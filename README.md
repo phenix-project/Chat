@@ -9,7 +9,9 @@ newsletters: PDF versions of all Phenix newsletters
 
 phil_etc: documentation on Phil and atom selections
 
-info.txt: source describing use of the other sources
+info.txt: source describing priming the chatbot
+
+info_for_audio.txt: Text to paste in to control the generation of default-length audio summary
 
 videos.list:  list of youtube videos to include in documentation
 
