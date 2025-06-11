@@ -1,0 +1,7 @@
+Explain to someone who has X-ray or cryo-EM data for a macromolecule
+how they can use Phenix to solve their structure.
+Walk them through the main steps in structure
+determination and validation by X-ray or CryoEM.  Include AlphaFold
+models in both X-ray and CryoEM.
+
+Skip details such as atom syntax, specific commands, polder maps.
