@@ -53,9 +53,8 @@ python sort_urls.py urls.list
 ./run_combine.csh > run_combine.log
 
 # Result are html files that display all of the material from all the pages from one of the files 
-#   with list of urls
-# combine_phenix_faqs.html	combine_phenix_reference.html combine_phenix_misc.html
-#  combine_phenix_top_level.html combine_phenix_overviews.html	combine_phenix_tutorials.html
+# with list of urls: combine_phenix_faqs.html	combine_phenix_reference.html combine_phenix_misc.html
+# combine_phenix_top_level.html combine_phenix_overviews.html	combine_phenix_tutorials.html
 
 # Now load each combine_phenix_xxx.html into Orion or Safari and save as PDF
 # Put these files in documentation/
