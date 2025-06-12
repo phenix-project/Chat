@@ -1,5 +1,7 @@
 # Chat
-Code to create sources for Phenix Chat.  Current Phenix documentation, reference material (pdf of papers), Phenix newsletters, selected documentation for atom selection and Phil
+Code and materials to create sources for Phenix Chat.  Current Phenix documentation, reference material (pdf of papers), Phenix newsletters, selected documentation for atom selection and Phil
+
+MATERIALS
 
 documentation:  directory containing Phenix documentation as of 2025-06-11
 
@@ -14,6 +16,17 @@ info.txt: source describing priming the chatbot
 info_for_audio.txt: Text to paste in to control the generation of default-length audio summary
 
 videos.list:  list of youtube videos to include in documentation
+
+HOW TO CREATE CHAT WITH NOTEBOOKLM AND THESE MATERIALS
+
+1. Start a new NotebookLM project. You may need to have a paid account to be allowed to use the number
+of sources present here (over 100).
+
+2. Select "Add source" in the notebook and select and drag all the PDF files in documentation, papers, newsletters, phil_etc, as well as info.txt on to the "+" screen that appears.
+
+3. Individually select "Add source" and then "Add youtube video" and paste in the url for each video in videos.list, one at a time.
+
+4. To generate an audio transcript, go to the Studio tab, hit Configure, and paste the contents of info_for_audio.txt (or equivalent) into the suggestion box that guides the AI.  Then generate the audio. If you are not pleased with it, delete it and add text to the suggestions box to discourage the AI from focusing on things you do not want and to encourage it to discuss things you are interested in seeing.
 
 
 HOW TO UPDATE THE DOCUMENTATION MATERIALS
