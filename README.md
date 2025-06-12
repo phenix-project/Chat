@@ -34,7 +34,7 @@ HOW TO UPDATE THE DOCUMENTATION MATERIALS
 The documentation PDF files were created from a nightly build Phenix documentation web site with the following
 protocol:
 
-# Work in a directory that contains crawler.py, sort_urls.py, combine.py, run_combine.csh (from code/), combine_a.html, and combine_b.html (from helper_files)
+# Work in a directory that contains crawler.py, sort_urls.py, combine.py, run_combine.csh (from code/), combine_a.html, and combine_c.html (from helper_files)
 
 # Run a web crawler to look up all the pages in this version:
 
