@@ -5,3 +5,6 @@ Use the Phenix code in your repository at <path_to_phenix_project> and
 put the two together for Phenix.  Use a small number for 
 number_of_files (like 100) for each.
 
+Note: do not save phenix code .txt files in this repository.  The 
+phenix developers' documentation is public so it can go here.
+
