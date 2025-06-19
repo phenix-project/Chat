@@ -30,9 +30,9 @@ file.  Then combine all these pdf files to make cctbx_docs.pdf
 
 3.  Get the code as a series of text files.
 
-python  $Chat/code/cctbx_list.py $cctbx
+python  $Chat/code/cctbx_list.py $cctbx 300
 
-That should result in a little under 300 .txt files.  If too many... adjust the parameter max_words in cctbx_list.py to make it bigger.
+That should result in a little under 300 .txt files.  If too many... adjust the parameter from 300 down to make it fewer.
 
 
 
