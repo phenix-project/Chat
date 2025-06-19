@@ -35,4 +35,5 @@ python  $Chat/code/cctbx_list.py $cctbx 300
 That should result in a little under 300 .txt files.  If too many... adjust the parameter from 300 down to make it fewer.
 
 
-
+Now upload the pdf and all the txt files and also info.txt to the LM and 
+you are set.
