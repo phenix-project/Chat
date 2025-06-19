@@ -1,0 +1,4443 @@
+
+
+ *******************************************************************************
+rstbx/sublattice_support/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/sublattice_support/change_basis.py
+from __future__ import division, print_function
+from scitbx import matrix
+from six.moves import range
+
+class sublattice_change_of_basis:
+
+  def __init__(self,max_modulus=3):
+    from cctbx.sgtbx.sub_lattice_tools import generate_matrix
+    self.maxmod = max_modulus
+    self._reindex_N = {}
+
+    for matS in generate_matrix(1):
+        self._reindex_N[1]=[sublattice_relation(matS,0)]
+
+    for mod in range(2,self.maxmod+1):
+      #if mod!=5:
+        self._reindex_N[mod] = []
+        for idx,matS in enumerate(generate_matrix(mod)):
+          self._reindex_N[mod].append(sublattice_relation(matS,idx))
+
+  def yield_transformations_ascending_modulus(self):
+    for x in range(2,self.maxmod+1):
+      for relation in self._reindex_N[x]:
+        yield relation
+
+  def yield_transformations_descending_modulus(self):
+    for x in range(self.maxmod,1,-1):
+      for relation in self._reindex_N[x]:
+        yield relation
+
+  def yield_identity_and_transformations_descending(self):
+    yield self._reindex_N[1][0]
+    for x in range(self.maxmod,1,-1):
+      for relation in self._reindex_N[x]:
+        yield relation
+
+  def show_summary(self):
+    for keymod in self._reindex_N:
+      for relation in self._reindex_N[keymod]:
+        relation.show_summary()
+
+  def set_size(self):
+    size=0
+    for keymod in self._reindex_N: size+=len(self._reindex_N[keymod])
+    return size
+
+  def get_element(self,number):
+    icount=0
+    for item in self.yield_identity_and_transformations_descending():
+      if icount==number:
+        return item
+      icount+=1
+
+  def get_relation(self,code):
+    found = [
+        item
+        for item in self.yield_identity_and_transformations_descending()
+        if item.lookup_code()==code]
+    if len(found)==0:  raise Exception("No index code=%s found"%(str(code)))
+    return found[0]
+
+class sublattice_relation:
+  def __init__(self, transformation,idx):
+    self._reindex_N = transformation # scitbx matrix sqr of rational ints
+    self.printout_order = idx
+
+  def matS(self):
+    return self._reindex_N
+
+  def lookup_code(self):
+    return "%d.%d"%(self.index_N(),self.printout_order)
+
+  def show_summary(self):
+    self.show_M()
+    # sublattice basis a',b',c'
+    print (self.as_abc(mat=self._reindex_N,vec=["a","b","c"]))
+    # index basis a,b,c
+    print (self.as_abc(mat=self._reindex_N.inverse(),vec=["a'","b'","c'"]))
+    print (self.sublattice_cosets())
+    print ()
+
+  def print_any_matrix(self, matrix):
+    for i in range(3):
+      for j in range(3):
+        if j<2:
+          print ("%4s"%(str(matrix[3*i+j])), end=" ")
+        else:
+          print ("%4s"%(str(matrix[3*i+j])))
+
+  def show_M(self):
+    # submitted manuscript, not consistent with Billiet or Rutherford
+    # self.print_any_matrix(self._reindex_N.transpose())
+    # revised manuscript
+    self.print_any_matrix(self._reindex_N)
+
+  def as_abc(self,mat,vec):
+    basis_comp=[]
+    for irow in [0,1,2]:
+      component_sum=[]
+      for idx,icol in enumerate([0,3,6]):
+        fac = mat[irow+icol]
+        if fac!=0:
+          if fac==1:
+            str_fac=''
+          elif fac==-1:
+            str_fac='-'
+          else:
+            str_fac="%s*"%(str(fac))
+          component_sum.append("%s%s"%(str_fac,vec[idx]))
+      all_plus_expression = "+".join(component_sum)
+      basis_comp.append(all_plus_expression.replace("+-","-"))
+    return ",".join(basis_comp)
+
+  def index_N(self):
+    return self._reindex_N.determinant()
+
+  def sublattice_cosets(self):
+    N = int(self.index_N()) # for Python 3 cast bost rational int to int
+    cosets = {}
+    inv_transform = self._reindex_N.inverse()
+
+    ui_rows = [(i * inv_transform[0], i*inv_transform[1], i*inv_transform[2])
+               for i in range(0,N+1)]
+    uj_rows = [(j*inv_transform[3], j*inv_transform[4], j*inv_transform[5])
+               for j in range(0,N+1)]
+    uk_rows = [(k*inv_transform[6], k*inv_transform[7], k*inv_transform[8])
+               for k in range(0,N+1)]
+    for ui_row in ui_rows:
+      for uj_row in uj_rows:
+        for uk_row in uk_rows:
+          alt_u_list = []
+          for idx in range(3):
+            #numerous Boost.python calls; could potentially be pushed to C++
+            idx_suppl = ui_row[idx] + uj_row[idx] + uk_row[idx]
+            den = idx_suppl.denominator()
+            num = idx_suppl.numerator()
+            alt_u_list.append( idx_suppl - (num//den))
+
+          if alt_u_list != [0,0,0]:
+            cosets[tuple(alt_u_list)]='present'
+
+    assert len(list(cosets.keys()))==N-1
+    return list(cosets.keys())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/sublattice_support/tst_sublattice.py
+from __future__ import division, print_function
+from rstbx.sublattice_support.change_basis import sublattice_change_of_basis
+
+def example_application():
+  S = sublattice_change_of_basis(6)
+  n_items = 0
+  for item in S.yield_transformations_descending_modulus():
+    #item.show_summary()
+    print (item.sublattice_cosets())
+    n_items += 1
+  assert n_items == 177
+
+if __name__=="__main__":
+  user_max_modulus = 6
+  S = sublattice_change_of_basis(user_max_modulus)
+  S.show_summary()
+  example_application()
+  print ("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/symmetry/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/symmetry/constraints/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("rstbx_symmetry_constraints_ext")
+from rstbx_symmetry_constraints_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/symmetry/constraints/g_gradients.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from math import sqrt,cos,sin
+from cctbx.array_family import flex
+
+class g_gradients:
+  """Use the chain rule to convert from Aij gradients to gi gradients"""
+
+  def __init__(self, agadaptor, symred):
+    """receive instances of helper classes"""
+    self.agadaptor = agadaptor
+    try:
+      self.symred_constraints = symred.constraints
+    except Exception:
+      self.symred_constraints = symred
+
+
+  def get_all_da(self):
+    # Aij : 9 elements of the reciprocal A* matrix [Rsymop paper, eqn(3)]
+    # df_Aij: 9 gradients of the functional with respect to Aij elements
+
+    # G=(g0,g1,g2,g3,g4,g5) 6 elements of the symmetrized metrical matrix,
+    #   with current increments already applied ==(a*.a*,b*.b*,c*.c*,a*.b*,a*.c*,b*.c*)
+    g = self.agadaptor.G
+
+    # The A* matrix calculated from G (lower triangular only; not general):
+    #      a*_x     0    0        astrx   0     0
+    # A* = a*_y   b*_y   0     == astry bstry   0
+    #      a*_z   b*_z   c*_z     astrz bstrz cstrz
+    #
+    # Conversions from G to A*:  cstrz = sqrt(g2)
+    #                            bstrz = g5/cstrz
+    #                            astrz = g4/cstrz
+    #                            bstry = sqrt(g1-bstrz^2)
+    #                            astry = (g3-astrz*bstrz)/bstry
+    #                            astrx = sqrt(g0 - astry^2 -astrz^2)
+    #
+    # Conversions from A* to G:  g0 = astrx^2 + astry^2 + astrz^2
+    #                            g1 = bstry^2 + bstrz^2
+    #                            g2 = cstrz^2
+    #                            g3 = astry*bstry + astrz*bstrz
+    #                            g4 = astrz*cstrz
+    #                            g5 = bstrz*cstrz
+
+    # the angles f = phi, p = psi, t = theta, along with convenient trig
+    # expressions
+    f = self.agadaptor.phi
+    p = self.agadaptor.psi
+    t = self.agadaptor.theta
+
+    cosf = cos(f); sinf = sin(f)
+    cosp = cos(p); sinp = sin(p)
+    cost = cos(t); sint = sin(t)
+
+    trig1 =  cosf*cost*sinp-sinf*sint
+    trig2 =  cost*sinf+cosf*sinp*sint
+    trig3 = -cost*sinf*sinp-cosf*sint
+    trig4 =  cosf*cost-sinf*sinp*sint
+
+    cstrz = sqrt(g[2])
+    bstrz = g[5]/cstrz
+    astrz = g[4]/cstrz
+    bstry = sqrt(g[1]-bstrz*bstrz)
+    astry = (g[3]-astrz*bstrz)/bstry
+    astrx = sqrt(g[0] - astry*astry -astrz*astrz)
+
+    # dAij_dphi: Partial derivatives of the 9 A components with respect to phi
+    dAij_dphi = flex.double((
+      -astry * trig1 - astrx * trig2 -astrz * cosf * cosp,
+      -bstry * trig1 - bstrz * cosf * cosp,
+      -cstrz * cosf * cosp,
+      0,
+      0,
+      0,
+      astry * trig3 + astrx * trig4 -astrz * cosp * sinf,
+      bstry * trig3 - bstrz * cosp * sinf,
+      -cstrz * cosp * sinf
+    ))
+
+    # dAij_dpsi: Partial derivatives of the 9 A components with respect to psi
+    dAij_dpsi = flex.double((
+      -astry * cosp * cost * sinf + astrz * sinf * sinp - astrx * cosp * sinf * sint,
+      -bstry*cosp*cost*sinf + bstrz*sinf*sinp,
+      cstrz * sinf * sinp,
+      -astrz * cosp - astry * cost * sinp - astrx * sinp * sint,
+      -bstrz * cosp - bstry * cost * sinp,
+      -cstrz * cosp,
+      astry * cosf * cosp * cost - astrz * cosf * sinp + astrx * cosf * cosp * sint,
+      bstry * cosf * cosp * cost - bstrz * cosf * sinp,
+      -cstrz * cosf * sinp
+    ))
+
+    # dAij_dtheta: Partial derivatives of the 9 A components with respect to theta
+    dAij_dtheta = flex.double((
+      -astry*trig4 + astrx*trig3,
+      -bstry*trig4,
+      0,
+      astrx*cosp*cost - astry*cosp*sint,
+      -bstry*cosp*sint,
+      0,
+      -astry*trig2 + astrx*trig1,
+      -bstry*trig2,
+      0
+    ))
+
+    # Partial derivatives of the 9 A components with respect to metrical matrix elements
+    g0,g1,g2,g3,g4,g5 = g
+    rad3 = g0-((g2*g3*g3+g1*g4*g4-2*g3*g4*g5)/(g1*g2-g5*g5))
+    sqrt_rad3 = sqrt(rad3)
+
+    dAij_dg0 = flex.double((
+      0.5*trig4/sqrt_rad3,
+      0,
+      0,
+      0.5*cosp*sint/sqrt_rad3,
+      0,
+      0,
+      0.5*trig2/sqrt_rad3,
+      0,
+      0,
+    ))
+
+    fac4 = g2*g3-g4*g5
+    fac4_sq = fac4*fac4
+    rad1 =  g1-g5*g5/g2
+    rad1_three_half = sqrt(rad1*rad1*rad1)
+    fac3 = g5*g5-g1*g2
+    rad2 = -(g2*g3*g3 +g4*(g1*g4-2*g3*g5)+g0*fac3)/(g1*g2-g5*g5)
+    factor_dg1 = fac4*fac4/(fac3*fac3*sqrt(rad2))
+    fac5 = g3-(g4*g5/g2)
+
+    dAij_dg1 = flex.double((
+     -0.5*fac5*trig3/rad1_three_half + 0.5*factor_dg1*trig4,
+      0.5*trig3/sqrt(rad1),
+      0,
+     -0.5*fac5*cosp*cost/rad1_three_half + 0.5*factor_dg1*cosp*sint,
+      0.5*cosp*cost/sqrt(rad1),
+      0,
+     -0.5*fac5*trig1/rad1_three_half + 0.5*factor_dg1*trig2,
+      0.5*trig1/sqrt(rad1),
+      0
+    ))
+
+    rat5_22 = g5/(g2*g2)
+    fac1 = g5*(g3-g4*g5/g2)
+    fac2 = (g1*g4-g3*g5)
+    fac2sq = fac2*fac2
+
+    dAij_dg2 = flex.double((
+     -0.5*rat5_22*fac1*trig3/rad1_three_half + g4*rat5_22*trig3/sqrt(rad1) +
+          0.5*fac2sq*trig4/(fac3*fac3*sqrt(rad2)) + 0.5*g4*cosp*sinf/pow(g2,1.5),
+      0.5*rat5_22*(g5*trig3/sqrt(rad1)+sqrt(g2)*cosp*sinf),
+     -0.5*cosp*sinf/sqrt(g2),
+
+     -0.5*rat5_22*fac1*cosp*cost/rad1_three_half + g4*rat5_22*cosp*cost/sqrt(rad1) +
+          0.5*g4*sinp/pow(g2,1.5) + 0.5*(fac2sq/fac3)*cosp*sint/(fac3*sqrt(rad2)),
+      0.5*rat5_22*(g5*cosp*cost/sqrt(rad1)+sqrt(g2)*sinp),
+     -0.5*sinp/sqrt(g2),
+
+     -0.5*rat5_22*fac1*trig1/rad1_three_half + g4*rat5_22*trig1/sqrt(rad1) +
+          0.5*fac2sq*trig2/(fac3*fac3*sqrt(rad2)) - 0.5*g4*cosf*cosp/pow(g2,1.5),
+      0.5*rat5_22*(g5*trig1/sqrt(rad1)-sqrt(g2)*cosf*cosp),
+      0.5*cosf*cosp/sqrt(g2)
+    ))
+
+    dAij_dg3 = flex.double((
+      trig3/sqrt(rad1) + fac4*trig4/(fac3*sqrt(rad2)),
+      0,
+      0,
+      cosp*cost/sqrt(rad1) + fac4*cosp*sint/(fac3*sqrt(rad2)),
+      0,
+      0,
+      trig1/sqrt(rad1) + fac4*trig2/(fac3*sqrt(rad2)),
+      0,
+      0
+    ))
+
+    dAij_dg4 = flex.double((
+    -g5*trig3/(g2*sqrt(rad1)) + fac2*trig4/(fac3*sqrt(rad2)) - cosp*sinf/sqrt(g2),
+    0,
+    0,
+    -g5*cosp*cost/(g2*sqrt(rad1)) - sinp/sqrt(g2) + fac2*cosp*sint/(fac3*sqrt(rad2)),
+    0,
+    0,
+    -g5*trig1/(g2*sqrt(rad1)) + fac2*trig2/(fac3*sqrt(rad2)) + cosf*cosp/sqrt(g2),
+    0,
+    0
+    ))
+
+    better_ratio = (fac2/fac3)*(fac4/fac3)
+
+    dAij_dg5 = flex.double((
+    fac1*trig3/(g2*rad1_three_half) -g4*trig3/(g2*sqrt(rad1)) +
+      better_ratio*trig4/sqrt(rad2),
+    -g5*trig3/(g2*sqrt(rad1)) - cosp*sinf/sqrt(g2),
+    0,
+
+    fac1*cosp*cost/(g2*rad1_three_half) - g4*cosp*cost/(g2*sqrt(rad1)) +
+      better_ratio*cosp*sint/sqrt(rad2),
+    -g5*cosp*cost/(g2*sqrt(rad1)) -sinp/sqrt(g2),
+    0,
+
+    fac1*trig1/(g2*rad1_three_half) - g4*trig1/(g2*sqrt(rad1)) +
+      better_ratio*trig2/sqrt(rad2),
+    -g5*trig1/(g2*sqrt(rad1))+cosf*cosp/sqrt(g2),
+    0,
+    ))
+
+    all_da = [dAij_dphi, dAij_dpsi, dAij_dtheta,
+              dAij_dg0, dAij_dg1, dAij_dg2, dAij_dg3, dAij_dg4, dAij_dg5]
+    return all_da
+
+  def dB_dp(self):
+    #returns the partial derivatives of the B matrix with respect to each
+    # independent parameter, as a list.
+
+    # First get the partial derivatives with respect to the six metrical
+    # matrix parameters:
+    dB_dg = self.get_all_da()[3:9]
+    values=[]
+    Nindep = self.symred_constraints.n_independent_params()
+    for n in range(Nindep):
+      values.append(flex.double(9))
+    # Now convert to partial derivatives with respect to the independent
+    for x in range(9):  # loop over the 9 elements of B
+      all_gradients = [t[x] for t in dB_dg]
+      g_indep = self.symred_constraints.independent_gradients(
+              all_gradients=tuple(all_gradients))
+      for a in range(Nindep):
+        values[a][x] = g_indep[a]
+    return values
+
+  def df_dgi(self,df_dAij):
+    self.all_da = self.get_all_da()
+    #df_dgi, Use chain rule to calculate total derivative of functional
+    # with respect to the 3 angles and 6 metrical matrix elements
+    df_dgi_full = flex.double((0,0,0,0,0,0,0,0,0))
+    for x in range(9):
+      for y in range(9):
+        df_dgi_full[x] += df_dAij[y] * self.all_da[x][y]
+
+    g_indep = self.symred_constraints.independent_gradients(
+              all_gradients=tuple(df_dgi_full[3:9]))
+
+    value = flex.double()
+    for i in range(3): value.append(df_dgi_full[i])
+    for i in range(len(g_indep)): value.append(g_indep[i])
+    return value
+
+"""Input file to Mathematica for calculating the above...
+Fback = {{astrx,0,0},{astry,bstry,0},{astrz,bstrz,cstrz}}
+B={{Cos[f],0,Sin[f]},{0,1,0},{-Sin[f],0,Cos[f]}}
+BI = Simplify[Inverse[B]]
+CC = {{1,0,0},{0,Cos[p],Sin[p]},{0,-Sin[p],Cos[p]}}
+CCI = Simplify[Inverse[CC]]
+Simplify[CC.CCI]
+DD = {{Cos[t],Sin[t],0},{-Sin[t],Cos[t],0},{0,0,1}}
+DDI = Simplify[Inverse[DD]]
+ROTI = BI.CCI.DDI
+Aback = ROTI.Fback
+derivf = D[Aback,f]//. -Cos[f]Cos[t]Sin[p]+Sin[f]Sin[t] -> negtrig1 //. -Cos[t]Sin[f]-Cos[f]Sin[p]Sin[t] -> negtrig2 //. -Cos[t]Sin[f]Sin[p]-Cos[f]Sin[t] -> trig3 //. Cos[f]Cos[t]-Sin[f]Sin[p]Sin[t] -> trig4
+derivp = D[Aback,p]
+derivt = D[Aback,t]//. Cos[f]Cos[t]Sin[p]-Sin[f]Sin[t] -> trig1 //. -Cos[t]Sin[f]-Cos[f]Sin[p]Sin[t] -> negtrig2 //. -Cos[t]Sin[f]Sin[p]-Cos[f]Sin[t] -> trig3 //. -Cos[f]Cos[t]+Sin[f]Sin[p]Sin[t] -> negtrig4
+Aback4G = ROTI.Fback //. Cos[f]Cos[t]Sin[p]-Sin[f]Sin[t] -> trig1 //. Cos[t]Sin[f]+Cos[f]Sin[p]Sin[t] -> trig2 //. -Cos[t]Sin[f]Sin[p]-Cos[f]Sin[t] -> trig3 //. Cos[f]Cos[t]-Sin[f]Sin[p]Sin[t] -> trig4
+cstrz = Sqrt[g2]
+bstrz = g5/cstrz
+astrz = g4/cstrz
+bstry = Sqrt[g1-bstrz^2]
+astry = (g3 - astrz*bstrz)/bstry
+astrx = Sqrt[g0 - astry^2-astrz^2]
+Simplify[D[Aback4G,g2]]//. g1-g5^2/g2 -> rad1 //. (g5^2-g1*g2)->fac3 //. g5^2*(g3-g4*g5/g2) ->g5fac1 //. -(g2*g3^2 +g4*(g1*g4-2*g3*g5)+g0*fac3)/(g1*g2-g5^2) -> rad2 //. (g1*g4-g3*g5)^2->fac2sq
+Simplify[D[Aback4G,g5]]//. g1-g5^2/g2 -> rad1 //. (g5^2-g1*g2)->fac3  //. g5*(g3-g4*g5/g2) ->fac1 //. -(g2*g3^2 +g4*(g1*g4-2*g3*g5)+g0*fac3)/(g1*g2-g5^2) -> rad2 //. (g1*g4-g3*g5)->fac2 //. g2*g3-g4*g5 -> fac4
+Simplify[D[Aback4G,g0]]//. g1-g5^2/g2 -> rad1 //. (g5^2-g1*g2)->fac3  //. g5*(g3-g4*g5/g2) ->fac1 //. -(g2*g3^2 +g4*(g1*g4-2*g3*g5)+g0*fac3)/(g1*g2-g5^2) -> rad2 //. (g1*g4-g3*g5)->fac2 //. g2*g3-g4*g5 -> fac4 //. g0-((g2*g3^2+g1*g4^2-2*g3*g4*g5)/(g1*g2-g5^2))->rad3
+Simplify[D[Aback4G,g1]]//. g1-g5^2/g2 -> rad1 //. (g5^2-g1*g2)->fac3  //. g5*(g3-g4*g5/g2) ->fac1 //. -(g2*g3^2 +g4*(g1*g4-2*g3*g5)+g0*fac3)/(g1*g2-g5^2) -> rad2 //. (g1*g4-g3*g5)->fac2 //. g2*g3-g4*g5 -> fac4 //. g3-(g4*g5/g2) -> fac5
+Simplify[D[Aback4G,g3]]//. g1-g5^2/g2 -> rad1 //. (g5^2-g1*g2)->fac3  //. g5*(g3-g4*g5/g2) ->fac1 //. -(g2*g3^2 +g4*(g1*g4-2*g3*g5)+g0*fac3)/(g1*g2-g5^2) -> rad2 //. (g1*g4-g3*g5)->fac2 //. g2*g3-g4*g5 -> fac4
+Simplify[D[Aback4G,g4]]//. g1-g5^2/g2 -> rad1 //. (g5^2-g1*g2)->fac3  //. g5*(g3-g4*g5/g2) ->fac1 //. -(g2*g3^2 +g4*(g1*g4-2*g3*g5)+g0*fac3)/(g1*g2-g5^2) -> rad2 //. (g1*g4-g3*g5)->fac2 //. g2*g3-g4*g5 -> fac4
+"""
+def finite_difference_test(orient):
+  from rstbx.symmetry.constraints import AGconvert as AG
+  from labelit.symmetry.metricsym.a_g_conversion import pp
+  from libtbx.tst_utils import approx_equal
+  adaptor = AG()
+  adaptor.forward(orient)
+  grad = g_gradients(adaptor,symred=None)
+  epsilon = 1.E-10
+
+  dAij_dphi = grad.get_all_da()[0]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi+x*epsilon,adaptor.psi,adaptor.theta)
+    AGback.G = adaptor.G
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dphi: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dphi))+"\n"+\
+         pp(diff_mat)
+  if not ( approx_equal(dAij_dphi,diff_mat,1.E-7)): raise Exception(rule)
+
+  dAij_dpsi = grad.get_all_da()[1]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi+x*epsilon,adaptor.theta)
+    AGback.G = adaptor.G
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dpsi: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dpsi))+"\n"+\
+         pp(diff_mat)
+  if not( approx_equal(dAij_dpsi,diff_mat,1.E-7)): raise Exception(rule)
+
+  dAij_dtheta = grad.get_all_da()[2]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi,adaptor.theta+x*epsilon)
+    AGback.G = adaptor.G
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dtheta: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dtheta))+"\n"+\
+         pp(diff_mat)
+  if not( approx_equal(dAij_dtheta,diff_mat,1.E-7)): raise Exception(rule)
+
+  g0,g1,g2,g3,g4,g5 = adaptor.G
+
+  dAij_dg0 = grad.get_all_da()[3]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi,adaptor.theta)
+    AGback.G = (g0+x*epsilon,g1,g2,g3,g4,g5)
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dg0: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dg0))+"\n"+\
+         pp(diff_mat)
+  if not ( approx_equal(dAij_dg0,diff_mat,1.E-7)): raise Exception(rule)
+
+  dAij_dg1 = grad.get_all_da()[4]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi,adaptor.theta)
+    AGback.G = (g0,g1+x*epsilon,g2,g3,g4,g5)
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dg1: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dg1))+"\n"+\
+         pp(diff_mat)
+  if not ( approx_equal(dAij_dg1,diff_mat,1.E-7)): raise Exception(rule)
+
+  dAij_dg2 = grad.get_all_da()[5]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi,adaptor.theta)
+    AGback.G = (g0,g1,g2+x*epsilon,g3,g4,g5)
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dg2: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dg2))+"\n"+\
+         pp(diff_mat)
+  if not( approx_equal(dAij_dg2,diff_mat,1.E-6)): raise Exception(rule)
+
+  dAij_dg3 = grad.get_all_da()[6]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi,adaptor.theta)
+    AGback.G = (g0,g1,g2,g3+x*epsilon,g4,g5)
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dg3: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dg3))+"\n"+\
+         pp(diff_mat)
+  if not( approx_equal(dAij_dg3,diff_mat,1.E-7)): raise Exception(rule)
+
+  dAij_dg4 = grad.get_all_da()[7]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi,adaptor.theta)
+    AGback.G = (g0,g1,g2,g3,g4+x*epsilon,g5)
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dg4: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dg4))+"\n"+\
+         pp(diff_mat)
+  if not( approx_equal(dAij_dg4,diff_mat,1.E-7)): raise Exception(rule)
+
+  dAij_dg5 = grad.get_all_da()[8]
+  AGback = AG()
+  F = []
+  for x in [-1.,1.]:
+    AGback.setAngles(adaptor.phi,adaptor.psi,adaptor.theta)
+    AGback.G = (g0,g1,g2,g3,g4,g5+x*epsilon)
+    F.append(flex.double(AGback.back()))
+  diff_mat = (F[1]-F[0])/(2.*epsilon)
+  rule = "dAij_dg5: Analytical gradient vs. finite difference gradient\n"+\
+         pp(list(dAij_dg5))+"\n"+\
+         pp(diff_mat)
+  if not( approx_equal(dAij_dg5,diff_mat,1.E-6)): raise Exception(rule)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/symmetry/constraints/parameter_reduction.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+from cctbx.uctbx import unit_cell
+from rstbx.symmetry.constraints import AGconvert
+
+class symmetrize_reduce_enlarge(object):
+                        # symmetrize the metrical matrix &
+                        # reduce the number of parameters to reflect symmetry
+                        # also, provide back transform to increase
+                        # number of parameters back to six
+
+  def __init__(self, space_group):
+
+    self.space_group = space_group
+    self.constraints = sgtbx.tensor_rank_2_constraints(
+      space_group=self.space_group,reciprocal_space=True)
+
+  def set_orientation(self, orientation, length_unit=1.E-10):
+    #provide orientation as either an A matrix (Rossmann) or B matrix (Busing & Levy)
+    # data type can be either scitbx.matrix.sqr or scitbx::mat3
+    # in either the reciprocal or direct space setting
+    # or as a cctbx.crystal_orientation.crystal_orientation
+    # if space group is not triclinic the orientation matrix should be close to
+    #  symmetrized, but exact symmetrization is done by averaging within the constructor.
+
+    # length unit defaults to 1.E-10 meters = 1 Angstrom
+
+    if "direct_matrix" in dir(orientation):
+      self.orientation = orientation # data is already a cctbx orientation
+    else:
+      from cctbx.crystal_orientation import crystal_orientation
+      which_setting = [crystal_orientation(orientation,True),
+                       crystal_orientation(orientation,False)]
+      #kludgy test for space setting: unit cell volume is never < 40 Angstroms^3
+      conversion_to_A3 = (length_unit*length_unit*length_unit)/1.E-30
+      select = [a.unit_cell().volume()*conversion_to_A3 > 40.
+                for a in which_setting]
+      self.orientation = which_setting[select.index(True)]
+
+
+  def symmetrize(self):
+      converter = AGconvert()
+      converter.forward(self.orientation) # allows subsequent back-conversion of symmetrized
+
+      # takes member-data orientation; returns symmetrized metrical matrix
+      uc = self.orientation.unit_cell()
+      avg = self.space_group.average_unit_cell(uc) # assumes direct-space cell
+      sym_mm = avg.reciprocal().metrical_matrix()
+
+      converter.validate_and_setG(sym_mm)
+      self.orientation = converter.back_as_orientation()
+
+  # it is assumed that metrical_matrix and independent are in reciprocal setting
+  def reduce(self,metrical_matrix):
+    # takes 6-parameter metrical matrix, returns reduced number of independent parameters
+    return self.constraints.independent_params(all_params=metrical_matrix)
+
+  def enlarge(self,independent):
+    # takes reduced number independent parameters, returns 6-parameter metrical matrix
+    u_star = self.constraints.all_params(independent_params=tuple(independent))
+    assert len(u_star) == 6
+    return u_star
+
+  def forward_independent_parameters(self):
+    # returns the independent parameters given the set_orientation() B matrix
+    self.Bconverter=AGconvert()
+    self.Bconverter.forward(self.orientation)
+    return self.reduce(metrical_matrix = self.Bconverter.G)
+
+  def forward_gradients(self):
+    #Specifically for refinement of the B-matrix parameters.
+    from rstbx.symmetry.constraints.g_gradients import g_gradients
+    gradient_engine = g_gradients(agadaptor = self.Bconverter, symred = self)
+    return gradient_engine.dB_dp()
+
+  def backward_orientation(self,independent):
+    # given new values of the independent parameters, back-calculate and
+    # set the new orientation matrix
+    new_mm = self.enlarge(independent)
+    self.Bconverter.validate_and_setG(new_mm)
+    self.orientation = self.Bconverter.back_as_orientation()
+    return self.orientation
+
+
+if __name__=="__main__":
+  from six.moves import cPickle as pickle
+  import os
+  from labelit.symmetry import metricsym
+  from cctbx.sgtbx.bravais_types import bravais_lattice
+  from rstbx.symmetry.constraints.g_gradients import finite_difference_test
+
+  this_directory = os.path.dirname(metricsym.__file__)
+  F = open(os.path.join(this_directory,"datastore"),"r")
+  #datastore represents all subgroup settings in the labelit reference database.
+
+  cases = []
+  bravais_types = []
+  try:
+    while 1:
+      cases.append(pickle.load(F))
+  except Exception:
+    assert len(cases)>900 #should be 980
+
+  for case in cases:
+      orient,cs,symmetry = case
+      print(orient,cs,symmetry.space_group().type().lookup_symbol())
+      S = symmetrize_reduce_enlarge(space_group=symmetry.space_group())
+      S.set_orientation(orientation=orient,length_unit=1.E-9)
+      S.symmetrize()
+      X = S.forward_independent_parameters()
+      dB_dp = S.forward_gradients()
+      B = S.backward_orientation(independent=X).reciprocal_matrix()
+      #continue
+      if symmetry.space_group().type().lookup_symbol() not in bravais_types:
+        bravais_types.append(symmetry.space_group().type().lookup_symbol())
+      finite_difference_test(orient)
+
+  encountered_types = [str(bravais_lattice(i)) for i in bravais_types]
+  reference_types = ["aP","mP","mC","oP","oC","oI","oF","tP","tI","hP","hR","cP","cI","cF"]
+  encountered_types.sort(); reference_types.sort()
+  assert encountered_types == reference_types
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/symmetry/sgtbx_adaptor.py
+from __future__ import absolute_import, division, print_function
+from cctbx.sgtbx import space_group_info
+
+#take care of R vs. H nomenclature, as well as ambiguous I-centered groups
+
+#For every possible Patterson symmetry there is one key.
+# The key is the conventional lookup symbol (CCP4 convention)
+# representing the simplest chiral space group whose diffraction pattern
+# has that Patterson symmetry.
+
+# The values serve the purpose of defining those sets of space
+#  groups which cannot be distinguished based on the symmetry of
+#  their diffraction patterns.
+
+sgtbx_chiral_adaptor = {
+  'P1':['P1'],
+  'P2':['P2'],
+  'C2':['C2'],
+  'P222':['P222'],
+#  'C222':['C222','B222','A222'],
+  'C222':['C222',],
+  'I222':['I222','I212121'],
+  'F222':['F222'],
+  'P4':['P4'],
+  'P422':['P422'],
+  'I4':['I4'],
+  'I422':['I422'],
+  'H3':['R3'],
+  'H32':['R32'],
+  'P3':['P3'],
+  'P321':['P321'],
+  'P312':['P312'],
+  'P6':['P6'],
+  'P622':['P622'],
+  'P23':['P23'],
+  'P432':['P432'],
+  'I23':['I23','I213'],
+  'I432':['I432'],
+  'F23':['F23'],
+  'F432':['F432'],
+}
+
+sgtbx_redefine = {}
+for key in sgtbx_chiral_adaptor:
+  sgtbx_redefine[key] = sgtbx_chiral_adaptor[key][0]
+
+patterson_lookup = {}
+def get_patterson_group(conventional_symbol):
+  global patterson_lookup
+  SGI = space_group_info(sgtbx_redefine[conventional_symbol])
+  if SGI in patterson_lookup:
+    PG = patterson_lookup[SGI]
+  else:
+    SG = SGI.group()
+    PG = SG.build_derived_patterson_group()
+    patterson_lookup[SGI]=PG
+  return PG
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/symmetry/subgroup.py
+from __future__ import absolute_import, division, print_function
+from six.moves import cPickle as pickle
+from libtbx import adopt_init_args
+from cctbx.sgtbx import subgroups
+from scitbx.array_family import flex
+from cctbx import crystal
+from scitbx import matrix
+from cctbx import sgtbx
+#only need this for legacy table lookup; deprecate later:
+from rstbx.symmetry.sgtbx_adaptor import get_patterson_group
+from cctbx.sgtbx.lattice_symmetry import metric_supergroup,metric_subgroups as base_subgroups
+from cctbx.sgtbx import bravais_types,change_of_basis_op
+from six.moves import zip
+find_max_delta = sgtbx.lattice_symmetry_find_max_delta
+
+#For LABELIT, the derive from the iotbx subgroup list such that the
+#  input cell is NOT reduced to "minimum symmetry".  This allows alignment
+#  of the basis with a previous data wedge.
+
+class metric_subgroups(base_subgroups):
+  def __init__(self,
+        input_symmetry,
+        max_delta,
+        enforce_max_delta_for_generated_two_folds=True,
+        bravais_types_only=True,force_minimum=False,
+        best_monoclinic_beta=True,
+        interest_focus="metric_symmetry"):
+    adopt_init_args(self,locals())
+    self.parse_reference()
+    self.result_groups = []
+    self.cb_op_best_cell_vector =[]
+    self.minimum_symmetry = self.input_symmetry
+    self.cb_op_inp_minimum = sgtbx.change_of_basis_op() #identity
+    if force_minimum:
+      self.change_input_to_minimum_cell()
+    if interest_focus=="metric_symmetry":
+      self.derive_result_group_list(group_of_interest=self.lattice_group_info())
+    elif interest_focus=="input_symmetry":
+      self.derive_result_group_list_original_input(group_of_interest=
+        self.input_symmetry.space_group_info())
+
+    #as a future reindexing reference, record the cb_op to best cell
+    for i,j in zip(self.result_groups,self.cb_op_best_cell_vector):
+      i['cb_op_best_cell']=j
+
+  reasonable_cutoff = 10.0 # maximum direct-space mean-square deviation of two orientations
+                           # measured in Angstrom^2; larger value indicates no match
+                           # later, this could be redefined as a fraction of cell size
+
+  def derive_result_group_list_original_input(self,group_of_interest):
+    # more-or-less a capitulation to code duplication.  Don't want to copy code
+    # from cctbx.sgtbx.lattice_symmetry but can't figure out a quick way around it.
+
+    # Get list of sub-spacegroups
+    subgrs = subgroups.subgroups(group_of_interest).groups_parent_setting()
+
+    # Order sub-groups
+    sort_values = flex.double()
+    for group in subgrs:
+      order_z = group.order_z()
+      space_group_number = sgtbx.space_group_type(group, False).number()
+      assert 1 <= space_group_number <= 230
+      sort_values.append(order_z*1000+space_group_number)
+    perm = flex.sort_permutation(sort_values, True)
+
+    for i_subgr in perm:
+      acentric_subgroup = subgrs[i_subgr]
+      acentric_supergroup = metric_supergroup(acentric_subgroup)
+      # Add centre of inversion to acentric lattice symmetry
+      centric_group = sgtbx.space_group(acentric_subgroup)
+      # Make symmetry object: unit-cell + space-group
+      # The unit cell is potentially modified to be exactly compatible
+      # with the space group symmetry.
+      subsym = crystal.symmetry(
+        unit_cell=self.minimum_symmetry.unit_cell(),
+        space_group=centric_group,
+        assert_is_compatible_unit_cell=False)
+      supersym = crystal.symmetry(
+        unit_cell=self.minimum_symmetry.unit_cell(),
+        space_group=acentric_supergroup,
+        assert_is_compatible_unit_cell=False)
+      # Convert subgroup to reference setting
+      cb_op_minimum_ref = subsym.space_group_info().type().cb_op()
+      ref_subsym = subsym.change_basis(cb_op_minimum_ref)
+      # Ignore unwanted groups
+      if (self.bravais_types_only and
+          not str(ref_subsym.space_group_info()) in bravais_types.centric):
+        continue
+      # Choose best setting for monoclinic and orthorhombic systems
+      cb_op_best_cell = self.change_of_basis_op_to_best_cell(ref_subsym)
+      best_subsym = ref_subsym.change_basis(cb_op_best_cell)
+      # Total basis transformation
+      cb_op_best_cell = change_of_basis_op(str(cb_op_best_cell),stop_chars='',r_den=144,t_den=144)
+      cb_op_minimum_ref=change_of_basis_op(str(cb_op_minimum_ref),stop_chars='',r_den=144,t_den=144)
+      self.cb_op_inp_minimum=change_of_basis_op(str(self.cb_op_inp_minimum),stop_chars='',r_den=144,t_den=144)
+      cb_op_inp_best = cb_op_best_cell * (cb_op_minimum_ref * self.cb_op_inp_minimum)
+      # Use identity change-of-basis operator if possible
+      if (best_subsym.unit_cell().is_similar_to(self.input_symmetry.unit_cell())):
+        cb_op_corr = cb_op_inp_best.inverse()
+        try:
+          best_subsym_corr = best_subsym.change_basis(cb_op_corr)
+        except RuntimeError as e:
+          if (str(e).find("Unsuitable value for rational rotation matrix.") < 0):
+            raise
+        else:
+          if (best_subsym_corr.space_group() == best_subsym.space_group()):
+            cb_op_inp_best = cb_op_corr * cb_op_inp_best
+      """Note:  The following call does not work if n_ltr >1 for the space group"""
+      if acentric_subgroup.n_ltr() == 1:
+        m_a_d = find_max_delta(
+                                  reduced_cell=self.minimum_symmetry.unit_cell(),
+                                  space_group=acentric_subgroup)
+      else:
+        m_a_d = 0.0
+      self.result_groups.append({'subsym':subsym,
+                                 'supersym':supersym,
+                                 'ref_subsym':ref_subsym,
+                                 'best_subsym':best_subsym,
+                                 'cb_op_inp_best':cb_op_inp_best,
+                                 'max_angular_difference':m_a_d
+                                })
+
+  def change_of_basis_op_to_best_cell(self,ref_subsym):
+
+    #plain algorithm for routine work.  Triclinic input symmetry is already
+    #  in the minimum (reduced) form.  Determine the best cell for conventional
+    #  monoclinic and orthorhombic crystal systems.
+    subgroup_cb_op_best_cell = ref_subsym.change_of_basis_op_to_best_cell(
+      best_monoclinic_beta=self.best_monoclinic_beta)
+
+    #fancy algorithm for reindexing work.  Triclinic symmetry is aligned
+    #  with a reference orientation, but is not necessarily in reduced
+    #  form.  Guarantee that the best cell
+    #  conforms to the one that has already been determined for a reference
+    #  dataset collected on the same cystal.  This option is only
+    #  executed if the reference information is present in a pickled file.
+    if self.reference_subgroups != None: #subsequent code only for reindexing cases
+      import inspect
+        #admittedly this is a private interface.  Rely on having this method always
+        #  called by derive_result_group_*.  Otherwise this breaks.
+        #do not save any frame references, thus avoiding reference circles:
+      current_supersym = inspect.currentframe().f_back.f_locals['supersym']
+      current_bravais = str(bravais_types.bravais_lattice(sgtbx.space_group_info(
+          group=current_supersym.space_group()).type().number()))
+      current_cb_op_minimum_ref = inspect.currentframe().f_back.f_locals['cb_op_minimum_ref']
+      guess1_cb_op_inp_best = subgroup_cb_op_best_cell * current_cb_op_minimum_ref *\
+                              self.cb_op_inp_minimum
+        #assume this frame is called in a very specific way such that four frames
+        # back gives the lepage module, class character.  It's the only way to
+        # pull out the current triclinic orientation.
+      guess1_orient = self.current_orientation.change_basis(matrix.sqr(
+        guess1_cb_op_inp_best.c().as_double_array()[0:9]).transpose().elems)
+
+      for j,refitem in enumerate(self.reference_subgroups):
+        if current_bravais != refitem['bravais']: continue
+
+        # first guess.  test plain algorithm best cell for match to refitem
+        dmsd = guess1_orient.direct_mean_square_difference(refitem['orient'])
+        if dmsd < self.reasonable_cutoff:
+          break
+
+        #second guess.  use the cb_op_best_cell from the reference indexing solution
+        guess2_cb_op_inp_best = refitem['cb_op_best_cell'] * current_cb_op_minimum_ref *\
+                              self.cb_op_inp_minimum
+        guess2_orient = self.current_orientation.change_basis(matrix.sqr(
+          guess2_cb_op_inp_best.c().as_double_array()[0:9]).transpose().elems)
+        dmsd = guess2_orient.direct_mean_square_difference(refitem['orient'])
+        if dmsd < self.reasonable_cutoff:
+          subgroup_cb_op_best_cell = refitem['cb_op_best_cell']
+          break
+
+    self.cb_op_best_cell_vector.append(subgroup_cb_op_best_cell)
+    return subgroup_cb_op_best_cell
+
+  def parse_reference(self):
+    try:
+      o_file = ('crystal_orientation')
+      f = open(o_file,'r')
+      reference_ori = pickle.load(f)
+      self.reference_subgroups = pickle.load(f)
+      f.close()
+
+    except Exception:
+      self.reference_subgroups = None
+
+class MetricSubgroup(dict):
+
+  def import_iotbx_style(self,subgroup):
+    #subgroup is a dictionary from iotbx.lattice_symmetry
+    self.update(subgroup)
+    return self
+
+  def number(self):
+    return self['subsym'].space_group().type().number()
+
+  #formerly 'matrix'
+  def to_reference_setting_as_double_array_transpose(self):
+    return matrix.sqr(
+      self['cb_op_inp_best'].c_inv().as_double_array()[0:9]).transpose().elems
+
+  def to_reference_setting_as_double_array_inverse_transpose(self):
+    return matrix.sqr(
+      self['cb_op_inp_best'].c().as_double_array()[0:9]).transpose().elems
+
+  def digest(self,add_inv=False):
+    return '#'.join([
+      '%.5f'%self['max_angular_difference'],
+      self.pretty_cb_op(),
+      self['bravais'],
+      sgtbx.space_group_info(group=self['reduced_group']).type().lookup_symbol(),
+      sgtbx.space_group_info(group=self['best_group']).type().lookup_symbol(),
+      ' '.join([str(int(x)) for x in self['constraints']]),
+      ])
+
+  def short_digest(self,add_inv=False):
+    return "%7.4f %2s (%-9s)"%(self['max_angular_difference'],      self['bravais'],
+      sgtbx.space_group_info(group=self['best_group']).type().lookup_symbol(),
+      )
+
+  def sg_digest(self,add_inv=False):
+    return ' | '.join([
+      self['cb_op_inp_best'].as_xyz(),
+      sgtbx.space_group_info(group=self['reduced_group']).type().lookup_symbol(),
+      ])
+
+  def reference_lookup_symbol(self):
+    return sgtbx.space_group_info(group=self['best_group']).type().lookup_symbol()
+
+  def pretty_cb_op(self):
+    for x in self['cb_op_inp_best'].c_inv().as_double_array():
+      assert int(x)==float(x)
+    return ' '.join(['%2d'%int(x) for x in matrix.sqr(
+      self['cb_op_inp_best'].c_inv().as_double_array()[0:9]
+       ).transpose().elems])
+
+  def __getitem__(self,key):
+    # legacy code to support table lookup of group type
+    # patterson:=the centric group built from the reference setting of Subgroup
+    if key=='patterson':
+      PG = get_patterson_group(self['group'])
+      return sgtbx.space_group_info(group = PG)
+    return dict.__getitem__(self,key)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/utils.py
+from __future__ import absolute_import, division, print_function
+
+# XXX please keep all shared-library imports inline
+import math
+
+def get_scattering_angle(x,
+                          y,
+                          center_x,
+                          center_y,
+                          distance,
+                          detector_two_theta, # in radians, please
+                          distance_is_corrected=False):
+  if (not distance_is_corrected) and (detector_two_theta != 0):
+    distance = distance / math.cos(detector_two_theta)
+  r_x = center_x - x
+  r_y = center_y - y
+  r = math.sqrt(r_x**2 + r_y**2)
+  if (detector_two_theta == 0):
+    return math.atan(r / distance)
+  else :
+    if (r_y <= 0):
+      gamma = (math.pi / 2) - detector_two_theta
+    else :
+      gamma = (math.pi / 2) + detector_two_theta
+    # distance from crystal to (0,y)
+    d2 = math.sqrt(distance**2 + r_y**2 - (2*distance*abs(r_y)*math.cos(gamma)))
+    # distance from crystal to (x,y)
+    d3 = math.sqrt(d2**2 + r_x**2)
+    angle = math.acos((distance**2 + d3**2 - r**2) / (2*distance*d3))
+    return angle
+
+def angle_between_points(x1,
+                          y1,
+                          x2,
+                          y2,
+                          center_x,
+                          center_y,
+                          distance,
+                          detector_two_theta,
+                          distance_is_corrected=False):
+  if (not distance_is_corrected) and (detector_two_theta != 0):
+    distance = distance / math.cos(detector_two_theta)
+  r_x_1 = center_x - x1
+  r_x_2 = center_x - x2
+  r_y_1 = center_y - y1
+  r_y_2 = center_y - y2
+  r = math.sqrt((x2-x1)**2 + (y2-y1)**2)
+  if (r_y_1 <= 0):
+    gamma_1 = (math.pi / 2) - detector_two_theta
+  else :
+    gamma_1 = (math.pi / 2) + detector_two_theta
+  # distance from crystal to (0,y1)
+  d2_1 = math.sqrt(distance**2 + r_y_1**2 - (2*distance*abs(r_y_1) *
+    math.cos(gamma_1)))
+  # distance from crystal to (x1,y1)
+  d3_1 = math.sqrt(d2_1**2 + r_x_1**2)
+  if (r_y_2 <= 0):
+    gamma_2 = (math.pi / 2) - detector_two_theta
+  else :
+    gamma_2 = (math.pi / 2) + detector_two_theta
+  # distance from crystal to (0,y2)
+  d2_2 = math.sqrt(distance**2 + r_y_2**2 - (2*distance*abs(r_y_2) *
+    math.cos(gamma_2)))
+  # distance from crystal to (x2,y2)
+  d3_2 = math.sqrt(d2_2**2 + r_x_2**2)
+  angle = math.acos((d3_1**2 + d3_2**2 - r**2) / (2 * d3_1 * d3_2))
+  return angle
+
+def reciprocal_space_distance(x1,
+                               y1,
+                               x2,
+                               y2,
+                               wavelength,
+                               **kwds):
+  assert (wavelength > 0)
+  angle = angle_between_points(x1, y1, x2, y2, **kwds)
+  ewald_radius = 1 / wavelength
+  return math.sqrt(2*(ewald_radius**2) - 2*(ewald_radius**2)*math.cos(angle))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/__init__.py
+from __future__ import absolute_import, division, print_function
+
+import rstbx.utils
+from libtbx.math_utils import ifloor, iceil
+from libtbx.str_utils import format_value
+from libtbx.utils import Sorry
+import math
+from six.moves import range
+from six import PY2
+
+pi_over_180 = math.pi / 180
+
+class screen_params(object):
+  """
+  Manager for all display parameters: this is independent of the actual image
+  data, although it stores various attributes such as detector dimensions.
+  The primary function is to convert between different coordinate systems and
+  determine which part of the image to display.
+  """
+  def __init__(self, img_w=None, img_h=None):
+    self.img_w = img_w
+    self.img_h = img_h
+    self.screen_w = None
+    self.screen_h = None
+    self.thumb_w = None
+    self.thumb_h = None
+    self.thumb_ratio = None
+    self.img_x_offset = 0
+    self.img_y_offset = 0
+    self.screen_x_start = 0
+    self.screen_y_start = 0
+    self.detector_pixel_size = 0
+    self.zoom = 0
+    self.last_thumb_x = 0 # NKS: hooks for keeping pan position while
+    self.last_thumb_y = 0 #  rendering the Prev or Next image
+
+  def inherit_params(self, params):
+    """
+    Adopts the current screen parameters (to preserve zoom level, offset,
+    etc.), but only if the image dimensions are the same.
+    """
+    if (self.img_w != params.img_w) or (self.img_h != params.img_h):
+      return
+    self.img_x_offset = params.img_x_offset
+    self.img_y_offset = params.img_y_offset
+    self.screen_x_start = params.screen_x_start
+    self.screen_y_start = params.screen_y_start
+    self.last_thumb_x = params.last_thumb_x
+    self.last_thumb_y = params.last_thumb_y
+    self.zoom = params.zoom
+
+  def set_zoom(self, zoom):
+    assert (zoom >= 0)
+    # XXX don't do anything fancy if image is uninitialized (for zoom view)
+    if (None in [self.screen_w, self.screen_h, self.img_w, self.img_h]):
+      self.zoom = zoom
+      return
+    # XXX adjust offsets to preserve current center
+    x0, y0, w0, h0 = self.get_bitmap_params()
+    increase_zoom = (zoom > self.zoom)
+    decrease_zoom = (zoom < self.zoom)
+    self.zoom = zoom
+    center_x, center_y = int(x0 + w0/2), int(y0 + h0/2)
+    x, y, w, h = self.get_bitmap_params()
+    if (increase_zoom):
+      if ((x + w) < self.img_w):
+        self.img_x_offset = max(min(int(center_x - w/2), self.img_w - w), 0)
+      if ((y + h) < self.img_h):
+        self.img_y_offset = max(min(int(center_y - h/2), self.img_h - h), 0)
+    elif (decrease_zoom):
+      self.img_x_offset = max(int(center_x - w/2), 0)
+      self.img_y_offset = max(int(center_y - h/2), 0)
+
+  def set_screen_size(self, w, h):
+    self.screen_w = w
+    self.screen_h = h
+    scale = self.get_scale()
+    w_img_pixels = int(w / scale)
+    h_img_pixels = int(h / scale)
+    if (w_img_pixels > (self.img_w - self.img_x_offset)):
+      self.img_x_offset = max(0, self.img_w - w_img_pixels)
+    if (h_img_pixels > (self.img_h - self.img_y_offset)):
+      self.img_y_offset = max(0, self.img_h - w_img_pixels)
+
+  def set_image_size(self, w, h):
+    self.img_w = w
+    self.img_h = h
+
+  def set_thumbnail_size(self, w, h, ratio):
+    self.thumb_w = w
+    self.thumb_h = h
+    self.thumb_ratio = ratio
+
+  def get_image_size(self):
+    assert (not None in [self.img_w, self.img_h])
+    return self.img_w, self.img_h
+
+  def get_thumbnail_size(self):
+    assert (not None in [self.thumb_w, self.thumb_h])
+    return (self.thumb_w, self.thumb_h)
+
+  def set_detector_resolution(self, p):
+    self.detector_pixel_size = p
+
+  def get_scale(self):
+    assert (not None in [self.screen_w, self.screen_h, self.img_w, self.img_h])
+    if (self.zoom == 0):
+      return min(self.screen_w / self.img_w, self.screen_h / self.img_h)
+    else :
+      return self.zoom
+
+  def get_detector_dimensions(self):
+    assert (not None in [self.img_w, self.img_h, self.detector_pixel_size])
+    return (self.img_w * self.detector_pixel_size,
+            self.img_h * self.detector_pixel_size)
+
+  def adjust_screen_coordinates(self, x, y):
+    xi, yi, w, h = self.get_bitmap_params()
+    scale = self.get_scale()
+    x_ = x + max(0, (self.screen_w - (w*scale)) / 2)
+    y_ = y + max(0, (self.screen_h - (h*scale)) / 2)
+    return (int(x_), int(y_))
+
+  def get_bitmap_params(self):
+    scale = self.get_scale()
+    x0 = max(self.img_x_offset, 0)
+    y0 = max(self.img_y_offset, 0)
+    w_scaled = min(self.img_w, (self.screen_w / scale)) #- x0
+    h_scaled = min(self.img_h, (self.screen_h / scale))
+    return (x0, y0, w_scaled, h_scaled)
+
+  def get_thumbnail_box(self):
+    x, y, w, h = self.get_bitmap_params()
+    tr = self.thumb_ratio
+    return int(x / tr), int(y / tr), int(w / tr), int(h / tr)
+
+  def get_zoom_box(self, x, y, boxsize=400, mag=16):
+    #assert ((boxsize % mag) == 0)
+    n_pixels = iceil(boxsize / mag)
+    x0 = min(self.img_w - n_pixels, ifloor(x - (n_pixels / 2)))
+    y0 = min(self.img_h - n_pixels, ifloor(y - (n_pixels / 2)))
+    return (x0, y0, n_pixels, n_pixels)
+
+  def translate_image(self, delta_x, delta_y):
+    """
+    Translate the viewport to a different area of the image.  Arguments are
+    in pixels.
+    """
+    scale = self.get_scale()
+    x_new = max(0, ifloor(self.img_x_offset - (delta_x / scale)))
+    y_new = max(0, ifloor(self.img_y_offset - (delta_y / scale)))
+    max_x = ifloor(self.img_w - (self.screen_w / scale))
+    max_y = ifloor(self.img_h - (self.screen_h / scale))
+    self.img_x_offset = min(x_new, max_x)
+    self.img_y_offset = min(y_new, max_y)
+
+  def center_view_from_thumbnail(self, x, y):
+    """
+    Translate the viewport to center on the X,Y coordinates equivalent to the
+    point clicked in the thumbnail view.  Arguments are in screen coordinates
+    relative to the upper left corner of the thumbnail (which is assumed to be
+    displayed in its entirety).
+    """
+    if (self.zoom == 0) : return
+    self.last_thumb_x = x
+    self.last_thumb_y = y
+    x0, y0, w, h = self.get_bitmap_params()
+    img_x = max(0, ifloor((x * self.thumb_ratio) - (w / 2)))
+    img_y = max(0, ifloor((y * self.thumb_ratio) - (h / 2)))
+    scale = self.get_scale()
+    max_x = ifloor(self.img_w - (self.screen_w / scale))
+    max_y = ifloor(self.img_h - (self.screen_h / scale))
+    self.img_x_offset = min(img_x, max_x)
+    self.img_y_offset = min(img_y, max_y)
+
+  def image_coords_as_screen_coords(self, x, y):
+    """
+    Convert image pixel coordinates to viewport pixel coordinates.
+    """
+    scale = self.get_scale()
+    x1 = self.screen_x_start + ((x+0.5) - self.img_x_offset) * scale
+    y1 = self.screen_y_start + ((y+0.5) - self.img_y_offset) * scale
+    xi, yi, w, h = self.get_bitmap_params()
+    x2 = x1 + max(0, (self.screen_w - (w*scale)) / 2)
+    y2 = y1 + max(0, (self.screen_h - (h*scale)) / 2)
+    return ((x2), (y2))
+
+  def screen_coords_as_image_coords(self, x, y):
+    """
+    Convert pixel coordinates in the viewport to pixel coordinates in the
+    raw image.
+    """
+    scale = self.get_scale()
+    xi, yi, w, h = self.get_bitmap_params()
+    x1 = x - max(0, (self.screen_w - (w*scale)) / 2)
+    y1 = y - max(0, (self.screen_h - (h*scale)) / 2)
+    x2 = self.img_x_offset + (x1 / scale)
+    y2 = self.img_y_offset + (y1 / scale)
+    return (ifloor(x2) + 1, ifloor(y2) + 1)
+
+  def image_coords_as_array_coords(self, x, y):
+    """
+    Convert image pixel coordinates to indexing values in the FlexImage
+    object.
+    """
+    return y-1, x-1
+
+  def array_coords_as_detector_coords(self, x, y):
+    """
+    Convert array indices to points on the detector surface.  Used in the
+    calculation of approximate lattice dimensions based on peaks in a
+    user-drawn line in the viewer.
+    """
+    x_, y_ = y+1, x+1
+    return self._raw.image_coords_as_detector_coords(x_, y_)
+
+  def distance_between_points(self, x1, y1, x2, y2):
+    """
+    Given a pair of image pixel coordinates, calculate the distance between
+    them on the detector face in mm.
+    """
+    x1_mm, y1_mm = self._raw.image_coords_as_detector_coords(x1, y1)
+    x2_mm, y2_mm = self._raw.image_coords_as_detector_coords(x2, y2)
+    return math.sqrt((x1_mm - x2_mm)**2 + (y1_mm - y2_mm)**2)
+
+class image(screen_params):
+  def __init__(self, file_name):
+    screen_params.__init__(self)
+    # XXX major hack - Boost.Python doesn't really deal with Unicode strings
+    if PY2 and isinstance(file_name, unicode):
+      file_name = str(file_name)
+    if isinstance(file_name, str) or isinstance(file_name, dict):
+      self.file_name = file_name
+      from iotbx.detectors import ImageFactory, ImageException
+      try :
+        img = ImageFactory(file_name)
+      except ImageException as e :
+        raise Sorry(str(e))
+      img.read()
+    else :
+      img = file_name # assume it's already been read
+
+    self._raw = img
+    try:
+      img.show_header()
+    except Exception: pass # intentional
+
+    detector = self._raw.get_detector()
+    if len(detector) == 1:
+      # Image size only makes sense for monolithic detectors.
+      image_size = detector[0].get_image_size()
+      self.set_image_size(
+        w=image_size[0],
+        h=image_size[1])
+
+    pixel_size = detector[0].get_pixel_size()
+    for panel in detector:
+      pstest = panel.get_pixel_size()
+      assert pixel_size[0] == pixel_size[1] == pstest[0] == pstest[1]
+    self.set_detector_resolution(pixel_size[0])
+
+    try:
+      from spotfinder.command_line.signal_strength import master_params
+      params = master_params.extract()
+      self._raw.initialize_viewer_properties(params)
+    except Exception: pass # intentional
+
+    self._beam_center = None
+    self._integration = None
+    self._spots = None
+    self._color_scheme = None
+    #self.update_image()
+    #self.convert_to_bitmap()
+
+  def set_integration_results(self, integration):
+    self._integration = integration
+    mp = integration['mapped_predictions']
+    print("%d spot predictions loaded" % mp.size())
+    print("max. resolution is %g" % integration['resolution'])
+
+  def set_spots(self, spots):
+    self._spots = spots
+
+  def set_beam_center(self, xbeam, ybeam):
+    self._beam_center = (xbeam, ybeam)
+
+  def create_flex_image(self,
+                         brightness=100,
+                         color_scheme=0,
+                         binning=1):
+    # XXX See also rstbx.slip_viewer.tile_generation._get_flex_image()
+    typehash = str(self._raw.get_raw_data().__class__)
+    if typehash.find('int') >= 0:
+      from iotbx.detectors import FlexImage
+    elif typehash.find('double') >= 0:
+      from iotbx.detectors import FlexImage_d as FlexImage
+
+    fi = FlexImage(
+      binning=binning,
+      brightness=brightness / 100,
+      rawdata=self._raw.get_raw_data(),
+      saturation=int(round(self._raw.get_detector()[0].get_trusted_range()[1])),
+      vendortype=self._raw.__class__.__name__,
+      color_scheme=color_scheme)
+
+    #from scitbx.array_family import flex
+    #print flex.max(self._raw.linearintdata), flex.min(self._raw.linearintdata)
+    fi.setWindow(0.0, 0.0, 1)
+    fi.adjust(color_scheme=color_scheme)
+    fi.prep_string()
+    return fi
+
+  def update_settings(self, **kwds):
+    self._wx_img = None
+    self.update_image(**kwds)
+
+  def get_opengl_background(self):
+    if (self._color_scheme == 0):
+      return (0.8,0.8,1.)
+    else :
+      return (0,0,0)
+
+  def update_image(self, brightness=100, color_scheme=0):
+    """
+    Re-process the image to adjust brightness and colors, and generate a new
+    wx.Image object and corresponding thumbnail image.
+    """
+    import wx
+    self._color_scheme = color_scheme
+    self._img = self.create_flex_image(
+      brightness=brightness,
+      color_scheme=color_scheme)
+    w = self._img.ex_size2()
+    h = self._img.ex_size1()
+    self.set_image_size(w, h)
+    wx_image = wx.EmptyImage(w, h)
+    wx_image.SetData(self._img.export_string)
+    self._wx_img = wx_image
+    binning = 8
+    if (w > 2560):
+      binning = 16
+    fi_thumb = self.create_flex_image(brightness=brightness,
+      color_scheme=color_scheme,
+      binning=binning)
+    w = fi_thumb.ex_size2()
+    h = fi_thumb.ex_size1()
+    wx_thumb = wx.EmptyImage(w, h)
+    wx_thumb.SetData(fi_thumb.export_string)
+    self.set_thumbnail_size(w, h, binning)
+    self._wx_thumb = wx_thumb
+    self._wx_thumb_bmp = wx_thumb.ConvertToBitmap()
+
+  def get_bitmap(self):
+    """
+    Returns the primary wx.Image scaled and clipped to the current screen
+    parameters for display in the main canvas.
+    """
+    import wx
+    x, y, w, h = self.get_bitmap_params()
+    scale = self.get_scale()
+    img = self._wx_img.GetSubImage((x, y, w, h))
+    img = img.Scale(w * scale, h * scale, wx.IMAGE_QUALITY_NORMAL)
+    return img.ConvertToBitmap()
+
+  def get_thumbnail_bitmap(self):
+    """
+    Returns the thumbnail image (without any further processing).
+    """
+    return self._wx_thumb_bmp #.ConvertToBitmap()
+
+  def get_zoomed_bitmap(self, x, y, boxsize=400, mag=16):
+    """
+    Returns a zoomed-in view of the image, centered around the clicked
+    position.
+    """
+    import wx
+    x0, y0, w, h = self.get_zoom_box(x, y, boxsize, mag)
+    if (x0 < 0) or (y0 < 0) : return None
+    assert (w == h)
+    img = self._wx_img.GetSubImage((x0, y0, w, h))
+    return img.Scale(boxsize, boxsize, wx.IMAGE_QUALITY_NORMAL)
+
+  # XXX does this need to be in C++?
+  def get_intensities_in_box(self, x, y, boxsize=400, mag=16):
+    x0, y0, w, h = self.get_zoom_box(x, y, boxsize, mag)
+    i, j = self.image_coords_as_array_coords(x0, y0)
+    d = self._raw.linearintdata
+    format = " ".join([ "%d" for n in range(w) ])
+    values = []
+    for u in range(1, h+1) : # XXX why can't I start at 0?
+      values.append([])
+      for v in range(1, w+1):
+        intensity = d[i+u, j+v]
+        values[u-1].append(intensity)
+    #for row in values :
+      #print format % tuple(row)
+    return values
+
+  def get_drawable_spots(self):
+    """
+    Given an array of spotfinder results (generated separately), determine
+    which of these are within the current bounds of the viewport.
+    """
+    if (self._spots is None) : return []
+    x, y, w, h = self.get_bitmap_params()
+    all_spots = []
+    for spot in self._spots :
+      all_spots.append(( spot.ctr_mass_x(), spot.ctr_mass_y() ))
+    spots_out = self._get_drawable_points(all_spots)
+    return spots_out
+
+  def _get_drawable_points(self, points):
+    points_out = []
+    x, y, w, h = self.get_bitmap_params()
+    for ym,xm in points :
+      if ((x+w) >= xm >= x) and ((y+h) >= ym >= y):
+        xm_, ym_ = self.image_coords_as_screen_coords(xm, ym)
+        points_out.append((xm_, ym_))
+    return points_out
+
+  def get_drawable_background_mask(self):
+    if (self._integration is None) : return []
+    points_out = self._get_drawable_points(
+      self._integration['background_masks_xy'])
+    return points_out
+
+  def get_drawable_predictions(self):
+    if (self._integration is None) : return []
+    points_out = self._get_drawable_points(
+      self._integration['mapped_predictions'])
+    return points_out
+
+  def get_drawable_integration_mask(self):
+    if (self._integration is None) : return []
+    points_out = self._get_drawable_points(
+      self._integration['integration_masks_xy'])
+    return points_out
+
+  def set_beam_center_from_screen_coords(self, x, y):
+    """
+    Reposition the beam center for the current image - this is not saved, but
+    it will override the beam center in the image header.  Arguments are
+    screen pixel coordinates in the main viewport.
+    """
+    x_im, y_im = self.screen_coords_as_image_coords(x, y)
+    if ((x_im <= 0) or (y_im <= 0) or
+        (x_im > self.img_w) or (y_im > self.img_h)):
+      raise Sorry("Coordinates are out of image!")
+    x_point, y_point = self._raw.image_coords_as_detector_coords(x_im, y_im)
+    old_x, old_y = self.get_beam_center_mm()
+    self._beam_center = (x_point, y_point)
+    return (old_x, old_y, x_point, y_point)
+
+  def reset_beam_center(self):
+    self._beam_center = None
+
+  def get_beam_center_mm(self):
+    if (self._beam_center is not None):
+      center_x, center_y = self._beam_center
+    else:
+      center_x, center_y = self._raw.get_detector()[0].get_beam_centre(
+        self._raw.get_beam().get_s0())
+    return center_x, center_y
+
+  def get_beam_center(self):
+    center_x, center_y = self.get_beam_center_mm()
+    (x, y) = self._raw.get_detector()[0].millimeter_to_pixel((center_x, center_y))
+    return (int(x), int(y))
+
+  def get_detector_distance(self):
+    dist = self._raw.get_detector()[0].get_distance()
+    twotheta = self.get_detector_2theta()
+    if (twotheta == 0.0):
+      return dist
+    else :
+      return dist / math.cos(twotheta)
+
+  def get_detector_2theta(self):
+    from scitbx.matrix import col
+
+    n = col(self._raw.get_detector()[0].get_normal())
+    s0 = col(self._raw.get_beam().get_unit_s0())
+
+    return s0.angle(n, deg=False)
+
+  def get_wavelength(self):
+    return self._raw.get_beam().get_wavelength()
+
+  def get_point_info(self, x, y):
+    """
+    Determine the intensity, resolution, and array indices of a pixel.
+    Arguments are in image pixel coordinates (starting from 1,1).
+    """
+    wavelength = self._raw.get_beam().get_wavelength()
+    d_min = self._raw.get_detector()[0].get_resolution_at_pixel(
+      self._raw.get_beam().get_s0(), (x, y))
+
+    slow, fast = self.image_coords_as_array_coords(x, y)
+
+    intensity = None
+    if self._raw.get_detector()[0].is_coord_valid((fast, slow)):
+      intensity = self._raw.get_raw_data()[(fast, slow)]
+    return point_info(slow, fast, intensity, d_min)
+
+
+  def line_between_points(self, x1, y1, x2, y2, n_values=100):
+    """
+    Given two points on the image, sample intensities along a line connecting
+    them (using linear interpolation).  This also calculates the coordinates
+    of each sample point, which is used for lattice dimension calculations
+    once peaks have been identified.  Arguments are in image pixel coordinates
+    (starting at 1,1).
+    """
+    x1_, y1_ = self.image_coords_as_array_coords(x1, y1)
+    x2_, y2_ = self.image_coords_as_array_coords(x2, y2)
+    n_values = ifloor(math.sqrt((x2_-x1_)**2 + (y2_-y1_)**2))
+    delta_x = (x2_ - x1_) / (n_values - 1)
+    delta_y = (y2_ - y1_) / (n_values - 1)
+    vals = []
+    img_coords = []
+    d = self._raw.linearintdata
+    # TODO remarkably, this is reasonably fast in Python, but it would
+    # probably be more at home in scitbx.math
+    for n in range(n_values):
+      x = x1_ + (n * delta_x)
+      y = y1_ + (n * delta_y)
+      xd, yd = self.array_coords_as_detector_coords(x, y)
+      img_coords.append((xd,yd))
+      x_1 = ifloor(x)
+      x_2 = iceil(x)
+      y_1 = ifloor(y)
+      y_2 = iceil(y)
+      v11 = d[(x_1, y_1)]
+      v12 = d[(x_1, y_2)]
+      v21 = d[(x_2, y_1)]
+      v22 = d[(x_2, y_2)]
+      if (x_2 == x_1):
+        if (y_2 == y_1):
+          vxy = v11
+        else :
+          vxy = ((v12 * (y - y_1)) + (v11 * (y_2 - y))) / (y_2 - y_1)
+      elif (y_2 == y_1):
+        vxy =  ((v21 * (x - x_1)) + (v11 * (x_2 - x))) / (x_2 - x_1)
+      else :
+        dxdy = (y_2 - y_1) * (x_2 - x_1)
+        vxy = ((v11 / dxdy) * (x_2 - x) * (y_2 - y)) + \
+              ((v21 / dxdy) * (x - x_1) * (y_2 - y)) + \
+              ((v12 / dxdy) * (x_2 - x) * (y - y_1)) + \
+              ((v22 / dxdy) * (x - x_1) * (y - y_1))
+      vals.append(vxy)
+    lattice_length = None
+    if (len(vals) > 5):
+      # first find peaks in the profile
+      peaks = []
+      avg = sum(vals) / len(vals)
+      filtered_vals = []
+      for x in vals :
+        if (x <= avg*3):
+          filtered_vals.append(x)
+      background = sum(filtered_vals) / len(filtered_vals)
+      i = 2
+      while (i < len(vals) - 2):
+        x = vals[i]
+        if (x <= background):
+          pass
+        elif ((x > vals[i-1]) and (x > vals[i-2]) and
+              (x > vals[i+1]) and (x > vals[i+2])):
+          peaks.append(i)
+        i += 1
+      if (len(peaks) > 0):
+        # calculate the average lattice length
+        center_x, center_y = self.get_beam_center_mm()
+        distances = []
+        i = 1
+        while (i < len(peaks)):
+          x1,y1 = img_coords[peaks[i-1]]
+          x2,y2 = img_coords[peaks[i]]
+          rs_distance = rstbx.utils.reciprocal_space_distance(x1, y1, x2, y2,
+            wavelength=self.get_wavelength(),
+            center_x=center_x,
+            center_y=center_y,
+            distance=self.get_detector_distance(),
+            detector_two_theta=self.get_detector_2theta(),
+            distance_is_corrected=True)
+          assert (rs_distance > 0)
+          distances.append(1 / rs_distance)
+          i += 1
+        lattice_length = sum(distances) / len(distances)
+    distance = self.distance_between_points(x1, y1, x2, y2)
+    return line_profile(vals, distance, lattice_length)
+
+class point_info(object):
+  """
+  Container for storing attributes of a pixel, for display by the main
+  frame (currently on the statusbar).
+  """
+  def __init__(self, slow, fast, intensity, d_min):
+    self.slow = slow
+    self.fast = fast
+    self.intensity = intensity
+    self.d_min = d_min
+
+  def format(self):
+    return "resolution = %s  intensity = %.2f  slow=%d  fast=%d" % (
+      format_value("%.2f A", self.d_min), self.intensity, self.slow, self.fast)
+
+class line_profile(object):
+  def __init__(self, values, distance, lattice_length):
+    self.values = values
+    self.distance = distance
+    self.lattice_length = lattice_length
+
+# TODO replace this with libtbx.phil
+class settings(object):
+  def __init__(self):
+    self.zoom_level = 0
+    self.brightness = 100
+    self.show_beam_center = True
+    self.invert_beam_center_axes = False
+    self.show_spotfinder_spots = True
+    self.show_integration = True
+    self.show_effective_tiling = False # doesn't appear in GUI, only for debugging
+    self.enable_collect_values = True
+    self.color_scheme = 0
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/calibration.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from scitbx.array_family import flex
+import math
+from six.moves import cPickle as pickle
+
+class sb_wrapper:
+  def __init__(self,working_phil):
+      self.working_phil = working_phil
+      self.two_theta_experimental = flex.double([
+        1.5114,3.0160,4.5289,6.0422,7.5575,9.0733,10.5922,12.1106,13.6320,15.1563,16.6836,18.2107])
+        # first 12 orders of silver behenate rings reported by Huang (1993) J Appl Cryst 26, 180-184.
+      copper_Kalpha = 1.5418 # Angstroms
+      d = flex.double(len(self.two_theta_experimental), copper_Kalpha/2.)
+      self.experimental_d = d/flex.sin((math.pi/360.)*self.two_theta_experimental)
+      # should correspond to repeat spacing of 58.7 Angstrom according to Huang.
+
+  def display(self,path):
+    import wx
+    from rstbx.viewer.calibration_frame import SBFrame
+    from rstbx.viewer import display
+    display.user_callback  = self.user_callback
+
+    app   = wx.App(0)
+    frame = SBFrame(None, -1, "X-ray image display", size=(1200,1080),
+      pos=(100,100), horizons_phil=self.working_phil)
+    frame.SetSize((1024,780))
+    frame.load_image(path)
+    frame.path = path
+    self.path = path
+    frame.settings_frame.panel.distance_ctrl.SetFloat(frame._img._raw.distance)
+    frame.settings_frame.panel.distance_ctrl.DoSendEvent()
+    frame.Show()
+    app.MainLoop()
+
+  def user_callback(self,dc,panel,wx):
+    center_x, center_y = panel._img.get_beam_center()
+    xc, yc = panel._img.image_coords_as_screen_coords(center_x, center_y)
+    dc.SetPen(wx.Pen('red'))
+    dc.SetBrush(wx.TRANSPARENT_BRUSH)
+
+    wavelength = panel._img._raw.wavelength #should be this
+    wavelength_from_avg_file = False
+    if wavelength_from_avg_file:
+      # go through hoops to get the proper wavelength corresponding to this run
+      avepath = self.path.replace("stddev","avg")
+      info = pickle.load(open(avepath,"rb"))
+      wavelength = info["WAVELENGTH"]
+
+    twotheta = 2.* flex.asin(
+                 flex.double(len(self.two_theta_experimental), wavelength/2.)/
+                 self.experimental_d)
+    L_mm = panel.settings.distance * flex.tan(twotheta)
+    L_pixels = L_mm / panel._img._raw.pixel_size
+
+    [ dc.DrawCircle(xc, yc, panel._img.get_scale() * pxl) for pxl in L_pixels ]
+
+class pdb_code_wrapper(sb_wrapper):
+
+  def __init__(self,working_phil):
+      self.working_phil = working_phil
+      # should corresponds to low angle scattering of crystal structure---up to 20 Angstroms
+      from xfel.cxi.display_powder_arcs import get_mmtbx_icalc
+      intensities = get_mmtbx_icalc(
+        code = working_phil.viewer.calibrate_pdb.code,
+        d_min = working_phil.viewer.calibrate_pdb.d_min,
+        anomalous_flag=False)
+      self.hkl_list = intensities.indices()
+      self.uc = intensities.unit_cell()
+      spacings = self.uc.d(self.hkl_list)
+      rev_order = flex.sort_permutation(spacings,reverse = True)
+      for x in range(len(rev_order)):
+        print(self.hkl_list[rev_order[x]], spacings[rev_order[x]])
+      self.experimental_d =  spacings.select(rev_order)
+
+  def user_callback(self,dc,panel,wx):
+    center_x, center_y = panel._img.get_beam_center()
+    xc, yc = panel._img.image_coords_as_screen_coords(center_x, center_y)
+    dc.SetPen(wx.Pen('red'))
+    dc.SetBrush(wx.TRANSPARENT_BRUSH)
+
+    wavelength = panel._img._raw.wavelength #should be this
+    wavelength_from_avg_file = False
+    if wavelength_from_avg_file:
+      # go through hoops to get the proper wavelength corresponding to this run
+      avepath = self.path.replace("stddev","avg")
+      info = pickle.load(open(avepath,"rb"))
+      wavelength = info["WAVELENGTH"]
+
+    twotheta = self.uc.two_theta(miller_indices = self.hkl_list, wavelength = wavelength)
+    L_mm = panel.settings.distance * flex.tan(twotheta)
+    L_pixels = L_mm / panel._img._raw.pixel_size
+
+    [ dc.DrawCircle(xc, yc, panel._img.get_scale() * pxl) for pxl in L_pixels ]
+
+class unit_cell_wrapper(sb_wrapper):
+
+  def __init__(self,working_phil):
+    self.working_phil = working_phil
+
+    from cctbx.crystal import symmetry
+    import cctbx.miller
+    self.uc = symmetry(unit_cell=self.working_phil.viewer.calibrate_unitcell.unitcell,
+                       space_group_symbol=self.working_phil.viewer.calibrate_unitcell.spacegroup)
+    self.hkl_list = cctbx.miller.build_set(self.uc, False, d_min=working_phil.viewer.calibrate_unitcell.d_min)
+
+    spacings = list(self.hkl_list.d_spacings())
+    print("Printing spacings, len: %s"%len(spacings))
+
+    def cmp(a,b):
+      if a[1] > b[1]: return 1
+      elif a[1] < b[1]: return -1
+      return 0
+
+    spacings = sorted(spacings, cmp=cmp, reverse=True)
+
+    for d in spacings:
+      print(d)
+
+  def user_callback(self,dc,panel,wx):
+    if not hasattr(panel.settings, "distance"): return # fixes a crash on exit
+
+    center_x, center_y = panel._img.get_beam_center()
+    xc, yc = panel._img.image_coords_as_screen_coords(center_x, center_y)
+    dc.SetPen(wx.Pen('red'))
+    dc.SetBrush(wx.TRANSPARENT_BRUSH)
+
+    wavelength = panel._img._raw.wavelength #should be this
+    wavelength_from_avg_file = False
+    if wavelength_from_avg_file:
+      # go through hoops to get the proper wavelength corresponding to this run
+      avepath = self.path.replace("stddev","avg")
+      info = pickle.load(open(avepath,"rb"))
+      wavelength = info["WAVELENGTH"]
+
+    twotheta = self.hkl_list.two_theta(wavelength = wavelength)
+    L_mm = []
+    L_pixels = []
+    for tt in twotheta: L_mm.append(panel.settings.distance * math.tan(tt[1]))
+    for lmm in L_mm: L_pixels.append(lmm/panel._img._raw.pixel_size)
+
+    [ dc.DrawCircle(xc, yc, panel._img.get_scale() * pxl) for pxl in L_pixels ]
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/calibration_frame.py
+from __future__ import absolute_import, division, print_function
+import rstbx.viewer.display
+import wx
+import os
+from rstbx.viewer.frame import XrayFrame,SettingsFrame,SettingsPanel
+
+class SBFrame(XrayFrame):
+  def __init__(self, *args, **kwds):
+    self.horizons_phil = kwds["horizons_phil"]
+    del kwds["horizons_phil"]
+    super(SBFrame, self).__init__(*args, **kwds)
+
+  def OnShowSettings(self, event):
+    if (self.settings_frame is None):
+      frame_rect = self.GetRect()
+      display_rect = wx.GetClientDisplayRect()
+      x_start = frame_rect[0] + frame_rect[2]
+      if (x_start > (display_rect[2] - 400)):
+        x_start = display_rect[2] - 400
+      y_start = frame_rect[1]
+      self.settings_frame = SBSettingsFrame(self, -1, "Settings",
+        style=wx.CAPTION|wx.MINIMIZE_BOX, pos=(x_start, y_start))
+    self.settings_frame.Show()
+
+  def load_image_restricted(self):
+    #This method can probably be back-edited to rely more on the base class code...later
+
+    file_name = os.path.abspath(self.path)
+    self._img = rstbx.viewer.image(self.path)
+    self.viewer.set_image(self._img)
+    #self.viewer._img = self._img
+    #self.viewer._img.set_screen_size(*(self.viewer.GetSize()))
+    self.viewer.line = None
+    scales = [0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+    zoom = scales[self.viewer.settings.zoom_level]
+    self.viewer._img.set_zoom(zoom)
+    self.viewer._img.update_settings(
+      brightness=self.viewer.settings.brightness)
+    self.viewer.Refresh()
+    if (self.viewer.GetParent().zoom_frame is not None):
+      self.viewer.GetParent().zoom_frame.Refresh()
+    self.viewer.GetParent().settings_frame.refresh_thumbnail()
+
+    self.settings_frame.set_image(self._img)
+    self.SetTitle(file_name)
+    items = self.image_chooser.GetItems()
+    if (not file_name in items):
+      items.append(file_name)
+    self.image_chooser.SetItems(items)
+    self.image_chooser.SetStringSelection(file_name)
+    self.update_statusbar()
+    self.Layout()
+
+class SBSettingsFrame(SettingsFrame):
+  def __init__(self, *args, **kwds):
+    super(SettingsFrame, self).__init__(*args, **kwds)
+    self.settings = self.GetParent().settings
+    szr = wx.BoxSizer(wx.VERTICAL)
+    panel = SBSettingsPanel(self, -1)
+    self.SetSizer(szr)
+    szr.Add(panel, 1, wx.EXPAND)
+    szr.Fit(panel)
+    self.panel = panel
+    self.sizer = szr
+    self.Fit()
+    self.Bind(wx.EVT_CLOSE, lambda evt : self.Destroy(), self)
+    self.Bind(wx.EVT_WINDOW_DESTROY, self.OnDestroy)
+
+class SBSettingsPanel(SettingsPanel):
+  def __init__(self, *args, **kwds):
+    wx.Panel.__init__(self, *args, **kwds)
+    self.settings = self.GetParent().settings
+    self._sizer = wx.BoxSizer(wx.VERTICAL)
+    s = self._sizer
+    self.SetSizer(self._sizer)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    s.Add(box)
+    txt1 = wx.StaticText(self, -1, "Zoom level:")
+    box.Add(txt1, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Zoom control
+    self.zoom_ctrl = wx.Choice(self, -1,
+      choices=["Auto", "25%", "50%", "100%", "200%", "400%", "800%"])
+    self.zoom_ctrl.SetSelection(self.settings.zoom_level)
+    box.Add(self.zoom_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self._sizer.Fit(self)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    s.Add(box)
+    txt2 = wx.StaticText(self, -1, "Brightness")
+    box.Add(txt2, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Brightness control
+    self.brightness_ctrl = wx.Slider(self, -1, size=(200,-1),
+      style=wx.SL_AUTOTICKS|wx.SL_LABELS)
+    box.Add(self.brightness_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.brightness_ctrl.SetMin(10)
+    self.brightness_ctrl.SetMax(500)
+    self.brightness_ctrl.SetValue(self.settings.brightness)
+    self.brightness_ctrl.SetTickFreq(25)
+
+    # Center control
+    self.center_ctrl = wx.CheckBox(self, -1, "Mark beam center")
+    self.center_ctrl.SetValue(self.settings.show_beam_center)
+    s.Add(self.center_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Distance control
+    print("DISTANCE",self.GetParent().GetParent().viewer._img)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    from wxtbx.phil_controls.floatctrl import FloatCtrl
+    from wxtbx.phil_controls import EVT_PHIL_CONTROL
+    self.distance_ctrl = FloatCtrl(self, -1, pos=(300,180), size=(80,-1),
+    value=80.00,
+    name="Detector Distance")
+    self.distance_ctrl.SetMax(5000)
+    self.distance_ctrl.SetMin(5)
+    self.distance_ctrl.SetOptional(False)
+    box.Add(self.distance_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    txtd = wx.StaticText(self, -1,  "Detector Distance",)
+    box.Add(txtd, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    s.Add(box)
+
+    # Quad translation controls
+    QT = self.GetParent().GetParent().horizons_phil.distl.quad_translations
+    if QT is not None:
+      iqt = 0
+      from wxtbx.phil_controls.intctrl import IntCtrl
+      for s_quad in ["UL","UR","LL","LR"]:
+
+        box = wx.BoxSizer(wx.HORIZONTAL)
+        setattr(self,s_quad+"x_ctrl",IntCtrl(self, -1, pos=(300,180), size=(80,-1),value=QT[iqt],name=s_quad+"x"))
+        iqt+=1
+        spinbtn = wx.SpinButton(self, -1)
+        getattr(self,s_quad+"x_ctrl").AttachSpinner(spinbtn)
+        box.Add(getattr(self,s_quad+"x_ctrl"), 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+        box.Add(spinbtn, 0, wx.RIGHT|wx.TOP|wx.BOTTOM|wx.ALIGN_CENTER_VERTICAL, 5)
+        txtd = wx.StaticText(self, -1,  s_quad+" x",)
+        box.Add(txtd, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+        setattr(self,s_quad+"y_ctrl",IntCtrl(self, -1, pos=(300,180), size=(80,-1),value=QT[iqt],name=s_quad+"y"))
+        iqt+=1
+        spinbtn = wx.SpinButton(self, -1)
+        getattr(self,s_quad+"y_ctrl").AttachSpinner(spinbtn)
+        box.Add(getattr(self,s_quad+"y_ctrl"), 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+        box.Add(spinbtn, 0, wx.RIGHT|wx.TOP|wx.BOTTOM|wx.ALIGN_CENTER_VERTICAL, 5)
+        txtd = wx.StaticText(self, -1,  s_quad+" y",)
+        box.Add(txtd, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+        s.Add(box)
+
+    self.collect_values()
+
+    self.Bind(wx.EVT_CHOICE, self.OnUpdate, self.zoom_ctrl)
+    self.Bind(wx.EVT_SLIDER, self.OnUpdateBrightness, self.brightness_ctrl)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdate2, self.center_ctrl)
+    self.Bind(EVT_PHIL_CONTROL, self.OnUpdateDist, self.distance_ctrl)
+
+    if QT is not None:
+      for s_quad in ["UL","UR","LL","LR"]:
+        self.Bind(EVT_PHIL_CONTROL, self.OnUpdateQuad, getattr(self,s_quad+"x_ctrl"))
+        self.Bind(EVT_PHIL_CONTROL, self.OnUpdateQuad, getattr(self,s_quad+"y_ctrl"))
+    txt3 = wx.StaticText(self, -1, "Thumbnail view:")
+    s.Add(txt3, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.thumb_panel = rstbx.viewer.display.ThumbnailView(
+      parent=self,
+      size=(256,256),
+      style=wx.SUNKEN_BORDER)
+    s.Add(self.thumb_panel, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+  def collect_values(self):
+    if self.settings.enable_collect_values:
+      self.settings.zoom_level = self.zoom_ctrl.GetSelection()
+      self.settings.brightness = self.brightness_ctrl.GetValue()
+      self.settings.show_beam_center = self.center_ctrl.GetValue()
+      self.settings.distance = self.distance_ctrl.GetPhilValue()
+
+  def OnUpdateQuad(self, event):
+    for iq,s_quad in enumerate(["UL","UR","LL","LR"]):
+      setattr(self.settings,s_quad+"x",getattr(self,s_quad+"x_ctrl").GetPhilValue())
+      setattr(self.settings,s_quad+"y",getattr(self,s_quad+"y_ctrl").GetPhilValue())
+      self.GetParent().GetParent().horizons_phil.distl.quad_translations[2*iq+0]=getattr(self.settings,s_quad+"x")
+      self.GetParent().GetParent().horizons_phil.distl.quad_translations[2*iq+1]=getattr(self.settings,s_quad+"y")
+    self.GetParent().GetParent().load_image_restricted()
+    #self.GetParent().GetParent().update_settings(layout=True)
+
+  def OnUpdateDist(self, event):
+    self.collect_values()
+    self.GetParent().GetParent().update_settings(layout=False)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/controls.py
+from __future__ import absolute_import, division, print_function
+
+from rstbx.viewer import results_base
+import wx
+
+class ListBase(wx.ListCtrl):
+  def Reset(self):
+    self.dataSource = results_base.EmptyData()
+    self.RefreshAllItems()
+
+  def RefreshAllItems(self):
+    n_items = self.dataSource.GetItemCount()
+    self.SetItemCount(n_items)
+    if (n_items > 0):
+      self.RefreshItems(0, n_items - 1)
+
+  def OnGetItemImage(self, item):
+    return self.dataSource.GetItemImage(item)
+
+  def OnGetItemAttr(self, item):
+    pass
+
+  def OnGetItemText(self, item, col):
+    return self.dataSource.GetItemText(item, col)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/dataset.py
+from __future__ import absolute_import, division, print_function
+
+from wxtbx.phil_controls import path, ints
+from wxtbx import phil_controls
+from wxtbx import icons, app
+import wx
+from libtbx.utils import Sorry
+import os
+
+RSTBX_SELECT_IMAGE_IDS = 1
+
+class SelectDatasetPanelMixin(object):
+  def draw_dataset_controls(self, sizer=None, pick_frames=True):
+    if (sizer is None):
+      sizer = self.GetSizer()
+    szr2 = wx.BoxSizer(wx.VERTICAL)
+    sizer.Add(szr2, 0, wx.ALL, 5)
+    szr3 = wx.BoxSizer(wx.HORIZONTAL)
+    szr2.Add(szr3)
+    bmp = wx.StaticBitmap(self, -1, icons.img_file.GetBitmap())
+    szr3.Add(bmp, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    caption = "Please select a dataset to index.  Most common detector " +\
+      "file formats are supported (ADSC, R-AXIS, MAR, Pilatus, CBF, etc.)."
+    if (pick_frames):
+      caption += "  If you wish you may specify which frames you want to "+ \
+        "use; otherwise the program will attempt to pick sensible defaults."
+    caption_txt = wx.StaticText(self, -1, caption)
+    caption_txt.Wrap(500)
+    szr3.Add(caption_txt, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    grid = wx.FlexGridSizer(cols=2)
+    sizer.Add(grid, 0, wx.ALL)
+    txt1 = wx.StaticText(self, -1, "Directory:")
+    grid.Add(txt1, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.dir_ctrl = path.PathCtrl(
+      parent=self,
+      style=path.WXTBX_PHIL_PATH_DIRECTORY)
+    grid.Add(self.dir_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.Bind(phil_controls.EVT_PHIL_CONTROL, self.OnChooseDirectory,
+      self.dir_ctrl)
+    txt2 = wx.StaticText(self, -1, "Image set:")
+    grid.Add(txt2, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.stack_ctrl = wx.Choice(
+      parent=self,
+      size=(400,-1))
+    grid.Add(self.stack_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.Bind(wx.EVT_CHOICE, self.OnChooseDataset, self.stack_ctrl)
+    if (pick_frames):
+      txt3 = wx.StaticText(self, -1, "Use frames:")
+      grid.Add(txt3, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+      self.frame_ctrl = ints.IntsCtrl(
+        parent=self,
+        size=(400,-1))
+      self.frame_ctrl.SetMin(1)
+      grid.Add(self.frame_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    else :
+      self.frame_ctrl = None
+    self.add_controls_to_grid(grid)
+
+  def add_controls_to_grid(self, sizer):
+    """
+    For subclasses which need to add aligned controls.
+    """
+    pass
+
+  def GetDataset(self):
+    if (len(self._datasets) == 0):
+      raise Sorry("No dataset selected!")
+    else :
+      i = self.stack_ctrl.GetSelection()
+      frames = None
+      if (self.frame_ctrl is not None):
+        frames = self.frame_ctrl.GetPhilValue()
+      return self._datasets[i], frames
+
+  def OnChooseDirectory(self, event):
+    dir_name = self.dir_ctrl.GetPhilValue()
+    if (dir_name is not None):
+      from iotbx.detectors import identify_dataset
+      self._datasets = identify_dataset(dir_name)
+      choices = [ d.format() for d in self._datasets ]
+      self.stack_ctrl.SetItems(choices)
+
+  def OnChooseDataset(self, event):
+    print(self.stack_ctrl.GetSelection())
+
+class SelectDatasetDialog(wx.Dialog, SelectDatasetPanelMixin):
+  def __init__(self, *args, **kwds):
+    self._datasets = []
+    style = wx.CAPTION
+    dlg_style = kwds.get("style", 0)
+    kwds['style'] = style
+    wx.Dialog.__init__(self, *args, **kwds)
+    szr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(szr)
+    self.draw_dataset_controls(pick_frames=(dlg_style & RSTBX_SELECT_IMAGE_IDS))
+    btn_sizer = wx.StdDialogButtonSizer()
+    szr.Add(btn_sizer, 0, wx.ALL|wx.ALIGN_RIGHT, 10)
+    cancel_btn = wx.Button(self, wx.ID_CANCEL)
+    ok_btn = wx.Button(self, wx.ID_OK)
+    btn_sizer.Add(cancel_btn, 0, wx.RIGHT, 5)
+    btn_sizer.Add(ok_btn)
+    szr.Fit(self)
+
+  def OnOkay(self, event):
+    pass
+
+def select_dataset(parent=None,
+                    title="Select a dataset",
+                    pick_frames=False):
+  style = 0
+  if (pick_frames):
+    style |= RSTBX_SELECT_IMAGE_IDS
+  dlg = SelectDatasetDialog(
+    parent=parent,
+    title=title,
+    style=style)
+  dataset = frames = None
+  if (dlg.ShowModal() == wx.ID_OK):
+    dataset, frames = dlg.GetDataset()
+  wx.CallAfter(dlg.Destroy)
+  if (pick_frames):
+    return dataset, frames
+  else :
+    return dataset
+
+# regression testing
+if (__name__ == "__main__"):
+  app = app.CCTBXApp(0)
+  dataset, frames = select_dataset(pick_frames=True)
+  if (dataset is not None):
+    if (frames is not None):
+      print("Selected images:")
+      for frame in frames :
+        file_name = dataset.get_frame_path(frame)
+        assert os.path.isfile(file_name)
+        print("  " + file_name)
+    else :
+      print(dataset)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/display.py
+from __future__ import absolute_import, division, print_function
+
+# TODO:
+#  - handle 2theta properly
+#  - resolution circles (2theta-dependent)
+#  - measure reciprocal-space distance between spots
+
+from rstbx.viewer import screen_params
+import wx
+user_callback = None
+
+class XrayView(wx.Panel):
+  def __init__(self, *args, **kwds):
+    self._img = None
+    super(XrayView, self).__init__(*args, **kwds)
+    self.settings = self.GetParent().settings
+    self.Bind(wx.EVT_PAINT, self.OnPaint)
+    if (wx.Platform == '__WXMSW__'):
+      # XXX fixes flickering problem on Windows - this does not appear to be
+      # an issue on Linux/Mac, so I've left the default behavior in place
+      self.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: True)
+    self.SetupEventHandlers()
+    self.xmouse = None
+    self.ymouse = None
+    self.line_start = None
+    self.line_end = None
+    self.was_dragged = False
+    self.shift_was_down = False
+    self._last_zoom = 0
+    self.zoom_level = None
+    # miscellaneous non-user flags
+    self.flag_always_show_predictions = False
+    self.flag_spots_as_points = False
+    self.flag_set_beam_center_mode = False
+    self.flag_suppress_messages = False
+
+  def SetupEventHandlers(self):
+    self.Bind(wx.EVT_SIZE, self.OnSize)
+    self.Bind(wx.EVT_MOTION, self.OnMotion)
+    self.Bind(wx.EVT_LEFT_DOWN, self.OnLeftDown)
+    self.Bind(wx.EVT_LEFT_DCLICK, self.OnDoubleClick)
+    self.Bind(wx.EVT_LEFT_UP, self.OnLeftUp)
+    self.Bind(wx.EVT_MIDDLE_DOWN, self.OnMiddleDown)
+    self.Bind(wx.EVT_MIDDLE_UP, self.OnMiddleUp)
+    self.Bind(wx.EVT_RIGHT_DOWN, self.OnRightDown)
+    self.Bind(wx.EVT_MOUSEWHEEL, self.OnMouseWheel)
+    self.Bind(wx.EVT_ENTER_WINDOW, self.OnEnter)
+    self.Bind(wx.EVT_LEAVE_WINDOW, self.OnLeave)
+
+  def set_image(self, image):
+    old_img = self._img
+    self._img = image
+    self._img.set_screen_size(*(self.GetSize()))
+    if (old_img is not None) and (type(self).__name__ != 'ZoomView'):
+      self._img.inherit_params(old_img)
+      if (self.GetParent().zoom_frame is not None):
+        self.GetParent().zoom_frame.set_image(image)
+        self.GetParent().zoom_frame.Refresh()
+    self.update_settings()
+
+  def get_scale(self):
+    if (self.zoom_level is not None):
+      return self.zoom_level
+    else :
+      return self._img.get_scale()
+
+  def update_settings(self, layout=True):
+    self.line = None
+    scales = [0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+    zoom = scales[self.settings.zoom_level]
+    if (self._img is not None):
+      self._img.set_zoom(zoom)
+      self._img.update_settings(
+        brightness=self.settings.brightness,
+        color_scheme=self.settings.color_scheme)
+    if (layout):
+      self.line_start = None
+      self.line_end = None
+      self.OnSize(None)
+    self.Refresh()
+    if (self.GetParent().zoom_frame is not None):
+      self.GetParent().zoom_frame.Refresh()
+    if self.GetParent().settings_frame is not None:
+      self.GetParent().settings_frame.refresh_thumbnail()
+
+  # EVENTS
+  def OnPaint(self, event):
+    dc = wx.AutoBufferedPaintDCFactory(self)
+    self.paint(dc)
+
+  def paint(self, dc):
+    if (self._img is None):
+      return
+    w, h = self.GetSize()
+    bitmap = self._img.get_bitmap()
+    x, y = self._img.adjust_screen_coordinates(0, 0)
+    dc.DrawBitmap(bitmap, x, y)
+    if (self.settings.show_beam_center):
+      center_x, center_y = self._img.get_beam_center()
+      xc, yc = self._img.image_coords_as_screen_coords(center_x, center_y)
+      if (xc < w) and (yc < h):
+        dc.SetPen(wx.Pen('blue'))
+        dc.DrawLine(xc - 10, yc, xc + 10, yc)
+        dc.DrawLine(xc, yc - 10, xc, yc + 10)
+    if (self.line_start is not None) and (self.line_end is not None):
+      dc.SetPen(wx.Pen('red', 2, wx.DOT))
+      x1, y1 = self._img.image_coords_as_screen_coords(*(self.line_start))
+      x2, y2 = self._img.image_coords_as_screen_coords(*(self.line_end))
+      dc.DrawLine(x1, y1, x2, y2)
+    if (self.settings.show_spotfinder_spots):
+      self.draw_spotfinder_spots(dc)
+    if (self.settings.show_integration):
+      self.draw_integration_results(dc)
+    if user_callback != None:
+      user_callback(dc,self,wx)
+
+  def draw_spotfinder_spots(self, dc):
+    spots = self._img.get_drawable_spots()
+    dc.SetPen(wx.Pen('red'))
+    if (self.flag_spots_as_points):
+      dc.DrawPoint(x, y)
+    else :
+      spot_scale = self._img.get_scale() * 5
+      for x,y in spots :
+        dc.DrawLine(x-spot_scale, y, x+spot_scale, y)
+        dc.DrawLine(x, y-spot_scale, x, y+spot_scale)
+
+  def draw_integration_results(self, dc):
+    scale = self.get_scale()
+    if (scale >= 4):
+      bg_masks = self._img.get_drawable_background_mask()
+      dc.SetPen(wx.Pen((255,255,0), 1))
+      for (x, y) in bg_masks :
+        dc.DrawCircle(x,y,1)
+      int_masks = self._img.get_drawable_integration_mask()
+      dc.SetPen(wx.CYAN_PEN)
+      for (x, y) in int_masks :
+        dc.DrawCircle(x,y,1)
+    else :
+      predictions = self._img.get_drawable_predictions()
+      dc.SetPen(wx.Pen((255,255,0), 1))
+      dc.SetBrush(wx.TRANSPARENT_BRUSH)
+      for (x, y) in predictions :
+        dc.DrawCircle(x, y, 8*scale)
+
+  def save_image(self, file_name):
+    rect = self.GetRect()
+    bitmap = wx.EmptyBitmap(rect.width, rect.height)
+    memory_dc = wx.MemoryDC()
+    memory_dc.SelectObject(bitmap)
+    memory_dc.SetBackgroundMode(wx.TRANSPARENT)
+    self.paint(memory_dc)
+    bitmap.SaveFile(file_name, wx.BITMAP_TYPE_PNG)
+
+  def OnSize(self, event):
+    if (self._img is not None):
+      w, h = self.GetSize()
+      self._img.set_screen_size(w, h)
+      self.Refresh()
+
+  #---------------------------------------------------------------------
+  # MOUSE EVENTS
+  def OnRecordMouse(self, event):
+    self.xmouse = event.GetX()
+    self.ymouse = event.GetY()
+
+  def OnMotion(self, event):
+    if (event.Dragging()):
+      self.was_dragged = True
+      if (event.LeftIsDown()):
+        if (event.ShiftDown()):
+          self.OnMiddleDrag(event)
+        else :
+          self.OnLeftDrag(event)
+      elif (event.MiddleIsDown()):
+        self.OnMiddleDrag(event)
+      elif (event.RightIsDown()):
+        self.OnRightDrag(event)
+    elif (self._img is not None) and (not self.flag_set_beam_center_mode):
+      x, y = self._img.screen_coords_as_image_coords(event.GetX(),event.GetY())
+      img_w, img_h = self._img.get_image_size()
+      if (x < 0) or (x > img_w) or (y < 0) or (y > img_h):
+        self.GetParent().update_statusbar()
+      else :
+        try :
+          info = self._img.get_point_info(x, y)
+        except IndexError as e :
+          # FIXME this really shouldn't happen
+          print(e)
+        else :
+          self.GetParent().update_statusbar(info)
+
+  def OnMiddleDown(self, event):
+    self.was_dragged = False
+    self.line_end = None
+    x, y = event.GetPositionTuple()
+    self.line_start = self._img.screen_coords_as_image_coords(x, y)
+
+  def OnMiddleUp(self, event):
+    if (self.was_dragged) and (self.line_start is not None):
+      x, y = event.GetPositionTuple()
+      self.line_end = self._img.screen_coords_as_image_coords(x, y)
+      x1, y1 = self.line_start
+      x2, y2 = self.line_end
+      if (x1 <= x2):
+        line = self._img.line_between_points(x1, y1, x2, y2)
+      else :
+        line = self._img.line_between_points(x2, y2, x1, y1)
+      self.GetParent().OnShowPlot(None)
+      self.GetParent().plot_frame.show_plot(line)
+
+  def OnMiddleDrag(self, event):
+    if (self._img is not None) and (not self.flag_set_beam_center_mode):
+      x, y = event.GetPositionTuple()
+      self.line_end = self._img.screen_coords_as_image_coords(x, y)
+      self.Refresh()
+
+  def OnLeftDown(self, event):
+    if (self._img is None) : return
+    self.was_dragged = False
+    if (event.ShiftDown()):
+      self.shift_was_down = True
+      self.OnMiddleDown(event)
+    elif (not self.flag_set_beam_center_mode):
+      self.OnRecordMouse(event)
+      wx.SetCursor(wx.StockCursor(wx.CURSOR_HAND))
+      #self.OnRecordMouse(event)
+
+  def OnLeftDrag(self, event):
+    # XXX some weirdness happens if the drag didn't start inside the panel...
+    if (self.xmouse is None) : return
+    if (self._img is not None):
+      if (self.shift_was_down):
+        self.OnMiddleDrag(event)
+      elif (not self.flag_set_beam_center_mode):
+        self.OnTranslate(event)
+
+  def OnLeftUp(self, event):
+    if (self._img is None) : return
+    if (self.shift_was_down):
+      self.OnMiddleUp(event)
+    else :
+      self.line = None
+      if (not self.was_dragged) and (self.flag_set_beam_center_mode):
+        x, y = event.GetPositionTuple()
+        (old_x, old_y, x_point, y_point) = \
+          self._img.set_beam_center_from_screen_coords(x,y)
+        # XXX should it pop up a message here?  maybe we need a built-in
+        # console for printing extra info?
+        print("Changed beam center to %.2f, %.2f (was: %.2f, %.2f)" % \
+          (x_point, y_point, old_x, old_y))
+        self.flag_set_beam_center_mode = False
+        self.GetParent().update_statusbar()
+    wx.SetCursor(wx.StockCursor(wx.CURSOR_CROSS))
+    self.Refresh()
+    self.shift_was_down = False
+    self.was_dragged = False
+
+  def OnMiddleDrag(self, event):
+    if (self._img is not None) and (not self.flag_set_beam_center_mode):
+      x, y = event.GetPositionTuple()
+      self.line_end = self._img.screen_coords_as_image_coords(x, y)
+      self.Refresh()
+
+  def OnRightDown(self, event):
+    self.was_dragged = False
+    if (event.ShiftDown()):
+      self.OnZoom3D(event)
+    else :
+      self.OnZoom(event)
+
+  def OnRightDrag(self, event):
+    self.OnZoom(event)
+
+  def OnDoubleClick(self, event):
+    pass
+  #---------------------------------------------------------------------
+
+  def OnZoom(self, event):
+    if (self._img is None) : return
+    x, y = event.GetPositionTuple()
+    img_x, img_y = self._img.screen_coords_as_image_coords(x, y)
+    self.GetParent().OnShowZoom(None)
+    self.GetParent().zoom_frame.recenter(img_x, img_y)
+    if (self.GetParent().zoom_3d is not None):
+      self.GetParent().zoom_3d.recenter(img_x, img_y)
+    self._img.set_screen_size(*(self.GetSize()))
+
+  def OnZoom3D(self, event):
+    if (self._img is None) : return
+    x, y = event.GetPositionTuple()
+    img_x, img_y = self._img.screen_coords_as_image_coords(x, y)
+    self.GetParent().OnShow3D(None)
+    self.GetParent().zoom_3d.recenter(img_x, img_y)
+    if (self.GetParent().zoom_frame is not None):
+      self.GetParent().zoom_frame.recenter(img_x, img_y)
+    self._img.set_screen_size(*(self.GetSize()))
+
+  def OnTranslate(self, event):
+    if (self._img is None) : return
+    x, y = event.GetX(), event.GetY()
+    delta_x = x - self.xmouse
+    delta_y = y - self.ymouse
+    self.OnRecordMouse(event)
+    self.TranslateImage(delta_x, delta_y)
+
+  def TranslateImage(self, delta_x, delta_y):
+    if (self._img is None) : return
+    if (self.settings.zoom_level == 0):
+      return
+    self._img.translate_image(delta_x, delta_y)
+    self.Refresh()
+    if (self.GetParent().settings_frame is not None):
+      self.GetParent().settings_frame.refresh_thumbnail()
+
+  def OnMouseWheel(self, event):
+    return # XXX disabled now that middle mouse measures intensity profile
+    if (self._img is None) : return
+    d_x = d_y = 0
+    if (event.ShiftDown()):
+      d_x = - 10 * event.GetWheelRotation()
+    else :
+      d_y = - 10 * event.GetWheelRotation()
+    self.TranslateImage(d_x, d_y)
+
+  def OnEnter(self, event):
+    if (not event.MiddleIsDown()) and (not event.RightIsDown()):
+      wx.SetCursor(wx.StockCursor(wx.CURSOR_CROSS))
+
+  def OnLeave(self, event):
+    self.was_dragged = False
+    wx.SetCursor(wx.StockCursor(wx.CURSOR_ARROW))
+
+  def ChangeBeamCenter(self):
+    self.flag_set_beam_center_mode = True
+
+  def ResetBeamCenter(self):
+    if (self._img is not None):
+      self._img.reset_beam_center()
+      self.Refresh()
+
+########################################################################
+# AUXILARY CLASSES: THUMBNAIL AND ZOOM
+#
+class ThumbnailView(XrayView):
+  def __init__(self, *args, **kwds):
+    XrayView.__init__(self, *args, **kwds)
+    self.flag_always_show_predictions = True
+
+  def SetupEventHandlers(self):
+    self.Bind(wx.EVT_LEFT_DOWN, self.OnLeftDown)
+
+  def set_image(self, image):
+    self._img = image
+    self.SetSize(image.get_thumbnail_size())
+    self.SetMinSize(image.get_thumbnail_size())
+    self.GetParent().Layout()
+
+  def OnPaint(self, event):
+    if (self._img is None) : return
+    dc = wx.AutoBufferedPaintDCFactory(self)
+    dc.SetBackground(wx.Brush((255,255,255)))
+    dc.Clear()
+    bitmap = self._img.get_thumbnail_bitmap()
+    dc.SetBrush(wx.TRANSPARENT_BRUSH)
+    dc.DrawBitmap(bitmap, 0, 0)
+    x, y, w, h = self._img.get_thumbnail_box()
+    dc.SetPen(wx.Pen('red', 2))
+    dc.DrawRectangle(x, y, w-1, h-1)
+
+  def OnLeftDown(self, event):
+    if (self._img is None) : return
+    x, y = event.GetPositionTuple()
+    self._img.center_view_from_thumbnail(x, y)
+    self.Refresh()
+    self.GetParent().refresh_main()
+
+#class ZoomView(wx.Panel):
+class ZoomView(XrayView):
+  def __init__(self, *args, **kwds):
+    super(ZoomView, self).__init__(*args, **kwds)
+    self.SetSize((400,400))
+    self.SetMinSize((400,400))
+    self._img = None
+    self.Bind(wx.EVT_PAINT, self.OnPaint)
+    self.x_center = None
+    self.y_center = None
+    self.zoom_level = 16
+    self.screen = screen_params()
+    self.screen.set_zoom(16)
+    self.text_color = (255,255,255)
+    self.flag_show_intensities = False
+
+  def SetupEventHandlers(self):
+    pass
+
+  def set_zoom_level(self, zoom):
+    self.zoom_level = zoom
+    self.screen.set_zoom(zoom)
+
+  def recenter(self, x, y):
+    self.x_center = x
+    self.y_center = y
+    self.Refresh()
+
+  def update_settings(self):
+    pass
+
+  def OnPaint(self, event):
+    dc = wx.AutoBufferedPaintDCFactory(self)
+    if ((not None in [self._img, self.x_center, self.y_center]) and
+        (self.x_center >= 0) and (self.y_center >= 0)):
+      w, h = self.GetSize()
+      wx_image = self._img.get_zoomed_bitmap(self.x_center, self.y_center,
+        boxsize=w, mag=self.zoom_level)
+      if (wx_image is None) : return
+      bitmap = wx_image.ConvertToBitmap()
+      dc.DrawBitmap(bitmap, 0, 0)
+      if (self.flag_show_intensities):
+        values = self._img.get_intensities_in_box(
+          x=self.x_center,
+          y=self.y_center,
+          boxsize=w,
+          mag=self.zoom_level)
+        black = wx.Colour(0,0,0,255)
+        white = wx.Colour(255,255,255,255)
+        yellow = wx.Colour(255,255,0,255)
+        dc.SetFont(wx.Font(self.zoom_level//2, wx.MODERN, wx.NORMAL, wx.NORMAL))
+        for i, row in enumerate(values):
+          y = int(self.Size[1]/len(values) * (i + 0.5))
+          if (y > (h-1)):
+            break
+          for j, intensity in enumerate(row):
+            x = int(self.Size[0]/len(values) * (j + 0.5))
+            if (x > (w-1)):
+              break
+            if isinstance(intensity, float):
+              if intensity > 100:
+                fmt = "%.0f"
+              elif intensity > 10:
+                fmt = "%.1f"
+              else:
+                fmt = "%.2f"
+            else:
+              fmt = "%i"
+            txt = fmt % intensity
+            # Calculate appropriate text colour according to formula from
+            # http://ux.stackexchange.com/a/8320
+            R = wx_image.GetRed(x,y)
+            G = wx_image.GetGreen(x,y)
+            B = wx_image.GetBlue(x,y)
+            Y = 0.2126 * (R/255)**2.2  +  0.7151 * (G/255)**2.2  +  0.0721 * (B/255)**2.2
+            if Y < 0.18:
+              dc.SetTextForeground(white) # XXX is white or yellow better here?
+            else:
+              dc.SetTextForeground(black)
+            width, height = dc.GetTextExtent(txt)
+            dc.DrawText(txt, x - width//2 , y - height//2)
+    else :
+      dc.SetPen(wx.Pen('red'))
+      dc.DrawText("Right-click in the main image field to zoom.", 10, 10)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/drivers.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx.utils import Sorry
+import os
+
+class basic_task(object):
+  def __init__(self, output_dir, args=(), params=None):
+    assert (output_dir is not None)
+    self.output_dir = output_dir
+    self.args = list(args)
+    self.params = params
+
+  def __call__(self, *args, **kwds):
+    old_cwd = os.getcwd()
+    os.chdir(self.output_dir)
+    result = self.run()
+    os.chdir(old_cwd)
+    return result
+
+  def run(self):
+    raise NotImplementedError(str(type(self).__name__))
+
+class run_indexing(basic_task):
+  def __init__(self, dataset, frames, **kwds):
+    basic_task.__init__(self, **kwds)
+    if (dataset is None):
+      raise Sorry("You must select a dataset to index!")
+    if (frames is not None):
+      for frame in frames :
+        file_name = dataset.get_frame_path(frame)
+        if (not os.path.isfile(file_name)):
+          raise Sorry(("Can't find a file named %s!  Make sure that the "+
+            "frame numbers specified correspond to actual images.")% file_name)
+        self.args.append("indexing.data=\"%s\"" % file_name)
+    else :
+      start, end = dataset.ranges[0]
+      img1 = dataset.get_frame_path(start)
+      if (end - start >= 20):
+        frame2 = start + int((end-start) / 2)
+      else :
+        frame2 = end
+      print("Will index on images %d and %d..." % (start, frame2))
+      img2 = dataset.get_frame_path(frame2)
+      self.args.append("indexing.data=\"%s\"" % img1)
+      self.args.append("indexing.data=\"%s\"" % img2)
+    self.args.append("indexing_pickle=integration")
+    print(self.args)
+
+  def run(self):
+    from rstbx.command_line import index
+    index.run_new_horizons(self.args)
+    return self.output_dir
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/frame.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+import rstbx.viewer.display
+import wxtbx.plots
+from wxtbx import bitmaps
+from wxtbx import icons
+import wx.lib.colourselect
+from libtbx.utils import Sorry, to_unicode
+from libtbx import easy_pickle
+import wx
+import os
+
+# Temporary: Make a variable to allow dual API
+WX3 = wx.VERSION[0] == 3
+
+# Instance to bind external update event to an event handler
+EVT_EXTERNAL_UPDATE = wx.PyEventBinder(wx.NewEventType(), 0)
+
+class ExternalUpdateEvent(wx.PyCommandEvent):
+  """XXX This class, along with the EVT_EXTERNAL_UPDATE instance
+  should perhaps move into its own file?
+  """
+
+  def __init__(self, eventType=EVT_EXTERNAL_UPDATE.evtType[0], id=0):
+    wx.PyCommandEvent.__init__(self, eventType, id)
+    self.img = None
+    self.title = None
+
+class XrayFrame(wx.Frame):
+  # Maximum number of entries in the chooser.
+  CHOOSER_SIZE = 1024
+
+  def __init__(self, *args, **kwds):
+    super(XrayFrame, self).__init__(*args, **kwds)
+    self.settings = rstbx.viewer.settings()
+    self.viewer = rstbx.viewer.display.XrayView(self, -1, size=(1024,640))
+    self.viewer.SetMinSize((640,640))
+    self.sizer = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(self.sizer)
+    self.sizer.Add(self.viewer, 1, wx.EXPAND)
+    self.statusbar = self.CreateStatusBar()
+    self.settings_frame = None
+    self.zoom_frame = None
+    self.zoom_3d = None
+    self.plot_frame = None
+    self._img = None
+    self._distl = None
+    self.toolbar = self.CreateToolBar(style=wx.TB_TEXT)
+    self.setup_toolbar()
+    self.toolbar.Realize()
+    self.mb = wx.MenuBar()
+    self.setup_menus()
+    self.SetMenuBar(self.mb)
+    self.Fit()
+    self.SetMinSize(self.GetSize())
+    self.OnShowSettings(None)
+    self.Bind(EVT_EXTERNAL_UPDATE, self.OnExternalUpdate)
+
+  def OnExternalUpdate(self, event):
+    """The OnExternalUpdate() function updates the image and the title
+    from @p event.
+    """
+
+    # See self.load_image().
+    self._img = event.img
+    self.viewer.set_image(self._img)
+    if self.settings_frame is not None :
+      self.settings_frame.set_image(self._img)
+    if self.zoom_frame is not None:
+      self.zoom_frame.set_image(self._img)
+    self.SetTitle(event.title)
+    self.update_statusbar()
+    self.Layout()
+
+  def setup_toolbar(self):
+    btn = self.toolbar.AddLabelTool(id=-1,
+      label="Load file",
+      bitmap=icons.hkl_file.GetBitmap(),
+      shortHelp="Load file",
+      kind=wx.ITEM_NORMAL)
+    self.Bind(wx.EVT_MENU, self.OnLoadFile, btn)
+    btn = self.toolbar.AddLabelTool(id=-1,
+      label="Settings",
+      bitmap=icons.advancedsettings.GetBitmap(),
+      shortHelp="Settings",
+      kind=wx.ITEM_NORMAL)
+    self.Bind(wx.EVT_MENU, self.OnShowSettings, btn)
+    btn = self.toolbar.AddLabelTool(id=-1,
+      label="Zoom",
+      bitmap=icons.search.GetBitmap(),
+      shortHelp="Zoom",
+      kind=wx.ITEM_NORMAL)
+    self.Bind(wx.EVT_MENU, self.OnZoom, btn)
+    txt = wx.StaticText(self.toolbar, -1, "Image:")
+    self.toolbar.AddControl(txt)
+    self.image_chooser = wx.Choice(self.toolbar, -1, size=(300,-1))
+    self.toolbar.AddControl(self.image_chooser)
+    self.Bind(wx.EVT_CHOICE, self.OnChooseImage, self.image_chooser)
+    btn = self.toolbar.AddLabelTool(id=wx.ID_BACKWARD,
+      label="Previous",
+      bitmap=bitmaps.fetch_icon_bitmap("actions","1leftarrow"),
+      shortHelp="Previous",
+      kind=wx.ITEM_NORMAL)
+    self.Bind(wx.EVT_MENU, self.OnPrevious, btn)
+    btn = self.toolbar.AddLabelTool(id=wx.ID_FORWARD,
+      label="Next",
+      bitmap=bitmaps.fetch_icon_bitmap("actions","1rightarrow"),
+      shortHelp="Next",
+      kind=wx.ITEM_NORMAL)
+    self.Bind(wx.EVT_MENU, self.OnNext, btn)
+
+  def setup_menus(self):
+    file_menu = wx.Menu()
+    self.mb.Append(file_menu, "File")
+    item = file_menu.Append(-1, "Open integration results...")
+    self.Bind(wx.EVT_MENU, self.OnLoadIntegration, item)
+    item = file_menu.Append(-1, "Open image...")
+    self.Bind(wx.EVT_MENU, self.OnLoadFile, item)
+    actions_menu = wx.Menu()
+    self.mb.Append(actions_menu, "Actions")
+    item = actions_menu.Append(-1, "Change beam center...")
+    self.Bind(wx.EVT_MENU, self.OnChangeBeamCenter, item)
+    item = actions_menu.Append(-1, "Reset beam center to header value")
+    self.Bind(wx.EVT_MENU, lambda evt: self.viewer.ResetBeamCenter(), item)
+    item = actions_menu.Append(-1, "Save screenshot...")
+    self.Bind(wx.EVT_MENU, self.OnScreenShot, item)
+
+  def get_key(self, file_name_or_data):
+    """The get_key() function returns the key of @p file_name_or_data.
+    In the case of dictionaries, it is the timestamp of the image.
+    For file names, the key is an ASCII-encoded absolute path string.
+    Otherwise, get_key() returns @c None.
+    """
+
+    try:
+      return file_name_or_data["TIMESTAMP"]
+    except TypeError as e: pass
+
+    try:
+      return file_name_or_data.get_image_file()
+    except AttributeError as e: pass
+
+    try:
+      return os.path.abspath(file_name_or_data)
+    except TypeError as e: pass
+
+    try:
+      return os.path.abspath(file_name_or_data.encode("ascii"))
+    except TypeError as e: pass
+    except AttributeError as e: pass
+
+    return None
+
+  def load_image(self, file_name_or_data):
+    """The load_image() function displays the image from @p
+    file_name_or_data.  The chooser is updated appropriately.
+    """
+
+    key = self.get_key(file_name_or_data)
+    if (type(file_name_or_data) is dict):
+      self._img = rstbx.viewer.image(file_name_or_data)
+    else :
+      try :
+        self._img = rstbx.viewer.image(key)
+      except IOError :
+        raise Sorry(("The file '%s' could not be recognized as a supported "+
+          "image format; please make sure it is actually a detector image.") %
+           key)
+
+    # Update the selection in the chooser.
+    i = self.add_file_name_or_data(file_name_or_data)
+    self.image_chooser.SetSelection(i)
+
+    self.viewer.set_image(self._img)
+    if (self.settings_frame is not None):
+      self.settings_frame.set_image(self._img)
+    self.SetTitle(to_unicode(key))
+    self.update_statusbar()
+    self.Layout()
+
+  def load_distl_output(self, file_name):
+    distl = easy_pickle.load(file_name)
+    self._distl = distl
+    img_files = []
+    for img_id in sorted(distl.images.keys()):
+      img = distl.images[img_id]
+      img_files.append(img['relpath'])
+    if (len(img_files) == 0):
+      raise Sorry("No images in this result!")
+    self.image_chooser.SetItems([ os.path.basename(f) for f in img_files ])
+    self.image_chooser.SetSelection(0)
+    self.load_image(img_files[0])
+    self.annotate_image(img_files[0])
+
+  def add_file_name_or_data(self, file_name_or_data):
+    """The add_file_name_or_data() function appends @p
+    file_name_or_data to the image chooser, unless it is already
+    present.  For file-backed images, the base name is displayed in
+    the chooser.  If necessary, the number of entries in the chooser
+    is pruned.  The function returns the index of the recently added
+    entry.  XXX This is probably the place for heuristics to determine
+    if the viewer was given a pattern, or a plain list of files.  XXX
+    Rename this function, because it only deals with the chooser?
+    """
+
+    key = self.get_key(file_name_or_data)
+    for i in range(self.image_chooser.GetCount()):
+      if (key == self.image_chooser.GetClientData(i)):
+        return i
+    if (self.image_chooser.GetCount() >= self.CHOOSER_SIZE):
+      self.image_chooser.Delete(0)
+    i = self.image_chooser.GetCount()
+    if (type(file_name_or_data) is dict):
+      self.image_chooser.Insert(key, i, None)
+    else :
+      self.image_chooser.Insert(os.path.basename(key), i, key)
+    return i
+
+  def annotate_image(self, file_name):
+    assert (self._distl is not None)
+    for img_id in sorted(self._distl.images.keys()):
+      img = self._distl.images[img_id]
+      if (img['relpath'] == file_name):
+        spots = img['spotoutput']['inlier_spots']
+        self._img.set_spots(spots)
+        break
+
+  def load_integration(self, dir_name):
+    from rstbx.viewer import processing
+    assert os.path.isdir(dir_name)
+    self.proc_frame = processing.ProcessingFrame(None, -1, "LABELIT")
+    self.proc_frame.set_viewer_frame(self)
+    self.proc_frame.LoadResults(dir_name)
+    self.proc_frame.Show()
+
+  def display_integration_result(self, result):
+    assert isinstance(result, dict)
+    self._img.set_integration_results(result)
+    self.viewer.Refresh()
+
+  def update_statusbar(self, info=None):
+    if (info is None):
+      self.statusbar.SetStatusText("Click and drag to pan; "+
+        "middle-click and drag to plot intensity profile, right-click to zoom")
+    else :
+      self.statusbar.SetStatusText(info.format())
+
+  def update_settings(self, layout=True):
+    self.viewer.update_settings(layout)
+
+  def set_brightness(self, brightness):
+    if (brightness > 0) and (brightness <= 500):
+      self.settings.brightness = brightness
+      if (self.settings_frame is not None):
+        self.settings_frame.update_controls()
+      self.viewer.update_settings(layout=False)
+
+  def OnLoadFile(self, event):
+    wildcard_str = ""
+    if (wx.PlatformInfo[4] != "wxOSX-cocoa"):
+      from iotbx import file_reader
+      wildcard_str = file_reader.get_wildcard_string("img")
+    file_name = wx.FileSelector("Image file",
+      wildcard=wildcard_str,
+      default_path="",
+      flags=(wx.OPEN if WX3 else wx.FD_OPEN))
+    if (file_name != ""):
+      self.load_image(file_name)
+
+  def OnLoadLabelitResult(self, event):
+    file_name = wx.FileSelector("Labelit result",
+      default_path="",
+      flags=(wx.OPEN if WX3 else wx.FD_OPEN))
+    if (file_name != ""):
+      self.load_image(file_name)
+
+  def OnLoadIntegration(self, event):
+    dir_name = wx.DirSelector("Integration result",
+      defaultPath="")
+    if (dir_name != ""):
+      self.load_integration(dir_name)
+
+  def OnShowSettings(self, event):
+    if (self.settings_frame is None):
+      frame_rect = self.GetRect()
+      display_rect = wx.GetClientDisplayRect()
+      x_start = frame_rect[0] + frame_rect[2]
+      if (x_start > (display_rect[2] - 400)):
+        x_start = display_rect[2] - 400
+      y_start = frame_rect[1]
+      self.settings_frame = SettingsFrame(self, -1, "Settings",
+        style=wx.CAPTION|wx.MINIMIZE_BOX|wx.CLOSE_BOX|wx.SYSTEM_MENU,
+        pos=(x_start, y_start))
+    self.settings_frame.Show()
+
+  def OnShowZoom(self, event):
+    if (self.zoom_frame is None):
+      self.zoom_frame = ZoomFrame(self, -1, "Zoom",
+        style=wx.CAPTION|wx.CLOSE_BOX|wx.RESIZE_BORDER|wx.SYSTEM_MENU)
+      self.zoom_frame.set_image(self._img)
+      self.zoom_frame.Show()
+    self.zoom_frame.Raise()
+
+  def OnShow3D(self, event):
+    if (self.zoom_3d is None):
+      from rstbx.viewer import pixels3d
+      self.zoom_3d = pixels3d.pixel_viewer_3d_frame(self, -1, "3D view",
+        style=wx.CAPTION|wx.CLOSE_BOX|wx.RESIZE_BORDER|wx.SYSTEM_MENU)
+      self.zoom_3d.set_image(self._img)
+      self.zoom_3d.Show()
+    self.zoom_3d.Raise()
+
+  def OnShowPlot(self, event):
+    if (self.plot_frame is None):
+      self.plot_frame = PlotFrame(self, -1, "Intensity profile",
+        style=wx.CAPTION|wx.CLOSE_BOX|wx.SYSTEM_MENU)
+      self.plot_frame.Show()
+
+  def OnZoom(self, event):
+    if (self.settings.zoom_level == 6):
+      self.settings.zoom_level = 0
+    else :
+      self.settings.zoom_level += 1
+    if hasattr(self.viewer, "update_settings"):
+      self.viewer.update_settings(layout=True)
+    if (self.settings_frame is not None):
+      self.settings_frame.update_controls()
+
+  def OnChooseImage(self, event):
+    self.load_image(self.image_chooser.GetClientData(
+        self.image_chooser.GetSelection()))
+
+  def OnPrevious(self, event):
+    n = self.image_chooser.GetSelection()
+    if (n != wx.NOT_FOUND and n - 1 >= 0):
+      self.load_image(self.image_chooser.GetClientData(n - 1))
+
+  def OnNext(self, event):
+    n = self.image_chooser.GetSelection()
+    if (n != wx.NOT_FOUND and n + 1 < self.image_chooser.GetCount()):
+      self.load_image(self.image_chooser.GetClientData(n + 1))
+
+  def OnScreenShot(self, event):
+    file_name = wx.FileSelector(
+      default_filename="xray.png",
+      default_path="",
+      wildcard="PNG image (*.png)|*.png",
+      flags=wx.SAVE)
+    if (file_name != ""):
+      self.viewer.save_image(file_name)
+
+  def OnChangeBeamCenter(self, event):
+    wx.MessageBox("Click on any point in the image to set the new beam center.")
+    self.statusbar.SetStatusText("Changing beam center")
+    self.viewer.ChangeBeamCenter()
+
+class SettingsFrame(wx.MiniFrame):
+  def __init__(self, *args, **kwds):
+    super(SettingsFrame, self).__init__(*args, **kwds)
+    self.settings = self.GetParent().settings
+    szr = wx.BoxSizer(wx.VERTICAL)
+    panel = SettingsPanel(self, -1)
+    self.SetSizer(szr)
+    szr.Add(panel, 1, wx.EXPAND)
+    szr.Fit(panel)
+    self.panel = panel
+    self.sizer = szr
+    self.Fit()
+    self.Bind(wx.EVT_CLOSE, lambda evt : self.Destroy(), self)
+    self.Bind(wx.EVT_WINDOW_DESTROY, self.OnDestroy)
+
+  def OnDestroy(self, event):
+    self.GetParent().settings_frame = None
+
+  def update_controls(self):
+    self.panel.zoom_ctrl.SetSelection(self.settings.zoom_level)
+    self.panel.brightness_ctrl.SetValue(self.settings.brightness)
+
+  def set_image(self, image):
+    self.panel.thumb_panel.set_image(image)
+    self.panel.GetSizer().Layout()
+    self.sizer.Fit(self.panel)
+    self.Layout()
+    self.Fit()
+
+  def refresh_thumbnail(self):
+    self.panel.thumb_panel.Refresh()
+
+class SettingsPanel(wx.Panel):
+  def __init__(self, *args, **kwds):
+    wx.Panel.__init__(self, *args, **kwds)
+    self.settings = self.GetParent().settings
+    self._sizer = wx.BoxSizer(wx.VERTICAL)
+    s = self._sizer
+    self.SetSizer(self._sizer)
+    grid = wx.FlexGridSizer(cols=2, rows=2, vgap=0, hgap=0)
+    s.Add(grid)
+    txt1 = wx.StaticText(self, -1, "Zoom level:")
+    grid.Add(txt1, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.zoom_ctrl = wx.Choice(self, -1,
+      choices=["Auto", "25%", "50%", "100%", "200%", "400%", "800%"])
+    self.zoom_ctrl.SetSelection(self.settings.zoom_level)
+    grid.Add(self.zoom_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    txt11 = wx.StaticText(self, -1, "Color scheme:")
+    grid.Add(txt11, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.color_ctrl = wx.Choice(self, -1,
+      choices=["grayscale","rainbow","heatmap","invert"])
+    self.color_ctrl.SetSelection(0)
+    grid.Add(self.color_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self._sizer.Fit(self)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    s.Add(box)
+    txt2 = wx.StaticText(self, -1, "Brightness")
+    box.Add(txt2, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.brightness_ctrl = wx.Slider(self, -1, size=(200,-1),
+      style=wx.SL_AUTOTICKS|wx.SL_LABELS)
+    box.Add(self.brightness_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.brightness_ctrl.SetMin(1)
+    self.brightness_ctrl.SetMax(500)
+    self.brightness_ctrl.SetValue(self.settings.brightness)
+    self.brightness_ctrl.SetTickFreq(25)
+    self.center_ctrl = wx.CheckBox(self, -1, "Mark beam center")
+    self.center_ctrl.SetValue(self.settings.show_beam_center)
+    s.Add(self.center_ctrl, 0, wx.ALL, 5)
+    self.spots_ctrl = wx.CheckBox(self, -1, "Show spotfinder results")
+    self.spots_ctrl.SetValue(self.settings.show_spotfinder_spots)
+    s.Add(self.spots_ctrl, 0, wx.ALL, 5)
+    self.integ_ctrl = wx.CheckBox(self, -1, "Show integration results")
+    self.integ_ctrl.SetValue(self.settings.show_integration)
+    s.Add(self.integ_ctrl, 0, wx.ALL, 5)
+#    self.invert_ctrl = wx.CheckBox(self, -1, "Invert beam center axes")
+#    self.invert_ctrl.SetValue(self.settings.invert_beam_center_axes)
+    self.Bind(wx.EVT_CHOICE, self.OnUpdate, self.zoom_ctrl)
+    self.Bind(wx.EVT_CHOICE, self.OnUpdate, self.color_ctrl)
+    self.Bind(wx.EVT_SLIDER, self.OnUpdateBrightness, self.brightness_ctrl)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdate2, self.center_ctrl)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdate2, self.spots_ctrl)
+    txt3 = wx.StaticText(self, -1, "Thumbnail view:")
+    s.Add(txt3, 0, wx.ALL, 5)
+    self.thumb_panel = rstbx.viewer.display.ThumbnailView(
+      parent=self,
+      size=(256,256),
+      style=wx.SUNKEN_BORDER)
+    #s.Add(self.thumb_panel, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    s.Add(self.thumb_panel, 0, wx.ALL, 5)
+#    self.Bind(wx.EVT_CHECKBOX, self.OnUpdate2, self.invert_ctrl)
+
+  def collect_values(self):
+    if self.settings.enable_collect_values:
+      self.settings.zoom_level = self.zoom_ctrl.GetSelection()
+      self.settings.brightness = self.brightness_ctrl.GetValue()
+      self.settings.show_beam_center = self.center_ctrl.GetValue()
+      self.settings.show_spotfinder_spots = self.spots_ctrl.GetValue()
+      self.settings.show_integration = self.integ_ctrl.GetValue()
+      self.settings.color_scheme = self.color_ctrl.GetSelection()
+#     self.settings.invert_beam_center_axes = self.invert_ctrl.GetValue()
+
+  def OnUpdate(self, event):
+    self.collect_values()
+    self.GetParent().GetParent().update_settings(layout=True)
+
+  def OnUpdateBrightness(self, event):
+    mouse = wx.GetMouseState()
+    if (mouse.LeftDown()) : return
+    self.collect_values()
+    self.GetParent().GetParent().update_settings(layout=False)
+
+  def OnUpdate2(self, event):
+    self.collect_values()
+    self.GetParent().GetParent().update_settings(layout=False)
+
+  def refresh_main(self):
+    self.GetParent().GetParent().viewer.Refresh()
+
+mag_levels = [8,16,24,32,48,64]
+class ZoomFrame(wx.MiniFrame):
+  def __init__(self, *args, **kwds):
+    super(ZoomFrame, self).__init__(*args, **kwds)
+    self.settings = self.GetParent().settings
+    self.control_panel = wx.Panel(self)
+    self.panel = rstbx.viewer.display.ZoomView(self, -1)
+    szr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(szr)
+    szr.Add(self.control_panel)
+    szr.Add(self.panel, 1, wx.EXPAND)
+    self.numbers_box = wx.CheckBox(self.control_panel, -1,
+      "Show intensity values")
+    txt1 = wx.StaticText(self.control_panel, -1, "Text color:")
+    self.text_color = wx.lib.colourselect.ColourSelect(self.control_panel,
+      colour=(255,255,0))
+    pszr = wx.BoxSizer(wx.VERTICAL)
+    self.control_panel.SetSizer(pszr)
+    box1 = wx.BoxSizer(wx.HORIZONTAL)
+    pszr.Add(box1)
+    box1.Add(self.numbers_box, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    box1.Add(txt1, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    box1.Add(self.text_color, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    box2 = wx.BoxSizer(wx.HORIZONTAL)
+    pszr.Add(box2)
+    txt2 = wx.StaticText(self.control_panel, -1, "Magnification:")
+    self.mag_ctrl = wx.Choice(self.control_panel, -1,
+      choices=[ "%dx" % x for x in mag_levels ])
+    self.mag_ctrl.SetSelection(1)
+    box2.Add(txt2, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    box2.Add(self.mag_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.Bind(wx.EVT_CLOSE, lambda evt : self.Destroy(), self)
+    self.Bind(wx.EVT_WINDOW_DESTROY, self.OnDestroy)
+    self.Bind(wx.EVT_CHECKBOX, self.OnChangeSettings, self.numbers_box)
+    self.Bind(wx.lib.colourselect.EVT_COLOURSELECT, self.OnChangeSettings,
+      self.text_color)
+    self.Bind(wx.EVT_CHOICE, self.OnChangeSettings, self.mag_ctrl)
+    szr.Fit(self.panel)
+    self.Fit()
+
+  def __getattr__(self, name):
+    return getattr(self.panel, name)
+
+  def OnDestroy(self, event):
+    self.GetParent().zoom_frame = None
+
+  def OnChangeSettings(self, event):
+    self.panel.flag_show_intensities = self.numbers_box.GetValue()
+    self.panel.text_color = self.text_color.GetValue()
+    zoom = mag_levels[ self.mag_ctrl.GetSelection() ]
+    self.panel.zoom_level = zoom
+    self.Refresh()
+
+class PlotFrame(wx.MiniFrame):
+  def __init__(self, *args, **kwds):
+    super(PlotFrame, self).__init__(*args, **kwds)
+    self.plot = LinePlot(self, figure_size=(8,3))
+    szr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(szr)
+    szr.Add(self.plot, 1, wx.EXPAND)
+    self.Fit()
+    self.Bind(wx.EVT_CLOSE, lambda evt : self.Destroy(), self)
+    self.Bind(wx.EVT_WINDOW_DESTROY, self.OnDestroy)
+
+  def __getattr__(self, name):
+    return getattr(self.plot, name)
+
+  def OnDestroy(self, event):
+    self.GetParent().plot_frame = None
+
+class LinePlot(wxtbx.plots.plot_container):
+  def show_plot(self, line):
+    self.figure.clear()
+    ax = self.figure.add_subplot(111)
+    x_data = range(len(line.values))
+    ax.plot(x_data, line.values, 'b-', linewidth=1)
+    ax.set_ylabel("Intensity")
+    if (line.lattice_length is not None):
+      ax.set_title(
+        "Line distance = %.2fmm; avg. lattice length = %.2f Angstrom" %
+          (line.distance, line.lattice_length))
+    else :
+      ax.set_title("Line distance: %.2fmm" % line.distance)
+    self.canvas.draw()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/indexing.py
+from __future__ import absolute_import, division, print_function
+
+from rstbx.viewer import controls, results_base
+from libtbx import str_utils
+from libtbx import easy_pickle
+import wx
+import os
+import sys
+
+columns = ["Solution", "Metric fit", "RMSD", "#spots", "Crystal system",
+    "Unit cell", "Volume"]
+column_sizes = [60, 80, 80, 60, 120, 250, 80]
+column_alignments = [0, 1, 1, 1, 1, 0, 1]
+
+class LatticeData(results_base.TableData):
+  def GetItemText(self, item, col):
+    n_items = self.GetItemCount()
+    solution = self.table[item]
+    if (col == 0):
+      return solution['counter']
+    elif (col == 1):
+      return "%s%s" % (str_utils.format_value("%.4f",
+        solution['max_angular_difference']), chr(161))
+    elif (col == 2):
+      return str_utils.format_value("%.4f", solution['residual'])
+    elif (col == 3):
+      return str(solution['count_GOOD'])
+    elif (col == 4):
+      return "%s %s" % (solution['system'], solution['bravais'])
+    elif (col == 5):
+      unit_cell = solution['orient'].unit_cell()
+      return "%g %g %g %g %g %g" % unit_cell.parameters()
+    elif (col == 6):
+      unit_cell = solution['orient'].unit_cell()
+      return str(int(unit_cell.volume()))
+
+class LatticeListCtrl(controls.ListBase):
+  def __init__(self, *args, **kwds):
+    kwds = dict(kwds)
+    kwds['style'] = wx.LC_REPORT|wx.LC_SINGLE_SEL|wx.LC_VIRTUAL
+    controls.ListBase.__init__(self, *args, **kwds)
+    for i, label in enumerate(columns):
+      self.InsertColumn(i, label, column_alignments[i])
+      self.SetColumnWidth(i, column_sizes[i])
+    self.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSelect, self)
+    self.Bind(wx.EVT_LIST_ITEM_DESELECTED, self.OnDeSelect, self)
+    self.Bind(wx.EVT_LEFT_DCLICK, self.OnDoubleClick, self)
+    self.Bind(wx.EVT_RIGHT_DOWN, self.OnRightClick, self)
+    self.dataSource = results_base.EmptyData()
+    self.RefreshAllItems()
+
+  def SetIndexingResults(self, labelit_possible):
+    assert isinstance(labelit_possible, list)
+    self.dataSource = LatticeData(labelit_possible)
+    self.RefreshAllItems()
+
+  def OnSelect(self, event):
+    pass
+
+  def OnDeSelect(self, event):
+    pass
+
+  def OnDoubleClick(self, event):
+    pass
+
+  def OnRightClick(self, event):
+    pass
+
+class IndexingPanel(wx.Panel):
+  def __init__(self, *args, **kwds):
+    wx.Panel.__init__(self, *args, **kwds)
+    szr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(szr)
+    self.lattice_list = LatticeListCtrl(self, -1, size=(760, 200))
+    txt1 = wx.StaticText(self, -1, "Indexing results:")
+    f1 = txt1.GetFont()
+    f1.SetWeight(wx.FONTWEIGHT_BOLD)
+    txt1.SetFont(f1)
+    szr.Add(txt1, 0, wx.ALL|wx.EXPAND, 5)
+    szr.Add(self.lattice_list, 0, wx.ALL|wx.EXPAND, 10)
+
+  def __getattr__(self, name):
+    return getattr(self.lattice_list, name)
+
+if (__name__ == "__main__"):
+  labelit_file = sys.argv[1]
+  assert (os.path.isfile(labelit_file))
+  labelit_result = easy_pickle.load(labelit_file)
+  assert isinstance(labelit_result, list)
+  app = wx.App(0)
+  app.locale = wx.Locale(wx.LANGUAGE_ENGLISH)
+  frame = wx.Frame(None, -1, "Lattice solutions", size=(800,320))
+  panel = wx.Panel(frame)
+  llist = LatticeListCtrl(panel, -1, size=(760, 200))
+  llist.SetIndexingResults(labelit_result)
+  frame.Show()
+  app.MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/integration.py
+from __future__ import absolute_import, division, print_function
+
+from rstbx.viewer import results_base, controls
+from rstbx.viewer.results_base import ResultData, BinData
+from libtbx.utils import Sorry
+import wx
+import os
+import sys
+
+class IntegrationTable(controls.ListBase):
+  def __init__(self, *args, **kwds):
+    kwds = dict(kwds)
+    kwds['style'] = wx.LC_REPORT|wx.LC_VIRTUAL|wx.LC_SINGLE_SEL
+    kwds['size'] = (720,120)
+    controls.ListBase.__init__(self, *args, **kwds)
+    labels = ["#","Point group","Beam center","Distance","Resolution",
+      "Mosaicity","RMS"]
+    widths = [60,120,120,100,100,80,80]
+    for i, label in enumerate(labels):
+      self.InsertColumn(i, label, wx.LIST_FORMAT_RIGHT)
+      self.SetColumnWidth(i, widths[i])
+    self.SetResults([])
+
+  def SetResults(self, results):
+    self.dataSource = ResultData(results)
+    self.RefreshAllItems()
+
+class ResolutionBinTable(controls.ListBase):
+  def __init__(self, *args, **kwds):
+    kwds = dict(kwds)
+    kwds['style'] = wx.LC_REPORT|wx.LC_VIRTUAL|wx.LC_SINGLE_SEL
+    kwds['size'] = (600,240)
+    controls.ListBase.__init__(self, *args, **kwds)
+    labels = ["Bin","Resolution","Completeness", "<I>", "<I/sig(I)>"]
+    widths = [60,180,140,100,100]
+    for i, label in enumerate(labels):
+      self.InsertColumn(i, label, wx.LIST_FORMAT_RIGHT)
+      self.SetColumnWidth(i, widths[i])
+    self.SetBins([])
+
+  def SetBins(self, table):
+    self.dataSource = BinData(table)
+    self.RefreshAllItems()
+
+class IntegrationPanel(wx.Panel):
+  def __init__(self, *args, **kwds):
+    self.result = None
+    wx.Panel.__init__(self, *args, **kwds)
+    pszr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(pszr)
+    txt1 = wx.StaticText(self, -1, "Integration results:")
+    f1 = txt1.GetFont()
+    f1.SetWeight(wx.FONTWEIGHT_BOLD)
+    txt1.SetFont(f1)
+    pszr.Add(txt1, 0, wx.ALL, 5)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    box.Add(wx.StaticText(self, -1, "Image number:"), 0,
+      wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.image_ctrl = wx.Choice(self, -1, size=(600,-1))
+    box.Add(self.image_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.Bind(wx.EVT_CHOICE, self.OnChooseImage, self.image_ctrl)
+    pszr.Add(box)
+    self.integration_list = IntegrationTable(self)
+    pszr.Add(self.integration_list, 0, wx.BOTTOM|wx.LEFT|wx.RIGHT|wx.EXPAND, 10)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    pszr.Add(box)
+    btn = wx.Button(self, -1, "View results")
+    self.view_btn = btn
+    box.Add(btn, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    txt2 = wx.StaticText(self, -1, "Integration output by resolution:")
+    txt2.SetFont(f1)
+    pszr.Add(txt2, 0, wx.ALL, 5)
+    self.bin_list = ResolutionBinTable(self)
+    pszr.Add(self.bin_list, 0, wx.BOTTOM|wx.LEFT|wx.RIGHT|wx.EXPAND, 10)
+    self._int_results = []
+    self._summaries = []
+    self.Bind(wx.EVT_BUTTON, self.OnView, btn)
+    self.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSelect, self.integration_list)
+    self.Bind(wx.EVT_LIST_ITEM_DESELECTED, self.OnDeSelect,
+      self.integration_list)
+    self.Bind(wx.EVT_CHAR, self.OnChar, self.integration_list)
+
+  def SetResults(self, result):
+    self.result = result
+    self.image_ctrl.SetItems(result.get_images())
+    self.ChooseImage(result.get_images()[0])
+
+  def ChooseImage(self, file_name):
+    image_id = self.result.get_image_id(file_name)
+    #solutions = self.result.get_integration_solutions()
+    int_results, summaries = self.result.get_integration(image_id)
+    assert (len(int_results) > 0)
+    self._int_results = int_results
+    self._summaries = summaries
+    self.integration_list.SetResults(summaries)
+    self.integration_list.Select(0)
+
+  def OnChooseImage(self, event):
+    file_name = self.image_ctrl.GetStringSelection()
+    self.ChooseImage(file_name)
+
+  def OnView(self, evt):
+    sol = self.integration_list.GetFirstSelected()
+    if (sol < 0):
+      raise Sorry("No solution selected!")
+    main_window = self.GetTopLevelParent()
+    result = self._int_results[sol]
+    viewer = main_window.get_viewer_frame()
+    viewer.load_image(self.image_ctrl.GetStringSelection())
+    viewer.display_integration_result(result)
+
+  def OnSelect(self, evt):
+    sol = self.integration_list.GetFirstSelected()
+    if (sol >= 0):
+      self.view_btn.Enable(True)
+      self.bin_list.SetBins(self._summaries[sol]['bins'])
+
+  def OnDeSelect(self, evt):
+    sol = self.integration_list.GetFirstSelected()
+    if (sol < 0):
+      self.view_btn.Enable(False)
+
+  def OnChar(self, evt):
+    code = evt.GetKeyCode()
+    if (code == wx.WXK_ENTER):
+      self.OnView(None)
+
+class ResultsFrame(wx.Frame):
+  def __init__(self, *args, **kwds):
+    kwds['style'] = wx.DEFAULT_FRAME_STYLE
+    wx.Frame.__init__(self, *args, **kwds)
+    szr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(szr)
+    p = IntegrationPanel(self)
+    szr.Add(p, 1, wx.EXPAND|wx.ALL)
+    szr.Fit(self)
+    self.Fit()
+    self.panel = p
+
+  def __getattr__(self, name):
+    return getattr(self.panel, name)
+
+def load_results():
+  file_base = sys.argv[1]
+  results, summaries = results_base.load_integration_results(os.getcwd(),
+    file_base)
+  if (len(results) == 0):
+    raise Sorry("No files matching %s!" % file_base)
+  app = wx.App(0)
+  frame = ResultsFrame(None, -1, "Integration results")
+  frame.SetResults(results, summaries)
+  frame.Show()
+  app.MainLoop()
+
+if (__name__ == "__main__"):
+  load_results()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/pixels3d.py
+
+from __future__ import absolute_import, division, print_function
+from gltbx import wx_viewer
+from gltbx.gl import *
+from gltbx.glu import *
+import gltbx.util
+from scitbx.math import minimum_covering_sphere
+from scitbx.array_family import flex
+from math import log
+import wx
+from six.moves import range
+
+def glbox(xyz1, xyz2):
+  x1 = min(xyz1[0], xyz2[0])
+  x2 = max(xyz1[0], xyz2[0])
+  y1 = min(xyz1[1], xyz2[1])
+  y2 = max(xyz1[1], xyz2[1])
+  z1 = min(xyz1[2], xyz2[2])
+  z2 = max(xyz1[2], xyz2[2])
+  # top face (red)
+  glBegin(GL_QUADS)
+  glNormal3f(0, 0, 1)
+  glVertex3f(x1, y1, z2)
+  glVertex3f(x2, y1, z2)
+  glVertex3f(x2, y2, z2)
+  glVertex3f(x1, y2, z2)
+  glEnd()
+  # bottom face (blue)
+  glBegin(GL_QUADS)
+  glNormal3f(0, 0, -1)
+  glVertex3f(x1, y1, z1)
+  glVertex3f(x1, y2, z1)
+  glVertex3f(x2, y2, z1)
+  glVertex3f(x2, y1, z1)
+  glEnd()
+  # top side (y = y)
+  glBegin(GL_QUADS)
+  glNormal3f(0, -1, 0)
+  glVertex3f(x1, y1, z1)
+  glVertex3f(x2, y1, z1)
+  glVertex3f(x2, y1, z2)
+  glVertex3f(x1, y1, z2)
+  glEnd()
+  # bottom side (y = y + 1)
+  glBegin(GL_QUADS)
+  glNormal3f(0, 1, 0)
+  glVertex3f(x1, y2, z2)
+  glVertex3f(x2, y2, z2)
+  glVertex3f(x2, y2, z1)
+  glVertex3f(x1, y2, z1)
+  glEnd()
+  # left side (x' = x)
+  glBegin(GL_QUADS)
+  glNormal3f(-1, 0, 0)
+  glVertex3f(x1, y2, z2)
+  glVertex3f(x1, y2, z1)
+  glVertex3f(x1, y1, z1)
+  glVertex3f(x1, y1, z2)
+  glEnd()
+  # right side (x' = x+1)
+  glBegin(GL_QUADS)
+  glNormal3f(1, 0, 0)
+  glVertex3f(x2, y1, z1)
+  glVertex3f(x2, y2, z1)
+  glVertex3f(x2, y2, z2)
+  glVertex3f(x2, y1, z2)
+  glEnd()
+
+class pixel_viewer_3d(wx_viewer.wxGLWindow):
+  def __init__(self, *args, **kwds):
+    wx_viewer.wxGLWindow.__init__(self, *args, **kwds)
+    self.SetSize((400,400))
+    self.SetMinSize((400,400))
+    self.flag_draw_boxes = False
+    self.flag_log_scale = False
+    self._img = None
+    self.x_center = None
+    self.y_center = None
+    self.buffer_factor = 2.0
+    self.scale_factor = 100
+    self.rotation_center = (20,-20,0)
+    self.minimum_covering_sphere = minimum_covering_sphere(
+      flex.vec3_double([[0,0,0],[40,-40,40],[40,0,0],[0,-40,40]]))
+    self.zoom_level = 16
+
+  def InitGL(self):
+    gltbx.util.handle_error()
+    b = self.background_rgb
+    glClearColor(b[0], b[1], b[2], 0.0)
+    glDisable(GL_LIGHT0)
+    glDisable(GL_LIGHTING)
+    glDisable(GL_BLEND)
+    glEnable(GL_LINE_SMOOTH)
+    glEnable(GL_CULL_FACE)
+    glEnable(GL_DEPTH_TEST)
+    glEnable(GL_POLYGON_SMOOTH)
+    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+    glHint(GL_POLYGON_SMOOTH_HINT, GL_NICEST)
+    self.initialize_modelview()
+    gltbx.util.handle_error()
+
+  def process_pick_points(self):
+    pass
+
+  def set_image(self, img):
+    self._img = img
+
+  def recenter(self, x, y):
+    self.x_center = x
+    self.y_center = y
+    self.Refresh()
+
+  def DrawGL(self):
+    if (None in [self._img, self.x_center, self.y_center]) : return
+    if self.flag_draw_boxes :
+      r, g, b = self._img.get_opengl_background()
+      glClearColor(r, g, b, 0.)
+      self._draw_boxes()
+    else :
+      glClearColor(0, 0, 0, 0.)
+      self._draw_lines()
+
+  def _draw_lines(self):
+    values = self._img.get_intensities_in_box(
+      x=self.x_center,
+      y=self.y_center,
+      boxsize=40,
+      mag=1)#self.zoom_level)
+    scale_factor = self.scale_factor
+    glColor3f(1, 1, 1)
+    w_range = [0.0,0.0]
+    glGetFloatv(GL_LINE_WIDTH_RANGE, w_range)
+    line_width = 0.1
+    if (w_range[0] > 0.1):
+      line_width = w_range[0]
+    glLineWidth(line_width)
+    for i, row in enumerate(values):
+      y = -i
+      glBegin(GL_LINES)
+      for j, value in enumerate(row):
+        if (j > 0):
+          x = j
+          val1 = row[j-1] / scale_factor
+          val2 = value / scale_factor
+          if (self.flag_log_scale):
+            val1 = log(val1)
+            val2 = log(val2)
+          glVertex3f(x-1, y, val1)
+          glVertex3f(x, y, val2)
+      glEnd()
+    for i in range(40):
+      x = i
+      glBegin(GL_LINES)
+      for j, row in enumerate(values):
+        if (j > 0):
+          y = -j
+          val1 = values[j-1][i] / scale_factor
+          val2 = row[i] / scale_factor
+          if (self.flag_log_scale):
+            val1 = log(val1)
+            val2 = log(val2)
+          glVertex3f(x, y+1, val1)
+          glVertex3f(x, y, val2)
+      glEnd()
+
+  def _draw_boxes(self):
+    values = self._img.get_intensities_in_box(
+      x=self.x_center,
+      y=self.y_center,
+      boxsize=40,
+      mag=1)#self.zoom_level)
+    wx_image = self._img.get_zoomed_bitmap(
+      x=self.x_center,
+      y=self.y_center,
+      boxsize=40,
+      mag=1)
+    if (wx_image is None) : return
+    glPolygonMode(GL_FRONT, GL_FILL)
+    scale_factor = self.scale_factor
+    for y_, row in enumerate(values):
+      y = -y_
+      for x, value in enumerate(row):
+        z = value / scale_factor
+        if (self.flag_log_scale):
+          z = log(z)
+        R = wx_image.GetRed(x,y_)
+        G = wx_image.GetGreen(x,y_)
+        B = wx_image.GetBlue(x,y_)
+        glColor3f(R/255., G/255., B/255.)
+        glbox((x,y,0),(x+1,y+1,z))
+
+class pixel_viewer_3d_frame(wx.MiniFrame):
+  def __init__(self, *args, **kwds):
+    wx.MiniFrame.__init__(self, *args, **kwds)
+    szr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(szr)
+    ctrls = wx.Panel(self, style=wx.RAISED_BORDER)
+    szr.Add(ctrls, 0, wx.EXPAND)
+    szr2 = wx.BoxSizer(wx.HORIZONTAL)
+    ctrls.SetSizer(szr2)
+    box1 = wx.CheckBox(ctrls, label="Wireframe rendering")
+    box1.SetValue(True)
+    self.Bind(wx.EVT_CHECKBOX, self.OnChangeRenderStyle, box1)
+    szr2.Add(box1, 0, wx.ALL, 5)
+    box2 = wx.CheckBox(ctrls, label="Log scaling")
+    self.Bind(wx.EVT_CHECKBOX, self.OnChangeScale, box2)
+    szr2.Add(box2, 0, wx.ALL, 5)
+    szr2.Add(wx.StaticText(ctrls, label="Scale:"), 0, wx.ALL, 5)
+    slider = wx.Slider(ctrls, size=(120,-1), style=wx.SL_AUTOTICKS)
+    slider.SetMin(10)
+    slider.SetMax(100)
+    slider.SetValue(100)
+    slider.SetTickFreq(10,1)
+    self.Bind(wx.EVT_SLIDER, self.OnSetScale, slider)
+    szr2.Add(slider, 0, wx.ALL, 5)
+    szr2.Fit(ctrls)
+    self._viewer = pixel_viewer_3d(parent=self)
+    szr.Add(self._viewer, 1, wx.EXPAND)
+    szr.Fit(self._viewer)
+    self.Fit()
+
+  def __getattr__(self, name):
+    return getattr(self._viewer, name)
+
+  def OnChangeRenderStyle(self, event):
+    wires = event.GetEventObject().GetValue()
+    self._viewer.flag_draw_boxes = not wires
+    self._viewer.Refresh()
+
+  def OnChangeScale(self, event):
+    scale = event.GetEventObject().GetValue()
+    self._viewer.flag_log_scale = scale
+    self._viewer.Refresh()
+
+  def OnSetScale(self, event):
+    scale = event.GetEventObject().GetValue()
+    self._viewer.scale_factor = scale
+    self._viewer.Refresh()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/processing.py
+from __future__ import absolute_import, division, print_function
+
+from rstbx.viewer import dataset, results_base, indexing, integration
+from rstbx.viewer.frame import XrayFrame
+from wxtbx import process_control, icons
+import wxtbx.app
+from wxtbx.phil_controls import path
+import wx.lib.agw.flatnotebook
+import wx
+import os
+import sys
+
+class ProcessingFrame(wx.Frame):
+  def __init__(self, *args, **kwds):
+    wx.Frame.__init__(self, *args, **kwds)
+    self.viewer = None
+    self.toolbar = self.CreateToolBar(style=wx.TB_TEXT)
+    btn = self.toolbar.AddLabelTool(id=-1,
+      label="Image viewer",
+      bitmap=icons.hkl_file.GetBitmap(),
+      shortHelp="Image viewer",
+      kind=wx.ITEM_NORMAL)
+    self.Bind(wx.EVT_MENU, self.OnLaunchViewer, btn)
+    self.toolbar.Realize()
+    self.statusbar = self.CreateStatusBar()
+    self.sizer = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(self.sizer)
+    self.nb = wx.lib.agw.flatnotebook.FlatNotebook(self)
+    self.sizer.Add(self.nb, 1, wx.EXPAND)
+    self.nb.SetMinSize((800,40))
+    self.start_panel = StartPanel(self.nb)
+    self.nb.AddPage(self.start_panel, "Setup")
+    self.indexing_panel = indexing.IndexingPanel(self.nb)
+    self.nb.AddPage(self.indexing_panel, "Indexing")
+    self.integration_panel = integration.IntegrationPanel(self.nb)
+    self.nb.AddPage(self.integration_panel, "Integration")
+    self.SetSize((800,600))
+
+  def LoadResults(self, dir_name):
+    self.result = results_base.result(dir_name)
+    self.indexing_panel.SetIndexingResults(self.result.get_indexing())
+    self.integration_panel.SetResults(self.result)
+    self.nb.SetSelection(1)
+
+  def OnRunIndexing(self, evt):
+    dataset, frames = self.start_panel.GetDataset()
+    output_dir = self.start_panel.GetOutputDir()
+    result = self.run_indexing(
+      dataset=dataset,
+      frames=frames,
+      output_dir=output_dir)
+    self.LoadResults(output_dir)
+
+  def run_indexing(self, **kwds):
+    from rstbx.viewer import drivers
+    run = drivers.run_indexing(**kwds)
+    indexing_result = process_control.run_function_as_process_in_dialog(
+      parent=self,
+      thread_function=run,
+      title="Running LABELIT",
+      message="Indexing images and performing simple test integration")
+    return indexing_result
+
+  def launch_viewer_frame(self):
+    if (self.viewer is None):
+      self.viewer = XrayFrame(
+        parent=self,
+        title="Image viewer")
+      self.viewer.Show()
+      self.Bind(wx.EVT_CLOSE, self.OnCloseViewer, self.viewer)
+
+  def get_viewer_frame(self):
+    self.launch_viewer_frame()
+    return self.viewer
+
+  def set_viewer_frame(self, frame):
+    assert (self.viewer is None)
+    self.viewer = frame
+
+  def OnCloseViewer(self, evt):
+    self.viewer.Destroy()
+    self.viewer = None
+
+  def OnLaunchViewer(self, evt):
+    self.launch_viewer_frame()
+
+class StartPanel(wx.Panel, dataset.SelectDatasetPanelMixin):
+  def __init__(self, *args, **kwds):
+    wx.Panel.__init__(self, *args, **kwds)
+    szr = wx.BoxSizer(wx.VERTICAL)
+    self.SetSizer(szr)
+    box = wx.StaticBox(self, -1, "Indexing setup")
+    bszr = wx.StaticBoxSizer(box, wx.VERTICAL)
+    szr.Add(bszr, 1, wx.ALL|wx.EXPAND, 5)
+    self.draw_dataset_controls(bszr)
+    btn = wx.Button(self, -1, "Run LABELIT...")
+    szr.Add(btn, 0, wx.ALL, 10)
+    frame = self.GetTopLevelParent()
+    frame.Bind(wx.EVT_BUTTON, frame.OnRunIndexing, btn)
+
+  def add_controls_to_grid(self, sizer):
+    txt = wx.StaticText(self, -1, "Output directory:")
+    self.output_ctrl = path.PathCtrl(
+      parent=self,
+      style=path.WXTBX_PHIL_PATH_DIRECTORY)
+    self.output_ctrl.SetValue(os.getcwd())
+    sizer.Add(txt, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    sizer.Add(self.output_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+  def GetOutputDir(self):
+    return self.output_ctrl.GetPhilValue()
+
+if (__name__ == "__main__"):
+  app = wxtbx.app.CCTBXApp(0)
+  frame = ProcessingFrame(None, -1, "LABELIT")
+  frame.Show()
+  if (len(sys.argv) > 1) and (os.path.isdir(sys.argv[1])):
+    frame.LoadResults(sys.argv[1])
+  app.MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/results_base.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx import easy_pickle
+from libtbx.utils import Sorry
+import re
+import os
+from six.moves import zip
+
+class result(object):
+  def __init__(self, dir_name):
+    self.dir_name = dir_name
+    self._distl = None
+    self._labelit = None
+    self._groups = None
+    distl_file = os.path.join(dir_name, "DISTL_pickle")
+    labelit_file = os.path.join(dir_name, "LABELIT_pickle")
+    groups_file = os.path.join(dir_name, "LABELIT_possible")
+    if (os.path.exists(distl_file)):
+      self._distl = easy_pickle.load(distl_file)
+    if (os.path.exists(labelit_file)):
+      self._labelit = easy_pickle.load(labelit_file)
+    if (os.path.exists(groups_file)):
+      self._groups = easy_pickle.load(groups_file)
+
+  def get_indexing(self):
+    return self._groups
+
+  def get_images(self):
+    images = []
+    if (self._labelit is not None):
+      files = self._labelit['file']
+      for id in sorted(files.keys()):
+        images.append(files[id])
+    return images
+
+  def get_image_id(self, file_name):
+    assert (self._labelit is not None)
+    files = self._labelit['file']
+    for id, fn in files.iteritems():
+      if (fn == file_name):
+        return id
+    return None
+
+  def get_integration_solutions(self):
+    solutions = []
+    for group in self._groups :
+      sol_id = group['counter']
+      image_id = sorted(self._labelit['file'].keys())[0]
+      integration_file = os.path.join(self.dir_name, "integration_%d_%d.pkl"
+        % (sol_id, image_id))
+      if (os.path.isfile(integration_file)):
+        solutions.append(sol_id)
+    return solutions
+
+  def get_integration(self, image_id=1):
+    return load_integration_results(self.dir_name, "integration",
+      image_id=image_id)
+
+  def get_image_integration(self, sol_id, image_id=None, file_name=None):
+    assert (image_id is not None) or (file_name is not None)
+    file_name = os.path.join(self.dir_name, "integration_%d_%d.pkl" % (sol_id,
+      image_id))
+    if (not os.path.exists(file_name)):
+      raise Sorry("Can't find the file %s!" % file_name)
+    integ_result = easy_pickle.load(file_name)
+    summary = get_integration_summary(integ_result, image_id)
+    return integ_result, summary
+
+def get_image_id(file_name):
+  base, ext = os.path.splitext(file_name)
+  fields = base.split("_")
+  return int(fields[-1])
+
+def find_integration_files(dir_name, base_name):
+  files = []
+  for file_name in os.listdir(dir_name):
+    if (file_name.startswith(base_name)):
+      files.append(os.path.join(dir_name, file_name))
+  return files
+
+def get_integration_summary(integ_result, sol_id):
+  summary = dict(
+    solution=sol_id,
+    point_group=integ_result['pointgroup'],
+    beam_center=(integ_result['xbeam'], integ_result['ybeam']),
+    distance=integ_result['distance'],
+    d_min=integ_result['resolution'],
+    mosaicity=integ_result['mosaicity'],
+    rms=integ_result['residual'],
+    bins=integ_result['table_raw'])
+  return summary
+
+def load_integration_results(dir_name, base_name, image_id=1):
+  files = find_integration_files(dir_name, base_name)
+  results = []
+  summaries = []
+  for file_path in files :
+    file_name = os.path.basename(file_path)
+    suffix = re.sub(base_name + "_", "", os.path.splitext(file_name)[0])
+    sol_id_, img_id_ = suffix.split("_")
+    if (int(img_id_) != image_id):
+      continue
+    print("integration file: %s" % file_path)
+    result = easy_pickle.load(file_path)
+    results.append(result)
+    summary = get_integration_summary(result, int(sol_id_))
+    summaries.append(summary)
+  r_s = list(zip(results, summaries))
+  r_s_sorted = sorted(r_s, key=lambda element: element[1]['solution'], reverse=True)
+  return [ r for r,s in r_s_sorted ], [ s for r, s in r_s_sorted ]
+
+class TableData(object):
+  """Base class for wx.ListCtrl data source objects in this module."""
+  def __init__(self, table):
+    assert isinstance(table, list) or isinstance(table, dict)
+    self.table = table
+
+  def GetItemCount(self):
+    return len(self.table)
+
+  def GetItemImage(self, item):
+    return 0
+
+class EmptyData(TableData):
+  def __init__(self, *args, **kwds):
+    self.table = []
+
+  def GetItemText(self, item, col):
+    return ""
+
+class ResultData(TableData):
+  def GetItemText(self, item, col):
+    n_items = self.GetItemCount()
+    assert (item < n_items) and (0 <= col <= 6)
+    result = self.table[item]
+    if (col == 0):
+      return "%d" % result['solution']
+    elif (col == 1):
+      return result['point_group']
+    elif (col == 2):
+      return "%.2f %.2f" % result['beam_center']
+    elif (col == 3):
+      return "%.2f" % result['distance']
+    elif (col == 4):
+      return "%.2f" % result['d_min']
+    elif (col == 5):
+      return "%.2f" % result['mosaicity']
+    else :
+      return "%.3f" % result['rms']
+
+class BinData(TableData):
+  def GetItemText(self, item, col):
+    n_items = self.GetItemCount()
+    assert (item < n_items) and (0 <= col <= 4)
+    bin = self.table[item]
+    if (col == 0):
+      return "%d" % bin.i_bin
+    elif (col == 1):
+      return "%g - %g" % bin.d_max_min
+    elif (col == 2):
+      return "%d / %d" % bin.completeness
+    elif (col == 3):
+      return "%8.1f" % bin.mean_I
+    else :
+      return "%8.1f" % bin.mean_I_sigI
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/spotfinder_frame.py
+from __future__ import absolute_import, division, print_function
+import rstbx.viewer.display
+import wx
+from rstbx.viewer.frame import XrayFrame,SettingsFrame,SettingsPanel
+
+def derived_draw_spotfinder_spots(self,dc):
+  self.organizer.update_spotfinder()
+  self.spotfinder = self.organizer.S
+
+  if self.settings.show_all_pix:
+    for spot in self.spotfinder.images[self.frames[0]]["spots_total"]:
+      for pxl in spot.bodypixels:
+        x,y = self._img.image_coords_as_screen_coords(
+          pxl.y,
+          pxl.x)
+        dc.SetPen(wx.Pen('green'))
+        dc.SetBrush(wx.GREEN_BRUSH)
+        dc.DrawCircle(x,y,1)
+
+  if self.settings.show_max_pix:
+    pink_brush = wx.Brush(colour=wx.Colour(255,192,203))
+    for spot in self.spotfinder.images[self.frames[0]]["spots_total"]:
+      x,y = self._img.image_coords_as_screen_coords(
+        spot.max_pxl_y(),
+        spot.max_pxl_x())
+      dc.SetPen(wx.Pen('pink'))
+      dc.SetBrush(pink_brush)
+      dc.DrawCircle(x,y,1)
+
+  if self.settings.show_ctr_mass:
+    for spot in self.spotfinder.images[self.frames[0]]["spots_total"]:
+      x,y = self._img.image_coords_as_screen_coords(
+        spot.ctr_mass_y(),
+        spot.ctr_mass_x())
+      dc.SetPen(wx.Pen('red'))
+      dc.SetBrush(wx.RED_BRUSH)
+      dc.DrawCircle(x,y,1)
+rstbx.viewer.display.XrayView.draw_spotfinder_spots = derived_draw_spotfinder_spots
+
+class SpotFrame(XrayFrame):
+  def __init__(self, *args, **kwds):
+    self.horizons_phil = kwds["horizons_phil"]
+    self.spot_organizer = kwds["spot_organizer"]
+    del kwds["horizons_phil"]; del kwds["spot_organizer"] #otherwise wx complains
+    super(SpotFrame, self).__init__(*args, **kwds)
+    self.viewer.horizons_phil = self.horizons_phil
+    self.viewer.spotfinder = self.spot_organizer.S
+    self.viewer.frames = self.spot_organizer.frames
+    self.viewer.organizer = self.spot_organizer
+
+  def OnShowSettings(self, event):
+    if (self.settings_frame is None):
+      frame_rect = self.GetRect()
+      display_rect = wx.GetClientDisplayRect()
+      x_start = frame_rect[0] + frame_rect[2]
+      if (x_start > (display_rect[2] - 400)):
+        x_start = display_rect[2] - 400
+      y_start = frame_rect[1]
+      self.settings_frame = SpotSettingsFrame(self, -1, "Settings",
+        style=wx.CAPTION|wx.MINIMIZE_BOX, pos=(x_start, y_start))
+    self.settings_frame.Show()
+
+class SpotSettingsFrame(SettingsFrame):
+  def __init__(self, *args, **kwds):
+    super(SettingsFrame, self).__init__(*args, **kwds)
+    self.settings = self.GetParent().settings
+    szr = wx.BoxSizer(wx.VERTICAL)
+    panel = SpotSettingsPanel(self, -1)
+    self.SetSizer(szr)
+    szr.Add(panel, 1, wx.EXPAND)
+    szr.Fit(panel)
+    self.panel = panel
+    self.sizer = szr
+    self.Fit()
+    self.Bind(wx.EVT_CLOSE, lambda evt : self.Destroy(), self)
+    self.Bind(wx.EVT_WINDOW_DESTROY, self.OnDestroy)
+
+class SpotSettingsPanel(SettingsPanel):
+  def __init__(self, *args, **kwds):
+    wx.Panel.__init__(self, *args, **kwds)
+    self.settings = self.GetParent().settings
+    # CONTROLS 4: additional settings for derived class
+    self.settings.show_ctr_mass = True
+    self.settings.show_max_pix = True
+    self.settings.show_all_pix = False
+    self._sizer = wx.BoxSizer(wx.VERTICAL)
+    s = self._sizer
+    self.SetSizer(self._sizer)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    s.Add(box)
+    txt1 = wx.StaticText(self, -1, "Zoom level:")
+    box.Add(txt1, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # CONTROLS 1:  Lay them out on the display
+    # Zoom control
+    self.zoom_ctrl = wx.Choice(self, -1,
+      choices=["Auto", "25%", "50%", "100%", "200%", "400%", "800%", "1600%"])
+    self.zoom_ctrl.SetSelection(self.settings.zoom_level)
+    box.Add(self.zoom_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self._sizer.Fit(self)
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    s.Add(box)
+    txt2 = wx.StaticText(self, -1, "Brightness")
+    box.Add(txt2, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Brightness control
+    self.brightness_ctrl = wx.Slider(self, -1, size=(200,-1),
+      style=wx.SL_AUTOTICKS|wx.SL_LABELS)
+    box.Add(self.brightness_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.brightness_ctrl.SetMin(10)
+    self.brightness_ctrl.SetMax(500)
+    self.brightness_ctrl.SetValue(self.settings.brightness)
+    self.brightness_ctrl.SetTickFreq(25)
+
+    # Center control
+    self.center_ctrl = wx.CheckBox(self, -1, "Mark beam center")
+    self.center_ctrl.SetValue(self.settings.show_beam_center)
+    s.Add(self.center_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Center of mass control
+    self.ctr_mass = wx.CheckBox(self, -1, "Spot centers of mass")
+    self.ctr_mass.SetValue(self.settings.show_ctr_mass)
+    s.Add(self.ctr_mass, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Max pixel control
+    self.max_pix = wx.CheckBox(self, -1, "Spot max pixels")
+    self.max_pix.SetValue(self.settings.show_max_pix)
+    s.Add(self.max_pix, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Spot pixels control
+    self.all_pix = wx.CheckBox(self, -1, "Spot all pixels")
+    self.all_pix.SetValue(self.settings.show_all_pix)
+    s.Add(self.all_pix, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+    # Minimum spot area control
+    box = wx.BoxSizer(wx.HORIZONTAL)
+    from wxtbx.phil_controls.intctrl import IntCtrl
+    from wxtbx.phil_controls import EVT_PHIL_CONTROL
+    self.minspotarea_ctrl = IntCtrl(self, -1, pos=(300,180), size=(80,-1),
+      value=self.GetParent().GetParent().horizons_phil.distl.minimum_spot_area,
+      name="Minimum spot area (pxls)")
+    self.minspotarea_ctrl.SetOptional(False)
+    box.Add(self.minspotarea_ctrl, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    txtd = wx.StaticText(self, -1,  "Minimum spot area (pxls)",)
+    box.Add(txtd, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    s.Add(box)
+
+    self.collect_values()
+
+    # CONTROLS 3:  Bind events to actions
+    self.Bind(wx.EVT_CHOICE, self.OnUpdate, self.zoom_ctrl)
+    self.Bind(wx.EVT_SLIDER, self.OnUpdateBrightness, self.brightness_ctrl)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdate2, self.center_ctrl)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdateCM, self.ctr_mass)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdateCM, self.max_pix)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdateCM, self.all_pix)
+    self.Bind(EVT_PHIL_CONTROL, self.OnUpdateCM, self.minspotarea_ctrl)
+
+    txt3 = wx.StaticText(self, -1, "Thumbnail view:")
+    s.Add(txt3, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+    self.thumb_panel = rstbx.viewer.display.ThumbnailView(
+      parent=self,
+      size=(256,256),
+      style=wx.SUNKEN_BORDER)
+    s.Add(self.thumb_panel, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+
+  # CONTROLS 2:  Fetch values from widgets
+  def collect_values(self):
+    if self.settings.enable_collect_values:
+      self.settings.zoom_level = self.zoom_ctrl.GetSelection()
+      self.settings.brightness = self.brightness_ctrl.GetValue()
+      self.settings.show_beam_center = self.center_ctrl.GetValue()
+      self.settings.show_ctr_mass = self.ctr_mass.GetValue()
+      self.settings.show_max_pix = self.max_pix.GetValue()
+      self.settings.show_all_pix = self.all_pix.GetValue()
+
+  def OnUpdateCM(self, event):
+    self.collect_values()
+    self.GetParent().GetParent().horizons_phil.distl.minimum_spot_area = self.minspotarea_ctrl.GetPhilValue()
+    self.GetParent().GetParent().update_settings(layout=False)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/spotfinder_wrap.py
+from __future__ import absolute_import, division, print_function
+class spot_wrapper:
+  def __init__(self,working_phil):
+      self.working_phil = working_phil
+
+  def display(self,path,organizer):
+    import wx
+    from rstbx.viewer.spotfinder_frame import SpotFrame
+    from rstbx.viewer import display
+
+    app   = wx.App(0)
+    frame = SpotFrame(None, -1, "X-ray image display", size=(1200,1080),
+      pos=(100,100), horizons_phil=self.working_phil,
+      spot_organizer = organizer)
+    frame.SetSize((1024,780))
+    frame.load_image(path)
+    frame.path = path
+    self.path = path
+    frame.Show()
+    app.MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+rstbx/viewer/tst.py
+from __future__ import absolute_import, division, print_function
+
+def exercise_1():
+  from rstbx.viewer import screen_params
+  p = screen_params()
+  p.set_image_size(2048,2048)
+  p.set_screen_size(1024,768)
+  p.set_thumbnail_size(256,256,8)
+  p.set_detector_resolution(0.1024)
+  p.set_zoom(0)
+  assert (p.get_scale() == 0.375)
+  assert (p.get_bitmap_params() == (0, 0, 2048, 2048))
+  p.set_zoom(0.5)
+  assert (p.get_scale() == 0.5)
+  assert (p.get_bitmap_params() == (0, 256, 2048, 1536))
+  p.set_zoom(1.0)
+  assert (p.get_bitmap_params() == (512, 640, 1024, 768))
+  p.translate_image(-800, -800)
+  assert (p.get_bitmap_params() == (1024, 1280, 1024, 768))
+  p.translate_image(-400, -400)
+  assert (p.get_bitmap_params() == (1024, 1280, 1024, 768))
+  assert (p.get_thumbnail_box() == (128, 160, 128, 96))
+  p.center_view_from_thumbnail(128,128)
+  assert (p.get_bitmap_params() == (512, 640, 1024, 768))
+
+# TODO: use a real image
+def exercise_2():
+  pass
+
+if (__name__ == "__main__"):
+  exercise_1()
+  print("OK")
+
+
+ *******************************************************************************

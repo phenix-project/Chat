@@ -1,0 +1,376 @@
+
+
+ *******************************************************************************
+scitbx/command_line/__init__.py
+"""
+command_line/__init__
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/command_line/apply_tapenade_hints.py
+"""\
+Simple script for post-processing output of TAPENADE at:
+
+  http://tapenade.inria.fr:8080/tapenade/paste.jsp
+
+TAPENADE is an Automatic Differentiation Engine developed at INRIA
+Sophia-Antipolis by the TROPICS team.
+
+http://www-sop.inria.fr/tropics/tapenade.html
+"""
+from __future__ import absolute_import, division, print_function
+
+def run(args):
+  file_names = []
+  no_comments = False
+  for arg in args:
+    if (arg == "--no-comments"):
+      no_comments = True
+    else:
+      file_names.append(arg)
+  lines_to_ignore = set("""\
+      INCLUDE 'DIFFSIZES.inc'
+C  Hint: nbdirsmax should be the maximum number of differentiation directions
+""".splitlines())
+  default_replacement_dict = {"nbdirsmax": "nbdirs"}
+  output_lines = []
+  for file_name in file_names:
+    replacement_dict = dict(default_replacement_dict)
+    for line in open(file_name).read().splitlines():
+      line = line.rstrip()
+      if (line in lines_to_ignore):
+        continue
+      if (line.startswith("C  Hint: ")):
+        flds = line.split()
+        assert len(flds) == 9
+        assert " ".join(flds[3:8]) == "should be the value of"
+        replacement_dict[flds[2]] = flds[8]
+        continue
+      if (no_comments and line.startswith("C")):
+        continue
+      if (line == "      END"):
+        replacement_dict = dict(default_replacement_dict)
+      else:
+        for old,new in replacement_dict.items():
+          line = line.replace(old, new)
+      output_lines.append(line)
+  while (len(output_lines) != 0 and len(output_lines[-1]) == 0):
+    output_lines.pop()
+  print("\n".join(output_lines))
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/command_line/generate_error_h.py
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import write_this_is_auto_generated
+import sys, os
+
+def as_string(module_name):
+  mn = module_name
+  mn_upper = mn.upper()
+  return r"""/*! \file
+    Declarations and macros for exception handling.
+ */
+
+#ifndef %(mn_upper)s_ERROR_H
+#define %(mn_upper)s_ERROR_H
+
+#include <scitbx/error_utils.h>
+
+#define %(mn_upper)s_CHECK_POINT \
+  std::cout << __FILE__ << "(" << __LINE__ << ")" << std::endl << std::flush
+#define %(mn_upper)s_CHECK_POINT_MSG(msg) \
+  std::cout << msg << " @ " __FILE__ << "(" << __LINE__ << ")" << std::endl << std::flush
+#define %(mn_upper)s_EXAMINE(A) \
+  std::cout << "variable " << #A << ": " << A << std::endl << std::flush
+
+//! Common %(mn)s namespace.
+namespace %(mn)s {
+
+  //! All %(mn)s exceptions are derived from this class.
+  class error : public ::scitbx::error_base<error>
+  {
+    public:
+
+      //! General %(mn)s error message.
+      explicit
+      error(std::string const& msg) throw()
+        : ::scitbx::error_base<error>("%(mn)s", msg)
+      {}
+
+      //! Error message with file name and line number.
+      /*! Used by the macros below.
+       */
+      error(const char* file, long line, std::string const& msg = "",
+            bool internal = true) throw()
+        : ::scitbx::error_base<error>("%(mn)s", file, line, msg, internal)
+      {}
+  };
+
+  //! Special class for "Index out of range." exceptions.
+  /*! These exceptions are propagated to Python as IndexError.
+   */
+  class error_index : public error
+  {
+    public:
+      //! Default constructor. The message may be customized.
+      explicit
+      error_index(std::string const& msg = "Index out of range.") throw()
+        : error(msg)
+      {}
+  };
+
+} // namespace %(mn)s
+
+//! For throwing an error exception with file name, line number, and message.
+#define %(mn_upper)s_ERROR(msg) \
+  SCITBX_ERROR_UTILS_REPORT(%(mn)s::error, msg)
+//! For throwing an "Internal Error" exception.
+#define %(mn_upper)s_INTERNAL_ERROR() \
+  SCITBX_ERROR_UTILS_REPORT_INTERNAL(%(mn)s::error)
+//! For throwing a "Not implemented" exception.
+#define %(mn_upper)s_NOT_IMPLEMENTED() \
+  SCITBX_ERROR_UTILS_REPORT_NOT_IMPLEMENTED(%(mn)s::error)
+
+//! Custom %(mn)s assertion.
+#define %(mn_upper)s_ASSERT(assertion) \
+  SCITBX_ERROR_UTILS_ASSERT(%(mn)s::error, %(mn_upper)s_ASSERT, assertion)
+
+#endif // %(mn_upper)s_ERROR_H
+""" % vars()
+
+def run(args):
+  this_command = os.environ["LIBTBX_DISPATCHER_NAME"]
+  if (len(args) != 1):
+    print("usage: %s module_name > error.h" % this_command)
+    return
+  write_this_is_auto_generated(f=sys.stdout, file_name_generator=this_command)
+  sys.stdout.write(as_string(module_name=args[0]))
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/command_line/histogram.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from libtbx.option_parser import option_parser
+import sys
+
+def process_file(file_object, n_slots, data_min, data_max, format_cutoffs):
+  data = flex.double()
+  for line in file_object.read().splitlines():
+    data.append(float(line))
+  print("total number of data points:", data.size())
+  if (data_min is None): data_min = flex.min(data)
+  if (data_max is None): data_max = flex.max(data)
+  flex.histogram(
+    data=data, n_slots=n_slots, data_min=data_min, data_max=data_max).show(
+      format_cutoffs=format_cutoffs)
+
+def run(args, command_name="scitbx.histogram"):
+  command_line = (option_parser(
+    usage=command_name+" [options] [data_file ...]",
+    description="Example: %s my_data --slots=20" % command_name)
+    .option("-s", "--slots",
+      action="store",
+      type="int",
+      default=10,
+      help="number of histogram slots",
+      metavar="INT")
+    .option(None, "--min",
+      action="store",
+      type="float",
+      default=None,
+      help="min data value in histogram",
+      metavar="FLOAT")
+    .option(None, "--max",
+      action="store",
+      type="float",
+      default=None,
+      help="max data value in histogram",
+      metavar="FLOAT")
+    .option("-f", "--format_cutoffs",
+      action="store",
+      type="str",
+      default="%.8g",
+      help="format specifier for cutoff values",
+      metavar="STR")
+  ).process(args=args)
+  def pro(file_object):
+    co = command_line.options
+    process_file(
+      file_object=file_object,
+      n_slots=co.slots,
+      data_min=co.min,
+      data_max=co.max,
+      format_cutoffs=co.format_cutoffs)
+  if (len(command_line.args) == 0):
+    pro(file_object=sys.stdin)
+  else:
+    for file_name in command_line.args:
+      pro(file_object=open(file_name))
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/command_line/show_exp_times.py
+from __future__ import absolute_import, division, print_function
+import sys, os
+
+def run(args):
+  if (len(args) == 0):
+    n_iterations = 1000
+  elif (len(args) == 1):
+    n_iterations = int(args[0])
+    assert n_iterations > 0
+  else:
+    from libtbx.utils import Usage
+    raise Usage("scitbx.show_exp_times [n_iterations]")
+  evar = "LIBTBX_NO_LD_PRELOAD"
+  evar_set = evar in os.environ
+  if (evar_set):
+    print("%s set:" % evar)
+  else:
+    print("%s not set:" % evar)
+  from scitbx.math.tests.tst_exp_functions import \
+    exercise_with_random_arguments as exercise
+  exercise(n_arguments=10000, n_iterations=n_iterations)
+  print()
+  sys.stdout.flush()
+  if (not evar_set):
+    if ("LD_PRELOAD" in os.environ):
+      del os.environ["LD_PRELOAD"]
+    os.environ[evar] = "1"
+    from libtbx import easy_run
+    easy_run.call(command="scitbx.show_exp_times %d" % n_iterations)
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/command_line/show_sizes.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+import sys
+
+def run(args):
+  assert len(args) == 0
+  print("Size of an empty container.")
+  print("Some of those containers store a pointer to a raw storage:")
+  print("the 'cumulative' entry refers to the total memory footprint")
+  print("whereas the other entry does not include the raw storage.")
+  print()
+  flex.show_sizes_int()
+  print()
+  flex.show_sizes_double()
+  print()
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/command_line/unicode_examples.py
+"Please help adding characters commonly used in science."
+from __future__ import absolute_import, division, print_function
+
+import sys
+
+def run(args):
+  assert len(args) == 0
+  unicode_text = u"""
+\u00C5 LATIN CAPITAL LETTER A WITH RING ABOVE
+\u00B0 DEGREE SIGN
+\u0391 GREEK CAPITAL LETTER ALPHA
+\u0392 GREEK CAPITAL LETTER BETA
+\u0393 GREEK CAPITAL LETTER GAMMA = gamma function
+\u0394 GREEK CAPITAL LETTER DELTA
+\u0395 GREEK CAPITAL LETTER EPSILON
+\u0396 GREEK CAPITAL LETTER ZETA
+\u0397 GREEK CAPITAL LETTER ETA
+\u0398 GREEK CAPITAL LETTER THETA
+\u0399 GREEK CAPITAL LETTER IOTA = iota adscript
+\u039A GREEK CAPITAL LETTER KAPPA
+\u039B GREEK CAPITAL LETTER LAMDA
+\u039C GREEK CAPITAL LETTER MU
+\u039D GREEK CAPITAL LETTER NU
+\u039E GREEK CAPITAL LETTER XI
+\u039F GREEK CAPITAL LETTER OMICRON
+\u03A0 GREEK CAPITAL LETTER PI
+\u03A1 GREEK CAPITAL LETTER RHO
+\u03A3 GREEK CAPITAL LETTER SIGMA
+\u03A4 GREEK CAPITAL LETTER TAU
+\u03A5 GREEK CAPITAL LETTER UPSILON
+\u03A6 GREEK CAPITAL LETTER PHI
+\u03A7 GREEK CAPITAL LETTER CHI
+\u03A8 GREEK CAPITAL LETTER PSI
+\u03A9 GREEK CAPITAL LETTER OMEGA
+\u03C6 GREEK SMALL LETTER PHI
+\u03C7 GREEK SMALL LETTER CHI
+\u03C8 GREEK SMALL LETTER PSI
+\u03C9 GREEK SMALL LETTER OMEGA
+\u03B2 greek small letter beta
+\u03B8 greek small letter theta
+\u03A5 greek capital letter upsilon
+\u03C6 greek small letter phi
+\u03C0 greek small letter pi
+\u03B2 GREEK SMALL LETTER BETA
+\u00DF latin small letter sharp s
+\u03B3 GREEK SMALL LETTER GAMMA
+\u03B4 GREEK SMALL LETTER DELTA
+\u03B5 GREEK SMALL LETTER EPSILON
+\u03B6 GREEK SMALL LETTER ZETA
+\u03B7 GREEK SMALL LETTER ETA
+\u03B8 GREEK SMALL LETTER THETA
+\u03B9 GREEK SMALL LETTER IOTA
+\u03BA GREEK SMALL LETTER KAPPA
+\u03BB GREEK SMALL LETTER LAMDA = lambda
+\u03BC GREEK SMALL LETTER MU
+\u00B5 micro sign
+\u03BD GREEK SMALL LETTER NU
+\u03BE GREEK SMALL LETTER XI
+\u03BF GREEK SMALL LETTER OMICRON
+\u03C0 GREEK SMALL LETTER PI math constant 3.141592...
+\u03C1 GREEK SMALL LETTER RHO
+\u03C2 GREEK SMALL LETTER FINAL SIGMA
+\u03C3 GREEK SMALL LETTER SIGMA
+\u03C4 GREEK SMALL LETTER TAU
+\u03C5 GREEK SMALL LETTER UPSILON
+"""
+  print(unicode_text.encode("utf-8", "strict"))
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************

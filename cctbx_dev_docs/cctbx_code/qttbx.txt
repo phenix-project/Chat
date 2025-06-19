@@ -1,0 +1,828 @@
+
+
+ *******************************************************************************
+qttbx/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+qttbx/command_line/start_chimerax.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.start_chimerax
+# LIBTBX_SET_DISPATCHER_NAME qttbx.start_chimerax
+from __future__ import absolute_import, division, print_function
+
+from iotbx.cli_parser import run_program
+from qttbx.programs import start_chimerax
+
+if __name__ == '__main__':
+  run_program(program_class=start_chimerax.Program)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+qttbx/phil.py
+from __future__ import absolute_import, division, print_function
+
+from PySide2.QtCore import Qt, QAbstractItemModel, QModelIndex
+
+import libtbx.phil
+
+# =============================================================================
+def check_phil(phil, scope=True, definition=True, raise_error=True):
+  """
+  Convenience function for checking if the input is a libtbx.phil.scope
+  only or a libtbx.phil.definition only or either.
+
+  Parameters
+  ----------
+    phil: object
+      The object to be tested
+    scope: bool
+      Flag to check if phil is a libtbx.phil.scope
+    definition: bool
+      Flag to check if phil is a libtbx.phil.definition
+    raise_error: bool
+      If true, a RuntimeError is raised if the check(s) fail
+
+  Returns
+  -------
+    value: bool
+  """
+  value = False
+  if scope:  # check for only libtbx.phil.scope
+    value = isinstance(phil, libtbx.phil.scope)
+  if definition:  # check for only libtbx.phil.definition
+    value = isinstance(phil, libtbx.phil.definition)
+  if scope and definition:  # check for either
+    value = isinstance(phil, libtbx.phil.scope) or isinstance(phil, libtbx.phil.definition)
+  if (scope and definition) and not value and raise_error:
+    raise RuntimeError('A libtbx.phil.scope or libtbx.phil.definition is expected.')
+  elif scope and not value and raise_error:
+    raise RuntimeError('A libtbx.phil.scope is expected.')
+  elif definition and not value and raise_error:
+    raise RuntimeError('A libtbx.phil.definition is expected.')
+  return value
+
+# =============================================================================
+class PhilItem(object):
+  """
+  """
+
+  # ---------------------------------------------------------------------------
+  def __init__(self, parent=None):
+
+    self._parent = parent
+    self._children = list()
+    self._type = Qt.UserRole + 1
+
+    # PHIL information
+    self.definition = None
+    self.full_path = None
+    self.value = None
+
+    # widget information
+    self.label_text = None
+    self.tooltip = None
+
+  # ---------------------------------------------------------------------------
+  def set_phil(self, phil, scope=True, definition=True):
+    check_phil(phil, scope=scope, definition=definition)
+
+    self.definition = phil
+    self.full_path = phil.full_path()
+    if phil.is_definition:
+      self.value = phil.extract()
+    else:
+      self.value = ''
+
+    # set label text for widget
+    self.label_text = ' '.join(self.definition.name.split('_')).capitalize()
+    if self.definition.short_caption is not None:
+      self.label_text = self.definition.short_caption
+
+    # set tooltip text to caption or help (preferred)
+    self.tooltip = self.full_path
+    if self.definition.caption is not None:
+      self.tooltip = self.full_path + '\n\n' + self.definition.caption
+    if self.definition.help is not None:
+      self.tooltip = self.full_path + '\n\n' + self.definition.help
+
+  # ---------------------------------------------------------------------------
+  def parent(self):
+    return self._parent
+
+  # ---------------------------------------------------------------------------
+  def appendChild(self, item):
+    self._children.append(item)
+
+  # ---------------------------------------------------------------------------
+  def childCount(self):
+    return len(self._children)
+
+  # ---------------------------------------------------------------------------
+  def child(self, row):
+    if row < self.childCount():
+      return self._children[row]
+    else:
+      raise RuntimeError('There is no child at row {row}.'.format(row=row))
+
+  # ---------------------------------------------------------------------------
+  def row(self):
+    if self._parent is None:
+      return 0
+    else:
+      return self._parent._children.index(self)
+
+  # ---------------------------------------------------------------------------
+  def type(self):
+    return self._type
+
+  # ---------------------------------------------------------------------------
+  def data(self, role):
+    if role == Qt.DisplayRole or role == Qt.EditRole:
+      return str(self.value)
+
+  # ---------------------------------------------------------------------------
+  def setData(self, value, role):
+    if role == Qt.EditRole:
+      self.value = value
+
+# =============================================================================
+class PhilModel(QAbstractItemModel):
+  """
+  The model component of a PHIL scope. This is used to map widgets to
+  the underlying PHIL scope and to update the data.
+  """
+
+  # ---------------------------------------------------------------------------
+  def __init__(self, parent=None):
+    """
+    """
+    QAbstractItemModel.__init__(self, parent)
+
+    self._header_labels = ['parameter', 'value']
+    self._root = PhilItem()
+
+    # PHIL
+    self._scope = None
+    self._extract = None
+
+  # ---------------------------------------------------------------------------
+  def initialize_model(self, phil_scope):
+
+    check_phil(phil_scope, scope=True, definition=False)
+
+    self._scope = phil_scope
+    self._extract = phil_scope.extract()
+
+    # fill out model data with values from PHIL scope
+    self.beginResetModel()
+    self._populate_tree(self._scope, self._root)
+    self.endResetModel()
+
+  # ---------------------------------------------------------------------------
+  def get_phil_extract_value(self, full_path):
+    """
+    Return the value given the full path
+
+    Parameters
+    ----------
+      full_path: str
+        The full PHIL path
+
+    Returns
+    -------
+      value: object
+        The value stored in full_path. Can be a list if .multiple is True.
+    """
+    value = self._extract
+    for subpath in full_path.split('.'):
+      if isinstance(value, libtbx.phil.scope_extract_list):
+        break
+      value = getattr(value, subpath)
+    return value
+
+  # ---------------------------------------------------------------------------
+  def set_phil_extract_value(self, full_path, value):
+    """
+    Set the value given the full path
+
+    Parameters
+    ----------
+      full_path: str
+        The full PHIL path
+      value: object
+        object to be stored at full_path
+
+    Returns
+    -------
+      Nothing
+    """
+    paths = full_path.split('.')
+    extract = self._extract
+    for subpath in paths[:-1]:
+      extract = getattr(extract, subpath)
+    setattr(extract, paths[-1], value)
+
+  # ---------------------------------------------------------------------------
+  def get_master_phil(self):
+    """
+    Function for getting the full master PHIL scope
+
+    Parameters
+    ---------
+      None
+
+    Returns
+    -------
+      master_phil: libtbx.phil.scope
+        The original master PHIL scope
+    """
+    return self._scope
+
+  # ---------------------------------------------------------------------------
+  def get_working_phil(self, diff_only=True):
+    """
+    Function for getting the working PHIL scope
+
+    Parameters
+    ----------
+      diff_only: bool
+        If True, only the differences are returned
+
+    Returns
+    -------
+      working_phil: libtbx.phil.scope
+        The working PHIL scope based on non-default settings
+    """
+    working_phil = self._scope.format(python_object=self._extract)
+    if diff_only:
+      working_phil = self._scope.fetch_diff(working_phil)
+    return working_phil
+
+  # ---------------------------------------------------------------------------
+  def get_phil_extract(self):
+    """
+    Function for getting the PHIL extract
+
+    Parameters
+    ----------
+      None
+
+    Returns
+    -------
+      extract: libtbx.phil.extract
+    """
+    return self._extract
+
+  # ---------------------------------------------------------------------------
+  def _populate_tree(self, leaf, branch):
+    """
+    Recursively creates a tree of PhilItem objects for each PHIL
+    definition
+
+    Parameters
+    ----------
+      leaf: libtbx.phil.scope or libtbx.phil.definition
+        If leaf is a PHIL definition, a PhilItem is created to represent
+        the definition, otherwise, new root is created with the name.
+      branch: PhilItem
+        A model item created from a leaf.
+
+    Returns
+    -------
+      Nothing
+    """
+    if leaf.is_definition:
+      item = PhilItemFactory.get_phil_item(leaf, branch)
+      branch.appendChild(item)
+    else:
+      new_root = PhilItemFactory.get_phil_item(leaf, branch)
+      branch.appendChild(new_root)
+      for sub_branch in leaf.objects:
+        self._populate_tree(sub_branch, new_root)
+
+  # ---------------------------------------------------------------------------
+  def headerData(self, section, orientation, role):
+    if role == Qt.DisplayRole:
+      if orientation == Qt.Horizontal:
+        return self._header_labels[section]
+    else:
+      return None
+
+  # ---------------------------------------------------------------------------
+  def parent(self, index):
+    if not index.isValid():
+      return QModelIndex()
+
+    child = index.internalPointer()
+    parent = child.parent()
+
+    if parent == self._root:
+      return QModelIndex()
+
+    return self.createIndex(parent.row(), 0, parent)
+
+  # ---------------------------------------------------------------------------
+  def index(self, row, column, parent=QModelIndex()):
+    if not self.hasIndex(row, column, parent):
+      return QModelIndex()
+
+    if not parent.isValid():
+      parent_item = self._root
+    else:
+      parent_item = parent.internalPointer()
+
+    child = parent_item.child(row)
+    if child is not None:
+      return self.createIndex(row, column, child)
+    else:
+      return QModelIndex()
+
+  # ---------------------------------------------------------------------------
+  def rowCount(self, parent=QModelIndex()):
+    if parent.column() > 0:
+      return 0
+
+    if not parent.isValid():
+      parent_item = self._root
+    else:
+      parent_item = parent.internalPointer()
+
+    return parent_item.childCount()
+
+  # ---------------------------------------------------------------------------
+  def columnCount(self, parent=QModelIndex()):
+    return len(self._header_labels)
+
+  # ---------------------------------------------------------------------------
+  def flags(self, index):
+    flags = QAbstractItemModel.flags(self, index)
+
+    if index.column() == 1:
+      flags = Qt.ItemIsEditable | flags
+
+    return flags
+
+  # ---------------------------------------------------------------------------
+  def data(self, index, role):
+    if not index.isValid():
+      return None
+
+    item = index.internalPointer()
+    value = item.data(role)
+    if role == Qt.DisplayRole:
+      if index.column() == 0:
+        return item.label_text
+      elif index.column() == 1:
+        return value
+    elif role == Qt.EditRole:
+      if index.column() == 1:
+        return value
+    else:
+      return None
+
+  # ---------------------------------------------------------------------------
+  def setData(self, index, value, role):
+    if role == Qt.EditRole:
+      if index.column() == 1:
+        item = index.internalPointer()
+        item.setData(value, role)
+        self.dataChanged.emit(index, index, [Qt.EditRole])
+        return True
+    return False
+
+# =============================================================================
+class PhilItemFactory(object):
+
+  mapping = {
+    'choice': PhilItem,
+  }
+
+  @classmethod
+  def get_phil_item(self, phil, parent):
+    if check_phil(phil, scope=False, definition=True, raise_error=False):
+      item_type = self.mapping.get(phil.type.phil_type, PhilItem)
+      item = item_type(parent=parent)
+      item.set_phil(phil)
+    else:
+      item = PhilItem(parent=parent)
+      item.set_phil(phil)
+    return item
+
+# =============================================================================
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+qttbx/programs/start_chimerax.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx.program_template import ProgramTemplate
+from qttbx.viewers.chimerax import ChimeraXViewer
+
+class Program(ProgramTemplate):
+
+  master_phil_str = '''
+    command = None
+      .type = str
+      .help = The full path to the executable. By default, the standard \
+              name will be searched in $PATH and some standard locations.
+    port = None
+      .type = int
+      .help = The port for the ChimeraX REST server. By default, a random \
+              port between 49152 and 65535 is chosen.
+  '''
+
+  datatypes = ['phil']
+
+  def validate(self):
+    pass
+
+  def run(self):
+    viewer = ChimeraXViewer()
+
+    if self.params.command is not None:
+      viewer.command = self.params.command
+    if self.params.port is not None:
+      viewer.port = self.params.port
+
+    self.output = viewer.start_viewer()
+
+  def get_results(self):
+    return self.output
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+qttbx/viewers/__init__.py
+"""
+Define basic interfaces for communicating with various viewers
+"""
+
+from __future__ import absolute_import, division, print_function
+
+import os
+import shutil
+import sys
+
+from libtbx.utils import Sorry
+
+# =============================================================================
+class ModelViewer(object):
+  """
+  Base class to define the interface for communicating with model
+  viewers.
+
+  Supported model viewers (future plans):
+    * Coot - https://www2.mrc-lmb.cam.ac.uk/personal/pemsley/coot/
+    * ChimeraX - https://www.cgl.ucsf.edu/chimerax/
+    * PyMOL - https://pymol.org/2/
+    * MolStar - https://molstar.org
+    * NGLViewer - http://nglviewer.org
+  """
+
+  viewer_name = None
+
+  def __init__(self):
+    self.command = None       # path to viewer executable
+    self.search_paths = None  # paths to search for viewer executable
+    self.flags = None         # flags to pass to executable
+    self.script = None        # startup script for connecting with viewer
+    self.port = None          # port for communicating with viewer
+    self.process = None       # viewer process
+    self.url = None           # URL for viewer
+
+    self._connected = False
+
+  def run_basic_checks(self):
+    """
+    Check that the minimum information is provided about the viewer.
+    """
+    if self.command is None:
+      raise Sorry('The command for {viewer_name} is not set.'
+                  .format(viewer_name=self.viewer_name))
+    if not os.path.isfile(self.command):
+      raise Sorry('The command for {viewer_name} is not available. '
+                  'Please check that {command} exists.'
+                  .format(viewer_name=self.viewer_name, command=self.command))
+    if self.port is None:
+      raise Sorry('The port has not been set.')
+    if not isinstance(self.port, int):
+      raise Sorry('The port should be an integer.')
+    if self.port > 65535:
+      raise Sorry('The port number should be 65535 or lower')
+
+  # ---------------------------------------------------------------------------
+  # Viewer functions
+  def find_command(self, cmd=None, path=None):
+    """
+    Function for finding the program executable. This function can be
+    used to set self.command
+
+    Parameters
+    ----------
+      cmd: str
+        The name of the command. If not set, the viewer_name is used.
+      path: str or list
+        The path or paths to search for the command. The shutil.which
+        function is used to search the existing path if this is not set.
+
+    Returns
+    -------
+      command: str
+        The full path to the command
+    """
+    if cmd is None:
+      cmd = self.viewer_name
+    if isinstance(path, list):
+      if sys.platform == 'win32':
+        path = ';'.join(path)
+      else:
+        path = ':'.join(path)
+    if sys.version_info.major == 3:
+      return shutil.which(cmd=cmd, path=path)
+    else:
+      for p in path.split(':'):
+        f = os.path.join(p, cmd)
+        if os.path.isfile(f):
+          return f
+      return None
+
+  def start_viewer(self):
+    raise NotImplementedError
+
+  def close_viewer(self):
+    raise NotImplementedError
+
+  # ---------------------------------------------------------------------------
+  # Model functions
+  def load_model(self, filename=None):
+    raise NotImplementedError
+
+  def close_model(self, model_id=None):
+    raise NotImplementedError
+
+  # ---------------------------------------------------------------------------
+  # Map functions
+  def load_map(self, filename=None):
+    raise NotImplementedError
+
+  def load_map_coefficients(self, filename=None, label=None):
+    raise NotImplementedError
+
+  def close_map(self, map_id=None):
+    raise NotImplementedError
+
+# =============================================================================
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+qttbx/viewers/chimerax.py
+"""
+Interface for ChimeraX using REST API
+
+https://www.cgl.ucsf.edu/chimerax/
+https://www.cgl.ucsf.edu/chimerax/docs/user/commands/remotecontrol.html
+
+"""
+
+from __future__ import absolute_import, division, print_function
+
+import glob
+import os
+import random
+import requests
+import subprocess
+import sys
+import time
+
+try:
+  from urllib.parse import unquote
+except ImportError:
+  from urllib import unquote
+
+from libtbx.utils import Sorry
+from qttbx.viewers import ModelViewer
+
+# =============================================================================
+class ChimeraXViewer(ModelViewer):
+
+  viewer_name = 'ChimeraX'
+
+  # ---------------------------------------------------------------------------
+  def is_available(self):
+    '''
+    Function for determining if ChimeraX is available
+
+    Parameters
+    ----------
+      Nothing
+
+    Returns
+    -------
+      True if ChimeraX is available
+    '''
+    self.find_viewer()
+    if self.command:
+      return True
+    else:
+      return False
+
+  def find_viewer(self):
+    '''
+    Function for finding ChimeraX
+
+    Parameters
+    ----------
+      Nothing
+
+    Returns
+    -------
+      Command for running ChimeraX
+    '''
+
+    if self.command is not None:
+      return self.command  # no work to do
+
+    search_paths = os.getenv('PATH')
+    search_command = self.viewer_name
+    if search_paths is not None:
+      if sys.platform == 'win32':
+        search_paths = search_paths.split(';')
+      else:
+        search_paths = search_paths.split(':')
+
+    # /Applications/ChimeraX<version>.app
+    if sys.platform == 'darwin':
+      known_paths = glob.glob('/Applications/ChimeraX*.app/Contents/MacOS')
+      known_paths.sort(reverse=True)
+      search_paths += known_paths
+    # /usr/bin/chimerax
+    elif sys.platform.startswith('linux'):
+      search_paths += ['/usr/bin']
+      search_command = 'chimerax'
+    # C:\Program Files\ChimeraX <version>\bin
+    elif sys.platform == 'win32':
+      known_paths = glob.glob('C:\\Program Files\\ChimeraX*\\bin')
+      known_paths.sort(reverse=True)
+      search_paths += known_paths
+      search_command = 'ChimeraX.exe'
+
+    if len(search_paths) > 0:
+      self.command = self.find_command(cmd=search_command, path=search_paths)
+
+    return self.command
+
+  def start_viewer(self, timeout=60):
+    '''
+    Function for starting the ChimeraX REST server
+
+    Parameters
+    ----------
+      timeout: int
+        The number of seconds to wait for the REST server to become
+        available before raising a Sorry
+
+    Returns
+    -------
+      Nothing
+    '''
+
+    # append some standard search locations for each platform
+    # the existing $PATH is searched first
+    if self.command is None:
+      self.find_viewer()
+
+    # randomly select port
+    if self.port is None:
+      self.port = random.randint(49152, 65535)
+
+    # set REST server information
+    self.flags = ['--cmd', 'remotecontrol rest start port {}'.format(self.port)]
+    self.url = "http://127.0.0.1:{}/".format(self.port)
+
+    self.run_basic_checks()
+
+    # construct ChimeraX command
+    # ChimeraX --cmd "remotecontrol rest start port <port>"
+    cmd = [self.command] + self.flags
+
+    # clean environment for launching ChimeraX
+    env = os.environ.copy()
+    for v in ['PYTHONPATH', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH']:
+      env.pop(v, None)
+
+    # start ChimeraX server and wait until it is ready
+    self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+
+    print()
+    print('-'*79)
+    print('Starting ChimeraX REST server')
+    print(self.command)
+    print(self.url)
+    counter = 0
+    while counter<timeout:
+      output = self._check_status()
+      if self._connected:
+        break
+      counter += 1
+      time.sleep(1)
+    if not self._connected:
+      raise Sorry('The ChimeraX REST server is not reachable at {} after '
+                  '{} seconds.'.format(self.url, counter))
+    print('ChimeraX is ready')
+    print('-'*79)
+    print()
+
+  # ---------------------------------------------------------------------------
+  def _check_status(self):
+    '''
+    Check if the REST server is available
+    '''
+    output = None
+    try:
+      output = requests.get(url=self.url + 'cmdline.html')
+      if output.status_code == 200:
+        self._connected = True
+    except requests.exceptions.ConnectionError:
+      self._connected = False
+    return output
+
+  # ---------------------------------------------------------------------------
+  def _run_command(self, params):
+    '''
+    Make requests call to REST server
+    https://www.cgl.ucsf.edu/chimerax/docs/user/commands/remotecontrol.html
+    '''
+    output = None
+    try:
+      r = requests.Request('GET', self.url + 'run', params=params)
+      p = r.prepare()
+      p.url = unquote(p.url)
+      s = requests.Session()
+      output = s.send(p)
+      # output = requests.get(url=self.url + 'run', params=params)
+    except requests.exceptions.ConnectionError:
+      pass
+    return output
+
+  # ---------------------------------------------------------------------------
+  def close_viewer(self):
+    print('='*79)
+    if self._connected:
+      print('Shutting down ChimeraX')
+      params = {'command': 'quit'}
+      self._run_command(params)
+    else:
+      print('ChimeraX already shut down')
+    rc = self.process.returncode
+    stdout, stderr = self.process.communicate()
+    # print('-'*79)
+    # print(stdout)
+    # print('-'*79)
+    # print(stderr)
+    print('='*79)
+
+  # ---------------------------------------------------------------------------
+  def _load_file(self, filename=None):
+    params = {'command': 'open+{}'.format(filename) }
+    return self._run_command(params)
+
+  # ---------------------------------------------------------------------------
+  def send_command(self, cmds=None):
+    params = {'command': "+".join(cmds)}
+    return self._run_command(params)
+
+  # ---------------------------------------------------------------------------
+  def load_model(self, filename=None):
+    return self._load_file(filename)
+
+  # ---------------------------------------------------------------------------
+  def load_map(self, filename=None):
+    return self._load_file(filename)
+
+  # ---------------------------------------------------------------------------
+  # functions for wxPython GUI
+  def is_alive(self):
+    self._check_status()
+    return self._connected
+
+  def quit(self):
+    return self.close_viewer()
+
+# =============================================================================
+
+
+ *******************************************************************************

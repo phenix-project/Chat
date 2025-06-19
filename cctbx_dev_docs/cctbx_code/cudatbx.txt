@@ -1,0 +1,479 @@
+
+
+ *******************************************************************************
+cudatbx/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+import libtbx.load_env
+if (libtbx.env.build_options.enable_cuda):
+  cudatbx_ext = bp.import_ext("cudatbx_ext")
+  from cudatbx_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/cufft/__init__.py
+from __future__ import absolute_import, division, print_function
+
+import atexit
+
+def real_to_complex_3d_in_place(data):
+  import boost_adaptbx.boost.python as bp
+  ext = bp.import_ext("cudatbx_cufft_ext")
+  real_type = type(data).__name__
+  if (real_type == "double"):
+    return ext.real_to_complex_3d_in_place_dp(data)
+  else :
+    assert (real_type == "float")
+    return ext.real_to_complex_3d_in_place_sp(data)
+
+def complex_to_complex_3d_in_place(data, direction):
+  import boost_adaptbx.boost.python as bp
+  ext = bp.import_ext("cudatbx_cufft_ext")
+  complex_type = type(data).__name__
+  if (complex_type == "complex_double"):
+    return ext.complex_to_complex_3d_in_place_dp(data, direction)
+  else :
+    assert (complex_type == "complex_float")
+    return ext.complex_to_complex_3d_in_place_sp(data, direction)
+
+def complex_to_real_3d_in_place(data, n):
+  import boost_adaptbx.boost.python as bp
+  ext = bp.import_ext("cudatbx_cufft_ext")
+  complex_type = type(data).__name__
+  if (complex_type == "complex_double"):
+    return ext.complex_to_real_3d_in_place_dp(data, n)
+  else :
+    assert (complex_type == "complex_float")
+    return ext.complex_to_real_3d_in_place_sp(data, n)
+
+def clean_up():
+  import boost_adaptbx.boost.python as bp
+  ext = bp.import_ext("cudatbx_cufft_ext")
+  ext.clean_up()
+
+# scitbx.fftpack compatibility API
+# XXX a smarter way to do this would be to set up the plan and cache it -
+# however, it isn't clear whether this would save us any time in practice
+class complex_to_complex_3d(object):
+  def __init__(self, n_complex):
+    self.n_complex = n_complex
+
+  def forward(self, data):
+    return complex_to_complex_3d_in_place(
+      data=data,
+      direction=-1)
+
+  def backward(self, data):
+    return complex_to_complex_3d_in_place(
+      data=data,
+      direction=1)
+
+class real_to_complex_3d(object):
+  def __init__(self, n_real):
+    self.n_real = n_real
+
+  def forward(self, data):
+    return real_to_complex_3d_in_place(data)
+
+  def backward(self, data):
+    return complex_to_real_3d_in_place(data, self.n_real)
+
+atexit.register(clean_up)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/cufft/tst_ext.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from six.moves import zip
+
+def exercise_real_to_complex_3d(benchmark=True):
+  sizes_1 = [((32,32,32), 16, 0.0000001),
+             ((64,64,64), 8, 0.000001),
+             ((128,128,128), 8, 0.000001),
+             ((512,512,512), 4, 0.01)]
+  sizes_2 = [((36,58,97), 8, 0.000001),
+             ((70,120,130), 8, 0.000001),
+             ((209,444,320), 4, 0.01),]
+#             ((532,460,485), 4, 0.01)]
+  print("real_to_complex_3d")
+  _exercise_real_to_complex_3d(sizes_1, benchmark)
+  _exercise_real_to_complex_3d(sizes_2, benchmark)
+
+def _exercise_real_to_complex_3d(sizes, benchmark=True):
+  from cctbx import maptbx
+  from scitbx.array_family import flex
+  from cudatbx import cufft
+  from scitbx import fftpack
+  from libtbx.test_utils import approx_equal
+  import time
+  for n_real, n_repeats, eps in sizes :
+    nx, ny, nz = n_real
+    fft = fftpack.real_to_complex_3d((nx,ny,nz))
+    mt = flex.mersenne_twister(seed=1)
+    g = flex.grid(fft.m_real()).set_focus(fft.n_real())
+    map = mt.random_double(size=g.size_1d())
+    map.reshape(g)
+    sfs = fft.forward(map.deep_copy())
+    map2 = fft.backward(sfs)
+    fft_cuda = cufft.real_to_complex_3d((nx,ny,nz))
+    sfs_cuda = fft_cuda.forward(map)#cufft.real_to_complex_3d_in_place(map)
+    map2_cuda = fft_cuda.backward(sfs_cuda)#cufft.complex_to_real_3d_in_place(sfs_cuda, n_real)
+    maptbx.unpad_in_place(map=map2)
+    maptbx.unpad_in_place(map=map2_cuda)
+    map2_values = map2.as_1d()
+    map2_cuda_values = map2_cuda.as_1d()
+    mmm = map2_values.min_max_mean()
+    mmm_cuda = map2_cuda_values.min_max_mean()
+    assert (map2.size() == map2_cuda.size())
+    assert approx_equal(mmm.min, mmm_cuda.min, eps=eps)
+    assert approx_equal(mmm.max, mmm_cuda.max, eps=eps)
+    assert approx_equal(mmm.mean, mmm_cuda.mean, eps=eps)
+    if (benchmark):
+      map_bak = map.deep_copy()
+      r2c = [ fft.forward, fft_cuda.forward ]
+      c2r = [ fft.backward, fft_cuda.backward ]
+      modules = ["fftpack:", "cufft:  "]
+      last_real = [None, None]
+      print("  dimensions:", n_real)
+      print("  repeats:", n_repeats)
+      k = 0
+      for (r2c_fn, c2r_fn, name) in zip(r2c, c2r, modules):
+        t_forward = 0
+        t_backward = 0
+        map = map_bak.deep_copy()
+        for i in range(n_repeats):
+          t1 = time.time()
+          sfs = r2c_fn(map)
+          t2 = time.time()
+          map2 = c2r_fn(sfs)
+          t3 = time.time()
+          t_forward += t2 - t1
+          t_backward += t3 - t2
+          if (i == n_repeats - 1):
+            last_real[k] = map2.deep_copy()
+        k += 1
+        print("    %s %7.3fs (forward)  %7.3fs (backward)" % (name,
+          t_forward / n_repeats, t_backward / n_repeats))
+      last_fftpack,last_cufft = last_real
+      maptbx.unpad_in_place(map=last_fftpack)
+      maptbx.unpad_in_place(map=last_cufft)
+      mmm = last_fftpack.as_1d().min_max_mean()
+      mmm_cuda = last_cufft.as_1d().min_max_mean()
+      # FIXME why doesn't this work?
+      #assert approx_equal(mmm.min, mmm_cuda.min, eps=eps)
+      assert approx_equal(mmm.max, mmm_cuda.max, eps=eps)
+      assert approx_equal(mmm.mean, mmm_cuda.mean, eps=eps)
+      print("")
+
+def exercise_complex_to_complex_3d():
+  from scitbx.array_family import flex
+  from cudatbx import cufft
+  from scitbx import fftpack
+  import time
+  import sys
+  print("")
+  print("complex_to_complex_3d")
+  for n_complex,n_repeats in [((100,80,90),16), ((200,160,180),16)]:
+    print("  dimensions:", n_complex)
+    print("  repeats:", n_repeats)
+    np = n_complex[0]*n_complex[1]*n_complex[2]
+    d0 = flex.polar(
+      flex.random_double(size=np)*2-1,
+      flex.random_double(size=np)*2-1)
+    d0.reshape(flex.grid(n_complex))
+    #
+    t0 = time.time()
+    for i_trial in range(n_repeats):
+      d = d0.deep_copy()
+    overhead = time.time()-t0
+    print("    overhead: %.2f seconds" % overhead)
+    #
+    # XXX extra CuFFT to initialize device - can we avoid this somehow?
+    d = d0.deep_copy()
+    cufft.complex_to_complex_3d(n_complex).forward(d)
+    cufft.complex_to_complex_3d(n_complex).backward(d)
+    # benchmarking run
+    t0 = time.time()
+    for i_trial in range(n_repeats):
+      d = d0.deep_copy()
+      cufft.complex_to_complex_3d(n_complex).forward(d)
+      cufft.complex_to_complex_3d(n_complex).backward(d)
+    print("    cufft:    %6.2f seconds" % ((time.time()-t0-overhead)/n_repeats))
+    rw = d / np
+    #
+    t0 = time.time()
+    for i_trial in range(n_repeats):
+      d = d0.deep_copy()
+      fftpack.complex_to_complex_3d(n_complex).forward(d)
+      fftpack.complex_to_complex_3d(n_complex).backward(d)
+    print("    fftpack:  %6.2f seconds" % ((time.time()-t0-overhead)/n_repeats))
+    sys.stdout.flush()
+    rp = d / np
+    #
+    print("")
+    assert flex.max(flex.abs(rw-rp)) < 1.e-6
+
+if (__name__ == "__main__"):
+  exercise_complex_to_complex_3d()
+  exercise_real_to_complex_3d()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/math/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/math/special_functions/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+import libtbx.load_env
+if (libtbx.env.build_options.enable_cuda):
+  cudatbx_special_functions_ext = bp.import_ext("cudatbx_special_functions_ext")
+  from cudatbx_special_functions_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/math/special_functions/tst_spherical_bessel_jn.py
+from __future__ import absolute_import, division, print_function
+import time
+
+from libtbx.test_utils import approx_equal
+from scitbx.array_family import flex
+from six.moves import range
+
+# =============================================================================
+def spherical_bessel_jn_test(write_output = False):
+  from scitbx.math import spherical_bessel_array
+  from cudatbx.math.special_functions import cuda_spherical_bessel_jn
+
+  z_size = 10000
+  z_max = 200.0
+  order = 50
+  z = flex.double(z_size)
+  for i in range(z_size):
+    z[i] = z_max * (i+1)/z_size
+
+  dt = [0.0,0.0]
+
+  # GPU
+  t0 = time.time()
+  jn_gpu = cuda_spherical_bessel_jn(order,z)
+  t1 = time.time()
+  dt[0] = t1 - t0
+  if write_output:
+    f = open('jn_gpu.dat','w')
+    for i in range(order+1):
+      for j in range(z_size):
+        f.write('%f %f\n'%(z[j],jn_gpu[i*z_size + j]))
+      f.write('&\n')
+    f.close()
+
+  # CPU
+  jn_cpu = [ None for i in range(order+1) ]
+  t0 = time.time()
+  for n in range(order+1):
+    jn_cpu[n] = spherical_bessel_array(n,z)
+  t1 = time.time()
+  dt[1] = t1 - t0
+  if write_output:
+    f = open('jn_cpu.dat','w')
+    for i in range(order+1):
+      for j in range(z_size):
+        f.write('%f %f\n'%(z[j],jn_cpu[i][j]))
+      f.write('&\n')
+    f.close()
+
+  # difference
+  d_jn = [ None for i in range(order+1) ]
+  for n in range(order+1):
+    d_jn[n] = jn_cpu[n] - jn_gpu[n*z_size:n*z_size + z_size]
+    for i in range(z_size):
+      assert( approx_equal(d_jn[n][i]*d_jn[n][i],0.0,eps=1.0e-6) )
+  if write_output:
+    f = open('d_jn.dat','w')
+    for i in range(order+1):
+      for j in range(z_size):
+        f.write('%f %f\n'%(z[j],d_jn[i][j]))
+      f.write('&\n')
+    f.close()
+
+  return dt
+
+# =============================================================================
+if (__name__ == '__main__'):
+  import libtbx.load_env
+  if (libtbx.env.build_options.enable_cuda):
+    t = spherical_bessel_jn_test()
+
+  print('Ok')
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+from libtbx import test_utils
+import libtbx.load_env
+
+def run():
+  tst_list = (
+  "$D/scattering/tst_direct_summation.py",
+  "$D/math/special_functions/tst_spherical_bessel_jn.py",
+  )
+
+  build_dir = libtbx.env.under_build("cudatbx")
+  dist_dir = libtbx.env.dist_path("cudatbx")
+
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/scattering/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+import libtbx.load_env
+if (libtbx.env.build_options.enable_cuda):
+  cudatbx_scattering_ext = bp.import_ext("cudatbx_scattering_ext")
+  from cudatbx_scattering_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cudatbx/scattering/tst_direct_summation.py
+from __future__ import absolute_import, division, print_function
+import math
+from iotbx import pdb
+from libtbx.test_utils import approx_equal
+from scitbx.array_family import flex
+from scitbx import matrix
+from scitbx.math.des_3_240_21 import t_x,t_y,t_z
+from six.moves import range
+
+test_pdb = "\
+CRYST1  127.692  225.403  306.106  90.00  90.00  90.00 P 21 21 21    4\n\
+ATOM      1  N   SER A  10      72.910  42.823  25.407  1.00103.66           N\n\
+ATOM      2  CA  SER A  10      71.864  43.176  26.422  1.00102.96           C\n\
+ATOM      3  C   SER A  10      72.181  44.524  27.077  1.00102.77           C\n\
+ATOM      4  O   SER A  10      73.190  44.668  27.780  1.00102.38           O\n\
+ATOM      5  CB  SER A  10      71.772  42.081  27.500  1.00102.67           C\n\
+ATOM      6  OG  SER A  10      70.697  42.316  28.402  1.00102.53           O\n\
+ATOM      7  N   ALA A  11      71.311  45.507  26.841  1.00102.05           N\n\
+ATOM      8  CA  ALA A  11      71.483  46.845  27.402  1.00100.38           C\n\
+ATOM      9  C   ALA A  11      71.640  46.741  28.922  1.00 99.29           C\n\
+END\n\
+"
+
+# =============================================================================
+def test_direct_summation():
+
+  # correct values
+  p = pdb.input(source_info='string',lines=test_pdb)
+  x = p.xray_structure_simple()
+  for s in x.scatterers():
+    s.set_use_u(False,False)
+
+  fc = x.structure_factors(anomalous_flag=False,d_min=2.0,
+                           algorithm='direct').f_calc()
+  fcd = fc.data()
+  indices = fc.indices()
+
+  # test values
+  xyz = x.sites_frac()
+  h = flex.vec3_double(len(indices))
+  fm = matrix.sqr(p.crystal_symmetry().unit_cell().fractionalization_matrix())
+  om = matrix.sqr(p.crystal_symmetry().unit_cell().orthogonalization_matrix())
+  for i in range(len(indices)):
+    h[i] = fm * indices[i]
+  sr = x.scattering_type_registry()
+  st = x.scattering_types()
+
+  sg = p.crystal_symmetry().space_group()
+  r = flex.double()
+  t = flex.vec3_double(len(sg))
+  for i in range(len(sg)):
+    r_i = om * matrix.sqr(sg[i].r().as_double())
+    for a in r_i:
+      r.append(a)
+    t[i] = om * matrix.col(sg[i].t().as_double())
+
+  bls = flex.double(len(xyz),0.0)
+  amplitudes = direct_summation()
+  amplitudes.add(st,xyz,bls,h,r,t,sr,False)
+  amplitudes = amplitudes.get_sum()
+
+  cpu_i = flex.norm(fcd)
+  gpu_i = flex.norm(amplitudes)
+
+  mean = 0.0
+  for i in range(len(cpu_i)):
+    e = math.fabs(cpu_i[i] - gpu_i[i])/cpu_i[i]
+    mean += e
+  mean = mean/(len(cpu_i))
+  assert(mean < 1.0e-3)
+
+# =============================================================================
+def test_saxs():
+
+  p = pdb.input(source_info='string',lines=test_pdb)
+  x = p.xray_structure_simple()
+  xyz = x.sites_cart()
+  blsf = flex.double(len(xyz),0.0)
+  sr = x.scattering_type_registry()
+  st = x.scattering_types()
+  q = flex.double(range(101))/200.0
+
+  t_w = flex.double(len(t_x),1.0)
+
+  l = flex.double()
+  l.extend(t_x)
+  l.extend(t_y)
+  l.extend(t_z)
+
+  intensities = direct_summation()
+  intensities.prepare_saxs(st,xyz,blsf,q,t_w,l,sr,False)
+  intensities.run_saxs_kernel()
+  intensities.sum_over_lattice()
+  intensities = intensities.get_sum()
+
+  assert(approx_equal(intensities[10].real,3584.9828125,out=None))
+
+
+# =============================================================================
+if (__name__ == '__main__'):
+  import libtbx.load_env
+  if (libtbx.env.build_options.enable_cuda):
+    from cudatbx.scattering import direct_summation
+    test_direct_summation()
+    test_saxs()
+
+  print('Ok')
+
+
+ *******************************************************************************

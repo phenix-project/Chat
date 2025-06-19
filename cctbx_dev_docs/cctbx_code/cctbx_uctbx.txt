@@ -1,0 +1,2339 @@
+
+
+ *******************************************************************************
+cctbx/uctbx/__init__.py
+from __future__ import absolute_import, division, print_function
+import cctbx.array_family.flex # import dependency
+import scitbx.array_family.shared # import dependency
+
+import boost_adaptbx.boost.python as bp
+from six.moves import zip
+ext = bp.import_ext("cctbx_uctbx_ext")
+from cctbx_uctbx_ext import *
+
+from scitbx import matrix
+import sys
+
+class unit_cell(ext.unit_cell):
+  """
+  Class for the handling of unit cell information.
+
+  All angles are in degrees.
+
+  The PDB convention for orthogonalization and fractionalization
+  of coordinates is used:
+
+  | Crystallographic Basis: D = {a,b,c}
+  | Cartesian Basis:        C = {i,j,k}
+  | i parallel to a
+  | j is in (a,b) plane
+  | k = i x j
+
+  :param parameters: A list, tuple or string of unit cell parameters.
+  :param metrical_matrix: Metrical matrix. See also
+                          :py:meth:`metrical_matrix`.
+  :param orthogonalization_matrix: Orthogonalization matrix. See also
+                          :py:meth:`orthogonalization_matrix`.
+
+  :returns: None
+  :rtype: None
+  """
+
+  def __init__(self,
+        parameters=None,
+        metrical_matrix=None,
+        orthogonalization_matrix=None):
+    assert [parameters, metrical_matrix, orthogonalization_matrix].count(None) >= 2
+    if (parameters is not None):
+      if (isinstance(parameters, str)):
+        parameters = [float(p) for p in parameters.replace(",", " ").split()]
+      ext.unit_cell.__init__(self,
+        parameters=parameters)
+    elif (metrical_matrix is not None):
+      ext.unit_cell.__init__(self,
+        metrical_matrix=metrical_matrix)
+    elif (orthogonalization_matrix is not None):
+      ext.unit_cell.__init__(self,
+        orthogonalization_matrix=orthogonalization_matrix)
+    else:
+      ext.unit_cell.__init__(self, parameters=[])
+
+def update_docstring(obj, string):
+  try:
+    obj.__doc__ = string # Py3
+  except AttributeError:
+    obj.__func__.__doc__ = string # Py2
+
+update_docstring(ext.unit_cell.metrical_matrix, """
+Access to the metrical matrix:
+
+.. math::
+   \\begin{pmatrix}
+     a^2                & a b \\cos(\\gamma) & a c \\cos(\\beta)  \\\\
+     a b \\cos(\\gamma) & b^2                & b c \\cos(\\alpha) \\\\
+     a c \\cos(\\beta)  & b c \\cos(\\alpha) & c^2                \\\\
+   \\end{pmatrix}
+
+:returns: the metrical matrix
+:rtype: tuple
+""")
+
+update_docstring(ext.unit_cell.orthogonalization_matrix, """
+Matrix for the conversion of fractional to Cartesian coordinates:
+
+.. math::
+  \\mathbf{x}_\\textrm{Cartesian} = \\mathbf{O} \\mathbf{x}_\\textrm{fractional}
+
+:returns: the orthogonalization matrix
+:rtype: tuple
+""")
+
+update_docstring(ext.unit_cell.fractionalization_matrix, """
+Matrix for the conversion of fractional to Cartesian coordinates:
+
+.. math::
+  \\mathbf{x}_\\textrm{fractional} = \\mathbf{F} \\mathbf{x}_\\textrm{Cartesian}
+
+:returns: the fractionalization matrix
+:rtype: tuple
+""")
+
+update_docstring(ext.unit_cell.orthogonalize, """
+Conversion of fractional coordinates to Cartesian coordinates.
+
+:param sites_frac: The fractional coordinates.
+                   Either coordinates for a single site (3-tuple) or a
+                   flex.vec3_double array of coordinates.
+
+:returns: the Cartesian coordinates
+:rtype: 3-tuple or flex.vec3_double
+""")
+
+update_docstring(ext.unit_cell.fractionalize, """
+Conversion of Cartesian coordinates to fractional coordinates.
+
+:param sites_cart: The Cartesian coordinates.
+                   Either coordinates for a single site (3-tuple) or a
+                   flex.vec3_double array of coordinates.
+
+:returns: the fractional coordinates
+:rtype: 3-tuple or flex.vec3_double
+""")
+
+@bp.inject_into(ext.unit_cell)
+class _():
+
+  def __str__(self):
+    return format(self, "({:.6g}, {:.6g}, {:.6g}, {:.6g}, {:.6g}, {:.6g})")
+
+  def __repr__(self):
+    return format(self, "uctbx.unit_cell(({}, {}, {}, {}, {}, {}))")
+
+  def __format__(self, format_spec="({:.6g}, {:.6g}, {:.6g}, {:.6g}, {:.6g}, {:.6g})"):
+    return format_spec.format(*self.parameters())
+
+  def show_parameters(self, f=None, prefix="Unit cell: "):
+    if (f is None): f = sys.stdout
+    print(prefix + str(self), file=f)
+
+  def is_conventional_hexagonal_basis(self,
+        absolute_length_tolerance=1e-3,
+        absolute_angle_tolerance=1e-3):
+    p = self.parameters()
+    if (abs(p[0]-p[1]) > absolute_length_tolerance):
+      return False
+    ideal_angles = [90, 90, 120]
+    for i in [3,4,5]:
+      if (abs(p[i]-ideal_angles[i-3]) > absolute_angle_tolerance):
+        return False
+    return True
+
+  def is_conventional_rhombohedral_basis(self,
+        absolute_length_tolerance=1e-3,
+        absolute_angle_tolerance=1e-3):
+    p = self.parameters()
+    for j in [1,2]:
+      if (abs(p[0]-p[j]) > absolute_length_tolerance):
+        return False
+    for j in [4,5]:
+      if (abs(p[3]-p[j]) > absolute_angle_tolerance):
+        return False
+    return True
+
+  def distance_mod_1(self, site_frac_1, site_frac_2):
+    return distance_mod_1(
+      unit_cell=self, site_frac_1=site_frac_1, site_frac_2=site_frac_2)
+
+  def minimum_reduction(self, iteration_limit=None,
+                              multiplier_significant_change_test=None,
+                              min_n_no_significant_change=None):
+    if (iteration_limit is None):
+      iteration_limit = 100
+    if (multiplier_significant_change_test is None):
+      multiplier_significant_change_test = 16
+    if (min_n_no_significant_change is None):
+      min_n_no_significant_change = 2
+    return fast_minimum_reduction(self,
+      iteration_limit,
+      multiplier_significant_change_test,
+      min_n_no_significant_change)
+
+  def minimum_cell(self, iteration_limit=None,
+                         multiplier_significant_change_test=None,
+                         min_n_no_significant_change=None):
+    return self.minimum_reduction(
+      iteration_limit,
+      multiplier_significant_change_test,
+      min_n_no_significant_change).as_unit_cell()
+
+  def is_buerger_cell(self, relative_epsilon=None):
+    from cctbx.uctbx.reduction_base import gruber_parameterization
+    return gruber_parameterization(self, relative_epsilon).is_buerger_cell()
+
+  def is_niggli_cell(self, relative_epsilon=None):
+    from cctbx.uctbx.reduction_base import gruber_parameterization
+    return gruber_parameterization(self, relative_epsilon).is_niggli_cell()
+
+  def niggli_reduction(self, relative_epsilon=None, iteration_limit=None):
+    from cctbx.uctbx import krivy_gruber_1976
+    return krivy_gruber_1976.reduction(self, relative_epsilon, iteration_limit)
+
+  def niggli_cell(self,
+        relative_epsilon=None,
+        iteration_limit=None):
+    return self.niggli_reduction(
+      relative_epsilon, iteration_limit).as_unit_cell()
+
+  def change_of_basis_op_to_niggli_cell(self,
+        relative_epsilon=None,
+        iteration_limit=None):
+    return self.niggli_reduction(
+      relative_epsilon, iteration_limit).change_of_basis_op()
+
+  def lattice_symmetry_group(self,
+        max_delta=3,
+        enforce_max_delta_for_generated_two_folds=True):
+    from cctbx import sgtbx
+    return sgtbx.lattice_symmetry_group(
+      reduced_cell=self,
+      max_delta=max_delta,
+      enforce_max_delta_for_generated_two_folds
+        =enforce_max_delta_for_generated_two_folds)
+
+  def complete_miller_set_with_lattice_symmetry(self,
+        anomalous_flag,
+        d_min,
+        lattice_symmetry_max_delta=3):
+    cb_op = self.change_of_basis_op_to_niggli_cell()
+    niggli_cell = self.change_basis(cb_op)
+    lattice_group = niggli_cell.lattice_symmetry_group(
+      max_delta=lattice_symmetry_max_delta)
+    from cctbx import crystal
+    niggli_lattice_symmetry = crystal.symmetry(
+      unit_cell=niggli_cell,
+      space_group_info=lattice_group.info())
+    from cctbx import miller
+    niggli_lattice_set = miller.build_set(
+      crystal_symmetry=niggli_lattice_symmetry,
+      anomalous_flag=anomalous_flag,
+      d_min=d_min)
+    return niggli_lattice_set.change_basis(cb_op.inverse())
+
+  def buffer_shifts_frac(self, buffer):
+    from cctbx.crystal import direct_space_asu
+    return direct_space_asu.float_asu(
+      unit_cell=self,
+      cuts=[direct_space_asu.float_cut_plane(n=n, c=0)
+        for n in [(-1,0,0),(0,-1,0),(0,0,-1)]]) \
+      .add_buffer(thickness=float(buffer)) \
+      .shape_vertices().max()
+
+  def box_frac_around_sites(self,
+        sites_cart=None,
+        sites_frac=None,
+        buffer=None):
+    assert [sites_cart, sites_frac].count(None) == 1
+    if (sites_frac is None):
+      assert sites_cart.size() > 0
+      sites_frac = self.fractionalize(sites_cart=sites_cart)
+    else:
+      assert sites_frac.size() > 0
+    del sites_cart
+    if (buffer is None or buffer == 0):
+      return sites_frac.min(), sites_frac.max()
+    s_min, s_max = sites_frac.min(), sites_frac.max()
+    del sites_frac
+    shifts_frac = self.buffer_shifts_frac(buffer=buffer)
+    return tuple([s-b for s,b in zip(s_min, shifts_frac)]), \
+           tuple([s+b for s,b in zip(s_max, shifts_frac)])
+
+  def debye_waller_factors(self,
+        miller_index=None,
+        miller_indices=None,
+        u_iso=None,
+        b_iso=None,
+        u_cart=None,
+        b_cart=None,
+        u_cif=None,
+        u_star=None,
+        exp_arg_limit=50,
+        truncate_exp_arg=False):
+    assert [miller_index, miller_indices].count(None) == 1
+    assert [u_iso, b_iso, u_cart, b_cart, u_cif, u_star].count(None) == 5
+    from cctbx import adptbx
+    h = miller_index
+    if (h is None): h = miller_indices
+    if (u_iso is not None):
+      b_iso = adptbx.u_as_b(u_iso)
+    if (b_iso is not None):
+      return adptbx.debye_waller_factor_b_iso(
+        self.stol_sq(h),
+        b_iso, exp_arg_limit, truncate_exp_arg)
+    if (b_cart is not None):
+      u_cart = adptbx.b_as_u(b_cart)
+    if (u_cart is not None):
+      u_star = adptbx.u_cart_as_u_star(self, u_cart)
+    if (u_cif is not None):
+      u_star = adptbx.u_cif_as_u_star(self, u_cif)
+    assert u_star is not None
+    return adptbx.debye_waller_factor_u_star(
+      h, u_star, exp_arg_limit, truncate_exp_arg)
+
+  debye_waller_factor = debye_waller_factors
+
+def non_crystallographic_buffer_layer(
+      sites_cart_min,
+      sites_cart_max,
+      default_buffer_layer=0.5):
+  sites_span = matrix.col(sites_cart_max) - matrix.col(sites_cart_min)
+  buffer_layer = max(list(sites_span))
+  if (buffer_layer == 0):
+    buffer_layer = default_buffer_layer
+  return buffer_layer
+
+def non_crystallographic_unit_cell(
+      sites_cart=None,
+      sites_cart_min=None,
+      sites_cart_max=None,
+      buffer_layer=None,
+      default_buffer_layer=0.5,
+      min_unit_cell_length=0):
+  assert (sites_cart is None) is not (sites_cart_min is None)
+  assert (sites_cart_min is None) is (sites_cart_max is None)
+  if (sites_cart is not None):
+    sites_cart_min = sites_cart.min()
+    sites_cart_max = sites_cart.max()
+  if (buffer_layer is None):
+    buffer_layer = non_crystallographic_buffer_layer(
+      sites_cart_min=sites_cart_min,
+      sites_cart_max=sites_cart_max,
+      default_buffer_layer=default_buffer_layer)
+  sites_span = matrix.col(sites_cart_max) - matrix.col(sites_cart_min)
+  return unit_cell([max(min_unit_cell_length, unit_cell_length)
+    for unit_cell_length in (sites_span + matrix.col([buffer_layer]*3)*2)])
+
+class non_crystallographic_unit_cell_with_the_sites_in_its_center(object):
+
+  def __init__(self,
+        sites_cart,
+        buffer_layer=None,
+        default_buffer_layer=0.5,
+        min_unit_cell_length=0):
+    sites_cart_min = sites_cart.min()
+    sites_cart_max = sites_cart.max()
+    self.unit_cell = non_crystallographic_unit_cell(
+      sites_cart=None,
+      sites_cart_min=sites_cart_min,
+      sites_cart_max=sites_cart_max,
+      buffer_layer=buffer_layer,
+      default_buffer_layer=default_buffer_layer,
+      min_unit_cell_length=min_unit_cell_length)
+    unit_cell_center = matrix.col(self.unit_cell.orthogonalize([0.5]*3))
+    model_center = (  matrix.col(sites_cart.max())
+                    + matrix.col(sites_cart.min())) / 2
+    self.shift_vector = unit_cell_center - model_center
+    self.sites_cart = sites_cart + self.shift_vector
+
+  def crystal_symmetry(self):
+    from cctbx import crystal
+    from cctbx import sgtbx
+    return crystal.symmetry(
+      unit_cell=self.unit_cell,
+      space_group=sgtbx.space_group())
+
+  def sites_frac(self):
+    return self.unit_cell.fractionalize(self.sites_cart)
+
+def infer_unit_cell_from_symmetry(params, space_group):
+  # XXX exercised by iotbx/kriber/tst_strudat.py
+  # XXX TODO: add to uctbx tests
+  from cctbx import sgtbx
+  error_msg = "Cannot interpret unit cell parameters."
+  #
+  laue_group = str(sgtbx.space_group_info(
+    group=space_group.build_derived_laue_group())).replace(" ", "")
+  #
+  if (len(params) == 6):
+    return unit_cell(params)
+  else:
+    crystal_system = space_group.crystal_system()
+    if (crystal_system == "Cubic"):
+      if len(params) == 1:
+        a = params[0]
+      elif len(params) == 3:
+        a,b,c = params
+        assert a==b==c
+      else:
+        raise RuntimeError(error_msg)
+      unit_cell_ = unit_cell((a,a,a,90,90,90))
+    elif (crystal_system in ("Hexagonal", "Trigonal")):
+      is_rhombohedral = False
+      if (crystal_system == "Trigonal"):
+        if (laue_group in ("R-3m:R", "R-3:R")):
+          is_rhombohedral = True
+      if (is_rhombohedral):
+        if len(params) != 2: raise RuntimeError(error_msg)
+        a = params[0]
+        angle = params[1]
+        unit_cell_ = unit_cell((a,a,a,angle,angle,angle))
+      else:
+        if len(params) == 2:
+          a = params[0]
+          c = params[1]
+        elif len(params) == 3:
+          a,b,c = params
+          assert a == b
+        elif len(params) == 4:
+          a,b,c,angle = params
+          assert a == b
+          assert angle == 120
+        else:
+          raise RuntimeError(error_msg)
+        unit_cell_ = unit_cell((a,a,c,90,90,120))
+    elif (crystal_system == "Tetragonal"):
+      if len(params) == 2:
+        a = params[0]
+        c = params[1]
+        unit_cell_ = unit_cell((a,a,c,90,90,90))
+      elif len(params) == 3:
+        a,b,c = params[:3]
+        assert a == b
+        unit_cell_ = unit_cell((a,a,c,90,90,90))
+      else:
+        raise RuntimeError(error_msg)
+    elif (crystal_system == "Orthorhombic"):
+      if len(params) != 3: raise RuntimeError(error_msg)
+      a = params[0]
+      b = params[1]
+      c = params[2]
+      unit_cell_ = unit_cell((a,b,c,90,90,90))
+    elif (crystal_system == "Monoclinic"):
+      if len(params) != 4: raise RuntimeError(error_msg)
+      a = params[0]
+      b = params[1]
+      c = params[2]
+      angle = params[3]
+      if (laue_group == "P12/m1"):
+        unit_cell_ = unit_cell((a,b,c,90,angle,90))
+      elif (laue_group == "P112/m"):
+        unit_cell_ = unit_cell((a,b,c,90,90,angle))
+      elif (laue_group == "P2/m11"):
+        unit_cell_ = unit_cell((a,b,c,angle,90,90))
+    elif (crystal_system == "Triclinic"):
+      raise RuntimeError(error_msg)
+    return unit_cell_
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/boost_python/tst_crystal_orientation.py
+from __future__ import absolute_import, division, print_function
+from math import pi
+try:
+  from six.moves import cPickle as pickle
+except ImportError:
+  import pickle
+from cctbx import uctbx, sgtbx
+from cctbx.crystal_orientation import crystal_orientation, basis_type
+from libtbx.test_utils import approx_equal
+import math
+
+def exercise_functions():
+  orthorhombic = (1,0,0,0,0.5,0.,0.,0.,0.25)
+  R = crystal_orientation(orthorhombic,True)
+  A = R.rotate_thru((1,0,0,),math.pi/2.)
+  assert approx_equal( A.direct_matrix(), (1,0, 0, 0,0,2,0,-4,0) )
+  B = R.rotate_thru((0,1,0,),math.pi/2.)
+  assert approx_equal( B.direct_matrix(), (0,0,-1, 0,2,0,4, 0,0) )
+  C = R.rotate_thru((0,0,1,),math.pi/2.)
+  assert approx_equal( C.direct_matrix(), (0,1, 0,-2,0,0,0, 0,4) )
+
+def exercise_basic():
+  identity = (1,0,0,0,1,0,0,0,1)
+  I = crystal_orientation(identity,False) #direct space
+  orthorhombic = (1,0,0,0,0.5,0.,0.,0.,0.25)
+  R = crystal_orientation(orthorhombic,True) #reciprocal space
+  assert R.direct_matrix() == (1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 4.0)
+  assert R.reciprocal_matrix() == orthorhombic
+  inverse = (-1,0,0,0,-1,0,0,0,-1)
+  negative = crystal_orientation(inverse,False)
+  assert I == negative.make_positive()
+  assert R.unit_cell().parameters() == (1.0,2.0,4.0,90.,90.,90.)
+  assert approx_equal( R.unit_cell_inverse().parameters(), (1.0,0.5,0.25,90.,90.,90.) )
+
+O1 = crystal_orientation((-0.015553395334476732, -0.0028287158782335244, 0.018868416534039902,
+                            -0.0016512962184570643, -0.020998220575299865, 0.0012056332661160732,
+                            0.015789188025134133, -0.011166135863736777, 0.013045365404272641),True)
+def exercise_change_basis():
+  assert approx_equal(O1.unit_cell().parameters(),
+                      (47.659, 47.6861, 49.6444, 62.9615, 73.8222, 73.5269),1E-3)
+  reindex = (0.0, -1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, -1.0) # swap a & b and take inverse
+  O2 = O1.change_basis(reindex)
+  assert approx_equal(O2.unit_cell().parameters(),
+                      (47.6861, 47.659, 49.6444, 73.8222, 62.9615, 73.5269),1E-3)
+
+  rhombohedral_test = crystal_orientation((
+    0.002737747939994224, -0.0049133768326561278, 0.0023634556852316566,
+    0.0062204242383498082, 0.006107332242442573, 0.0047036576949967112,
+    -0.0057640198753891566, -0.0025891042237382953, 0.0023674924674260264),basis_type.reciprocal)
+  rhombohedral_reference = crystal_orientation((
+    -0.0076361080646872997, 0.0049061665572297979, 0.0023688116121433865,
+    -0.00011109895272056645, -0.0061110173438898583, 0.0047062769738302939,
+     0.0031790372319626674, 0.0025876279220667518, 0.0023669727051432361),basis_type.reciprocal)
+  # Find a similarity transform that maps the two cells onto each other
+  c_inv_r_best = rhombohedral_test.best_similarity_transformation(
+      other = rhombohedral_reference, fractional_length_tolerance = 1.00,
+      unimodular_generator_range=1)
+  c_inv_r_int = tuple([int(round(ij,0)) for ij in c_inv_r_best])
+  assert c_inv_r_int == (-1, 0, 0, 1, -1, 0, 0, 0, 1)
+  c_inv = sgtbx.rt_mx(sgtbx.rot_mx(c_inv_r_int))
+  cb_op = sgtbx.change_of_basis_op(c_inv)
+  rhombohedral_reindex = rhombohedral_test.change_basis(cb_op)
+  assert rhombohedral_reindex.difference_Z_score(rhombohedral_reference) < 0.40
+  assert rhombohedral_reindex.direct_mean_square_difference(rhombohedral_reference) < 0.1
+
+  #an alternative test from ana that should fail (gives high msd~0.22; cell axes don't match):
+  ana_reference = crystal_orientation((
+    0.0023650364919947241, 0.012819317075171401, 0.003042762222847376,
+    0.0081242553464681254, 0.0050052660206998077, -0.01472465697193685,
+   -0.01373896574061278, 0.0083781530252581681, -0.0035301340829149005),basis_type.reciprocal)
+  ana_current = crystal_orientation((
+   -0.014470153848927263, 0.0095185368147633793, 0.00087746490483763798,
+   -0.0049989006573928716, -0.0079714727432991222, 0.014778692772530192,
+    0.0051268914129933571, 0.010264066188909109, 0.0044244589492769002),basis_type.reciprocal)
+  c_inv_r_best = ana_current.best_similarity_transformation(
+      other = ana_reference,
+      fractional_length_tolerance = 200.0,
+      unimodular_generator_range=1)
+  c_inv_r_int = tuple([int(round(ij,0)) for ij in c_inv_r_best])
+  c_inv = sgtbx.rt_mx(sgtbx.rot_mx(c_inv_r_int))
+  cb_op = sgtbx.change_of_basis_op(c_inv)
+  ana_reindex = ana_reference.change_basis(cb_op.inverse())
+  assert 200.0 > ana_reindex.difference_Z_score(ana_current) > 20.
+
+  u = uctbx.unit_cell((10., 10., 10., 90., 90., 90.))
+  CO = crystal_orientation(u.fractionalization_matrix(),True)
+  assert approx_equal(
+    CO.unit_cell().parameters(),
+    CO.change_basis((1,0,0, 0,1,0, 0,0,1)).unit_cell().parameters())
+  u = uctbx.unit_cell((2,3,5))
+  CO = crystal_orientation(u.fractionalization_matrix(),True)
+  assert approx_equal(
+    CO.change_basis((0,1,0, 0,0,1, 1,0,0)).unit_cell().parameters(),
+    (5,2,3,90,90,90))
+  cb_op = sgtbx.change_of_basis_op("y,z,x")
+  assert approx_equal(
+    CO.change_basis(cb_op).unit_cell().parameters(),
+    (5,2,3,90,90,90))
+
+  import scitbx.math
+  from scitbx import matrix
+  fmx = matrix.sqr(
+    uctbx.unit_cell((10, 13, 17, 85, 95, 105)).fractionalization_matrix())
+  crm = matrix.sqr(scitbx.math.r3_rotation_axis_and_angle_as_matrix(
+    axis=(-3,5,-7), angle=37, deg=True))
+  co = crystal_orientation(crm * fmx.transpose(), True)
+  assert approx_equal(co.crystal_rotation_matrix(), crm)
+
+def exercise_compare():
+  pass
+
+def exercise_pickle():
+  p = pickle.dumps(O1)
+  v = pickle.loads(p)
+  assert O1 == v
+
+def exercise_exceptions():
+  pass
+
+def run():
+  exercise_functions()
+  exercise_basic()
+  exercise_change_basis()
+  exercise_compare()
+  exercise_pickle()
+  exercise_exceptions()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/boost_python/tst_uctbx.py
+from __future__ import absolute_import, division, print_function
+from math import pi, sin, cos, asin, sqrt
+from six.moves import range
+from six.moves import zip
+try:
+  from six.moves import cPickle as pickle
+except ImportError:
+  import pickle
+from cctbx.array_family import flex
+from cctbx import sgtbx, uctbx
+from scitbx import matrix
+from libtbx.test_utils import approx_equal, not_approx_equal, show_diff
+import random
+import sys
+
+def exercise_functions():
+  d_star_sq_s = 1.2345
+  d_star_sq_a = flex.double((1.2345, 0.1234))
+  two_theta_s = 0.61725
+  two_theta_a = flex.double((0.61725,0.65432))
+  # forward conversions
+  assert approx_equal(
+    uctbx.d_star_sq_as_stol_sq(d_star_sq_s), d_star_sq_s / 4)
+  assert approx_equal(
+    uctbx.d_star_sq_as_stol_sq(d_star_sq_a),
+    [uctbx.d_star_sq_as_stol_sq(i) for i in d_star_sq_a])
+  assert approx_equal(
+    uctbx.d_star_sq_as_two_stol(d_star_sq_s)**2, d_star_sq_s)
+  assert approx_equal(
+    uctbx.d_star_sq_as_two_stol(d_star_sq_a),
+    [uctbx.d_star_sq_as_two_stol(i) for i in d_star_sq_a])
+  assert approx_equal(
+    uctbx.d_star_sq_as_stol(d_star_sq_s)**2, d_star_sq_s / 4)
+  assert approx_equal(
+    uctbx.d_star_sq_as_stol(d_star_sq_a),
+    [uctbx.d_star_sq_as_stol(i) for i in d_star_sq_a])
+  assert approx_equal(
+    1/(uctbx.d_star_sq_as_d(d_star_sq_s)**2), d_star_sq_s)
+  assert approx_equal(
+    uctbx.d_star_sq_as_d(d_star_sq_a),
+    [uctbx.d_star_sq_as_d(i) for i in d_star_sq_a])
+  assert approx_equal(
+    uctbx.d_star_sq_as_two_theta(d_star_sq_s, 1.5),
+    2 * asin(1.5/2*sqrt(d_star_sq_s)))
+  assert approx_equal(
+    uctbx.d_star_sq_as_two_theta(d_star_sq_s, 1.5),
+    uctbx.d_star_sq_as_two_theta(d_star_sq_s, 1.5, False))
+  assert approx_equal(
+    uctbx.d_star_sq_as_two_theta(d_star_sq_a, 1.5),
+    [uctbx.d_star_sq_as_two_theta(i, 1.5) for i in d_star_sq_a])
+  assert approx_equal(
+    uctbx.d_star_sq_as_two_theta(d_star_sq_s, 1.5)*180/pi,
+    uctbx.d_star_sq_as_two_theta(d_star_sq_s, 1.5, True))
+  # reverse conversions
+  for d_star_sq, two_theta in zip(
+    (d_star_sq_s, d_star_sq_a),(two_theta_s, two_theta_a)):
+    assert approx_equal(
+      uctbx.stol_sq_as_d_star_sq(
+        uctbx.d_star_sq_as_stol_sq(d_star_sq)), d_star_sq)
+    assert approx_equal(
+      uctbx.two_stol_as_d_star_sq(
+        uctbx.d_star_sq_as_two_stol(d_star_sq)), d_star_sq)
+    assert approx_equal(
+      uctbx.stol_as_d_star_sq(
+        uctbx.d_star_sq_as_stol(d_star_sq)), d_star_sq)
+    assert approx_equal(
+      uctbx.d_as_d_star_sq(
+        uctbx.d_star_sq_as_d(d_star_sq)), d_star_sq)
+    assert approx_equal(
+      uctbx.two_theta_as_d_star_sq(
+        uctbx.d_star_sq_as_two_theta(d_star_sq, 1.5), 1.5), d_star_sq)
+    assert approx_equal(
+      uctbx.two_theta_as_d_star_sq(two_theta, 1.5),
+      uctbx.two_theta_as_d_star_sq(two_theta, 1.5, False))
+    assert approx_equal(
+      uctbx.two_theta_as_d_star_sq(two_theta, 1.5),
+      uctbx.two_theta_as_d_star_sq(two_theta*180/pi, 1.5, True))
+    assert approx_equal(
+      uctbx.two_theta_as_d(two_theta, 1.5),
+      uctbx.d_star_sq_as_d(uctbx.two_theta_as_d_star_sq(two_theta, 1.5)))
+    assert approx_equal(
+      uctbx.two_theta_as_d(two_theta, 1.5, True),
+      uctbx.d_star_sq_as_d(uctbx.two_theta_as_d_star_sq(two_theta, 1.5, True)))
+  #
+  assert uctbx.fractional_unit_shifts(distance_frac=[0,0,0]) == (0,0,0)
+  assert uctbx.fractional_unit_shifts([0.6,7.4,-0.4]) == (1,7,0)
+  assert uctbx.fractional_unit_shifts([-6,3,-0.6]) == (-6,3,-1)
+  site_frac_1 = [0.3,-8.6,2.1]
+  for eps,expected_u2 in [(-1.e-5, 1), (1.e-5, 2)]:
+    site_frac_2 = [-3,5.6,0.6-eps]
+    assert uctbx.fractional_unit_shifts(
+      site_frac_1=site_frac_1,
+      site_frac_2=site_frac_2) == (3, -14, expected_u2)
+
+def exercise_basic():
+  d = (1,1,1,90,90,90)
+  u = uctbx.unit_cell()
+  assert approx_equal(u.parameters(), d)
+  u = uctbx.unit_cell(d)
+  assert u.parameters() == d
+  assert approx_equal(u.parameters(), u.reciprocal_parameters())
+  assert approx_equal(u.volume(), 1)
+  assert approx_equal(u.longest_vector_sq(), 3)
+  assert approx_equal(u.shortest_vector_sq(), 1)
+  p = (2,3,4,80,100,110)
+  for i in range(7):
+    u = uctbx.unit_cell(p[:i])
+    assert u.parameters() == p[:i] + d[i:]
+    v = uctbx.unit_cell(p[:i])
+    assert v.parameters() == u.parameters()
+    if (i):
+      assert not_approx_equal(u.parameters(), u.reciprocal_parameters())
+      assert not u.is_similar_to(u.reciprocal())
+      assert not u.is_similar_to(u.reciprocal(), 1.e-3)
+      assert not u.is_similar_to(u.reciprocal(), 1.e-3, 1.e-3)
+      assert u.is_similar_to(u.reciprocal(), 1000, 180)
+    assert approx_equal(
+      u.reciprocal_parameters(), u.reciprocal().parameters())
+    assert approx_equal(
+      u.parameters(), u.reciprocal().reciprocal_parameters())
+    assert approx_equal(
+      u.reciprocal_metrical_matrix(), u.reciprocal().metrical_matrix())
+    assert approx_equal(
+      u.metrical_matrix(), u.reciprocal().reciprocal_metrical_matrix())
+    v = u.reciprocal().reciprocal()
+    assert u.is_similar_to(v, 1.e-3, 1.e-3)
+    assert approx_equal(u.volume(), 1/u.reciprocal().volume())
+  u = uctbx.unit_cell(p)
+  assert not u.is_degenerate()
+  assert not u.is_degenerate(1.e-10)
+  assert not u.is_degenerate(1.e-10, 1.e-5)
+  assert u.is_degenerate(10)
+  assert u.is_degenerate(1.e-10, 20)
+  m = u.metrical_matrix()
+  n = (2*2, 3*3, 4*4,
+       2*3*cos(110*pi/180), 2*4*cos(100*pi/180), 3*4*cos(80*pi/180))
+  assert approx_equal(m, n)
+  v = uctbx.unit_cell(metrical_matrix=m)
+  assert approx_equal(u.parameters(), v.parameters())
+  u = uctbx.unit_cell((2,3,4))
+  assert approx_equal(u.volume(), 2*3*4)
+  assert approx_equal(u.longest_vector_sq(), 2*2+3*3+4*4)
+  assert approx_equal(u.shortest_vector_sq(), 2*2)
+  u = uctbx.unit_cell(p)
+  assert approx_equal(u.volume(), 22.04006625)
+  assert approx_equal(
+    u.d_volume_d_params(),
+    (11.020033123326023, 7.3466887488840156, 5.5100165616630115,
+     0.051324088220620838, -0.051324088220620769, -0.13367230402431379))
+  for alpha in range(70,121,10):
+    for beta in range(70,121,10):
+      for gamma in range(70,121,10):
+        u = uctbx.unit_cell([7,11,13,alpha, beta, gamma])
+        v = uctbx.unit_cell(
+          orthogonalization_matrix=u.orthogonalization_matrix())
+        assert v.is_similar_to(u)
+
+def exercise_unit_cell_angles_are_feasible():
+  n = 0
+  n15 = 0
+  for a in range(0,180+10,10):
+    for b in range(0,180+10,10):
+      for g in range(0,180+10,10):
+        f = uctbx.unit_cell_angles_are_feasible(values_deg=(a,b,g))
+        if (f):
+          n += 1
+          assert uctbx.unit_cell((10,10,10,a,b,g)).volume() > 0
+        if (uctbx.unit_cell_angles_are_feasible(
+                values_deg=(a,b,g), tolerance=15)):
+          assert f
+          n15 += 1
+  assert n == 1649
+  assert n15 == 1135
+
+def exercise_frac_orth():
+  u = uctbx.unit_cell(())
+  assert approx_equal(
+    u.fractionalization_matrix(), u.orthogonalization_matrix())
+  u = uctbx.unit_cell((2,3,5))
+  assert approx_equal(
+    u.fractionalize((1,2,4)), (1/2., 2/3., 4/5.))
+  assert approx_equal(
+    u.orthogonalize((1/2., 2/3., 4/5.)), (1,2,4))
+  assert approx_equal(
+    u.fractionalize(flex.vec3_double([(1,2,4)])), [(1/2., 2/3., 4/5.)])
+  assert approx_equal(
+    u.orthogonalize(flex.vec3_double([(1/2., 2/3., 4/5.)])), [(1,2,4)])
+  assert approx_equal(
+    u.length((1/2.,2/3.,4/5.))**2, 1**2 + 2**2 + 4**2)
+  assert approx_equal(
+    u.distance((7/2.,8/3.,9/5.), (3,2,1))**2, 1**2 + 2**2 + 4**2)
+  assert approx_equal(
+    u.angle((0,0,0),(1/2.,0,0),(1,0,0)), 180.)
+  assert approx_equal(
+    u.angle((0,0,0),(1/2.,0,0),(1/2.,1/3.,0)), 90.)
+  assert approx_equal(
+    u.angle((1/2.,0,0),(1/2.,1/3.,0),(0,0,0)), 45.)
+  assert u.angle((0,0,0),(0,0,0),(1,0,0)) is None
+  assert approx_equal(
+    u.dihedral((0,0,0),(1/2.,0,0),(1/2.,0,1/5.),(1,0,1/5.)), 180.)
+  assert approx_equal(
+    u.dihedral((0,0,0),(1/2.,0,0),(1/2.,0,1/5.),(1/2.,-1/3.,1/5.)), 90.)
+  assert approx_equal(
+    u.dihedral((0,0,0),(1/2.,0,0),(1/2.,0,1/5.),(1,-1/3.,1/5.)), 135.)
+  assert approx_equal(
+    u.dihedral((0,0,0),(1/2.,0,0),(1/2.,0,1/5.),(1,1/3.,1/5.)), -135.)
+  assert u.dihedral((0,0,0),(1/2.,0,0),(1/2.,0,0),(1,0,1/5.)) is None
+  assert approx_equal(
+    u.mod_short_length((1/4.,2/3.,4/5.)),
+    u.length((1/4.,-1/3.,-1/5.)))
+  assert approx_equal(
+    u.mod_short_distance((13/4.,8/3.,9/5.), (3,2,1)),
+    u.length((1/4.,-1/3.,-1/5.)))
+  c = flex.vec3_double(((7/2.,8/3.,9/5.), (13/4.,8/3.,9/5.)))
+  assert approx_equal(
+    u.min_mod_short_distance(c, (3,2,1)),
+    u.mod_short_distance((13/4.,8/3.,9/5.), (3,2,1)))
+  #
+  u = uctbx.unit_cell((13,17,19,83,111,95))
+  fm = matrix.sqr(u.fractionalization_matrix())
+  assert ",".join(["%.3g" % e for e in fm.elems]) \
+      == "0.0769,0.00673,0.029,0,0.059,-0.00578,0,0,0.0566"
+  om = matrix.sqr(u.orthogonalization_matrix())
+  assert ",".join(["%.3g" % e for e in om.elems]) \
+      == "13,-1.48,-6.81,0,16.9,1.73,0,0,17.7"
+  gm = matrix.sqr(u.grid_index_as_site_cart_matrix(gridding=(11,13,17)))
+  pg = matrix.col((5,-7,23))
+  pf = matrix.col((5/11,-7/13,23/17))
+  assert approx_equal(u.orthogonalize(pf), om*pf)
+  assert approx_equal(gm*pg, om*pf)
+  f = flex.vec3_double(flex.random_double(size=12)*2-1)
+  c = u.orthogonalize(sites_frac=f)
+  assert approx_equal(u.fractionalize(sites_cart=c), f)
+  for fi,ci in zip(f, c):
+    assert approx_equal(u.orthogonalize(site_frac=fi), ci)
+    assert approx_equal(u.fractionalize(site_cart=ci), fi)
+    assert approx_equal(om*matrix.col(fi), ci)
+    assert approx_equal(fm*matrix.col(ci), fi)
+  #
+  s = sgtbx.rt_mx("-x,-x+y,-x+z", r_den=12)
+  assert approx_equal(u.matrix_cart(rot_mx=s.r()), [
+    -0.3622586, -0.1191822, -0.5137527,
+    -1.435689, 0.8743934, -0.5414459,
+    -1.357969, -0.1188069, 0.4878651])
+  from scitbx.math import r3_rotation_axis_and_angle_from_matrix as from_matrix
+  def check(u, sg):
+    for s in sg:
+      t = s.r().info().type()
+      c = matrix.sqr(u.matrix_cart(rot_mx=s.r()))
+      d = c.determinant()
+      assert approx_equal(abs(d), 1)
+      assert (t < 0) is (d < 0)
+      fm = from_matrix(r=c*d)
+      expected = {
+        1: [0],
+        2: [180, -180],
+        3: [120, -120],
+        4: [90, -90],
+        6: [60, -60]}[abs(t)]
+      observed = round(fm.angle(deg=True))
+      if (observed not in expected):
+        raise RuntimeError("%s not in %s (%s)" % (
+          str(observed), str(expected), s.r().as_xyz()))
+  check( # primitive settig of space group No. 230
+    u=uctbx.unit_cell([10.911236359717213]*3 + [109.47122063449069]*3),
+    sg=sgtbx.space_group("-I 4bd 2c 3 (y+z,x+z,x+y)"))
+  check( # P 6/m m m
+    u=uctbx.unit_cell((13,13,17,90,90,120)),
+    sg=sgtbx.space_group("-P 6 2"))
+
+def exercise_distance_mod_1():
+  uc = uctbx.unit_cell((9,10,12,85,95,100))
+  dm1 = uc.distance_mod_1(
+    site_frac_1=(0.2, 0.1, -0.3),
+    site_frac_2=(3.21, -6.88, 1.67))
+  assert approx_equal(dm1.diff_raw, (-3.01, 6.98, -1.97))
+  assert approx_equal(dm1.diff_mod, (-0.01, -0.02, 0.03))
+  assert approx_equal(dm1.dist_sq, 0.1645459)
+  assert dm1.unit_shifts() == (3, -7, 2)
+
+def exercise_change_basis():
+  u = uctbx.unit_cell(())
+  assert approx_equal(
+    u.parameters(),
+    u.change_basis((1,0,0, 0,1,0, 0,0,1)).parameters())
+  assert approx_equal(
+    u.parameters(),
+    u.change_basis((2,0,0, 0,2,0, 0,0,2), 2).parameters())
+  u = uctbx.unit_cell((2,3,5))
+  assert approx_equal(
+    u.change_basis((0,1,0, 0,0,1, 1,0,0)).parameters(),
+    (5,2,3,90,90,90))
+  #
+  cb_op = sgtbx.change_of_basis_op("y,z,x").inverse()
+  assert approx_equal(
+    u.change_basis(cb_op=cb_op).parameters(),
+    (5,2,3,90,90,90))
+
+def exercise_miller_index_methods():
+  u = uctbx.unit_cell((2,3,5))
+  assert u.max_miller_indices(0.5) == (4,6,10)
+  assert u.max_miller_indices(0.5, 1.e-3) == (4,6,10)
+  assert approx_equal(
+    u.d_star_sq((1,0,0)), 1/4.)
+  assert approx_equal(
+    u.d_star_sq((0,1,0)), 1/9.)
+  assert approx_equal(
+    u.d_star_sq((0,0,1)), 1/25.)
+  u = uctbx.unit_cell((2,3,5,80,100,110))
+  h = (1,2,3)
+  d_star_sq_123 = 1.39498933203
+  assert approx_equal(
+    u.d_star_sq(h), d_star_sq_123)
+  assert approx_equal(
+    u.stol_sq(h), d_star_sq_123 / 4)
+  assert approx_equal(
+    u.two_stol(h)**2, d_star_sq_123)
+  assert approx_equal(
+    u.stol(h)**2, d_star_sq_123 / 4)
+  assert approx_equal(
+    1/(u.d(h)**2), d_star_sq_123)
+  assert approx_equal(
+    u.two_theta(h, 1.5), 2 * asin(1.5/2*sqrt(d_star_sq_123)))
+  assert approx_equal(
+    u.two_theta(h, 1.5),
+    u.two_theta(h, 1.5, False))
+  assert approx_equal(
+    u.two_theta(h, 1.5)*180/pi,
+    u.two_theta(h, 1.5, True))
+  assert approx_equal(
+    pow(sin(u.two_theta(h, 1.5)),2),
+    u.sin_sq_two_theta(h, 1.5))
+  assert approx_equal(
+    sin(u.two_theta(h, 1.5)),
+    u.sin_two_theta(h, 1.5))
+  miller_indices = flex.miller_index(((1,2,3), (-3,4,-5), (2,-3,4)))
+  for d_spacing_measure in (u.d_star_sq,
+                            u.stol_sq,
+                            u.two_stol,
+                            u.stol,
+                            u.d):
+    values = d_spacing_measure(miller_indices)
+    for i,v in enumerate(values):
+      assert approx_equal(
+        v, d_spacing_measure(miller_indices[i]))
+  wavelength = 0.8
+  values = u.two_theta(miller_indices, wavelength)
+  for i,v in enumerate(values):
+    assert approx_equal(
+      v, u.two_theta(miller_indices[i], wavelength))
+  for deg in (False,True):
+    values = u.two_theta(miller_indices, wavelength, deg)
+    for i,v in enumerate(values):
+      assert approx_equal(
+        v, u.two_theta(miller_indices[i], wavelength, deg))
+  assert approx_equal(
+    u.max_d_star_sq(miller_indices),
+    u.d_star_sq((-3,4,-5)),
+    eps=1e-10)
+  assert approx_equal(
+    u.min_max_d_star_sq(miller_indices),
+    [u.d_star_sq((1,2,3)), u.d_star_sq((-3,4,-5))],
+    eps=1e-10)
+  values = u.sin_two_theta(miller_indices, wavelength)
+  for i, v in enumerate(values):
+    assert approx_equal(
+      sin(u.two_theta(miller_indices[i], wavelength)),
+      v)
+  values = u.sin_sq_two_theta(miller_indices, wavelength)
+  for i, v in enumerate(values):
+    assert approx_equal(
+      pow(sin(u.two_theta(miller_indices[i], wavelength)), 2),
+      v)
+  u = uctbx.unit_cell((2,3,5))
+  rcv = u.reciprocal_space_vector((1,1,1))
+  assert approx_equal(rcv, (0.5, 1/3., 0.2))
+  rcvs = u.reciprocal_space_vector(miller_indices)
+  assert approx_equal(rcvs,
+    [(0.5, 2/3., 0.6), (-1.5, 4/3., -1.0), (1.0, -1.0, 0.8)])
+
+def exercise_debye_waller_factor():
+  u = uctbx.unit_cell((3,4,5,85,95,105))
+  dw = u.debye_waller_factor
+  h = (1,2,3)
+  assert approx_equal(dw(miller_index=h, u_iso=0.01), 0.848878180759)
+  assert approx_equal(dw(h, b_iso=1.01), 0.810924506935)
+  assert approx_equal(dw(h, u_cart=[0.06,0.04,0.05,0.01,0.02,0.03]),
+    0.239382185855)
+  assert approx_equal(dw(h, b_cart=[1.06,1.04,1.05,1.01,1.02,1.03]),
+    0.546010240906)
+  assert approx_equal(dw(h, u_cif=[0.04,0.06,0.05,0.01,0.02,0.03]),
+    0.251706371444)
+  assert approx_equal(dw(h, u_star=[0.0004,0.0006,0.0005,0.0001,0.0002,0.0003]),
+    0.781343730547)
+  #
+  dw(h, b_iso=-250, exp_arg_limit=60)
+  dw(h, b_iso=-250, truncate_exp_arg=True)
+  try: dw(h, b_iso=-250)
+  except RuntimeError as e:
+    assert not show_diff(str(e),
+      "cctbx::adptbx::debye_waller_factor_exp:"
+      " arg_limit exceeded (isotropic): arg = 51.8763 arg_limit = 50")
+  else: raise Exception_expected
+  try: dw(h, b_cart=[-240,-240,-240,0,0,0], exp_arg_limit=40)
+  except RuntimeError as e:
+    assert not show_diff(str(e),
+      "cctbx::adptbx::debye_waller_factor_exp:"
+      " arg_limit exceeded (anisotropic): arg = 49.8013 arg_limit = 40")
+  else: raise Exception_expected
+  #
+  mi = flex.miller_index(((1,2,3), (-2,1,-3)))
+  assert approx_equal(
+    dw(miller_indices=mi, u_iso=0.01),
+    [0.8488781807585344, 0.8378216424772783])
+  assert approx_equal(
+    dw(miller_indices=mi, u_cart=[0.06,0.04,0.05,0.01,0.02,0.03]),
+    [0.2393821858545768, 0.2899416042036387])
+
+def exercise_compare():
+  u1 = uctbx.unit_cell((3,2,5,90,100,90))
+  u2 = uctbx.unit_cell((2,3,5,90,80,90))
+  assert u1.compare_orthorhombic(other=u1) == 0
+  assert u2.compare_orthorhombic(other=u2) == 0
+  assert u1.compare_orthorhombic(other=u2) == 1
+  assert u2.compare_orthorhombic(other=u1) == -1
+  assert u1.compare_monoclinic(
+    other=u1, unique_axis=1, angular_tolerance=3) == 0
+  assert u2.compare_monoclinic(
+    other=u2, unique_axis=1, angular_tolerance=3) == 0
+  assert u1.compare_monoclinic(
+    other=u2, unique_axis=1, angular_tolerance=3) == -1
+  assert u2.compare_monoclinic(
+    other=u1, unique_axis=1, angular_tolerance=3) == 1
+  #
+  u = uctbx.unit_cell((31.8764, 6.35, 22.54, 90, 135, 90))
+  c = u.change_of_basis_op_for_best_monoclinic_beta()
+  assert str(c) == "a+c,b,c"
+  assert c.c().r().den() == 12
+  assert c.c().t().den() == 144
+  u = uctbx.unit_cell((6.35, 31.8764, 16.2514, 90, 101.266, 90))
+  c = u.change_of_basis_op_for_best_monoclinic_beta()
+  assert str(c) == "a,b,c"
+  assert c.c().r().den() == 12
+  assert c.c().t().den() == 144
+
+def exercise_is_conventional_basis():
+  u = uctbx.unit_cell
+  def hex(s): return u(s).is_conventional_hexagonal_basis()
+  assert hex("10 10 11 90 90 120")
+  assert     not hex("10 11 11 90 90 120")
+  assert not hex("10 10 11 91 90 120")
+  assert not hex("10 10 11 90 89 120")
+  assert not hex("10 10 11 90 90 121")
+  def rho(s): return u(s).is_conventional_rhombohedral_basis()
+  assert     rho("10 10 10 80 80 80")
+  assert not rho("10 11 10 80 80 80")
+  assert not rho("10 10 11 80 80 80")
+  assert not rho("10 10 10 81 80 80")
+  assert not rho("10 10 10 80 81 80")
+  assert not rho("10 10 10 80 80 81")
+
+def exercise_pickle():
+  u = uctbx.unit_cell((2,3,5,80,100,110))
+  p = pickle.dumps(u)
+  v = pickle.loads(p)
+  assert u.parameters() == v.parameters()
+
+def exercise_exceptions():
+  if ("--skip" in sys.argv[1:]):
+    print("SKIPPING: exercise_exceptions")
+    return
+  try:
+    u = uctbx.unit_cell((0,0,0,0,0,0))
+  except ValueError as e:
+    assert str(e) == "Unit cell parameter is zero or negative.",\
+      str(e)
+  else:
+    raise AssertionError('exception expected')
+  try:
+    u = uctbx.unit_cell(metrical_matrix=(0,0,0,0,0,0))
+  except ValueError as e:
+    assert str(e) == "Corrupt metrical matrix.", str(e)
+  else:
+    raise AssertionError('exception expected')
+  u = uctbx.unit_cell((2,3,5,80,100,110))
+  try:
+    u.two_theta((-3,4,-5), 1.5)
+  except RuntimeError as e:
+    assert str(e).endswith("CCTBX_ASSERT(sin_theta <= 1.0) failure."), \
+      str(e)
+  else:
+    raise AssertionError('exception expected')
+
+def exercise_fast_minimum_reduction():
+  mr = uctbx.fast_minimum_reduction(uctbx.unit_cell((1,1,1,90,90,90)))
+  assert mr.iteration_limit() == 100
+  assert mr.multiplier_significant_change_test() == 16
+  assert mr.min_n_no_significant_change() == 2
+  mr = uctbx.fast_minimum_reduction(uctbx.unit_cell((1,1,1,90,90,90)), 90)
+  assert mr.iteration_limit() == 90
+  assert mr.multiplier_significant_change_test() == 16
+  assert mr.min_n_no_significant_change() == 2
+  mr = uctbx.fast_minimum_reduction(uctbx.unit_cell((1,1,1,90,90,90)), 90,8)
+  assert mr.iteration_limit() == 90
+  assert mr.multiplier_significant_change_test() == 8
+  assert mr.min_n_no_significant_change() == 2
+  mr = uctbx.fast_minimum_reduction(uctbx.unit_cell((1,1,1,90,90,90)), 90,8,4)
+  assert mr.iteration_limit() == 90
+  assert mr.multiplier_significant_change_test() == 8
+  assert mr.min_n_no_significant_change() == 4
+  mr = uctbx.fast_minimum_reduction(uctbx.unit_cell((2,3,5,80,90,100)))
+  assert approx_equal(mr.as_gruber_matrix(),(4,9,25,-5.209445,0,-2.083778))
+  assert approx_equal(mr.as_niggli_matrix(),(4,9,25,-5.209445/2,0,-2.083778/2))
+  assert approx_equal(mr.as_sym_mat3(),(4,9,25,-2.083778/2,0,-5.209445/2))
+  assert mr.as_unit_cell().is_similar_to(uctbx.unit_cell((2,3,5,100,90,100)))
+  assert approx_equal(mr.r_inv(), (-1,0,0,0,-1,0,0,0,1))
+  assert mr.n_iterations() == 1
+  assert not mr.termination_due_to_significant_change_test()
+  assert mr.type() == 2
+  mr = uctbx.fast_minimum_reduction(uctbx.unit_cell((5,3,2,50,120,130)), 8)
+  assert mr.n_iterations() == 8
+  assert not mr.termination_due_to_significant_change_test()
+  try:
+    uctbx.fast_minimum_reduction(uctbx.unit_cell((5,3,2,50,120,130)), 2, 7)
+  except RuntimeError as e:
+    assert str(e) == "cctbx Error: Iteration limit exceeded."
+  else:
+    raise AssertionError('exception expected')
+  try:
+    u = uctbx.unit_cell((2,3,5,70,120,50))
+  except Exception:
+    pass
+  else:
+    try:
+      uctbx.fast_minimum_reduction(u)
+    except RuntimeError as e:
+      if ("--Verbose" in sys.argv[1:]):
+        print("Expected:", e)
+
+class exercise_is_degenerate(object):
+
+  def __init__(self, n_iterations=None):
+    if (n_iterations is not None):
+      self.n_iterations = n_iterations
+    else:
+      if ("--hardest" in sys.argv[1:]):
+        self.n_iterations = 1000000
+      elif ("--harder" in sys.argv[1:]):
+        self.n_iterations = 100000
+      elif ("--hard" in sys.argv[1:]):
+        self.n_iterations = 10000
+      else:
+        self.n_iterations = 100
+    self.n_stable = [0,0]
+    self.n_unstable = 0
+    i_iteration = 0
+    rnd = random.random
+    while 1:
+      lengths = [rnd(), rnd(), rnd()]
+      for alpha in range(10,180,10):
+        for beta in range(10,180,10):
+          for gamma in range(10,180,10):
+            try:
+              u = uctbx.unit_cell((2,3,5,alpha,beta,gamma))
+            except Exception:
+              pass
+            else:
+              is_degenerate = u.is_degenerate(1.e-10, 1.e-5)
+              try:
+                uctbx.fast_minimum_reduction(u)
+                self.n_stable[int(is_degenerate)] += 1
+              except RuntimeError as e:
+                assert is_degenerate
+                self.n_unstable += 1
+              i_iteration += 1
+              if (i_iteration == self.n_iterations):
+                return
+
+  def report(self):
+    print("exercise_is_degenerate:")
+    s = self.n_stable[0] + self.n_stable[1]
+    n = self.n_iterations*0.01
+    print("  n_stable:", s, self.n_stable, "= %.3g%%" % (s/n))
+    print("  n_unstable:", self.n_unstable, "= %.3g%%" % (self.n_unstable/n))
+
+def exercise_similarity_transformations():
+  reference = uctbx.unit_cell(
+    (79.61, 86.07, 96.9986, 89.3203, 65.7721, 62.4533))
+  others = [uctbx.unit_cell(params) for params in [
+    (79, 85.6519, 97.0483, 89.6713, 65.9826, 62.5374),
+    (79, 85.6519, 97.0483, 68.3049, 65.9826, 62.5374)]]
+  expected_transformations = [
+    [(1, 0, 0, 0, 1, 0, 0, 0, 1), (1, 1, 1, 0, -1, 0, 0, 0, -1)],
+    [(-1, 0, -1, 0, -1, 0, 0, 0, 1), (-1, -1, 0, 0, 1, 0, 0, 0, -1)]
+  ]
+  for other,expected in zip(others, expected_transformations):
+    transformations = reference.similarity_transformations(
+      other=other,
+      relative_length_tolerance=0.02,
+      absolute_angle_tolerance=2,
+      unimodular_generator_range=1)
+    assert list(transformations) == expected
+
+def unit_cell_bases_mean_square_difference(self, other):
+  diff_sqs = flex.double()
+  for basis_vector in [(1,0,0),(0,1,0),(0,0,1)]:
+    self_v = matrix.col(self.orthogonalize(basis_vector))
+    other_v = matrix.col(other.orthogonalize(basis_vector))
+    diff_sqs.append((self_v - other_v).norm_sq())
+  return flex.mean(diff_sqs)
+
+def exercise_bases_rmsd():
+  unit_cells = [uctbx.unit_cell(params) for params in [
+    (79, 85.6519, 97.0483, 89.6713, 65.9826, 62.5374),
+    (79, 85.6519, 97.0483, 68.3049, 65.9826, 62.5374),
+    (110, 58.4, 69.2, 90, 127, 90),
+    (56.48, 56.48, 182.39, 90, 90, 120)]]
+  for cell_a in unit_cells:
+    for cell_b in unit_cells:
+      v_cpp = cell_a.bases_mean_square_difference(cell_b)
+      v_py = unit_cell_bases_mean_square_difference(cell_a, cell_b)
+      assert approx_equal(v_cpp, v_py)
+      if (cell_a is cell_b):
+        assert approx_equal(v_cpp, 0)
+
+def exercise_box_frac_around_sites():
+  unit_cell = uctbx.unit_cell((10,10,10,90,90,120))
+  buffer = 2
+  sites_frac = flex.vec3_double([
+    (1/2., 2/3., 0.),
+    (1/2., 1/3., 0.)])
+  min_, max_ = unit_cell.box_frac_around_sites(
+    sites_frac=sites_frac, buffer=buffer)
+  assert approx_equal(min_, (0.26905989232414967, 0.10239322565748302, -0.2))
+  assert approx_equal(max_, (0.73094010767585038, 0.8976067743425169, 0.2))
+  sites_cart = unit_cell.orthogonalize(sites_frac=sites_frac)
+  min_, max_ = sites_cart.min(), sites_cart.max()
+  min_ = unit_cell.fractionalize([m-buffer for m in min_])
+  max_ = unit_cell.fractionalize([m+buffer for m in max_])
+  assert approx_equal(min_, (0.017863279495408259, 0.10239322565748302, -0.2))
+  assert approx_equal(max_, (0.98213672050459189, 0.8976067743425169, 0.2))
+  unit_cells = [uctbx.unit_cell(params) for params in [
+    (10, 15, 20, 90,  90,  90),
+    (10, 10, 20, 90,  90, 120),
+    (10, 10, 10, 60,  60,  60)]]
+  sites_cart = flex.vec3_double([
+    (2.23474, 8.72834, 4.70562),
+    (3.72656, 3.28621, 9.19121),
+    (-6.83519, -7.5707, 4.62386)])
+  c_inv_rs = [(1,0,0, 0,1,0, 0,0,1),
+              (0,1,0, 0,0,1, 1,0,0),
+              (0,0,1, 1,0,0, 0,1,0)]
+  for unit_cell_0 in unit_cells:
+    for c_inv_r in c_inv_rs:
+      unit_cell = unit_cell_0.change_basis(c_inv_r)
+      sites_frac = unit_cell.fractionalize(sites_cart=sites_cart)
+      min0, max0 = unit_cell.box_frac_around_sites(
+        sites_cart=sites_cart)
+      for x,y in zip(min0, max0): assert x < y
+      for buffer in [None, 0]:
+        min_, max_ = unit_cell.box_frac_around_sites(
+          sites_cart=sites_cart, buffer=buffer)
+        assert approx_equal(min_, min0)
+        assert approx_equal(max_, max0)
+        min_, max_ = unit_cell.box_frac_around_sites(
+          sites_frac=sites_frac, buffer=buffer)
+        assert approx_equal(min_, min0)
+        assert approx_equal(max_, max0)
+      for buffer in [0,3,5,7]:
+        min0, max0 = unit_cell.box_frac_around_sites(
+          sites_cart=sites_cart, buffer=buffer)
+        for x,y in zip(min0, max0): assert x < y
+        min_, max_ = unit_cell.box_frac_around_sites(
+          sites_frac=sites_frac, buffer=buffer)
+        assert approx_equal(min_, min0)
+        assert approx_equal(max_, max0)
+        min_, max_ = sites_cart.min(), sites_cart.max()
+        min_ = unit_cell.fractionalize([m-buffer for m in min_])
+        max_ = unit_cell.fractionalize([m+buffer for m in max_])
+        if (unit_cell_0 is unit_cells[0]):
+          assert approx_equal(min_, min0)
+          assert approx_equal(max_, max0)
+        elif (buffer == 0 and unit_cell_0 is unit_cells[1]):
+          assert approx_equal(min_, min0)
+          if (c_inv_r is c_inv_rs[2]):
+            assert approx_equal(max_, max0)
+          else:
+            assert not_approx_equal(max_, max0)
+        else:
+          assert not_approx_equal(min_, min0)
+          assert not_approx_equal(max_, max0)
+
+def exercise_non_crystallographic_unit_cell_with_the_sites_in_its_center():
+  sites_cart = flex.vec3_double([(-5.,-5.,-5.)])
+  box = uctbx.non_crystallographic_unit_cell_with_the_sites_in_its_center(
+                    sites_cart   = sites_cart,
+                    buffer_layer = 5)
+  assert approx_equal(box.unit_cell.parameters(), (10, 10, 10, 90, 90, 90))
+  assert approx_equal(box.sites_cart, [(5.0, 5.0, 5.0)])
+  assert box.crystal_symmetry().space_group_info().type().number() == 1
+
+def exercise_tensor_rank_2_orth_and_frac_linear_maps():
+  from cctbx import adptbx, sgtbx
+  p1 = sgtbx.space_group_info('P1')
+  for i in range(100):
+    uc = p1.any_compatible_unit_cell(27)
+    u_star = matrix.col.random(n=6, a=0, b=1)
+    u_iso_ref = adptbx.u_star_as_u_iso(uc, u_star)
+    u_iso = matrix.col(uc.u_star_to_u_iso_linear_form()).dot(u_star)
+    assert approx_equal(u_iso, u_iso_ref, eps=1e-15)
+    u_cart_ref = adptbx.u_star_as_u_cart(uc, u_star)
+    u_cart = matrix.sqr(uc.u_star_to_u_cart_linear_map()) * u_star
+    assert approx_equal(u_cart, u_cart_ref, eps=1e-15)
+    u_cif_ref = adptbx.u_star_as_u_cif(uc, u_star)
+    u_cif = matrix.diag(uc.u_star_to_u_cif_linear_map())*(u_star)
+    assert approx_equal(u_cif, u_cif_ref)
+
+def exercise_d_metrical_matrix_d_params():
+  def finite_differences(unit_cell, eps=1e-6):
+    grads = []
+    for i in range(6):
+      params = list(unit_cell.parameters())
+      params[i] += eps
+      uc = uctbx.unit_cell(parameters=params)
+      qm = matrix.col(uc.metrical_matrix())
+      params[i] -= 2*eps
+      uc = uctbx.unit_cell(parameters=params)
+      qp = matrix.col(uc.metrical_matrix())
+      dq = (qm-qp)/(2*eps)
+      grads.extend(list(dq))
+    grads = flex.double(grads)
+    grads.resize(flex.grid((6,6)))
+    return grads.matrix_transpose()
+  p1 = sgtbx.space_group_info('P1')
+  uc = p1.any_compatible_unit_cell(27)
+  grads = uc.d_metrical_matrix_d_params()
+  fd_grads = finite_differences(uc)
+  assert approx_equal(grads, fd_grads)
+  sgi = sgtbx.space_group_info('I-4')
+  uc = sgi.any_compatible_unit_cell(volume=18000)
+  grads = uc.d_metrical_matrix_d_params()
+  fd_grads = finite_differences(uc)
+  assert approx_equal(grads, fd_grads)
+
+def exercise_downstream_methods():
+  uc = uctbx.unit_cell((10,10,10,90,90,90))
+  assert str(uc.lattice_symmetry_group().info()) == "P 4 3 2"
+  for anomalous_flag in [False, True]:
+    ms = uc.complete_miller_set_with_lattice_symmetry(
+      d_min=2-1e-6, anomalous_flag=anomalous_flag)
+    assert str(ms.space_group_info()) == "P 4 3 2"
+    if (anomalous_flag):
+      assert ms.indices().size() == 28
+    else:
+      assert ms.indices().size() == 26
+
+def exercise_unit_cell_format():
+  sgi = sgtbx.space_group_info('P1')
+  uc = sgi.any_compatible_unit_cell(volume=1000)
+  s = str(uc)
+  assert s == '(8.52593, 11.0837, 14.4941, 83, 109, 129)', s
+  s = format(uc, '{:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}')
+  assert s == '8.53 11.08 14.49 83.00 109.00 129.00', s
+
+def exercise_unit_cell_repr():
+  sgi = sgtbx.space_group_info('P1')
+  uc = sgi.any_compatible_unit_cell(volume=1000)
+  assert eval(repr(uc)).is_similar_to(uc, 1e-8, 1e-3)
+
+
+def run():
+  exercise_unit_cell_repr()
+  exercise_unit_cell_format()
+  exercise_d_metrical_matrix_d_params()
+  exercise_tensor_rank_2_orth_and_frac_linear_maps()
+  exercise_non_crystallographic_unit_cell_with_the_sites_in_its_center()
+  exercise_functions()
+  exercise_basic()
+  exercise_unit_cell_angles_are_feasible()
+  exercise_frac_orth()
+  exercise_distance_mod_1()
+  exercise_change_basis()
+  exercise_miller_index_methods()
+  exercise_debye_waller_factor()
+  exercise_compare()
+  exercise_is_conventional_basis()
+  exercise_pickle()
+  exercise_exceptions()
+  exercise_fast_minimum_reduction()
+  exercise_similarity_transformations()
+  exercise_bases_rmsd()
+  exercise_box_frac_around_sites()
+  exercise_downstream_methods()
+  e = exercise_is_degenerate()
+  if (e.n_iterations > 100):
+    e.report()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/determine_unit_cell/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+try:
+    bp.import_ext("determine_unit_cell_ext")
+except ImportError:
+    print("Cannot import the boost-bound NCDist module. Are you sure that NCDist.h is in the source tree, and that you have rebuilt?")
+from determine_unit_cell_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/gruber_1973.py
+from __future__ import absolute_import, division, print_function
+from cctbx.uctbx.reduction_base import iteration_limit_exceeded
+from cctbx.uctbx.reduction_base import reduction_base
+from cctbx.uctbx.reduction_base import minimum_reduction_mixin
+from cctbx import uctbx
+from scitbx import matrix
+from six.moves import zip
+
+def entier(x):
+  "greatest integer which is not greater than x"
+  result = int(x)
+  if (x-result < 0): result -= 1
+  if (not (x-result < 1)): result += 1 # work around rounding errors
+  return result
+
+class reduction(reduction_base):
+
+  def __init__(self, unit_cell, relative_epsilon=None, iteration_limit=None):
+    reduction_base.__init__(self, unit_cell, relative_epsilon, iteration_limit)
+    while (self.step()): pass
+
+  def _name(self):
+    return "Gruber"
+
+  def step(s):
+    eq = s.eps_eq
+    gt = s.eps_gt
+    # N1
+    if (gt(s.a, s.b) or (eq(s.a, s.b) and gt(abs(s.d), abs(s.e)))):
+      s.n1_action()
+    # N2
+    if (gt(s.b, s.c) or (eq(s.b, s.c) and gt(abs(s.e), abs(s.f)))):
+      s.n2_action()
+      return True
+    # N3
+    if (s.def_gt_0()):
+      s.n3_true_action()
+    else:
+      s.n3_false_action()
+    if (s.b2_action()): return True
+    if (s.b3_action()): return True
+    if (s.b4_action()): return True
+    if (s.b5_action()): return True
+    return False
+
+  def b2_action(s):
+    if (not s.eps_gt(abs(s.d), s.b)): return False
+    j = entier((s.d+s.b)/(2*s.b))
+    if (j == 0): return False
+    s.cb_update((1,0,0,0,1,-j,0,0,1))
+    s.c += j*j*s.b - j*s.d
+    s.d -= 2*j*s.b
+    s.e -= j*s.f
+    assert s.c > 0
+    return True
+
+  def b3_action(s):
+    if (not s.eps_gt(abs(s.e), s.a)): return False
+    j = entier((s.e+s.a)/(2*s.a))
+    if (j == 0): return False
+    s.cb_update((1,0,-j,0,1,0,0,0,1))
+    s.c += j*j*s.a - j*s.e
+    s.d -= j*s.f
+    s.e -= 2*j*s.a
+    assert s.c > 0
+    return True
+
+  def b4_action(s):
+    if (not s.eps_gt(abs(s.f), s.a)): return False
+    j = entier((s.f+s.a)/(2*s.a))
+    if (j == 0): return False
+    s.cb_update((1,-j,0,0,1,0,0,0,1))
+    s.b += j*j*s.a - j*s.f
+    s.d -= j*s.e
+    s.f -= 2*j*s.a
+    assert s.b > 0
+    return True
+
+  def b5_action(s):
+    de = s.d + s.e
+    fab = s.f + s.a + s.b
+    if (not s.eps_lt(de+fab, 0)): return False
+    j = entier((de+fab)/(2*fab))
+    if (j == 0): return False
+    s.cb_update((1,0,-j,0,1,-j,0,0,1))
+    s.c += j*j*fab-j*de
+    s.d -= j*(2*s.b+s.f)
+    s.e -= j*(2*s.a+s.f)
+    assert s.c > 0
+    return True
+
+class minimum_reduction(minimum_reduction_mixin, reduction):
+  """Development and regression test code. Do not use for applications.
+     Use uctbx.fast_minimum_reduction instead.
+  """
+
+  def __init__(self, unit_cell, iteration_limit=None):
+    minimum_reduction_mixin.__init__(self, unit_cell, iteration_limit)
+
+  def n3_false_action(self):
+    reduction.n3_false_action(self)
+    if (not self.significant_change_test()):
+      raise StopIteration
+
+class fast_minimum_reduction(object):
+  """Development and regression test code. Do not use for applications.
+     Use uctbx.fast_minimum_reduction instead.
+  """
+
+  def __init__(self, unit_cell, iteration_limit=None,
+                                multiplier_significant_change_test=16,
+                                min_n_no_significant_change=2):
+    if (iteration_limit is None):
+      self._iteration_limit = 100
+    else:
+      self._iteration_limit = iteration_limit
+    self.multiplier_significant_change_test=multiplier_significant_change_test
+    self.min_n_no_significant_change=min_n_no_significant_change
+    sym_mat3 = unit_cell.metrical_matrix()
+    self.a = sym_mat3[0]
+    self.b = sym_mat3[1]
+    self.c = sym_mat3[2]
+    self.d = 2*sym_mat3[5]
+    self.e = 2*sym_mat3[4]
+    self.f = 2*sym_mat3[3]
+    self._r_inv = matrix.sqr((1,0,0,0,1,0,0,0,1))
+    self._n_iterations = 0
+    self._n_no_significant_change = 0
+    self._last_abc_significant_change_test = (-self.a,-self.b,-self.c)
+    while (self.step()): pass
+
+  def as_gruber_matrix(self):
+    return (self.a, self.b, self.c, self.d, self.e, self.f)
+
+  def as_niggli_matrix(self):
+    return (self.a, self.b, self.c, self.d/2, self.e/2, self.f/2)
+
+  def as_sym_mat3(self):
+    return (self.a, self.b, self.c, self.f/2, self.e/2, self.d/2)
+
+  def as_unit_cell(self):
+    return uctbx.unit_cell(metrical_matrix=self.as_sym_mat3())
+
+  def iteration_limit(self):
+    return self._iteration_limit
+
+  def r_inv(self):
+    return self._r_inv
+
+  def n_iterations(self):
+    return self._n_iterations
+
+  def def_test(s):
+    n_zero = 0
+    n_positive = 0
+    if (0 < s.d): n_positive += 1
+    elif (not s.d < 0): n_zero += 1
+    if (0 < s.e): n_positive += 1
+    elif (not s.e < 0): n_zero += 1
+    if (0 < s.f): n_positive += 1
+    elif (not s.f < 0): n_zero += 1
+    return n_zero, n_positive
+
+  def def_gt_0(self):
+    n_zero, n_positive = self.def_test()
+    return n_positive == 3 or (n_zero == 0 and n_positive == 1)
+
+  def type(self):
+    n_zero, n_positive = self.def_test()
+    if (n_positive == 3): return 1
+    if (n_positive == 0): return 2
+    return 0
+
+  def step(s):
+    # N1
+    if (s.b < s.a):
+      s.n1_action()
+    # N2
+    if (s.c < s.b):
+      s.n2_action()
+      return True
+    # N3
+    if (s.def_gt_0()):
+      s.n3_true_action()
+    else:
+      s.n3_false_action()
+      if (not s.significant_change_test()):
+        return False
+    if (s.b2_action()): return True
+    if (s.b3_action()): return True
+    if (s.b4_action()): return True
+    if (s.b5_action()): return True
+    return False
+
+  def significant_change_test(self):
+    abc = (self.a,self.b,self.c)
+    m = self.multiplier_significant_change_test
+    change = tuple([(new*m+(new-last))-new*m
+      for new,last in zip(abc, self._last_abc_significant_change_test)])
+    if (change == (0,0,0)):
+      self._n_no_significant_change += 1
+      if (self._n_no_significant_change >= self.min_n_no_significant_change):
+        return False
+    else:
+      self._n_no_significant_change = 0
+    self._last_abc_significant_change_test = abc
+    return True
+
+  def cb_update(self, m_elems):
+    if (self._n_iterations == self._iteration_limit):
+      raise iteration_limit_exceeded(
+        "Gruber iteration limit exceeded (limit=%d)."
+        % self._iteration_limit)
+    self._r_inv *= matrix.sqr(m_elems)
+    self._n_iterations += 1
+
+  def n1_action(self):
+    self.cb_update((0,-1,0, -1,0,0, 0,0,-1))
+    self.a, self.b = self.b, self.a
+    self.d, self.e = self.e, self.d
+
+  def n2_action(self):
+    self.cb_update((-1,0,0, 0,0,-1, 0,-1,0))
+    self.b, self.c = self.c, self.b
+    self.e, self.f = self.f, self.e
+
+  def n3_true_action(s):
+    i,j,k = 1,1,1
+    if (s.d < 0): i = -1
+    if (s.e < 0): j = -1
+    if (s.f < 0): k = -1
+    s.cb_update((i,0,0, 0,j,0, 0,0,k))
+    s.d = abs(s.d)
+    s.e = abs(s.e)
+    s.f = abs(s.f)
+
+  def n3_false_action(s):
+    f = [1,1,1]
+    z = -1
+    if (0 < s.d): f[0] = -1
+    elif (not s.d < 0): z = 0
+    if (0 < s.e): f[1] = -1
+    elif (not s.e < 0): z = 1
+    if (0 < s.f): f[2] = -1
+    elif (not s.f < 0): z = 2
+    if (f[0]*f[1]*f[2] < 0):
+      assert z != -1
+      f[z] = -1
+    s.cb_update((f[0],0,0, 0,f[1],0, 0,0,f[2]))
+    s.d = -abs(s.d)
+    s.e = -abs(s.e)
+    s.f = -abs(s.f)
+
+  def b2_action(s):
+    if (not s.b < abs(s.d)): return False
+    j = entier((s.d+s.b)/(2*s.b))
+    if (j == 0): return False
+    s.cb_update((1,0,0,0,1,-j,0,0,1))
+    s.c += j*j*s.b - j*s.d
+    s.d -= 2*j*s.b
+    s.e -= j*s.f
+    assert 0 < s.c
+    return True
+
+  def b3_action(s):
+    if (not s.a < abs(s.e)): return False
+    j = entier((s.e+s.a)/(2*s.a))
+    if (j == 0): return False
+    s.cb_update((1,0,-j,0,1,0,0,0,1))
+    s.c += j*j*s.a - j*s.e
+    s.d -= j*s.f
+    s.e -= 2*j*s.a
+    assert 0 < s.c
+    return True
+
+  def b4_action(s):
+    if (not s.a < abs(s.f)): return False
+    j = entier((s.f+s.a)/(2*s.a))
+    if (j == 0): return False
+    s.cb_update((1,-j,0,0,1,0,0,0,1))
+    s.b += j*j*s.a - j*s.f
+    s.d -= j*s.e
+    s.f -= 2*j*s.a
+    assert 0 < s.b
+    return True
+
+  def b5_action(s):
+    de = s.d + s.e
+    fab = s.f + s.a + s.b
+    if (not de+fab < 0): return False
+    j = entier((de+fab)/(2*fab))
+    if (j == 0): return False
+    s.cb_update((1,0,-j,0,1,-j,0,0,1))
+    s.c += j*j*fab-j*de
+    s.d -= j*(2*s.b+s.f)
+    s.e -= j*(2*s.a+s.f)
+    assert 0 < s.c
+    return True
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/gruber_1973_table_1.py
+from __future__ import absolute_import, division, print_function
+from scitbx import matrix
+
+raw_mk2 = """
+N
+100/110/00m
+N
+110/010/00m
+N
+100/1m0/001
+110/100/00m
+N
+100/0m0/101
+N
+100/010/10m
+N
+100/0m0/101
+N
+100/0m0/101
+N
+100/0m0/101
+N
+100/1m0/001
+N
+100/110/00m
+N
+100/0m0/0mm
+100/0m0/101
+N
+100/110/00m
+N
+100/0mm/00m
+100/110/00m
+N
+100/0m0/0mm
+N
+100/0mm/00m
+N
+100/010/mmm
+N
+100/mmm/001
+N
+100/010/01m
+100/0mm/0m0
+N
+100/mmm/010
+100/010/mmm
+N
+100/010/01m
+100/0mm/0m0
+100/110/111
+100/110/00m
+N
+100/010/01m
+N
+100/010/mmm
+N
+100/010/01m
+100/110/111
+100/110/00m
+N
+100/110/00m
+N
+100/0m0/0mm
+N
+100/0m0/101
+N
+100/0m0/101
+N
+100/110/00m
+"""
+
+raw_type_conditions = """
+01:a=b<=c|a<b=c:q,q,a
+02:a=b<=c:q/2,q,a
+03:a=b<=c:q-p/2,q,a
+04:a<=b<c:q,a,q
+05:q<a=b<c|a<b<c:q-p/2,a,q
+06:a=b<c:q,a,q/2
+07:a=b<c:q,a,p/2
+08:a=b<c:q,a,q-p/2
+09:a<b=c|q<a<b<c:q-p/2,q,a
+10:a<b<=c:b+m*(p-q),p,a
+11:q=a<b=c|a<b<c:b,a,q
+12:a<b=c:n*p+q,q,a
+13:a<b=c:b,a/2,a
+14:q<a<b=c:b,q,q
+15:q<a<b=c:b,q/2,q
+16:q<a<b=c:-b+a-2*q/3,-a+q/3,-a+q/3
+17:q<a<b=c:-b+a/2-q/6,-a/2-q/6,-a+q/3
+18:q<a<b=c:b,q-p/2,q
+19:q<a<b=c:-b+a-p/6-q/2,-a-p/6+q/2,-a+p/3
+20:q<a<b=c:b,a-q/2,a
+21:q<a<b<c:b,q-p/2,q
+22:q<a<b<c:-b+a+p/2-q,-a+p/2,-a-p+q
+23:q<a<b<c:b,a-q/2,a
+24:a<b<c:b,a/2,a
+25:a<b<c:b,a+p-q,p
+26:a<b<c:n*p+q,a,q
+27:a<b<c:b+m*(p-q),a,p
+28:a<b<c:b+p-m*q,a+p-q,a
+"""
+
+def get_mk2_sets():
+  sets = {}
+  k = 0
+  set = []
+  for line in raw_mk2.split():
+    if (line == "N"):
+      if (k): sets[k] = set
+      k += 1
+      set = []
+      continue
+    assert line[3] == "/"
+    assert line[7] == "/"
+    m = []
+    for e in line.replace("/",""):
+      if   (e == "0"): m.append(0)
+      elif (e == "1"): m.append(1)
+      elif (e == "m"): m.append(-1)
+      else:
+        raise RuntimeError("Corrupt internal table.")
+    m = matrix.sqr(m)
+    assert abs(m.determinant()) == 1, (line, m.elems, m.determinant())
+    set.append(m)
+  assert k == 28
+  sets[k] = set
+  return sets
+
+class type_conditions(object):
+
+  def __init__(self, ck_types, defks):
+    self.ck_types = ck_types
+    self.defks = defks
+
+def get_type_conditions():
+  result = {}
+  k = 0
+  for line in raw_type_conditions.split():
+    k += 1
+    k_ctrl,cks,defks = line.split(":")
+    assert int(k_ctrl) == k
+    result[k] = type_conditions(cks.split("|"), defks)
+  assert k == 28
+  return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/krivy_gruber_1976.py
+from __future__ import absolute_import, division, print_function
+from cctbx.uctbx.reduction_base import iteration_limit_exceeded # implicit import
+from cctbx.uctbx.reduction_base import reduction_base
+from cctbx.uctbx.reduction_base import minimum_reduction_mixin
+
+class reduction(reduction_base):
+
+  def __init__(self, unit_cell, relative_epsilon=None, iteration_limit=None):
+    reduction_base.__init__(self, unit_cell, relative_epsilon, iteration_limit)
+    while (self.step()): pass
+
+  def _name(self):
+    return "Krivy-Gruber"
+
+  def step(s):
+    eq = s.eps_eq
+    lt = s.eps_lt
+    gt = s.eps_gt
+    # A1
+    if (gt(s.a, s.b) or (eq(s.a, s.b) and gt(abs(s.d), abs(s.e)))):
+      s.a1_action()
+    # A2
+    if (gt(s.b, s.c) or (eq(s.b, s.c) and gt(abs(s.e), abs(s.f)))):
+      s.a2_action()
+      return True
+    # A3
+    if (s.def_gt_0()):
+      s.a3_action()
+    # A4
+    else:
+      s.a4_action()
+    # A5
+    if (gt(abs(s.d), s.b)
+        or (eq(s.d, s.b) and lt(s.e+s.e, s.f))
+        or (eq(s.d, -s.b) and lt(s.f, 0))):
+      s.a5_action()
+      return True
+    # A6
+    if (gt(abs(s.e), s.a)
+        or (eq(s.e, s.a) and lt(s.d+s.d, s.f))
+        or (eq(s.e, -s.a) and lt(s.f, 0))):
+      s.a6_action()
+      return True
+    # A7
+    if (gt(abs(s.f), s.a)
+        or (eq(s.f, s.a) and lt(s.d+s.d, s.e))
+        or (eq(s.f, -s.a) and lt(s.e, 0))):
+      s.a7_action()
+      return True
+    # A8
+    if (lt(s.d+s.e+s.f+s.a+s.b, 0)
+        or (eq(s.d+s.e+s.f+s.a+s.b, 0) and gt(s.a+s.a+s.e+s.e+s.f, 0))):
+      s.a8_action()
+      return True
+    return False
+
+  def a1_action(s):
+    s.n1_action()
+
+  def a2_action(s):
+    s.n2_action()
+
+  def a3_action(s):
+    s.n3_true_action()
+
+  def a4_action(s):
+    s.n3_false_action()
+
+  def a5_action(s):
+    if (s.d > 0):
+      s.cb_update((1,0,0,0,1,-1,0,0,1))
+      s.c += s.b - s.d
+      s.d -= s.b + s.b
+      s.e -= s.f
+    else:
+      s.cb_update((1,0,0,0,1,1,0,0,1))
+      s.c += s.b + s.d
+      s.d += s.b + s.b
+      s.e += s.f
+    assert s.c > 0
+
+  def a6_action(s):
+    if (s.e > 0):
+      s.cb_update((1,0,-1,0,1,0,0,0,1))
+      s.c += s.a - s.e
+      s.d -= s.f
+      s.e -= s.a + s.a
+    else:
+      s.cb_update((1,0,1,0,1,0,0,0,1))
+      s.c += s.a + s.e
+      s.d += s.f
+      s.e += s.a + s.a
+    assert s.c > 0
+
+  def a7_action(s):
+    if (s.f > 0):
+      s.cb_update((1,-1,0,0,1,0,0,0,1))
+      s.b += s.a - s.f
+      s.d -= s.e
+      s.f -= s.a + s.a
+    else:
+      s.cb_update((1,1,0,0,1,0,0,0,1))
+      s.b += s.a + s.f
+      s.d += s.e
+      s.f += s.a + s.a
+    assert s.b > 0
+
+  def a8_action(s):
+    s.cb_update((1,0,1,0,1,1,0,0,1))
+    s.c += s.a+s.b+s.d+s.e+s.f
+    s.d += s.b+s.b+s.f
+    s.e += s.a+s.a+s.f
+    assert s.c > 0
+
+class minimum_reduction(minimum_reduction_mixin, reduction):
+  """Development and regression test code. Do not use for applications.
+     Use uctbx.fast_minimum_reduction instead.
+  """
+
+  def __init__(self, unit_cell, iteration_limit=None):
+    minimum_reduction_mixin.__init__(self, unit_cell, iteration_limit)
+
+  def a4_action(self):
+    reduction.a4_action(self)
+    if (not self.significant_change_test()):
+      raise StopIteration
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/lrl/match_lattices.py
+from __future__ import division
+import cctbx_uctbx_lrl_ext as ext
+
+def get_input():
+  import sys
+  if len(sys.argv) > 1:
+    with open(sys.argv[1]) as f:
+      result = [l.strip() for l in f.readlines()]
+  else:
+    inp = sys.stdin.readline()
+    result = []
+    while inp.lower() != 'end':
+      result.append(inp.strip())
+      inp = sys.stdin.readline()
+  return result
+
+def selling_reduce(reader, mat=None):
+  lc = ext.LatticeConverter
+  if mat is None: mat = ext.MatS6()
+  lat, cell = reader.GetLattice(), reader.GetCell()
+  result = lc.SellingReduceCell(lat, cell, mat)
+  return result
+
+
+inputs = get_input()
+input_readers = []
+for inp in inputs:
+  reader = ext.LRL_ReadLatticeData()
+  reader.CellReader(inp)
+  input_readers.append(reader)
+
+mat_reference = ext.MatS6()
+selling_reduce(input_readers[0], mat=mat_reference)
+mat_reference = ext.MatS6.Inverse(mat_reference)
+
+vLat = [] # These are the input lattices, Selling reduced
+for reader in input_readers:
+  vLat.append(ext.S6(selling_reduce(reader)))
+
+lm = ext.LRL_LatticeMatcher()
+lm.SetReferenceLattice(vLat[0])
+
+vs = []
+for lat in vLat:
+  match = lm.MatchReference(lat)
+  vs.append(mat_reference*match)
+
+DC_ref = ext.DC(vLat[0])
+for i, (s6, lat) in enumerate(zip(vs, vLat)):
+  #distDC = ext.DC.DistanceBetween(DC_ref, ext.DC(lat))
+  print(i, ' ', ext.LRL_Cell_Degrees(s6))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/lrl/tst_match_lattices.py
+from __future__ import division
+import os
+import tempfile
+import libtbx
+import libtbx.load_env
+from libtbx.easy_run import fully_buffered
+
+
+def run():
+  lrl_path = libtbx.env.find_in_repositories('cctbx_project/cctbx/uctbx/lrl')
+  ml_path = os.path.join(lrl_path, 'match_lattices.py')
+
+  inputs = [
+      "r 57.98 57.98 57.98 92.02 92.02 92.02",
+      "r 57.98 57.98 57.98 92.02 92.02 92.02",
+      "h 80.36 80.36 99.44 90 90 120",
+      "c 80.95 80.57 57.1 90 90.35 90",
+      "h 80.36 80.36 99.44 90 90 120",
+      "r 57.1 57.1 57.1 89.75 89.75 89.75",
+      ]
+  inp_file = tempfile.NamedTemporaryFile(mode='w')
+  for line in inputs: inp_file.write(line + '\n')
+  inp_file.flush()
+
+  outputs = [
+      "0    57.98000  57.98000  57.98000  92.02000  92.02000  92.02000",
+      "1    57.98000  57.98000  57.98000  92.02000  92.02000  92.02000",
+      "2    57.01998  57.01998  57.01998  89.60502  90.39498  90.39498",
+      "3    57.10000  57.10610  57.10610  90.26959  89.75193  90.24807",
+      "4    57.01998  57.01998  57.01998  89.60502  90.39498  90.39498",
+      "5    57.10000  57.10000  57.10000  90.25000  89.75000  90.25000",
+  ]
+
+  command = "libtbx.python %s %s" %(ml_path, inp_file.name)
+  result = fully_buffered(command).raise_if_errors().stdout_lines[-6:]
+
+  for l, ref in zip(result, outputs):
+    assert l.strip()==ref
+
+  inp_file.close()
+
+if __name__ == "__main__":
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/uctbx/reduction_base.py
+from __future__ import absolute_import, division, print_function
+from cctbx import uctbx
+from scitbx import matrix
+from six.moves import zip
+
+class gruber_parameterization(object):
+
+  def __init__(self, unit_cell, relative_epsilon=None):
+    if (relative_epsilon is None): relative_epsilon = 1.e-5
+    sym_mat3 = unit_cell.metrical_matrix()
+    self.a = sym_mat3[0]
+    self.b = sym_mat3[1]
+    self.c = sym_mat3[2]
+    self.d = 2*sym_mat3[5]
+    self.e = 2*sym_mat3[4]
+    self.f = 2*sym_mat3[3]
+    self.epsilon = unit_cell.volume()**(1/3.) * relative_epsilon
+
+  def as_gruber_matrix(self):
+    return (self.a, self.b, self.c, self.d, self.e, self.f)
+
+  def as_niggli_matrix(self):
+    return (self.a, self.b, self.c, self.d/2, self.e/2, self.f/2)
+
+  def as_sym_mat3(self):
+    return (self.a, self.b, self.c, self.f/2, self.e/2, self.d/2)
+
+  def as_unit_cell(self):
+    return uctbx.unit_cell(metrical_matrix=self.as_sym_mat3())
+
+  def eps_lt(self, x, y):
+    return x < y - self.epsilon
+
+  def eps_gt(self, x, y):
+    return self.eps_lt(y, x)
+
+  def eps_eq(self, x, y):
+    return not (self.eps_lt(x, y) or self.eps_lt(y, x))
+
+  def def_test(self):
+    lt = self.eps_lt
+    d,e,f = (self.d,self.e,self.f)
+    n_zero = 0
+    n_positive = 0
+    if (lt(0, d)): n_positive += 1
+    elif (not lt(d, 0)): n_zero += 1
+    if (lt(0, e)): n_positive += 1
+    elif (not lt(e, 0)): n_zero += 1
+    if (lt(0, f)): n_positive += 1
+    elif (not lt(f, 0)): n_zero += 1
+    return n_zero, n_positive
+
+  def def_gt_0(self):
+    n_zero, n_positive = self.def_test()
+    return n_positive == 3 or (n_zero == 0 and n_positive == 1)
+
+  def type(self):
+    n_zero, n_positive = self.def_test()
+    if (n_positive == 3): return 1
+    if (n_positive == 0): return 2
+    return 0
+
+  def meets_primary_conditions(self):
+    gt = self.eps_gt
+    s = self
+    if (gt(s.a, s.b)): return False
+    if (gt(s.b, s.c)): return False
+    if (gt(abs(s.d), s.b)): return False
+    if (gt(abs(s.e), s.a)): return False
+    if (gt(abs(s.f), s.a)): return False
+    return True
+
+  def meets_main_conditions(self):
+    if (not self.meets_primary_conditions()): return False
+    type = self.type()
+    if (type == 0): return False
+    if (type == 2):
+      lt = self.eps_lt
+      s = self
+      if (lt(s.d+s.e+s.f+s.a+s.b, 0)): return False
+    return True
+
+  def is_buerger_cell(self):
+    if (not self.meets_main_conditions()): return False
+    eq = self.eps_eq
+    gt = self.eps_gt
+    s = self
+    if (eq(s.a, s.b)):
+      if (gt(abs(s.d), abs(s.e))): return False
+    if (eq(s.b, s.c)):
+      if (gt(abs(s.e), abs(s.f))): return False
+    return True
+
+  def is_niggli_cell(self):
+    if (not self.is_buerger_cell()): return False
+    eq = self.eps_eq
+    gt = self.eps_gt
+    s = self
+    if (eq(s.d, s.b)):
+      if (gt(s.f, s.e+s.e)): return False
+    if (eq(s.e, s.a)):
+      if (gt(s.f, s.d+s.d)): return False
+    if (eq(s.f, s.a)):
+      if (gt(s.e, s.d+s.d)): return False
+    if (eq(s.d, -s.b)):
+      if (not eq(s.f, 0)): return False
+    if (eq(s.e, -s.a)):
+      if (not eq(s.f, 0)): return False
+    if (eq(s.f, -s.a)):
+      if (not eq(s.e, 0)): return False
+    if (eq(s.d+s.e+s.f+s.a+s.b, 0)):
+      if (gt(s.a+s.a+s.e+s.e+s.f, 0)): return False
+    return True
+
+class iteration_limit_exceeded(RuntimeError): pass
+
+class reduction_base(gruber_parameterization):
+
+  def __init__(self, unit_cell, relative_epsilon, iteration_limit):
+    if (iteration_limit is None):
+      self._iteration_limit = 1000
+    else:
+      self._iteration_limit = iteration_limit
+    gruber_parameterization.__init__(self, unit_cell, relative_epsilon)
+    self._r_inv = matrix.sqr((1,0,0,0,1,0,0,0,1))
+    self._n_iterations = 0
+    self._last_after_all_obtuse_action = (-1,-1,-1)
+
+  def iteration_limit(self):
+    return self._iteration_limit
+
+  def r_inv(self):
+    return self._r_inv
+
+  def change_of_basis_op(self):
+    from cctbx import sgtbx
+    return sgtbx.change_of_basis_op(
+      sgtbx.rt_mx(sgtbx.rot_mx(self._r_inv.elems, 1))).inverse()
+
+  def n_iterations(self):
+    return self._n_iterations
+
+  def cb_update(self, m_elems):
+    if (self._n_iterations == self._iteration_limit):
+      raise iteration_limit_exceeded(
+        "%s iteration limit exceeded (limit=%d)."
+        % (self._name(), self._iteration_limit))
+    self._r_inv *= matrix.sqr(m_elems)
+    self._n_iterations += 1
+
+  def n1_action(self):
+    self.cb_update((0,-1,0, -1,0,0, 0,0,-1))
+    self.a, self.b = self.b, self.a
+    self.d, self.e = self.e, self.d
+
+  def n2_action(self):
+    self.cb_update((-1,0,0, 0,0,-1, 0,-1,0))
+    self.b, self.c = self.c, self.b
+    self.e, self.f = self.f, self.e
+
+  def n3_true_action(self):
+    lt = self.eps_lt
+    i,j,k = 1,1,1
+    if (lt(self.d, 0)): i = -1
+    if (lt(self.e, 0)): j = -1
+    if (lt(self.f, 0)): k = -1
+    self.cb_update((i,0,0, 0,j,0, 0,0,k))
+    self.d = abs(self.d)
+    self.e = abs(self.e)
+    self.f = abs(self.f)
+
+  def n3_false_action(self):
+    lt = self.eps_lt
+    gt = self.eps_gt
+    f = [1,1,1]
+    z = -1
+    if (gt(self.d, 0)): f[0] = -1
+    elif (not lt(self.d, 0)): z = 0
+    if (gt(self.e, 0)): f[1] = -1
+    elif (not lt(self.e, 0)): z = 1
+    if (gt(self.f, 0)): f[2] = -1
+    elif (not lt(self.f, 0)): z = 2
+    if (f[0]*f[1]*f[2] < 0):
+      assert z != -1
+      f[z] = -1
+    self.cb_update((f[0],0,0, 0,f[1],0, 0,0,f[2]))
+    self.d = -abs(self.d)
+    self.e = -abs(self.e)
+    self.f = -abs(self.f)
+
+class minimum_reduction_mixin(object):
+  """Development and regression test code. Do not use for applications.
+     Use uctbx.fast_minimum_reduction instead.
+  """
+
+  def __init__(self, unit_cell, iteration_limit=None,
+                                multiplier_significant_change_test=16,
+                                min_n_no_significant_change=2):
+    self.multiplier_significant_change_test=multiplier_significant_change_test
+    self.min_n_no_significant_change=min_n_no_significant_change
+    self._n_no_significant_change = 0
+    a,b,c = unit_cell.metrical_matrix()[:3]
+    self._last_abc_significant_change_test = (-a,-b,-c)
+    self.reduction = self.__class__.__bases__[1]
+    try:
+      self.reduction.__init__(self,
+        unit_cell=unit_cell,
+        relative_epsilon=0,
+        iteration_limit=iteration_limit)
+      self.termination_due_to_significant_change_test = False
+    except StopIteration:
+      self.termination_due_to_significant_change_test = True
+
+  def eps_eq(self, x, y):
+    return False
+
+  def significant_change_test(self):
+    abc = (self.a,self.b,self.c)
+    m = self.multiplier_significant_change_test
+    change = tuple([(new*m+(new-last))-new*m
+      for new,last in zip(abc, self._last_abc_significant_change_test)])
+    if (change == (0,0,0)):
+      self._n_no_significant_change += 1
+      if (self._n_no_significant_change >= self.min_n_no_significant_change):
+        return False
+    else:
+      self._n_no_significant_change = 0
+    self._last_abc_significant_change_test = abc
+    return True
+
+
+ *******************************************************************************

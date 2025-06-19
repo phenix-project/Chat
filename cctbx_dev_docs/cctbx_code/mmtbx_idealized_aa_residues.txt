@@ -1,0 +1,626 @@
+
+
+ *******************************************************************************
+mmtbx/idealized_aa_residues/__init__.py
+from __future__ import absolute_import, division, print_function
+import cctbx.array_family.flex # import dependency
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/idealized_aa_residues/all_his.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+
+# All H ------------------------------------------------------------------------
+
+pdb_str1_H = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  H   HIS             7.644   8.098  10.566  1.00  0.00           H
+ATOM     12  HA  HIS             7.398  10.137   8.454  1.00  0.00           H
+ATOM     13  HB2 HIS             5.000   9.652   8.660  1.00  0.00           H
+ATOM     14  HB3 HIS             5.346   8.504   9.981  1.00  0.00           H
+ATOM     15  HD1 HIS             5.540   8.939   6.259  1.00  0.00           H
+ATOM     16  HD2 HIS             6.384   6.030   9.154  1.00  0.00           H
+ATOM     17  HE1 HIS             5.937   6.766   5.000  1.00  0.00           H
+ATOM     18  HE2 HIS             6.450   5.000   6.760  1.00  0.00           H
+TER
+END
+"""
+
+pdb_str2_H = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  H   HIS             7.644   8.098  10.566  1.00  0.00           H
+ATOM     12  HA  HIS             7.398  10.137   8.454  1.00  0.00           H
+ATOM     13  HB2 HIS             5.000   9.652   8.660  1.00  0.00           H
+ATOM     14  HB3 HIS             5.346   8.504   9.981  1.00  0.00           H
+ATOM     15  HD1 HIS             5.540   8.939   6.259  1.00  0.00           H
+ATOM     16  HD2 HIS             6.384   6.030   9.154  1.00  0.00           H
+ATOM     17  HE1 HIS             5.937   6.766   5.000  1.00  0.00           H
+TER
+END
+"""
+
+pdb_str3_H = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  H   HIS             7.644   8.098  10.566  1.00  0.00           H
+ATOM     12  HA  HIS             7.398  10.137   8.454  1.00  0.00           H
+ATOM     13  HB2 HIS             5.000   9.652   8.660  1.00  0.00           H
+ATOM     14  HB3 HIS             5.346   8.504   9.981  1.00  0.00           H
+ATOM     16  HD2 HIS             6.384   6.030   9.154  1.00  0.00           H
+ATOM     17  HE1 HIS             5.937   6.766   5.000  1.00  0.00           H
+ATOM     18  HE2 HIS             6.450   5.000   6.760  1.00  0.00           H
+TER
+END
+"""
+
+# All D ------------------------------------------------------------------------
+
+pdb_str1_D = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  D   HIS             7.644   8.098  10.566  1.00  0.00           D
+ATOM     12  DA  HIS             7.398  10.137   8.454  1.00  0.00           D
+ATOM     13  DB2 HIS             5.000   9.652   8.660  1.00  0.00           D
+ATOM     14  DB3 HIS             5.346   8.504   9.981  1.00  0.00           D
+ATOM     15  DD1 HIS             5.540   8.939   6.259  1.00  0.00           D
+ATOM     16  DD2 HIS             6.384   6.030   9.154  1.00  0.00           D
+ATOM     17  DE1 HIS             5.937   6.766   5.000  1.00  0.00           D
+ATOM     18  DE2 HIS             6.450   5.000   6.760  1.00  0.00           D
+TER
+END
+"""
+
+pdb_str2_D = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  D   HIS             7.644   8.098  10.566  1.00  0.00           D
+ATOM     12  DA  HIS             7.398  10.137   8.454  1.00  0.00           D
+ATOM     13  DB2 HIS             5.000   9.652   8.660  1.00  0.00           D
+ATOM     14  DB3 HIS             5.346   8.504   9.981  1.00  0.00           D
+ATOM     15  DD1 HIS             5.540   8.939   6.259  1.00  0.00           D
+ATOM     16  DD2 HIS             6.384   6.030   9.154  1.00  0.00           D
+ATOM     17  DE1 HIS             5.937   6.766   5.000  1.00  0.00           D
+TER
+END
+"""
+
+pdb_str3_D = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  D   HIS             7.644   8.098  10.566  1.00  0.00           D
+ATOM     12  DA  HIS             7.398  10.137   8.454  1.00  0.00           D
+ATOM     13  DB2 HIS             5.000   9.652   8.660  1.00  0.00           D
+ATOM     14  DB3 HIS             5.346   8.504   9.981  1.00  0.00           D
+ATOM     16  DD2 HIS             6.384   6.030   9.154  1.00  0.00           D
+ATOM     17  DE1 HIS             5.937   6.766   5.000  1.00  0.00           D
+ATOM     18  DE2 HIS             6.450   5.000   6.760  1.00  0.00           D
+TER
+END
+"""
+
+# All H/D ----------------------------------------------------------------------
+
+pdb_str1_HD = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  H  AHIS             7.644   8.098  10.566  0.50  0.00           H
+ATOM     11  D  BHIS             7.644   8.098  10.566  0.50  0.00           D
+ATOM     12  HA  HIS             7.398  10.137   8.454  1.00  0.00           H
+ATOM     13  HB2 HIS             5.000   9.652   8.660  1.00  0.00           H
+ATOM     14  HB3 HIS             5.346   8.504   9.981  1.00  0.00           H
+ATOM     15  HD1AHIS             5.540   8.939   6.259  0.50  0.00           H
+ATOM     15  DD1BHIS             5.540   8.939   6.259  0.50  0.00           D
+ATOM     16  HD2 HIS             6.384   6.030   9.154  1.00  0.00           H
+ATOM     17  HE1 HIS             5.937   6.766   5.000  1.00  0.00           H
+ATOM     18  HE2AHIS             6.450   5.000   6.760  0.50  0.00           H
+ATOM     18  DE2BHIS             6.450   5.000   6.760  0.50  0.00           D
+TER
+END
+"""
+
+pdb_str2_HD = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  H  AHIS             7.644   8.098  10.566  0.50  0.00           H
+ATOM     11  D  BHIS             7.644   8.098  10.566  0.50  0.00           D
+ATOM     12  HA  HIS             7.398  10.137   8.454  1.00  0.00           H
+ATOM     13  HB2 HIS             5.000   9.652   8.660  1.00  0.00           H
+ATOM     14  HB3 HIS             5.346   8.504   9.981  1.00  0.00           H
+ATOM     15  HD1AHIS             5.540   8.939   6.259  0.50  0.00           H
+ATOM     15  DD1BHIS             5.540   8.939   6.259  0.50  0.00           D
+ATOM     16  HD2 HIS             6.384   6.030   9.154  1.00  0.00           H
+ATOM     17  HE1 HIS             5.937   6.766   5.000  1.00  0.00           H
+TER
+END
+"""
+
+pdb_str3_HD = """
+CRYST1   13.022   15.843   16.570  90.00  90.00  90.00 P 1
+ATOM      1  N   HIS             8.022   8.797   9.927  1.00  0.00           N
+ATOM      2  CA  HIS             7.020   9.705   9.381  1.00  0.00           C
+ATOM      3  C   HIS             6.734  10.843  10.354  1.00  0.00           C
+ATOM      4  O   HIS             6.781  10.659  11.570  1.00  0.00           O
+ATOM      5  CB  HIS             5.729   8.948   9.062  1.00  0.00           C
+ATOM      6  CG  HIS             5.905   7.850   8.060  1.00  0.00           C
+ATOM      7  ND1 HIS             5.768   8.050   6.704  1.00  0.00           N
+ATOM      8  CD2 HIS             6.207   6.539   8.218  1.00  0.00           C
+ATOM      9  CE1 HIS             5.978   6.911   6.069  1.00  0.00           C
+ATOM     10  NE2 HIS             6.246   5.978   6.965  1.00  0.00           N
+ATOM     11  H  AHIS             7.644   8.098  10.566  0.50  0.00           H
+ATOM     11  D  BHIS             7.644   8.098  10.566  0.50  0.00           D
+ATOM     12  HA  HIS             7.398  10.137   8.454  1.00  0.00           H
+ATOM     13  HB2 HIS             5.000   9.652   8.660  1.00  0.00           H
+ATOM     14  HB3 HIS             5.346   8.504   9.981  1.00  0.00           H
+ATOM     16  HD2 HIS             6.384   6.030   9.154  1.00  0.00           H
+ATOM     17  HE1 HIS             5.937   6.766   5.000  1.00  0.00           H
+ATOM     18  HE2AHIS             6.450   5.000   6.760  0.50  0.00           H
+ATOM     18  DE2BHIS             6.450   5.000   6.760  0.50  0.00           D
+TER
+END
+"""
+
+class load(object):
+  def __init__(self):
+    self.r = {}
+    all_his = [
+      ["h1",  pdb_str1_H],
+      ["h2",  pdb_str2_H],
+      ["h3",  pdb_str3_H],
+      ["d1",  pdb_str1_D],
+      ["d2",  pdb_str2_D],
+      ["d3",  pdb_str3_D],
+      ["hd1", pdb_str1_HD],
+      ["hd2", pdb_str2_HD],
+      ["hd3", pdb_str3_HD]
+    ]
+    for his in all_his:
+      self.r[his[0]] = iotbx.pdb.input(source_info = None, lines = his[1]
+        ).construct_hierarchy().only_residue_group().detached_copy()
+
+  def main_three(self):
+    result = []
+    for ps in ["h1", "h2", "h3"]:
+      result.append(self.r[ps])
+    return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/idealized_aa_residues/rotamer_manager.py
+from __future__ import absolute_import, division, print_function
+from libtbx import easy_pickle
+import libtbx.load_env
+from mmtbx.rotamer.rotamer_eval import RotamerEval
+
+aa_codes = [
+  "ala",
+  "asn",
+  "asp",
+  "cys",
+  "gln",
+  "glu",
+  "gly",
+  "his",
+  "ile",
+  "leu",
+  "met",
+  "mse",
+  "phe",
+  "pro", # XXX BAD all-rotamers files
+  "ser",
+  "thr",
+  "trp",
+  "tyr",
+  "val",
+  "arg",
+  "lys"
+]
+
+class load(object):
+  def __init__(self, rotamers, residues=None):
+    if(residues is not None):
+      for i, residue in enumerate(residues):
+        residues[i] = residue.lower()
+    assert rotamers in ["favored", "favored_allowed"]
+    self.rotamer_evaluator = RotamerEval()
+    path=libtbx.env.find_in_repositories("chem_data/rotamer_chi_angles")
+    self.result = {}
+    for aa_code in aa_codes:
+      if(residues is not None):
+        if(not aa_code in residues): continue
+      try:
+        if(rotamers=="favored"):
+          f = "%s_favored.pkl"%aa_code
+        elif(rotamers=="favored_allowed"):
+          f = "%s_favored_allowed.pkl"%aa_code
+        else: raise RuntimeError("Not implemented: rotamers=%s"%rotamers)
+        chi_angles = easy_pickle.load(file_name = "/".join([path,f]))
+      except Exception:
+        chi_angles = None
+      self.result.setdefault(aa_code,[]).extend([chi_angles])
+
+  def get_chi_angles(self, resname):
+    resname = resname.strip().lower()
+    assert resname in aa_codes
+    return self.result[resname][0]
+
+  def rotamer(self, residue):
+    return self.rotamer_evaluator.evaluate_residue(residue)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/idealized_aa_residues/sample_rotamers.py
+from __future__ import absolute_import, division, print_function
+import time
+from mmtbx import monomer_library
+import mmtbx.refinement.real_space.fit_residue
+import iotbx.pdb
+from mmtbx.rotamer.rotamer_eval import RotamerEval
+import mmtbx.utils
+import sys
+from libtbx import easy_pickle
+import libtbx.load_env
+from six.moves import range
+from libtbx import easy_mp
+from libtbx import group_args
+import math
+
+mon_lib_srv = monomer_library.server.server()
+rotamer_eval = RotamerEval()
+
+pdb_files = [
+  "ala.pdb",
+  "asn.pdb",
+  "asp.pdb",
+  "cys.pdb",
+  "gln.pdb",
+  "glu.pdb",
+  "gly.pdb",
+  "his.pdb",
+  "ile.pdb",
+  "leu.pdb",
+  "met.pdb",
+  "mse.pdb", # is ignored with rotamer named None
+  "phe.pdb",
+  "pro.pdb", # BAD all-rotamers files
+  "ser.pdb",
+  "thr.pdb",
+  "trp.pdb",
+  "tyr.pdb",
+  "val.pdb",
+  "arg.pdb",
+  "lys.pdb"
+]
+
+def get_nested_loop(n, fine, start=0, end=360):
+  assert n >= 1 and n<=4
+  result = []
+  #
+  if(fine):
+    if   (n in [1,2]): step=1
+    elif (n == 3):     step=3
+  else:
+    step = 10
+  #
+  if(n==1):
+    for a1 in range(start,end+step,step):
+      result.append([a1])
+  elif(n==2):
+    for a1 in range(start,end+step,step):
+      for a2 in range(start,end+step,step):
+        result.append([a1, a2])
+  elif(n==3):
+    for a1 in range(start,end+step,step):
+      for a2 in range(start,end+step,step):
+        for a3 in range(start,end+step,step):
+          result.append([a1, a2, a3])
+  elif(n==4):
+    if(fine):
+      for a1 in range(start,end+7,7):
+        for a2 in range(start,end+8,8):
+          for a3 in range(start,end+9,9):
+            for a4 in range(start,end+10,10):
+              result.append([a1, a2, a3, a4])
+    else:
+      for a1 in range(start,end+step,step):
+        for a2 in range(start,end+step,step):
+          for a3 in range(start,end+step,step):
+            for a4 in range(start,end+step,step):
+              result.append([a1, a2, a3, a4])
+  return result
+
+def get_clusters_and_angles(file_name, fine):
+  path=libtbx.env.find_in_repositories("mmtbx/idealized_aa_residues/data")
+  pdb_inp = iotbx.pdb.input(file_name=path+"/"+file_name)
+  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  xrs = pdb_inp.xray_structure_simple()
+  residue = pdb_hierarchy.only_residue()
+  clusters = mmtbx.refinement.real_space.aa_residue_axes_and_clusters(
+    residue         = residue,
+    mon_lib_srv     = mon_lib_srv,
+    backbone_sample = False).clusters
+  if(len(clusters)==0): return None,None
+  nested_loop = get_nested_loop(n=len(clusters), fine=fine)
+  return clusters, nested_loop
+
+def chunker(x, dim):
+  return (x[i::dim] for i in range(dim))
+
+def run_one(args):
+  clusters, chunk, file_name, include, collect_states = args
+  #
+  path=libtbx.env.find_in_repositories("mmtbx/idealized_aa_residues/data")
+  pdb_inp = iotbx.pdb.input(file_name=path+"/"+file_name)
+  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  xrs = pdb_inp.xray_structure_simple()
+  residue = pdb_hierarchy.only_residue()
+  ri = mmtbx.refinement.real_space.fit_residue.get_rotamer_iterator(
+    mon_lib_srv = mon_lib_srv,
+    residue     = residue)
+  if(len(clusters)==0): return
+  for rotamer, rotamer_sites_cart in ri:
+    residue.atoms().set_xyz(rotamer_sites_cart)
+    xrs = xrs.replace_sites_cart(rotamer_sites_cart)
+    if(collect_states):
+      states = mmtbx.utils.states(
+        xray_structure=xrs, pdb_hierarchy=pdb_hierarchy)
+    else:
+      states = None # Collecting states with multiprocessing won't work!
+    good_angles = mmtbx.refinement.real_space.generate_angles_nested(
+      clusters     = clusters,
+      residue      = residue,
+      rotamer_eval = rotamer_eval,
+      nested_loop  = chunk,
+      include      = include,
+      states       = states)
+    break
+    #
+  good_angles_ = []
+  for chi in good_angles:
+    chi_ = []
+    for ch in chi:
+      chi_.append(ch*math.pi/180)
+    good_angles_.append(chi_)
+  good_angles = good_angles_
+  #
+  return group_args(good_angles = good_angles, states = states)
+
+def exercise(file_name, include, NPROC=96):
+  fine = False
+  if(len(include)==2): fine = True
+  suffix = "_".join([s.lower() for s in include])
+  clusters, nested_loop = get_clusters_and_angles(file_name=file_name, fine=fine)
+  if(clusters is None): return
+  chunks = list(chunker(nested_loop, NPROC))
+  tt = 0
+  if(NPROC>1):
+    argss = []
+    for chunk in chunks:
+      argss.append([clusters, chunk, file_name, include, False])
+    stdout_and_results = easy_mp.pool_map(
+      processes    = NPROC,
+      fixed_func   = run_one,
+      args         = argss,
+      func_wrapper = "buffer_stdout_stderr")
+    good_angles = []
+    for result in stdout_and_results:
+      good_angles.extend(result[1].good_angles)
+    states = None # Undefined if multiprocessing is used
+  else:
+    t0 = time.time()
+    args = [clusters, nested_loop, file_name, include, True]
+    result = run_one(args)
+    good_angles = result.good_angles
+    states      = result.states
+    tt = time.time()-t0
+  if(states is not None):
+    states.write(file_name="%s_%s.pdb"%(file_name[:-4],suffix))
+  print("file_name, n_clusters, n_good_angles, total:", file_name, \
+    len(clusters), len(good_angles), len(nested_loop), tt)
+  sys.stdout.flush()
+  easy_pickle.dump(
+    file_name="%s_%s.pkl"%(file_name[:-4], suffix),
+    obj=good_angles)
+
+if(__name__ == "__main__"):
+  for it in [["FAVORED","ALLOWED"], ["FAVORED"]]:
+    print (it, "-"*20)
+    if(len(sys.argv[1:])==1):
+      exercise(file_name=sys.argv[1:][0], include=it)
+    else:
+      for fn in pdb_files:
+        exercise(file_name=fn, include=it)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/idealized_aa_residues/tst.py
+from __future__ import absolute_import, division, print_function
+import time
+from mmtbx import monomer_library
+import mmtbx.refinement.real_space.fit_residue
+import iotbx.pdb
+from mmtbx.rotamer.rotamer_eval import RotamerEval
+import mmtbx.utils
+from scitbx.matrix import rotate_point_around_axis
+import libtbx.load_env
+
+mon_lib_srv = monomer_library.server.server()
+rotamer_eval = RotamerEval()
+rotamer_manager = mmtbx.idealized_aa_residues.rotamer_manager.load(
+  rotamers="favored")
+
+pdb_files = [
+  "ala.pdb",
+  "asn.pdb",
+  "asp.pdb",
+  "cys.pdb",
+  "gln.pdb",
+  "glu.pdb",
+  "gly.pdb",
+  "his.pdb",
+  "ile.pdb",
+  "leu.pdb",
+  "met.pdb",
+  "mse.pdb", # is ignored with rotamer named None
+  "phe.pdb",
+  "ser.pdb",
+  "thr.pdb",
+  "trp.pdb",
+  "tyr.pdb",
+  "val.pdb",
+  "arg.pdb",
+  "lys.pdb"
+]
+
+def sample(residue, clusters, states):
+  xyz_moved_dc = residue.atoms().extract_xyz().deep_copy()
+  chi_angles = rotamer_manager.get_chi_angles(resname=residue.resname)
+  print(residue.resname, len(chi_angles))
+  if(residue.resname in ["ARG","LYS"]):
+    return None # skip: too long to run
+  if(residue.resname in ["ALA","GLY"]):
+    assert len(chi_angles) == 0
+  else:
+    len(chi_angles) > 0
+  for ia, angles in enumerate(chi_angles):
+    xyz_moved = xyz_moved_dc.deep_copy()
+    for i, angle in enumerate(angles):
+      cl = clusters[i]
+      for atom in cl.atoms_to_rotate:
+        new_xyz = rotate_point_around_axis(
+          axis_point_1 = xyz_moved[cl.axis[0]],
+          axis_point_2 = xyz_moved[cl.axis[1]],
+          point        = xyz_moved[atom],
+          angle        = angle, deg=False)
+        xyz_moved[atom] = new_xyz
+    residue.atoms().set_xyz(xyz_moved)
+    fl = rotamer_eval.evaluate_residue(residue = residue)
+    assert fl != "OUTLIER"
+    if(states is not None): states.add(sites_cart=xyz_moved)
+  return states
+
+def exercise(file_name, write_pdb_file=False):
+  path=libtbx.env.find_in_repositories("mmtbx/idealized_aa_residues/data")
+  pdb_inp = iotbx.pdb.input(file_name=path+"/"+file_name)
+  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  xrs = pdb_inp.xray_structure_simple()
+  residue = pdb_hierarchy.only_residue()
+  clusters = mmtbx.refinement.real_space.aa_residue_axes_and_clusters(
+    residue         = residue,
+    mon_lib_srv     = mon_lib_srv,
+    backbone_sample = False).clusters
+  ri = mmtbx.refinement.real_space.fit_residue.get_rotamer_iterator(
+    mon_lib_srv = mon_lib_srv,
+    residue     = residue)
+  if(len(clusters)==0): return
+  for rotamer, rotamer_sites_cart in ri:
+    residue.atoms().set_xyz(rotamer_sites_cart)
+    xrs= xrs.replace_sites_cart(rotamer_sites_cart)
+    states = None
+    if(write_pdb_file):
+      states = mmtbx.utils.states(xray_structure=xrs,
+        pdb_hierarchy=pdb_hierarchy)
+    states_result = sample(
+      residue      = residue,
+      clusters     = clusters,
+      states       = states)
+    if(write_pdb_file):
+      states.write(file_name="%s_all-coarse_step10.pdb"%file_name[:-4])
+    break # By convention, use first rotamer!
+
+if(__name__ == "__main__"):
+  t0 = time.time()
+  for fn in pdb_files:
+    exercise(file_name=fn)
+  print("Time: %8.4f"%(time.time()-t0))
+  print("OK")
+
+
+ *******************************************************************************

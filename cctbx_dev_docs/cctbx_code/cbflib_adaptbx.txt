@@ -1,0 +1,253 @@
+
+
+ *******************************************************************************
+cbflib_adaptbx/__init__.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex # import dependency
+from cbflib_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cbflib_adaptbx/command_line/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cbflib_adaptbx/command_line/dump.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+# LIBTBX_SET_DISPATCHER_NAME cbf.dump
+
+import sys
+
+def process(file_name, out=None):
+  if (out is None): out = sys.stdout
+  import pycbf
+  print("File name:", file_name, file=out)
+  object = pycbf.cbf_handle_struct() # FIXME
+  object.read_file(file_name.encode(), pycbf.MSG_DIGEST)
+  object.rewind_datablock()
+  n_blocks = object.count_datablocks()
+  print("Number of blocks:", n_blocks, file=out)
+  for i_block in range(n_blocks):
+    object.select_datablock(i_block)
+    print("  Block name:", object.datablock_name().decode(), file=out)
+    object.rewind_category()
+    n_categories = object.count_categories()
+    print("  Number of categories:", n_categories, file=out)
+    for i_category in range(n_categories):
+      object.select_category(i_category)
+      print("    Category name:", object.category_name().decode(), file=out)
+  print(file=out)
+
+def run(args):
+  if (len(args) == 0):
+    from libtbx.utils import Usage
+    import libtbx.load_env
+    raise Usage("%s your.cbf ..." % libtbx.env.dispatcher_name)
+  for file_name in args:
+    process(file_name)
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cbflib_adaptbx/copy_files.py
+from __future__ import absolute_import, division, print_function
+# svn co https://cbflib.svn.sourceforge.net/svnroot/cbflib/trunk/CBFlib_bleeding_edge sourceforge_cbflib
+
+class info_counters(object):
+  def __init__(O):
+    O.mkdir = 0
+    O.copied = 0
+    O.updated = 0
+    O.already_up_to_date = 0
+  def report(O):
+    print("Directories created:", O.mkdir)
+    print("Files copied:", O.copied)
+    print("Files updated:", O.updated)
+    print("Files already up-to-date:", O.already_up_to_date)
+
+def run(args):
+  assert len(args) == 1, "<path>/sourceforge_cbflib"
+  sourceforge_cbflib = args[0]
+  from shutil import copyfile
+  import os
+  op = os.path
+  assert op.isdir(sourceforge_cbflib)
+  counters = info_counters()
+  def copy_from_directory(dname, fnames=None, h_c_only=False):
+    if (not op.isdir(dname)):
+      os.mkdir(dname)
+      counters.mkdir += 1
+    dpath = op.join(sourceforge_cbflib, dname)
+    if (fnames is None): fnames = os.listdir(dpath)
+    for fname in fnames:
+      if (not h_c_only or fname.endswith(".h") or fname.endswith(".c")):
+        src = op.join(dpath, fname)
+        dst = op.join(dname, fname)
+        src_bytes = open(src, "rb").read()
+        if (not op.isfile(dst)):
+          counters.copied += 1
+        else:
+          dst_bytes = open(dst, "rb").read()
+          if (dst_bytes == src_bytes):
+            counters.already_up_to_date += 1
+            src = None
+          else:
+            counters.updated += 1
+        if (src is not None):
+          copyfile(src=src, dst=dst)
+  for dname in ["include", "src"]:
+    copy_from_directory(dname, h_c_only=True)
+  copy_from_directory("src", ["cbf.stx.y"])
+  copy_from_directory("pycbf", ["pycbf_wrap.c", "pycbf.py"])
+  copy_from_directory("examples", ["img.h", "img.c", "fit2d_data.cbf"])
+  copy_from_directory("doc", ["lgpl.txt"])
+  fnames = ["README"]
+  if (op.isfile(op.join(sourceforge_cbflib, "TAG"))):
+    fnames.append("TAG")
+  copy_from_directory(".", fnames)
+  counters.report()
+  print("Done.")
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cbflib_adaptbx/exercise_compression.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from scitbx.array_family import flex
+from cbflib_adaptbx import uncompress,compress,assert_equal
+from libtbx.development.timers import Profiler
+
+def create_random_data_with_gaussian_distribution(mu=0.0,sigma=1.0):
+  slow=2048
+  fast=2048
+  total_sz = slow*fast
+  flex.set_random_seed(2048)
+  random_data = flex.random_int_gaussian_distribution(total_sz,mu,sigma)
+  random_data.reshape(flex.grid(slow,fast))
+  return random_data
+
+def basic_tests(verbose=True):
+  initial_data = create_random_data_with_gaussian_distribution(0.0,100.0)
+
+  #special deltas to test the compression algorithm
+  addresses = [3,6,9,12,15,18]
+  deltas = [-127,128,-32767,32768,-2147483647,2147483647]
+  for x in range(6):
+    initial_data[addresses[x]-1]=0
+    initial_data[addresses[x]]=deltas[x]
+
+  if verbose: P=Profiler("compress")
+  array_shape = initial_data.focus()
+  if verbose: print(array_shape)
+  compressed_data = compress(initial_data)
+  if verbose: print(len(compressed_data))
+  if verbose: P=Profiler("uncompress")
+  decompressed_data = uncompress(packed=compressed_data, fast=array_shape[1],
+                                 slow=array_shape[0])
+
+  if verbose: del P
+  assert assert_equal(initial_data, decompressed_data)
+
+if __name__=="__main__":
+  basic_tests(False)
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cbflib_adaptbx/libtbx_refresh.py
+from __future__ import absolute_import, division, print_function
+from libtbx.str_utils import show_string
+import os
+op = os.path
+pycbf_py = self.env.under_dist(module_name="cbflib", path="pycbf/pycbf.py")
+if not op.isfile(pycbf_py):
+  raise RuntimeError("Missing file: %s" % show_string(pycbf_py))
+target_dir = self.env.under_build(path="lib")
+if not op.isdir(target_dir):
+  os.makedirs(target_dir)
+print("  Copying to lib: %s" % show_string(pycbf_py))
+with open(op.join(target_dir, "pycbf.py"), "w") as fh:
+  with open(pycbf_py) as rh:
+    fh.write(rh.read())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cbflib_adaptbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+def tst_run(args=[]):
+  assert len(args) == 0
+  import libtbx.load_env
+  import os
+  op = os.path
+  cbf = libtbx.env.under_dist(
+    module_name="cbflib",
+    path="examples/fit2d_data.cbf")
+  assert op.isfile(cbf)
+  from cbflib_adaptbx.command_line import dump
+  from six.moves import cStringIO as StringIO
+  sio = StringIO()
+  dump.process(file_name=cbf, out=sio)
+  from libtbx.test_utils import show_diff
+  assert not show_diff(sio.getvalue(), """\
+File name: %s
+Number of blocks: 1
+  Block name: image_1
+  Number of categories: 12
+    Category name: diffrn
+    Category name: diffrn_source
+    Category name: diffrn_radiation
+    Category name: diffrn_radiation_wavelength
+    Category name: diffrn_measurement
+    Category name: diffrn_detector
+    Category name: diffrn_detector_element
+    Category name: diffrn_data_frame
+    Category name: array_structure_list
+    Category name: array_element_size
+    Category name: array_intensities
+    Category name: array_data
+
+""" % cbf)
+  print("OK")
+
+# unstable test though should now be stable
+tst_list = [
+  tst_run,
+  "$D/exercise_compression.py"
+  ]
+
+def run():
+  build_dir = libtbx.env.under_build("cbflib_adaptbx")
+  dist_dir = libtbx.env.dist_path("cbflib_adaptbx")
+
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************

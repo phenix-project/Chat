@@ -1,0 +1,566 @@
+
+
+ *******************************************************************************
+xfel/merging/general_fcalc.py
+from __future__ import absolute_import, division, print_function
+import mmtbx.programs.fmodel
+import mmtbx.utils
+import iotbx.pdb
+import libtbx.phil.command_line
+import sys
+import math
+
+def run (params) :
+  # assume *.mtz has Iobs or IMEAN and was created in previous step
+  # from mark1 algorithm
+  if params.model[-4:]==".mtz":
+    from iotbx import mtz
+    data_SR = mtz.object(params.model)
+    for array in data_SR.as_miller_arrays():
+       this_label = array.info().label_string().lower()
+       if True not in [this_label.find(tag)>=0 for tag in ["iobs","imean",params.scaling.mtz_column_F]]: continue
+       i_array = array.as_intensity_array().change_basis(params.model_reindex_op).map_to_asu()
+       c_array = i_array.complete_array(
+                 d_min = params.d_min / math.pow(1 + params.unit_cell_length_tolerance, 1 / 3))
+       # complete_array adds new Miller indices to complete the a.s.u., setting sigma=-1 to
+       # indicate that the new entries have no data.  (sigma == -1) is tested to remove
+       # undefined Miller indices from the scaling calculation.
+       return c_array
+    raise Exception("mtz did not contain expected label Iobs or IMEAN")
+
+  pdb_in = iotbx.pdb.input(params.model)
+  xray_structure = pdb_in.xray_structure_simple()
+  xray_structure.show_summary()
+  phil2 = mmtbx.programs.fmodel.master_phil
+  params2 = phil2.extract()
+  # adjust the cutoff of the generated intensities to assure that
+  # statistics will be reported to the desired high-resolution limit
+  # even if the observed unit cell differs slightly from the reference.
+  params2.high_resolution = params.d_min / math.pow(
+    1 + params.unit_cell_length_tolerance, 1 / 3)
+  if params.d_max is not None:
+    params2.low_resolution = params.d_max
+  params2.output.type = "real"
+  if (params.include_bulk_solvent) :
+    params2.fmodel.k_sol = params.k_sol
+    params2.fmodel.b_sol = params.b_sol
+
+  # vvv These params restore the "legacy" solvent mask generation before
+  # vvv cctbx commit 2243cc9a
+  params2.mask.Fmask_res_high = 0
+  params2.mask.grid_step_factor = 4
+  params2.mask.solvent_radius = 1.11
+  params2.mask.use_resolution_based_gridding = True
+  # ^^^
+
+  f_model = mmtbx.utils.fmodel_from_xray_structure(
+    xray_structure = xray_structure,
+    f_obs          = None,
+    add_sigmas     = True,
+    params         = params2).f_model
+  if not params.merge_anomalous:
+    f_model = f_model.generate_bijvoet_mates()
+  i_model = f_model.as_intensity_array().change_basis(params.model_reindex_op).map_to_asu()
+
+  return i_model
+
+def random_structure (params) :
+
+  """We're going to do some very approximate stuff here.  Given a unit
+   cell & SG, will put typical atomic contents in the unit cell & get
+   structure factors.
+
+  XXX This function is no longer called from either
+  command_line/cxi_merge.py nor command_line/cxi_xmerge.py; it could
+  probably be removed.
+  """
+
+  import random
+  random.seed(0)
+  from scitbx.array_family import flex
+  flex.set_random_seed(0)
+  from cctbx.development import random_structure
+
+  uc_volume = params.target_unit_cell.volume()
+  asu_volume = uc_volume / params.target_space_group.group().order_z()
+  target_number_scatterers = int(asu_volume)//128 # Very approximate rule of thumb for proteins with ~50% solvent content
+  element_unit = ['O']*19 + ['N']*18 + ['C']*62 + ['S']*1
+  element_pallet = element_unit * (1 + ( target_number_scatterers//len(element_unit) ))
+  assert len(element_pallet) >= target_number_scatterers
+  # XXX Ersatz hard limit to prevent excessive execution time of
+  # xray_structure() below.
+  elements = element_pallet[:min(1000, target_number_scatterers)]
+
+  xs = random_structure.xray_structure(
+    space_group_info = params.target_space_group,
+    unit_cell = params.target_unit_cell,
+    elements=elements,
+    min_distance=1.2)
+  xs.show_summary()
+  phil2 = mmtbx.programs.fmodel.master_phil
+  params2 = phil2.extract()
+  # adjust the cutoff of the generated intensities to assure that
+  # statistics will be reported to the desired high-resolution limit
+  # even if the observed unit cell differs slightly from the reference.
+  params2.high_resolution = params.d_min / math.pow(
+    1 + params.unit_cell_length_tolerance, 1 / 3)
+  params2.output.type = "real"
+  if (params.include_bulk_solvent) :
+    print("Sorry, can't include bulk solvent for randomly-generated sites.")
+  f_model = mmtbx.utils.fmodel_from_xray_structure(
+    xray_structure = xs,
+    f_obs          = None,
+    add_sigmas     = True,
+    params         = params2).f_model
+  if not params.merge_anomalous:
+    f_model_possibly_anomalous = f_model.generate_bijvoet_mates()
+  else:
+    f_model_possibly_anomalous = f_model
+  i_model = f_model_possibly_anomalous.as_intensity_array()
+
+  if params.scaling.mtz_file is not None:
+    f_fake = f_model.as_amplitude_array()
+    # as the code that consumes the mtz f-obs expects non-anomalous data
+    mtzdata = f_fake.as_mtz_dataset(column_root_label="f-obs")
+    mtzdata.mtz_object().write(params.scaling.mtz_file)
+
+  return i_model
+
+
+if (__name__ == "__main__") :
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/merging/model/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/merging/phil_validation.py
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import Sorry
+
+class application:
+  def __init__(self,param):
+
+    self.param = param
+    self.application_level_validation()
+
+  def application_level_validation(self):
+
+    if self.param.merging.reverse_lookup is not None:
+      if self.param.data_reindex_op != "h,k,l":
+        raise Sorry("The data reindex operator "+self.param.data_reindex_op+
+        """ cannot be given in combination with the reverse lookup file
+       """+self.param.merging.reverse_lookup+""".  The reverse lookup table itself contains
+       a reindexing operator for each image in the data set.""")
+
+class samosa:
+  def __init__(self,param,allow_model=False):
+
+    self.param = param
+    self.allow_model = allow_model
+    self.application_level_validation()
+
+  def application_level_validation(self):
+
+    if self.allow_model==False and self.param.model is not None:
+      raise Sorry("""For samosa, no PDB structural model is used for frame-to-frame
+      scaling, therefore the model phil parameter must be set to None.""")
+    if self.param.target_unit_cell is None or self.param.target_space_group is None:
+      raise Sorry("""For samosa, target_unit_cell and space_group must be given""")
+    if not self.param.scaling.algorithm in ['mark1','levmar']:
+      raise Sorry("""Must specify either mark1 or levmar algorithm for scaling.
+      (Both algorithms have the same effect within samosa.""")
+    #if self.param.significance_filter.apply is True:
+    #  raise Sorry("""No significance filter for samosa.  Variance weighting is
+    #  used to downweight weak data.""")
+    if self.param.raw_data.sdfac_auto or self.param.raw_data.sdfac_refine:
+      raise Sorry("""SDFAC manipulation not implemented for samosa.""")
+    if self.param.postrefinement.enable:
+      raise Sorry("""Postrefinement not currently available in samosa.""")
+    if not self.param.include_negatives:
+      raise Sorry("""Normally negative values are included in samosa.""")
+    if not self.param.scaling.report_ML:
+      raise Sorry("""Must have 'report_ML' estimates of mosaic model from integration program""")
+    if "PartialityDeff" in self.param.levmar.parameter_flags and \
+       "PartialityEtaDeff" in self.param.levmar.parameter_flags:
+      raise Sorry("""Only one partiality model""")
+    if self.param.memory.shared_array_allocation is None:
+      raise Sorry("""For samosa.join, the expected number of measurements must be given
+      in the memory.shared_array_allocation phil parameter""")
+    if self.param.backend != "Flex":
+      raise Sorry("""For samosa, we are only using the Flex backend at present""")
+
+    # samosa.scale requires mtz_file to be set & file to be readable in order to produce isomorphous stats
+    if self.param.scaling.mtz_file is not None:
+      from iotbx import mtz
+      mtz_object = mtz.object(file_name=self.param.scaling.mtz_file)
+      comparison_column_found = False
+      obs_labels = []
+      for array in mtz_object.as_miller_arrays():
+        this_label = array.info().label_string().lower()
+        if array.observation_type() is not None:
+          obs_labels.append(this_label.split(',')[0])
+        if this_label.find(self.param.scaling.mtz_column_F)==0:
+          comparison_column_found = True
+          break
+      if not comparison_column_found:
+        raise Sorry(self.param.scaling.mtz_file +
+                  " has labels [" +
+                  ", ".join(obs_labels) +
+                  "].  Please set scaling.mtz_column_F to one of these.")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/merging/predictions_to_edges.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from dials.array_family import flex # implicit dependency
+import libtbx.load_env # implicit dependency
+from six.moves import cPickle as pickle
+from cctbx.crystal import symmetry
+from scitbx.matrix import col
+from rstbx.bandpass import parameters_bp3, use_case_bp3
+from libtbx import easy_pickle
+from libtbx.phil import parse
+from spotfinder.applications.xfel.cxi_phil import cxi_basic_start
+from iotbx.detectors.npy import NpyImage
+import math, os
+from xfel.command_line.frame_unpickler import construct_reflection_table_and_experiment_list
+from dials.algorithms.spot_prediction import StillsReflectionPredictor
+
+def load_pickle(pickle_path):
+  return pickle.load(open(pickle_path, "rb"))
+
+class ImageInfo:
+  def __init__(self, img_path, detector_phil=None):
+    self.img_path = img_path
+    self.img_data = load_pickle(img_path)
+    self.img_size = self.img_data['SIZE2']
+    self.pixel_size = self.img_data['PIXEL_SIZE']
+    self.detector_phil=detector_phil
+    self.tm = None
+  def tiling_from_image(self):
+    if self.tm is not None:
+      return self.tm
+    labelit_regression = libtbx.env.find_in_repositories(
+          relative_path="labelit_regression",
+          test=os.path.isdir)
+    if detector_phil is None:
+      detector_phil = os.path.join(labelit_regression, "xfel", "cxi-10.1.phil")
+    detector_scope = parse(file_name=detector_phil)
+    basic_scope = cxi_basic_start()
+    new_scope = basic_scope.phil_scope.fetch(source=detector_scope)
+    tiling_phil = new_scope.extract()
+    img = NpyImage("dummy", source_data=img_data)
+    img.readHeader(tiling_phil)
+    self.tm = img.get_tile_manager(phil)
+    return self.tm
+
+def extend_predictions(pdata, int_pickle_path, image_info, dmin=1.5, dump=False, detector_phil=None):
+  """
+  Given a LABELIT format integration pickle, generate a new predictor for reflections
+  extending to a higher resolution dmin matching the current unit cell, orientation,
+  mosaicity and domain size.
+  """
+  # image_info is an instance of ImageInfo
+  img_path = image_info.img_path
+  img_size = image_info.img_size
+  pixel_size = image_info.pixel_size
+
+  # pdata is the integration pickle object
+  ori = pdata['current_orientation'][0]
+  ucell = ori.unit_cell()
+  sg = pdata['pointgroup']
+  cbop = pdata['current_cb_op_to_primitive'][0]
+  xbeam = pdata['xbeam']
+  ybeam = pdata['ybeam']
+  wavelength = pdata['wavelength']
+
+  if 'effective_tiling' in pdata:
+    tm_int = pdata['effective_tiling']
+  else:
+    tiling = image_info.tiling_from_image(detector_phil=detector_phil)
+    tm_int = tiling.effective_tiling_as_flex_int(reapply_peripheral_margin=True,
+                                                 encode_inactive_as_zeroes=True)
+
+  xtal = symmetry(unit_cell=ucell, space_group="P1")
+  indices = xtal.build_miller_set(anomalous_flag=True, d_min=dmin)
+  params = parameters_bp3(indices=indices.indices(),
+                          orientation=ori,
+                          incident_beam=col((0.,0.,-1.)),
+                          packed_tophat=col((1.,1.,0.)),
+                          detector_normal=col((0.,0.,-1.)),
+                          detector_fast=col((0.,1.,0.)), # if buggy, try changing sign
+                          detector_slow=col((1.,0.,0.)), # if buggy, try changing sign
+                          pixel_size=col((pixel_size,pixel_size,0.)),
+                          pixel_offset=col((0.5,0.5,0.0)),
+                          distance=pdata['distance'],
+                          detector_origin=col((-ybeam, -xbeam, 0.))) # if buggy, try changing signs
+  ucbp3 = use_case_bp3(parameters=params)
+
+  # use the tiling manager above to construct the predictor parameters
+  ucbp3.set_active_areas(tm_int)
+  signal_penetration = 0.5 # from LG36 trial 94 params_2.phil
+  ucbp3.set_sensor_model(thickness_mm=0.1, mu_rho=8.36644, signal_penetration=signal_penetration)
+  # presume no subpixel corrections for now
+  ucbp3.prescreen_indices(wavelength)
+  ucbp3.set_orientation(ori)
+  ucbp3.set_mosaicity(pdata['ML_half_mosaicity_deg'][0]*math.pi/180) # radians
+  ucbp3.set_domain_size(pdata['ML_domain_size_ang'][0])
+  bandpass = 1.E-3
+  wave_hi = wavelength * (1.-(bandpass/2.))
+  wave_lo = wavelength * (1.+(bandpass/2.))
+  ucbp3.set_bandpass(wave_hi, wave_lo)
+  ucbp3.picture_fast_slow()
+
+  # the full set of predictable reflections can now be accessed
+  predicted = ucbp3.selected_predictions_labelit_format()
+  hkllist = ucbp3.selected_hkls()
+
+  # construct the experiment list and other dials backbone to be able to write predictions
+  frame = construct_reflection_table_and_experiment_list(int_pickle_path,
+                                                         img_path,
+                                                         pixel_size,
+                                                         proceed_without_image=True)
+  frame.assemble_experiments()
+  frame.assemble_reflections()
+  predictor = StillsReflectionPredictor(frame.experiment, dmin=1.5)
+  Rcalc = flex.reflection_table.empty_standard(len(hkllist))
+  Rcalc['miller_index'] = hkllist
+  expt_xtal = frame.experiment.crystal
+  predictor.for_reflection_table(Rcalc, expt_xtal.get_A())
+  predicted = Rcalc['xyzcal.mm']
+
+  # # apply the active area filter
+  # from iotbx.detectors.active_area_filter import active_area_filter
+  # active_areas = list(tm.effective_tiling_as_flex_int())
+  # active_area_object = active_area_filter(active_areas)
+  # aa_predicted, aa_hkllist = active_area_object(predicted, hkllist, 0.11)
+  # extended_mapped_predictions = flex.vec2_double()
+  # for i in range(len(aa_predicted)):
+  # extended_mapped_predictions.append(aa_predicted[i][0:2])
+
+  # return predictions without re-applying an active area filter
+  newpreds = flex.vec2_double()
+  for i in range(len(predicted)):
+    newpreds.append((predicted[i][0]/pixel_size, img_size-predicted[i][1]/pixel_size))
+  # finally, record new predictions as member data
+  pdata['mapped_predictions_to_edge'] = newpreds
+  pdata['indices_to_edge'] = hkllist
+
+  if dump:
+    newpath = int_pickle_path.split(".pickle")[0] + "_extended.pickle"
+    easy_pickle.dump(newpath, pdata)
+
+  else:
+    return (hkllist, newpreds)
+
+if __name__ == "__main__":
+  import sys
+  for path in sys.argv[1:]:
+    pdata = load_pickle(path)
+    extend_predictions(pdata, path, dmin=1.5, dump=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/merging/refine.py
+# -*- mode: python; coding: utf-8; indent-tabs-mode: nil; python-indent: 2 -*-
+#
+# $Id$
+
+from __future__ import absolute_import, division, print_function
+
+import math
+
+from cctbx.array_family import flex
+from scitbx.lbfgs.tst_curvatures import lbfgs_with_curvatures_mix_in
+from six.moves import range
+
+
+class find_scale(lbfgs_with_curvatures_mix_in):
+  def __init__(self, scaler, params):
+
+    """This function is largely redundant, because it duplicates what is
+    done during mark1 scaling.
+
+    @param scaler Database structure of scaling input
+    @param params work_params
+    """
+
+    # Extract an ordered union of all Miller indices observed on all
+    # frames, and the database structure of observations.
+    self._millers = scaler.millers['merged_asu_hkl']
+    self._observations = scaler._observations
+
+    # XXX Could be more clever about this here, because this will
+    # determine scale factors for rejected frames as well!  Better
+    # named selected_frames?
+    self._subset = scaler.frames['data_subset']
+
+    self._data = self._observations.get_double('i')
+    self._hkl = self._observations.get_int('hkl_id')
+    self._sigmas = self._observations.get_double('sigi')
+    self._frames = self._observations.get_int('frame_id')
+
+    # XXX Useless assert?
+    assert len(self._hkl) == len(self._data) \
+      and  len(self._hkl) == len(self._sigmas)
+
+    # Initialise all per-frame scale factors to one.
+    n_frames = len(self._subset)
+    self.x = flex.double(n_frames + len(self._millers))
+    for i in range(n_frames):
+      self.x[i] = 1
+
+    # For each Miller index, the weighted (XXX) average intensity of
+    # all the observations serves as an initial estimate of the merged
+    # intensity.  This is all Monte Carlo scaling would do.
+    assert len(self._millers) == len(scaler.summed_wt_I) \
+      and  len(self._millers) == len(scaler.summed_weight)
+
+    for i in range(len(self._millers)):
+      if scaler.summed_weight[i] > 0:
+        self.x[n_frames + i] = scaler.summed_wt_I[i] / scaler.summed_weight[i]
+
+    # The weight of each observation is (1 / sigma)**2, where sigma is
+    # the standard deviation of the observation as determined during
+    # integration.  An observation is assigned a weight of zero if
+    #
+    #   The observation was made on a rejected frame
+    #
+    #   The integrated intensity of the observation is non-positive
+    #
+    #   The variance of the observation, s**2, as determined during
+    #   integration, is non-positive
+    #
+    #   The d-spacing of the observation lies outside the
+    #   user-supplied resolution limits
+    #
+    # XXX Check Bolotovsky et al.: use sigma**2 or sigma for the
+    # weighting?
+    self.w = flex.double(len(self._hkl))
+    for i in range(len(self.w)):
+      if not self._subset[self._frames[i]]:
+        continue
+
+      if not params.include_negatives and self._data[i] <= 0:
+        continue
+
+      # XXX Should compare against sqrt(eps) instead?  See also
+      # scales_non_positive below.
+      v = self._sigmas[i]**2
+      if v <= 0:
+        continue
+
+      # Test d_min first, because it is more likely to have a lower
+      # resolution limit than an upper resolution limit.  XXX Is this
+      # ever enforced in practice, i.e. is this the first time the
+      # limits are applied?
+      d = scaler.params.target_unit_cell.d(self._millers[self._hkl[i]])
+      if (params.d_min is not None and d < params.d_min) or \
+         (params.d_max is not None and d > params.d_max):
+        continue
+
+      self.w[i] = 1 / v
+
+    # Should be the last call in the application-specific minimizer
+    # class.  This will call lbfgs's run() function and perform
+    # optimization.
+    super(find_scale, self).__init__() #max_iterations=2000
+
+
+  def compute_functional_and_gradients(self):
+    """The compute_functional_and_gradients() function
+
+    @return Two-tuple of the value of the functional, and an
+            <code>n</code>-long vector with the values of the
+            gradients at the current position
+    """
+
+    #from libtbx.development.timers import Profiler
+    from xfel import compute_functional_and_gradients
+
+    n_frames = len(self._subset)
+
+    #p = Profiler("compute_functional_and_gradients [C++]")
+    (f, g) = compute_functional_and_gradients(
+      self.x, self.w, n_frames, self._observations)
+    #del p
+
+    # XXX Only output this every 100 iterations or so.
+    scales = self.x[0:len(self._subset)]
+    stats = flex.mean_and_variance(scales)
+    print("* f =% 10.4e, g =% f+/-%f" % (
+      math.sqrt(f),
+      stats.mean(),
+      stats.unweighted_sample_standard_deviation()))
+
+    # Warn if there are non_positive per-frame scaling factors.
+    scales_non_positive = scales.select(scales <= 1e-6) # XXX Or just zero!
+    if len(scales_non_positive) > 0:
+      stats = flex.mean_and_variance(scales_non_positive)
+      if len(scales_non_positive) > 1:
+        sigma = stats.unweighted_sample_standard_deviation()
+      else:
+        sigma = 0
+      print("Have %d non-positive per-frame scaling factors: " \
+        "%f+/-%f [%f, %f]" % (
+          len(scales_non_positive),
+          stats.mean(),
+          sigma,
+          flex.min(scales_non_positive),
+          flex.max(scales_non_positive)))
+
+    return (f, g)
+
+
+  def curvatures(self):
+    from xfel import curvatures
+    n_frames = len(self._subset)
+    return curvatures(
+      self.x, self.w, n_frames, self._observations)
+
+
+  def get_scaling_results(self, results, scaler):
+    from xfel import get_scaling_results_mark2
+
+    return get_scaling_results_mark2(
+      self.x, self.w, results, scaler.params.target_unit_cell)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/merging/report/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/merging/report/graphs/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/merging/report/tables/__init__.py
+
+
+ *******************************************************************************

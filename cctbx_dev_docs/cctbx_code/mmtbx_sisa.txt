@@ -1,0 +1,1137 @@
+
+
+ *******************************************************************************
+mmtbx/sisa/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/sisa/optimize/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/sisa/optimize/mod_ga.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+'''
+Author      : Uervirojnangkoorn, M.
+Created     : 12/1/2014
+Description : Genetic algorithm.
+'''
+import random
+
+class ga_handler(object):
+  '''
+  Genetic algorithm class.
+  '''
+  def __init__(self):
+    '''
+    Constructor
+    '''
+
+
+  def initialse(self, pop_size, idv_length, cdf_from_pdf_set, phi_for_hl):
+    '''
+    generate population from cdf of HL
+    '''
+    pop=[];
+    for i_pop in range(pop_size):
+      idv=[0]*idv_length;
+
+      for i_idv in range(idv_length):
+        tmp_rand=random.random();
+        for i_phi in range(len(phi_for_hl)):
+          if cdf_from_pdf_set[i_idv][i_phi]>= tmp_rand:
+            idv[i_idv]=phi_for_hl[i_phi]
+            break
+
+      pop.append(idv)
+
+    return pop;
+
+
+  def crossover(self,parent1,parent2,ratio_cross):
+
+    num_point_cross=int(round(ratio_cross*len(parent1)))
+    child1=parent1[:]
+    child2=parent2[:]
+
+    ''' unicross '''
+    cross_template=random.sample(range(len(parent1)),num_point_cross)
+
+    for i_cross in range(num_point_cross):
+      child1[cross_template[i_cross]]=parent2[cross_template[i_cross]]
+      child2[cross_template[i_cross]]=parent1[cross_template[i_cross]]
+
+
+    ''' normal cross
+    max_i=int(round(len(parent1)/(num_point_cross*2)))
+
+    for i in range(max_i):
+      i_st=num_point_cross*i*2
+      i_en=i_st+num_point_cross
+      child1[i_st:i_en]=parent2[i_st:i_en]
+      child2[i_st:i_en]=parent1[i_st:i_en]
+    '''
+
+
+    return child1,child2,cross_template
+
+  def mutation(self,parent,prob_of_mut,num_point_mut,cdf_from_pdf_set,phi_for_hl):
+
+    child=parent[:];
+    if random.random() < prob_of_mut:
+      mut_template=random.sample(range(len(parent)),num_point_mut);
+
+      for i_mut in range(num_point_mut):
+        tmp_rand=random.random();
+        dif_abs=[0]*len(phi_for_hl);
+        for i_phi in range(len(phi_for_hl)):
+          dif_abs[i_phi]=abs(cdf_from_pdf_set[mut_template[i_mut]][i_phi]-tmp_rand);
+
+
+        child[mut_template[i_mut]]=phi_for_hl[dif_abs.index(min(dif_abs))];
+
+
+    return child;
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/sisa/optimize/mod_input.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+import iotbx.phil
+from libtbx.utils import Sorry
+import sys, os
+
+master_phil = iotbx.phil.parse("""
+data = None
+  .type = path
+  .help = Path to an input mtz file.
+project_name = .
+  .type = str
+  .help = Project name specified as a path to store different runs.
+run_name = None
+  .type = str
+  .help = Run name is used as folder name that stores output files.
+title = None
+  .type = str
+  .help = Title of the run.
+flag_log_verbose_on = False
+  .type = bool
+  .help = Turn this flag on to output more information.
+hklrefin = None
+  .type = path
+  .help = Mtz file used as a reference to calculate phase errors.
+column_names = FP,SIGFP,PHIB,FOM,HLA,HLB,HLC,HLD
+  .type = str
+  .help = List of column names if not FP, SIGFP, PHIB, FOM, HLA, HLB, HLC, HLD.
+column_phic = PHIC
+  .type = str
+  .help = Column name for phases in refin mtz file.
+autodm = True
+  .type = bool
+  .help = Set this flag to False to disable automatic density modification.
+seq_file = None
+  .type = path
+  .help = Path to sequence file.
+ha_file = None
+  .type = path
+  .help = Path to heavy atom pdb file (preliminary results for previous searches).
+model_file = None
+  .type = path
+  .help = Path to pre-built model.
+fom_min = 0.0
+  .type = float
+  .help = Minimum cut-off figure of merits.
+d_min = 0.1
+  .type = float
+  .help = Minimum resolution.
+d_max = 99.0
+  .type = float
+  .help = Maximum resolution.
+sigma_min = 1.5
+  .type = float
+  .help = Minimum I/sigI.
+flag_apply_b_factor = False
+  .type = bool
+  .help = Turn this flag on to apply Wilson B-factor (wavelength is needed).
+wavelength = 1.0
+  .type = float
+  .help = Wavelength.
+n_stacks = 1
+  .type = int
+  .help = No. of stacks used in optimization (each stack contribute to specified percent_f_squared).
+n_micro_cycles = 10
+  .type = int
+  .help = No. of microcycles.
+n_macro_cycles = 1
+  .type = int
+  .help = No. of macrocycles.
+n_processors = 32
+  .type = int
+  .help = No. processors.
+percent_f_squared = 25
+  .type = float
+  .help = Percent of F^2 used in selecting no. of reflections in each stack.
+flag_excl_centric = False
+  .type = bool
+  .help = Turn this flag on to exclude centric reflections from the search.
+fit_params
+  .help = search parameters
+{
+  solvent_content = 0.5
+    .type = float
+    .help = Solvent content (fractions).
+  wang_radius = 4.0
+    .type = float
+    .help = Wang radius
+  ed_sigma_thres = 5.0
+    .type = float
+    .help = Electrion density sigma cut-off.
+  w_llmap = 0.0
+    .type = float
+    .help = Weight of log-likelihood map score.
+  w_skew = 0.0
+    .type = float
+    .help = Weight of map skew score.
+}
+ga_params
+  .help = genetic algorithm parameters.
+{
+  pop_size = 400
+    .type = int
+    .help = No. of chromosomes in the population.
+  max_gen = 100
+    .type = int
+    .help = Maximum number of generations.
+  prob_of_cross = 0.95
+    .type = float
+    .help = Probability of crossover.
+  prob_of_mut = 0.01
+    .type = float
+    .help = Probability of mutation.
+  ratio_cross = 0.2
+    .type = float
+    .help = Fractions used in crossing over.
+  num_point_mut = 1
+    .type = int
+    .help = No. of mutation points.
+  xmap_radius = 3
+    .type = int
+    .help = No. of cells used during map local search.
+  num_sel_mate = 15
+    .type = int
+    .help = NA
+  crossover_start_rate = 0.2
+    .type = float
+    .help = Starting crossover rate.
+  crossover_end_rate = 0.2
+    .type = float
+    .help = Final crossover rate.
+  crossover_slope = 1.0
+    .type = float
+    .help = Slope of the crossover rate function.
+  skew_sigma_sel_lo = 0.0
+    .type = float
+    .help = NA
+  skew_sigma_sel_hi = 1.0
+    .type = float
+    .help = NA
+}
+""")
+
+txt_help = """**************************************************************************************************
+
+Sisa helps resampling a new combination of experimental phases for a few strongest reflections.
+The output mtz file can be used to perform density modification.
+
+Usage: phenix.sisa parameter.phil
+
+With this command, you can specify all parameters required by sisa in your parameter.phil file.
+To obtain the template of these parameters, you can perform a dry run (simply run phenix.sisa).
+You can then change the values of the parameters.
+
+For feedback, please contact monarin@stanford.edu.
+
+**************************************************************************************************
+
+List of available parameters:
+"""
+def process_input(argv=None):
+  if argv == None:
+    argv = sys.argv[1:]
+
+  user_phil = []
+  for arg in sys.argv[1:]:
+    if os.path.isfile(arg):
+      if arg.lower().find('.mtz') > 0:
+        user_phil.append(iotbx.phil.parse("""data=\"%s\"""" % arg))
+      else:
+        try:
+          user_phil.append(iotbx.phil.parse(open(arg).read()))
+        except RuntimeError as e :
+          print('Error reading input: run phenix.sisa -h for help')
+          raise Sorry("Unrecognized argument '%s' (error: %s)" % (arg, str(e)))
+    else :
+      print(arg)
+      if arg == '--help' or arg == '-h':
+        print(txt_help)
+        master_phil.show(attributes_level=1)
+        exit()
+      else:
+        try :
+          user_phil.append(iotbx.phil.parse(arg))
+        except RuntimeError as e :
+          print('Error reading input: run phenix.sisa -h for help')
+          raise Sorry("Unrecognized argument '%s' (error: %s)" % (arg, str(e)))
+
+  working_phil = master_phil.fetch(sources=user_phil)
+  params = working_phil.extract()
+
+  #check dry-run
+  if len(user_phil) == 0:
+    master_phil.show()
+    print('Use the above list of parameters to generate your input file (.phil). For more information, run phenix.sisa -h.')
+    exit()
+
+  if params.data is None:
+    print('MTZ file with amplitudes, HL coefficients, and PHIB is required. For more information, run phenix.sisa -h.')
+    exit()
+
+  #capture input read out by phil
+  from six.moves import cStringIO as StringIO
+  class Capturing(list):
+    def __enter__(self):
+      self._stdout = sys.stdout
+      sys.stdout = self._stringio = StringIO()
+      return self
+    def __exit__(self, *args):
+      self.extend(self._stringio.getvalue().splitlines())
+      sys.stdout = self._stdout
+
+  with Capturing() as output:
+    working_phil.show()
+
+  txt_out = 'sisa.optimize (v.0 150326a) input:\n'
+  for one_output in output:
+    txt_out += one_output + '\n'
+
+  print(txt_out)
+
+
+  if params.autodm:
+    if params.seq_file is None:
+      raise Sorry("Sequence file is needed for automatic density modification. You can set autodm=False to disable this step.")
+
+  #determine automatic run_no if run_name is not given
+  run_seq_list = flex.int()
+  if params.run_name is None:
+    for dirs in os.walk(params.project_name):
+      current_dir = dirs[0]
+      if current_dir.find('Sisa_run_') > 0:
+        try:
+          current_dir_arr = current_dir.split('_')
+          run_seq_list.append(int(current_dir_arr[len(current_dir_arr)-1]))
+        except Exception:
+          dummy = 1
+    if len(run_seq_list) == 0:
+      run_seq = 1
+    else:
+      run_seq = flex.max(run_seq_list) + 1
+    params.run_name = 'Sisa_run_'+str(run_seq)
+
+  #generate run_no folder only if the folder does not exist.
+  project_run_path = params.project_name + '/' + params.run_name
+  if os.path.exists(project_run_path):
+    raise Sorry("The run number %s already exists."%project_run_path)
+
+  os.makedirs(project_run_path)
+  return params, txt_out
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/sisa/optimize/mod_masks.py
+from __future__ import absolute_import, division, print_function
+'''
+Author      : Uervirojnangkoorn, M.
+Created     : 12/1/2014
+Description : Mask functions.
+'''
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/sisa/optimize/mod_mtz.py
+'''
+Author      : Uervirojnangkoorn, M.
+Created     : 12/1/2014
+Description : Handling mtz file.
+'''
+from __future__ import absolute_import, division, print_function
+import sys
+import numpy as np
+from iotbx import reflection_file_reader
+from cctbx.array_family import flex
+from cctbx import miller
+from cctbx import crystal
+from six.moves import range
+
+class mtz_handler(object):
+  '''
+  Handling mtz files.
+  '''
+  def __init__(self):
+    '''
+    Constructor
+    '''
+
+  def format_miller_arrays(self, iparams):
+    '''
+    Read in mtz file and format to miller_arrays_out object with
+    index[0] --> FP, SIGFP
+    index[1] --> PHIB
+    index[2] --> FOM
+    index[3] --> HLA, HLB, HLC, HLD
+    index[4] --> optional PHIC
+    '''
+    #readin reflection file
+    reflection_file = reflection_file_reader.any_reflection_file(iparams.data)
+
+    file_content=reflection_file.file_content()
+    column_labels=file_content.column_labels()
+    col_name=iparams.column_names.split(',')
+
+    miller_arrays=reflection_file.as_miller_arrays()
+    flex_centric_flags = miller_arrays[0].centric_flags().data()
+    crystal_symmetry = crystal.symmetry(
+        unit_cell=miller_arrays[0].unit_cell(), space_group=miller_arrays[0].space_group())
+
+    #grab all required columns
+    flag_fp_found = 0
+    flag_phib_found = 0
+    flag_fom_found = 0
+    flag_hl_found = 0
+    ind_miller_array_fp = 0
+    ind_miller_array_phib = 0
+    ind_miller_array_fom = 0
+    ind_miller_array_hl = 0
+    for i in range(len(miller_arrays)):
+      label_string = miller_arrays[i].info().label_string()
+      labels=label_string.split(',')
+      #only look at first index string
+      if labels[0]==col_name[0]:
+        #grab FP, SIGFP
+        flex_fp_all=miller_arrays[i].data()
+        flex_sigmas_all=miller_arrays[i].sigmas()
+        flag_fp_found=1
+        ind_miller_array_fp = i
+      elif labels[0]==col_name[2]:
+        #grab PHIB
+        flex_phib_all=miller_arrays[i].data()
+        flag_phib_found=1
+        ind_miller_array_phib = i
+      elif labels[0]==col_name[3]:
+        #grab FOM
+        flex_fom_all=miller_arrays[i].data()
+        flag_fom_found=1
+        ind_miller_array_fom = i
+      elif labels[0]==col_name[4]:
+        #grab HLA,HLB,HLC,HLD
+        flex_hl_all=miller_arrays[i].data()
+        flag_hl_found=1
+        ind_miller_array_hl = i
+
+    if flag_hl_found==1 and flag_phib_found == 0:
+      #calculate PHIB and FOM from HL
+      miller_array_phi_fom = miller_arrays[ind_miller_array_hl].phase_integrals()
+      flex_phib_all = miller_array_phi_fom.phases(deg=True).data()
+      flex_fom_all = miller_array_phi_fom.amplitudes().data()
+      flag_phib_found = 1
+      flag_fom_found = 1
+
+    if flag_fp_found==0 or flag_phib_found==0 or flag_fom_found==0 or flag_hl_found==0:
+      print("couldn't find all required columns")
+      sys.exit()
+
+    miller_indices_sel = miller_arrays[ind_miller_array_fp].indices()
+    print('No. reflections for read-in miller arrays - indices:%6.0f fp:%6.0f phib:%6.0f fom:%6.0f HL:%6.0f)'%( \
+          len(miller_indices_sel), len(flex_fp_all), len(flex_phib_all), len(flex_fom_all), len(flex_hl_all)))
+
+    miller_indices = flex.miller_index()
+    flex_fp = flex.double()
+    flex_sigmas = flex.double()
+    flex_phib = flex.double()
+    flex_fom = flex.double()
+    flex_hl = flex.hendrickson_lattman()
+    #format all miller arrays to the same length
+    for miller_index in miller_indices_sel:
+      fp_cn, phib_cn, fom_cn, hl_cn = (0,0,0,0)
+
+      matches = miller.match_multi_indices(
+                    miller_indices_unique=flex.miller_index([miller_index]),
+                    miller_indices=miller_arrays[ind_miller_array_fp].indices())
+      if len(matches.pairs()) > 0:
+        fp_cn = 1
+        fp = flex_fp_all[matches.pairs()[0][1]]
+        sigmas = flex_sigmas_all[matches.pairs()[0][1]]
+
+      matches = miller.match_multi_indices(
+                    miller_indices_unique=flex.miller_index([miller_index]),
+                    miller_indices=miller_arrays[ind_miller_array_phib].indices())
+      if len(matches.pairs()) > 0:
+        phib_cn = 1
+        phib = flex_phib_all[matches.pairs()[0][1]]
+
+      matches = miller.match_multi_indices(
+                    miller_indices_unique=flex.miller_index([miller_index]),
+                    miller_indices=miller_arrays[ind_miller_array_fom].indices())
+      if len(matches.pairs()) > 0:
+        fom_cn = 1
+        fom = flex_fom_all[matches.pairs()[0][1]]
+
+      matches = miller.match_multi_indices(
+                    miller_indices_unique=flex.miller_index([miller_index]),
+                    miller_indices=miller_arrays[ind_miller_array_hl].indices())
+      if len(matches.pairs()) > 0:
+        hl_cn = 1
+        hl = flex_hl_all[matches.pairs()[0][1]]
+
+      if (fp_cn + phib_cn + fom_cn + hl_cn) == 4:
+        miller_indices.append(miller_index)
+        flex_fp.append(fp)
+        flex_sigmas.append(sigmas)
+        flex_phib.append(phib)
+        flex_fom.append(fom)
+        flex_hl.append(hl)
+
+
+
+    print('No. reflections after format - indices:%6.0f fp:%6.0f phib:%6.0f fom:%6.0f HL:%6.0f)'%( \
+          len(miller_indices), len(flex_fp), len(flex_phib), len(flex_fom), len(flex_hl)))
+
+    flex_hla = flex.double()
+    flex_hlb = flex.double()
+    flex_hlc = flex.double()
+    flex_hld = flex.double()
+    for i in range(len(flex_hl)):
+      data_hl_row=flex_hl[i]
+      flex_hla.append(data_hl_row[0])
+      flex_hlb.append(data_hl_row[1])
+      flex_hlc.append(data_hl_row[2])
+      flex_hld.append(data_hl_row[3])
+    '''
+    Read benchmark MTZ (PHICalc) for MPE calculation
+    '''
+    flex_phic = flex.double([0]*len(flex_fp))
+    if iparams.hklrefin is not None:
+      reflection_file = reflection_file_reader.any_reflection_file(iparams.hklrefin)
+      miller_arrays_bench=reflection_file.as_miller_arrays()
+      flex_phic_raw = None
+      for i in range(len(miller_arrays_bench)):
+        label_string = miller_arrays_bench[i].info().label_string()
+        labels=label_string.split(',')
+        #only look at first index string
+        if labels[0] == iparams.column_phic:
+          #grab PHIC
+          if miller_arrays_bench[i].is_complex_array():
+            flex_phic_raw = miller_arrays_bench[i].phases(deg=True).data()
+          else:
+            flex_phic_raw = miller_arrays_bench[i].data()
+          miller_indices_phic = miller_arrays_bench[i].indices()
+
+      if flex_phic is not None:
+        matches = miller.match_multi_indices(
+                  miller_indices_unique=miller_indices,
+                  miller_indices=miller_indices_phic)
+
+        flex_phic = flex.double([flex_phic_raw[pair[1]] for pair in matches.pairs()])
+
+    #format miller_arrays_out
+    miller_set=miller.set(
+            crystal_symmetry=crystal_symmetry,
+            indices=miller_indices,
+            anomalous_flag=False)
+    miller_array_out = miller_set.array(
+            data=flex_fp,
+            sigmas=flex_sigmas).set_observation_type_xray_amplitude()
+
+    #check if Wilson B-factor is applied
+    flex_fp_for_sort = flex_fp[:]
+    if iparams.flag_apply_b_factor:
+      try:
+        #get wilson_plot
+        from mmtbx.scaling import xtriage
+        from libtbx.utils import null_out
+        xtriage_args = [
+          iparams.data,
+          "",
+          "",
+          "log=tst_xtriage_1.log"
+        ]
+        result = xtriage.run(args=xtriage_args, out=null_out())
+        ws = result.wilson_scaling
+
+        print('Wilson K=%6.2f B=%6.2f'%(ws.iso_p_scale, ws.iso_b_wilson))
+        sin_theta_over_lambda_sq = miller_array_out.two_theta(wavelength=iparams.wavelength) \
+                                    .sin_theta_over_lambda_sq().data()
+        wilson_expect = flex.exp(-2 * ws.iso_b_wilson * sin_theta_over_lambda_sq)
+        flex_fp_for_sort = wilson_expect * flex_fp
+      except Exception:
+        print('Error calculating Wilson scale factors. Continue without applying B-factor.')
+
+
+    flex_d_spacings = miller_array_out.d_spacings().data()
+
+    mtz_dataset = miller_array_out.as_mtz_dataset(column_root_label="FP")
+
+    for data,lbl,typ in [(flex_phib, "PHIB", "P"),
+        (flex_fom, "FOMB", "W"),
+        (flex_hla,"HLA","A"),
+        (flex_hlb,"HLB","A"),
+        (flex_hlc,"HLC","A"),
+        (flex_hld,"HLD","A"),
+        (flex_phic,"PHIC","P")]:
+        mtz_dataset.add_miller_array(miller_array_out.array(data=data),
+            column_root_label=lbl,
+            column_types=typ)
+
+    miller_arrays_out = mtz_dataset.mtz_object().as_miller_arrays()
+
+    '''
+    getting sorted indices for the selected reflections in input mtz file
+    list_fp_sort_index: stores indices of sorted FP in descending order
+    '''
+    import operator
+    fp_sort_index= [i for (i,j) in sorted(enumerate(flex_fp_for_sort), key=operator.itemgetter(1))]
+    fp_sort_index.reverse()
+
+    """
+    for i in range(100):
+      print miller_indices[fp_sort_index[i]], flex_d_spacings[fp_sort_index[i]], flex_fp[fp_sort_index[i]], flex_sigmas[fp_sort_index[i]], wilson_expect[fp_sort_index[i]]
+
+    exit()
+    """
+
+    #calculate sum of fp^2 from percent_f_squared
+    flex_fp_squared = flex_fp ** 2
+    f_squared_per_stack = (iparams.percent_f_squared * np.sum(flex_fp_squared))/100
+    fp_sort_index_stacks = []
+    sum_fp_now, i_start = (0,0)
+    for i in range(len(fp_sort_index)):
+      i_sel = fp_sort_index[i_start:i+1]
+      sum_fp_now = np.sum([flex_fp_squared[ii_sel] for ii_sel in i_sel])
+      if sum_fp_now >= f_squared_per_stack:
+        fp_sort_index_stacks.append(fp_sort_index[i_start:i+1])
+        i_start = i+1
+        if len(fp_sort_index_stacks) == iparams.n_stacks:
+          break
+
+    txt_out = 'stack_no sum(f_squared) %total  n_refl\n'
+    for i in range(len(fp_sort_index_stacks)):
+      sum_fp = np.sum([flex_fp_squared[ii_sel] for ii_sel in fp_sort_index_stacks[i]])
+      txt_out += '%6.0f %14.2f %8.2f %6.0f\n'%(i+1, sum_fp, \
+        (sum_fp/np.sum(flex_fp_squared))*100, len(fp_sort_index_stacks[i]))
+
+    return miller_arrays_out, fp_sort_index_stacks, txt_out
+
+  def write_mtz(self, miller_arrays, file_name_out):
+    crystal_symmetry = crystal.symmetry(
+        unit_cell=miller_arrays[0].unit_cell(), space_group=miller_arrays[0].space_group())
+
+    #get data from miller_arrays
+    flex_fp = miller_arrays[0].data()
+    flex_sigmas = miller_arrays[0].sigmas()
+    flex_phib = miller_arrays[1].data()
+    flex_fom = miller_arrays[2].data()
+    flex_hl = miller_arrays[3].data()
+
+    #format hla,b,c,d
+    flex_hla = flex.double()
+    flex_hlb = flex.double()
+    flex_hlc = flex.double()
+    flex_hld = flex.double()
+    for i in range(len(flex_hl)):
+      data_hl_row=flex_hl[i]
+      flex_hla.append(data_hl_row[0])
+      flex_hlb.append(data_hl_row[1])
+      flex_hlc.append(data_hl_row[2])
+      flex_hld.append(data_hl_row[3])
+
+    #format miller_arrays_out
+    miller_set=miller.set(
+            crystal_symmetry=crystal_symmetry,
+            indices=miller_arrays[0].indices(),
+            anomalous_flag=False)
+    miller_array_out = miller_set.array(
+            data=flex_fp,
+            sigmas=flex_sigmas).set_observation_type_xray_amplitude()
+
+    mtz_dataset = miller_array_out.as_mtz_dataset(column_root_label="FP")
+
+    for data,lbl,typ in [(flex_phib, "PHIB", "P"),
+        (flex_fom, "FOMB", "W"),
+        (flex_hla,"HLA","A"),
+        (flex_hlb,"HLB","A"),
+        (flex_hlc,"HLC","A"),
+        (flex_hld,"HLD","A")]:
+        mtz_dataset.add_miller_array(miller_array_out.array(data=data),
+            column_root_label=lbl,
+            column_types=typ)
+
+    mtz_dataset.mtz_object().write(file_name=file_name_out)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/sisa/optimize/mod_optimize.py
+'''
+Author      : Uervirojnangkoorn, M.
+Created     : 12/1/2014
+Description : Optimizer main module.
+'''
+from __future__ import absolute_import, division, print_function
+import numpy as np
+import math, random
+from cctbx.array_family import flex
+from datetime import datetime
+from six.moves import range
+
+class sisa_optimizer(object):
+  '''
+  Setup project environment, sort reflections and return selected indices,
+  then perform microcycle optimization (macrocyle is done in the command file).
+  '''
+  def __init__(self):
+    '''
+    Constructor
+    '''
+    self.phi_for_hl=flex.double(range(0,360,1))
+
+  def calc_pdf_cdf_from_hl(self, hl_given):
+    cdf_from_pdf_set=[]
+    phi_for_hl_radian = self.phi_for_hl * math.pi / 180
+    for i_refl in range(len(hl_given)):
+      pdf_from_hl=[0]*len(phi_for_hl_radian)
+      cdf_from_pdf=[0]*len(phi_for_hl_radian)
+
+      for i_phi in range(len(phi_for_hl_radian)):
+        phi_given_radian=phi_for_hl_radian[i_phi]
+        pdf_from_hl[i_phi]=math.exp((hl_given[i_refl][0]*math.cos(phi_given_radian))+
+                                    (hl_given[i_refl][1]*math.sin(phi_given_radian))+
+                                    (hl_given[i_refl][2]*math.cos(2*phi_given_radian))+
+                                    (hl_given[i_refl][3]*math.sin(2*phi_given_radian)));
+        cdf_from_pdf[i_phi]=sum(pdf_from_hl[0:i_phi+1]);
+
+      #scale the cdf
+      max_cdf_from_pdf=max(cdf_from_pdf);
+      for j_phi in range(len(cdf_from_pdf)):
+        cdf_from_pdf[j_phi]/=max_cdf_from_pdf;
+
+      cdf_from_pdf_set.append(cdf_from_pdf);
+
+    return cdf_from_pdf_set
+
+  def setup_map_coeff(self, miller_arrays, indices_selected, phi_selected, fom_selected):
+
+    flex_fp = miller_arrays[0].data()
+    flex_sigmas = miller_arrays[0].sigmas()
+    flex_phi_new = miller_arrays[1].data()
+    flex_fom_new = miller_arrays[2].data()
+    for i in range(len(indices_selected)):
+      flex_fom_new[indices_selected[i]] = fom_selected[i]
+      flex_phi_new[indices_selected[i]] = phi_selected[i]
+
+    flex_fp_w_new = flex_fp * flex_fom_new
+    miller_array_fp_w = miller_arrays[0].customized_copy(data=flex_fp_w_new)
+
+    map_coeff = miller_array_fp_w.phase_transfer(phase_source=flex_phi_new, deg=True)
+
+    return map_coeff
+
+  def calcskew(self, map_coeff, iparams):
+    real_map = map_coeff.fft_map().real_map()
+
+    ed_limit = iparams.fit_params.ed_sigma_thres*real_map.sample_standard_deviation()
+
+    ed_limit_up=ed_limit
+    ed_limit_dn=ed_limit*-1
+
+    #truncate the electron density beyond sigma limit
+    real_map.set_selected(real_map>ed_limit_up,ed_limit_up)
+    real_map.set_selected(real_map<ed_limit_dn,ed_limit_dn)
+
+    skew = flex.mean(flex.pow(real_map,3))/pow(flex.mean_sq(real_map),3/2)
+
+    return skew
+
+  def pickbestidv(self, list_idv, list_fit, lo_sigma_fit, up_sigma_fit):
+    list_phis_good = []
+    mean_fit = sum(list_fit)/len(list_fit)
+    std_fit = np.std(list_fit)
+    fit_thres_lo = mean_fit + (lo_sigma_fit * std_fit)
+    fit_thres_hi = mean_fit + (up_sigma_fit * std_fit)
+
+    for i_idv in range(len(list_idv)):
+      if list_fit[i_idv] > fit_thres_lo and list_fit[i_idv] <= fit_thres_hi:
+        list_phis_good.append(list_idv[i_idv])
+
+    #find centroid phase for phis_good
+    from mmtbx.sisa.optimize.mod_util import util_handler
+    uth = util_handler()
+    flex_phi_bar, dummy = uth.calcphibar(list_phis_good)
+
+    return flex_phi_bar, mean_fit, std_fit, len(list_phis_good)
+
+  def calc_stats(self, miller_arrays, indices_selected, phi_selected, fom_selected, iparams):
+    map_coeff = self.setup_map_coeff(miller_arrays, indices_selected,
+                                      phi_selected, fom_selected)
+    skew = self.calcskew(map_coeff, iparams)
+
+    fp_selected = flex.double([miller_arrays[0].data()[inds] for inds in indices_selected])
+    phic_selected = flex.double([miller_arrays[4].data()[inds] for inds in indices_selected])
+
+    mpe_phi = 0
+    mapcc_phi = 0
+    if iparams.hklrefin is not None and \
+      np.sum(phic_selected) > 0:
+      from mmtbx.sisa.optimize.mod_util import util_handler
+      uth = util_handler()
+      mapcc_phi, mpe_phi = uth.calcphicc(fp_selected,
+                                           [1]*len(fom_selected),
+                                           fom_selected,
+                                           phic_selected,
+                                           phi_selected,
+                                           True)
+    return skew, mapcc_phi, mpe_phi
+
+  def run_optimize(self, micro_cycle_no, stack_no, miller_arrays, indices_selected, cdf_set, iparams):
+
+    #start ga
+    from mmtbx.sisa.optimize.mod_ga import ga_handler
+    gah = ga_handler()
+
+    from mmtbx.sisa.optimize.mod_util import util_handler
+    uth = util_handler()
+
+    list_phis_intcycle = []
+    list_fit_intcycle = []
+
+    #initial fist population and calculate their fitness
+    ga_idv_length = len(indices_selected)
+    cur_pop=gah.initialse(iparams.ga_params.pop_size, ga_idv_length, cdf_set, self.phi_for_hl)
+    cur_fit=[0]*len(cur_pop)
+
+    #setup new fp, phic (if given), fom, and new fom
+    fp_selected = flex.double([miller_arrays[0].data()[inds] for inds in indices_selected])
+    phib_selected = flex.double([miller_arrays[1].data()[inds] for inds in indices_selected])
+    fom_selected = flex.double([miller_arrays[2].data()[inds] for inds in indices_selected])
+
+    fom_selected_new = fom_selected + 0.2
+
+    #calculate initial mapcc and mpe
+    skew, mapcc, mpe = self.calc_stats(miller_arrays, indices_selected,
+                                        phib_selected, fom_selected, iparams)
+
+    txt_prn_out = "Starting stack %2.0f: microcycle %2.0f (initial skew=%6.2f, mapcc=%6.2f, mpe=%6.2f)\n"%(\
+      stack_no+1, micro_cycle_no+1, skew, mapcc, mpe*180/math.pi)
+    print(txt_prn_out)
+    txt_pop_hist_out=""
+    for i_idv in range(len(cur_pop)):
+      map_coeff = self.setup_map_coeff(miller_arrays, indices_selected,
+            flex.double(cur_pop[i_idv]), fom_selected_new)
+      cur_fit[i_idv] = self.calcskew(map_coeff, iparams)
+
+      #collect the first population
+      list_phis_intcycle.append(cur_pop[i_idv])
+      list_fit_intcycle.append(cur_fit[i_idv])
+
+    txt_prn_tmp = 'gen'.center(5)+'<skew>'.center(7)+'std_skew'.center(8)+'n_accidv'.center(10)+ \
+      'skew'.center(6)+'mapcc'.center(7)+'mpe'.center(5)+'mapccp'.center(7)+'mpep'.center(6)+'time_spent (min)'.center(16)+'\n'
+    print(txt_prn_tmp)
+    txt_prn_out += txt_prn_tmp
+    #Set up population map
+    #[[7,1,5],
+    #[2,3,0],
+    #[4,6,9]]
+    map_width=int(math.sqrt(iparams.ga_params.pop_size))
+    map_1D=random.sample(range(iparams.ga_params.pop_size), iparams.ga_params.pop_size)
+
+    map_2D=[]
+    for i_width in range(map_width):
+      map_2D.append(map_1D[int(map_width*i_width):int(map_width*(i_width+1))])
+
+    map_visit_order=random.sample(range(iparams.ga_params.pop_size), iparams.ga_params.pop_size)
+
+    #start a generation
+    conv_gen = iparams.ga_params.max_gen
+    for i_gen in range(iparams.ga_params.max_gen):
+      time_gen_start=datetime.now()
+
+      #calculate crossover rate for this generation
+      ga_ratio_cross=iparams.ga_params.crossover_start_rate + \
+        (math.pow(i_gen/iparams.ga_params.max_gen, iparams.ga_params.crossover_slope) * \
+        (iparams.ga_params.crossover_end_rate-iparams.ga_params.crossover_start_rate))
+
+      num_point_cross=int(round(ga_ratio_cross * ga_idv_length))
+      for i_idv in range(len(map_visit_order)):
+        mom_x=int(math.fmod(map_visit_order[i_idv], map_width))
+        mom_y=int(math.floor(map_visit_order[i_idv]/map_width))
+        mom_id=map_2D[mom_x][mom_y]
+        mom=cur_pop[mom_id]
+        mom_fit=cur_fit[mom_id]
+
+
+        #draw an xmap around mom and grab the idv_id stored in map_2D
+        mate_candidate_id=[]
+        xmap_width = (iparams.ga_params.xmap_radius * 2) + 1
+        for i_xmap_y in range(xmap_width):
+          for i_xmap_x in range(xmap_width):
+            i_xmap_tmp_x=mom_x+i_xmap_x-iparams.ga_params.xmap_radius
+            i_xmap_tmp_y=mom_y+i_xmap_y-iparams.ga_params.xmap_radius
+            if i_xmap_tmp_x >= xmap_width:
+              i_xmap_tmp_x-= xmap_width
+            if i_xmap_tmp_y >= xmap_width:
+              i_xmap_tmp_y-= xmap_width
+            if ~(map_2D[i_xmap_tmp_x][i_xmap_tmp_y]==mom_id):
+              mate_candidate_id.append(map_2D[i_xmap_tmp_x][i_xmap_tmp_y])
+
+        mate_candiate_id_random_order=random.sample(range(len(mate_candidate_id)), iparams.ga_params.num_sel_mate)
+
+        tmp_mate_fit_set=[]
+        for i_mate in range(iparams.ga_params.num_sel_mate):
+          tmp_mate_fit_set.append(
+                [mate_candidate_id[mate_candiate_id_random_order[i_mate]],
+                cur_fit[mate_candidate_id[mate_candiate_id_random_order[i_mate]]]])
+
+        tmp_mate_fit_sort=sorted(tmp_mate_fit_set, key=lambda fit: fit[1],reverse=True)
+
+        dad_id=tmp_mate_fit_sort[0][0]
+        dad=cur_pop[dad_id]
+
+        #perform ga operator - perform under probability
+        #otherwise keeps the mom
+        if random.random() < iparams.ga_params.prob_of_cross:
+          child1,child2,cross_template = gah.crossover(mom, dad, ga_ratio_cross)
+          child1 = gah.mutation(
+                  child1,
+                  iparams.ga_params.prob_of_mut,
+                  iparams.ga_params.num_point_mut,
+                  cdf_set,
+                  self.phi_for_hl)
+          child2 = gah.mutation(
+                  child2,
+                  iparams.ga_params.prob_of_mut,
+                  iparams.ga_params.num_point_mut,
+                  cdf_set,
+                  self.phi_for_hl)
+
+          #recalculate fitness
+          map_coeff = self.setup_map_coeff(miller_arrays, indices_selected,
+            flex.double(child1), fom_selected_new)
+          child1_fit = self.calcskew(map_coeff, iparams)
+
+          map_coeff = self.setup_map_coeff(miller_arrays, indices_selected,
+            flex.double(child2), fom_selected_new)
+          child2_fit = self.calcskew(map_coeff, iparams)
+
+          if child1_fit >= child2_fit:
+            child_sel=child1[:]
+            child_fit_sel=child1_fit
+          else:
+            child_sel=child2[:]
+            child_fit_sel=child2_fit
+
+          if child_fit_sel > cur_fit[mom_id]:
+            cur_pop[mom_id]=child_sel[:]
+            cur_fit[mom_id]=child_fit_sel
+
+
+      ''' collect some stats '''
+      #1. record some stats
+      time_gen_end=datetime.now()
+      time_gen_spent=time_gen_end-time_gen_start
+
+
+      #2. mapcc and mpe among population
+      n_idv_pick=int(round(0.05*iparams.ga_params.pop_size))
+      mpe_idv_pick=[0]*n_idv_pick
+      mapcc_idv_pick=[0]*n_idv_pick
+      id_idv_pick=random.sample(range(iparams.ga_params.pop_size), n_idv_pick)
+      for i in range(n_idv_pick):
+        i_idv_pick = id_idv_pick[i]
+        mpe_to_others = [0] * iparams.ga_params.pop_size
+        mapcc_to_others = [0] * iparams.ga_params.pop_size
+        for j in range(iparams.ga_params.pop_size):
+          mapcc_to_others[j], mpe_to_others[j] = uth.calcphicc(
+                fp_selected,
+                fom_selected_new,
+                fom_selected_new,
+                cur_pop[i_idv_pick],
+                cur_pop[j],
+                True)
+
+        mpe_idv_pick[i]=sum(mpe_to_others)/iparams.ga_params.pop_size
+        mapcc_idv_pick[i]=sum(mapcc_to_others)/iparams.ga_params.pop_size
+
+      mpe_avg_gen = sum(mpe_idv_pick)/len(mpe_idv_pick)
+      mapcc_avg_gen = sum(mapcc_idv_pick)/len(mapcc_idv_pick)
+
+      #3. collect the population in generation
+      for i_idv in range(len(cur_pop)):
+        list_phis_intcycle.append(cur_pop[i_idv])
+        list_fit_intcycle.append(cur_fit[i_idv])
+
+
+      #4. calculate averaged phis among available phis now
+      flex_phis_intcycle, \
+      mean_fit_intcycle, \
+      std_fit_intcycle, \
+      num_good_idv_intcycle = self.pickbestidv(
+                                list_phis_intcycle,
+                                list_fit_intcycle,
+                                iparams.ga_params.skew_sigma_sel_lo,
+                                iparams.ga_params.skew_sigma_sel_hi)
+
+      flex_phis_fit_intcycle, mapcc_phis_intcycle, mpe_phis_intcycle = self.calc_stats(\
+              miller_arrays, indices_selected, flex_phis_intcycle, fom_selected_new, iparams)
+
+      txt_prn_tmp = '%2.0f %7.2f %8.2f %6.0f %8.2f %5.2f %6.2f %6.2f %6.2f %10.2f\n'%(i_gen+1, \
+        mean_fit_intcycle, std_fit_intcycle, num_good_idv_intcycle, flex_phis_fit_intcycle, \
+        mapcc_phis_intcycle, mpe_phis_intcycle*180/math.pi, \
+        mapcc_avg_gen, mpe_avg_gen*180/math.pi, time_gen_spent.seconds/60)
+      print(txt_prn_tmp)
+      txt_prn_out += txt_prn_tmp
+      #check termination
+      if mapcc_avg_gen >= 0.9:
+        conv_gen = i_gen
+        break
+
+
+
+
+    txt_prn_out += 'Population converged at generation '+str(conv_gen+1)+'\n'
+
+    #complete one internal cycle
+    if iparams.flag_log_verbose_on:
+      #for phis in list_phis_intcycle:
+      #  print phis
+      """
+      file_name_pop_hist_out = iparams.project_name+'/'+iparams.run_name+"/log_pop_hist_step_"+str(stack_no+1)+"_intcycle_"+str(micro_cycle_no+1)+".log"
+      output = open(file_name_pop_hist_out, 'w')
+      output.write(list(list_phis_intcycle))
+      output.close()
+      """
+
+
+    return flex_phis_intcycle, fom_selected_new, flex_phis_fit_intcycle, txt_prn_out
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/sisa/optimize/mod_util.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+'''
+Author      : Uervirojnangkoorn, M.
+Created     : 12/1/2014
+Description : Utilitiy functions.
+'''
+
+import math
+from cctbx.array_family import flex
+
+class util_handler(object):
+  '''
+  classdocs
+  '''
+  def __init__(self):
+    '''
+    Constructor
+    '''
+
+  def calcmpe(self, phic_given, phiraw_given, is_deg):
+    phi_error=[0]*len(phic_given);
+    for i_phi in range(len(phic_given)):
+      if is_deg:
+        phi_error[i_phi]=math.acos(math.cos((phic_given[i_phi]*math.pi/180)-(phiraw_given[i_phi]*math.pi/180)));
+      else:
+        phi_error[i_phi]=math.acos(math.cos(phic_given[i_phi]-phiraw_given[i_phi]));
+
+    mean_phi_error=sum(phi_error)/len(phi_error);
+
+    return mean_phi_error;
+
+
+  def calcphicc(self, magf, fomc, fomraw, phic_given, phiraw_given, is_deg):
+    '''
+    calculate mapcc as phase correlation
+    sum((f*fom)^2*(cos(phic-phir)))/sum((f*fom)^2)
+    '''
+    phi_cc=[0]*len(phic_given)
+    phi_error=[0]*len(phic_given)
+    sum_magf_sq=0
+    for i_phi in range(len(phic_given)):
+      f_sq=math.pow(magf[i_phi], 2)*fomc[i_phi]*fomraw[i_phi]
+      sum_magf_sq+=f_sq
+      if is_deg:
+        phi_cc[i_phi]=f_sq*math.cos((phic_given[i_phi]*math.pi/180)-(phiraw_given[i_phi]*math.pi/180))
+        phi_error[i_phi]=math.acos(math.cos((phic_given[i_phi]*math.pi/180)-(phiraw_given[i_phi]*math.pi/180)))
+      else:
+        phi_cc[i_phi]=f_sq*math.cos(phic_given[i_phi]-phiraw_given[i_phi])
+        phi_error[i_phi]=math.acos(math.cos(phic_given[i_phi]-phiraw_given[i_phi]))
+
+    mean_phicc=sum(phi_cc)/sum_magf_sq
+    mean_phierr=sum(phi_error)/len(phi_error)
+
+    return mean_phicc, mean_phierr
+
+  def calcphibar(self,phi_set):
+    '''
+    calculate centroid phases for given set
+    input data structure
+    [[phia_refl_1, phia_refl_2, phia_refl_3...],
+    [phib_refl_1,phib_refl_2,phib_refl_3..],
+    ...]
+    average phia_refl_1, phib_refl_1,...
+    '''
+    import cmath
+
+    n_pop_size=len(phi_set)
+    n_refl=len(phi_set[0])
+
+    flex_phi_bar=flex.double(n_refl)
+    txt_phi_bar=""
+    for i in range(n_refl):
+      sum_phis=cmath.rect(0,0)
+
+      for j in range(n_pop_size):
+        sum_phis+=cmath.rect(1,phi_set[j][i]*math.pi/180)
+
+      flex_phi_bar[i]=cmath.phase(sum_phis)*180/math.pi
+      txt_phi_bar+=str(flex_phi_bar[i])+","
+
+    txt_phi_bar+="\n"
+
+    return flex_phi_bar,txt_phi_bar
+
+
+ *******************************************************************************

@@ -1,0 +1,1478 @@
+
+
+ *******************************************************************************
+mmtbx/ringer/__init__.py
+
+# TODO unit tests wouldn't hurt...
+
+"""
+Implementation of the Ringer method for torsion-angle sampling of sidechain
+electron density to screen for alternate conformations.
+
+Reference:
+  Lang PT, Ng HL, Fraser JS, Corn JE, Echols N, Sales M, Holton JM, Alber T.
+  Automated electron-density sampling reveals widespread conformational
+  polymorphism in proteins. Protein Sci. 2010 Jul;19(7):1420-31. PubMed PMID:
+  20499387
+"""
+
+from __future__ import absolute_import, division, print_function
+from libtbx import adopt_init_args, Auto
+from libtbx.utils import Sorry
+from libtbx import easy_mp
+import sys
+from six.moves import range
+
+ringer_phil_str = """
+sampling_angle = 5
+  .type = int
+  .input_size = 80
+scaling = *sigma volume
+  .type = choice(multi=False)
+skip_alt_confs = True
+  .type = bool
+  .short_caption = Skip existing alternate conformations
+nproc = 1
+  .type = int
+  .short_caption = Processors
+  .style = renderer:draw_nproc_widget
+"""
+
+class ringer_chi(object):
+  """
+  Sampling results for a single sidechain Chi angle.
+  """
+  def __init__(self, id, angle_current, densities, sampling,
+      fofc_densities=None):
+    adopt_init_args(self, locals())
+    assert len(densities) > 0
+    if (angle_current < 0):
+      self.angle_current = 360 + angle_current
+    self.peak_chi, self.peak_rho = self.find_peaks(densities)
+    self.deviation = self.deviate(self.peak_chi)
+    self.rho_mean = sum(densities) / len(densities)
+    # Add a tiny number to avoid dividing by 0 (which shouldn't happen anyway)
+    self.rho_rel = self.peak_rho/(self.rho_mean+.000000000000000001)
+
+  def format_csv(self, fofc=False):
+    densities = [ "%.3f" % x for x in self.densities ]
+    if (fofc) and (self.fofc_densities is not None):
+      densities = [ "%.3f" % x for x in self.fofc_densities ]
+    return "chi%d,%.1f,%s" % (self.id, self.angle_current, ",".join(densities))
+
+  def find_peaks(self, densities):
+    rho_max = max(densities)
+    for i, rho in enumerate(densities):
+      if rho == max(densities):
+        i = i * (360 / len(densities))
+        return i, rho
+    # This should never happen, but just in case, dump this in
+    # place of throwing an error.
+    return 0,0
+
+  def deviate(self, chi):
+    return min(abs(chi-i) for i in [60, 180, 300])
+
+class ringer_residue(object):
+  """
+  Container of sampling results for a single residue with at least one Chi
+  angle.
+  """
+  def __init__(self, resname, chain_id, resid, altloc, n_chi, xyz=None):
+    adopt_init_args(self, locals())
+    self._angles = {}
+
+  def format(self):
+    if (self.altloc == ""):
+      return "%s%2s%s" % (self.resname, self.chain_id, self.resid)
+    else :
+      return "%s%2s%s (conformer %s)" % (self.resname, self.chain_id,
+        self.resid, self.altloc)
+
+  def format_csv(self, include_map_label=True):
+    if (self.altloc == ""):
+      prefix = "%s%2s%s," % (self.resname, self.chain_id, self.resid)
+    else :
+      prefix = "%s%2s%s %s," % (self.resname, self.chain_id, self.resid,
+        self.altloc)
+    lines = []
+    for i in range(1, self.n_chi+1):
+      chi = self.get_angle(i)
+      if (chi is not None):
+        if include_map_label :
+          lines.append(prefix + "2mFo-DFc," + chi.format_csv())
+        else :
+          lines.append(prefix + chi.format_csv())
+        if (chi.fofc_densities is not None):
+          if include_map_label :
+            lines.append(prefix + "mFo-DFc," + chi.format_csv(fofc=True))
+          else :
+            lines.append(prefix + chi.format_csv(fofc=True))
+    return "\n".join(lines)
+
+  def add_angle(self, **kwds):
+    chi = ringer_chi(**kwds)
+    self._angles[chi.id] = chi
+
+  def get_angle(self, id):
+    return self._angles.get(id, None)
+
+def sample_angle(
+    i_seqs,
+    sites_cart,
+    map_coeffs,
+    real_map,
+    difference_map,
+    sigma,
+    angle_start,
+    params,
+    sampling_method="linear",
+    unit_cell=None):
+  """
+  Given a set of four sites defining a rotatable dihedral angle, sample the
+  density at the fourth site in small angular increments.
+
+  returns: a tuple of lists containing the sampled density values (floats) for
+           the primary map and optional difference map.
+  """
+  frac_matrix = None
+  if (unit_cell is None):
+    assert (map_coeffs is not None)
+    unit_cell = map_coeffs.unit_cell()
+  frac_matrix = unit_cell.fractionalization_matrix()
+  assert (sampling_method != "direct") or (map_coeffs is not None)
+  from cctbx import maptbx
+  from scitbx.matrix import rotate_point_around_axis
+  point = rotate_point_around_axis(
+    axis_point_1=sites_cart[1],
+    axis_point_2=sites_cart[2],
+    point=sites_cart[3],
+    angle=-angle_start,
+    deg=True)
+  # TODO: present option to have point (sites_cart[3]) be generated based on
+  # idealized geometry.
+  n_degrees = 0
+  densities = []
+  difference_densities = []
+  while (n_degrees < 360):
+    point = rotate_point_around_axis(
+      axis_point_1=sites_cart[1],
+      axis_point_2=sites_cart[2],
+      point=point,
+      angle=params.sampling_angle,
+      deg=True)
+    point_frac = unit_cell.fractionalize(site_cart=point)
+    rho = rho_fofc = None
+    if (sampling_method == "spline") and (map_coeffs is not None):
+      rho = real_map.tricubic_interpolation(point_frac)
+      if (difference_map is not None):
+        rho_fofc = difference_map.tricubic_interpolation(point_frac)
+    elif (sampling_method == "linear") or (map_coeffs is None):
+      if (map_coeffs is None):
+        rho = maptbx.non_crystallographic_eight_point_interpolation(
+          map=real_map,
+          gridding_matrix=frac_matrix,
+          site_cart=point)
+          #allow_out_of_bounds=True)
+      else :
+        rho = real_map.eight_point_interpolation(point_frac)
+        if (difference_map is not None):
+          rho_fofc = difference_map.eight_point_interpolation(point_frac)
+    else :
+      rho = map_coeffs.direct_summation_at_point(
+        site_frac=point_frac,
+        sigma=sigma).real
+    densities.append(rho)
+    if (rho_fofc is not None):
+      difference_densities.append(rho_fofc)
+    n_degrees += params.sampling_angle
+  #print densities
+  return densities, difference_densities
+
+class iterate_over_residues(object):
+  """
+  Given a PDB hierarchy and electron density, run Ringer analysis for all
+  applicable amino acid residues in the model.  Defaults to examining all chi
+  angles but this can be overriden.  Implemented as a class to facilitate
+  parallelization, but the instantiated object can be discarded after the
+  'results' attribute is retrieved.
+  """
+  def __init__(self,
+                pdb_hierarchy,
+                params,
+                map_coeffs=None,
+                difference_map_coeffs=None,
+                map_data=None,
+                unit_cell=None,
+                grid_spacing=0.2,
+                sampling_method="linear",
+                n_chi_max=4,
+                log=None):
+    if (log is None) : log = sys.stdout
+    adopt_init_args(self, locals())
+    models = pdb_hierarchy.models()
+    if (len(models) > 1):
+      raise Sorry("Multi-model PDB files not supported.")
+    self.sigma = self.real_map = self.difference_map = None
+    if (map_coeffs is not None):
+      self.unit_cell = map_coeffs.unit_cell()
+      if (params.sampling_method == "direct"):
+        self.map_coeffs = self.map_coeffs.expand_to_p1()
+        if (not map_coeffs.anomalous_flag()):
+          self.map_coeffs = self.map_coeffs.generate_bijvoet_mates()
+      if (sampling_method != "direct") or (params.scaling == "sigma"):
+        fft_map = self.map_coeffs.fft_map(resolution_factor=grid_spacing)
+        if (params.scaling == "sigma"):
+          self.sigma = fft_map.statistics().sigma()
+          fft_map.apply_sigma_scaling()
+        else :
+          fft_map.apply_volume_scaling()
+        self.real_map = fft_map.real_map_unpadded()
+    else :
+      assert (map_data is not None)
+      self.unit_cell = unit_cell
+      self.real_map = map_data
+#      space_group_number = ccp4_map.space_group_number
+#      from cctbx import crystal
+#      crystal_symmetry_map = crystal.symmetry(ccp4_map.unit_cell().parameters(), space_group_number)
+#      if not crystal_symmetry_model:
+#        print >> self.log, """Warning: the model does not contain symmetry information. Using map information."""
+#      elif not crystal_symmetry_map.is_similar_symmetry(crystal_symmetry_model):
+#        print >> self.log, """Warning: The map and model appear to have different crystal symmetry information.
+#          EMRinger will assume the map symmetry data is correct and process."""
+#      # If map space group is P1, then check that model space group is also either not present or is P1.
+#      # If both are p1 or model symmetry is not present, then do the shift. Otherwise, no shift.
+#      if space_group_number == 1 and not (crystal_symmetry_model and crystal_symmetry_model.space_group() and crystal_symmetry_model.space_group_number() != 1):
+#        import mmtbx.utils
+#        shift_manager = mmtbx.utils.shift_origin(
+#        map_data = ccp4_map.data.as_double(),
+#        pdb_hierarchy = pdb_hierarchy,
+#        crystal_symmetry = crystal_symmetry_map)
+#        if not shift_manager.shift_cart == None:
+#          print >> self.log, "Warning: Model and Map use different origin. Applying origin shift to compensate."
+#        pdb_hierarchy = shift_manager.pdb_hierarchy # gives you shifted model
+#
+#        self.real_map = shift_manager.map_data # gives you shifted map
+#      else:
+#        print >> self.log, """Warning: Structure is not P1, so automatic origin shifts cannot currently be applied"""
+#        self.real_map = ccp4_map.data.as_double()
+      # XXX assume that the map is already scaled properly (in the original
+      # unit cell)
+      #models = pdb_hierarchy.models()
+      self.sigma = 1 #ccp4_map.statistics().sigma()
+      # XXX the unit cell that we need for the non-crystallographic
+      # interpolation is not what comes out of the map - it's the
+      #self.unit_cell = ccp4_map.grid_unit_cell()
+    if (difference_map_coeffs is not None):
+      if (sampling_method == "direct"):
+        self.difference_map_coeffs = self.difference_map_coeffs.expand_to_p1()
+        if (not difference_map_coeffs.anomalous_flag()):
+          self.difference_map_coeffs = \
+            self.difference_map_coeffs.generate_bijvoet_mates()
+      if (sampling_method != "direct") or (params.scaling == "sigma"):
+        fft_map = self.difference_map_coeffs.fft_map(
+          resolution_factor=params.grid_spacing)
+        if (params.scaling == "sigma"):
+          fft_map.apply_sigma_scaling()
+        else :
+          fft_map.apply_volume_scaling()
+        self.difference_map = fft_map.real_map_unpadded()
+    results = []
+    from mmtbx.rotamer import sidechain_angles
+    self.angle_lookup = sidechain_angles.SidechainAngles(False)
+    self.sites_cart = pdb_hierarchy.atoms().extract_xyz()
+    self.residue_groups = []
+    for chain in models[0].chains():
+      self.residue_groups.extend(chain.residue_groups())
+    if (params.nproc in [None,Auto]) or (params.nproc > 1):
+      # this will be a list of lists
+      results_ = easy_mp.pool_map(
+        processes=params.nproc,
+        fixed_func=self.__sample_density,
+        args=list(range(len(self.residue_groups))))
+      # now flatten it out
+      self.results = []
+      for result_list in results_ : self.results.extend(result_list)
+    else :
+      self.results = []
+      for i_res in range(len(self.residue_groups)):
+        self.results.extend(self.__sample_density(i_res, verbose=True))
+    if len(self.results) == 0:
+      raise Sorry("""No residues could be scanned by EMRinger, so scores cannot be generated.
+      There are a few problems that can lead to this, including not having
+      modeled side chains (poly-A or poly-G models), mismatches between the map
+      and model grid, or corrupted map density values. These problems can often
+      be assessed with molecular graphics tools such as pymol or coot.""")
+
+  def __sample_density(self, i_res, verbose=False):
+    import iotbx.pdb
+    get_class = iotbx.pdb.common_residue_names_get_class
+    residue_group = self.residue_groups[i_res]
+    conformers = residue_group.conformers()
+    results = []
+    for i_conf, conformer in enumerate(residue_group.conformers()):
+      if (i_conf > 0) and (self.params.skip_alt_confs):
+        continue
+      residue = conformer.only_residue()
+      if (get_class(residue.resname) == "common_amino_acid"):
+        n_chi = int(self.angle_lookup.chisPerAA.get(residue.resname.lower(),0))
+        if (n_chi == 0) : continue
+        xyz = None
+        for atom in residue.atoms():
+          if (atom.name.strip() == "CA"):
+            xyz = atom.xyz
+            break
+        res_out = ringer_residue(
+          resname=residue.resname,
+          chain_id=residue_group.parent().id,
+          # resid=residue.resid(),
+          resid=residue.resseq_as_int(),
+          altloc=conformer.altloc,
+          n_chi=n_chi,
+          xyz=xyz)
+        if (verbose):
+          print("  %s:" % residue.id_str(), file=self.log)
+        for i in range(1, min(self.n_chi_max+1, n_chi+1)):
+          try :
+            atoms = self.angle_lookup.extract_chi_atoms("chi%d" % i, residue)
+          except AttributeError as e :
+            print("Warning: Could not load chi {} atoms".format(i), file=self.log)
+            pass
+          else :
+            try :
+              if (atoms is None):
+                print("Warning: No side chain atoms detected in model", file=self.log)
+                break
+              i_seqs = [ atom.i_seq for atom in atoms ]
+              sites_chi = [ self.sites_cart[i_seq] for i_seq in i_seqs ]
+              from cctbx.geometry_restraints import dihedral
+              chi = dihedral(
+                sites=sites_chi,
+                angle_ideal=0,
+                weight=0)
+              if (verbose):
+                print("    chi%d = %.1f" % (i, chi.angle_model), file=self.log)
+              densities, fofc_densities = sample_angle(
+                i_seqs=i_seqs,
+                sites_cart=sites_chi,
+                map_coeffs=self.map_coeffs,
+                real_map=self.real_map,
+                difference_map=self.difference_map,
+                unit_cell=self.unit_cell,
+                angle_start=chi.angle_model,
+                sigma=self.sigma,
+                params=self.params,
+                sampling_method=self.sampling_method)
+              if (len(fofc_densities) == 0):
+                fofc_densities = None
+              else :
+                assert (len(fofc_densities) == len(densities))
+              if (verbose) : pass
+              res_out.add_angle(
+                id=i,
+                angle_current=chi.angle_model,
+                densities=densities,
+                fofc_densities=fofc_densities,
+                sampling=self.params.sampling_angle)
+            except Exception as e :
+              pass
+        if not len(res_out._angles) == 0:
+          results.append(res_out)
+    return results
+
+class Peak(object):
+  """
+  Container for information about the sampling angle where density is at the
+  global maximum for the given Chi angle.  Used for EMRinger.
+  """
+  # The peak object, should eventually get moved into ringer I suspect.
+  def __init__(self, resname, resid, chain_id, n_chi, chi_value, rho_value):
+    adopt_init_args(self, locals())
+    self.chi_value=chi_value%360
+
+  def __repr__(self):
+    return "\n%s\t%s\t%s\t%s\t%d\t%f" % (self.resname,self.resid,self.chain_id,self.n_chi,self.chi_value*5,self.rho_value)
+
+class Peaklist(object):
+  # Right now this is just a slightly specialized list. I may add functionality
+  # later, however.
+  def __init__(self):
+    self.peaks=[]
+
+  def sorted(self, *key):
+    return sorted(self.peaks,*key)
+
+  def append_lists(self,other_peaklist):
+    self.peaks = self.peaks+ other_peaklist.peaks
+
+  def add_new(self,resname, resid, chain_id, n_chi, chi_value, rho_value):
+    self.peaks.append(Peak(resname, resid, chain_id, n_chi, chi_value, rho_value))
+
+  def get_peaks(self):
+    return self.peaks
+
+  def __len__(self):
+    return len(self.peaks)
+
+  def __repr__(self):
+    return str(sorted(self.peaks,key=lambda peak: peak.chi_value))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ringer/em_rolling.py
+"""
+Rolling rotamericity metric for EM-Ringer.
+
+Reference:
+  Barad BA, Echols N, Wang RYR, Cheng YC, DiMaio F, Adams PD, Fraser JS. (2015)
+  Side-chain-directed model and map validation for 3D Electron Cryomicroscopy.
+  Nature Methods, in press.
+
+"""
+
+########################################################################
+# Package imports
+from __future__ import absolute_import, division, print_function
+from libtbx import easy_pickle
+from collections import defaultdict
+import argparse
+import os
+import sys
+
+import six
+from six.moves import range
+
+# from matplotlib import rcParams
+# rcParams['figure.autolayout'] = True
+# rcParams['xtick.labelsize'] = 16
+# rcParams['ytick.labelsize'] = 16
+# rcParams['axes.labelsize'] = 24
+# rcParams['axes.titlesize'] = 24
+
+Residue_codes = ["ARG","ASN","ASP","CYS","GLU","GLN","HIS",
+"LEU","LYS","MET","PHE","SER","TRP","TYR","SEC","PYL"]
+Branched_residues = ["THR","VAL","ILE"]
+No_c_gamma = ["ALA", "GLY"]
+Weird = ["PRO"]
+
+
+class RingerDict(object):
+  '''Ringerdict: A dictionary accessible form of the output of ringer'''
+  def __init__(self, resultlist, offset):
+    self.dict = {}
+    for residue in resultlist:
+      if residue.resname in Residue_codes:
+        residue.resid = int(residue.resid)+offset
+        self.add_residue(residue)
+
+  def add_residue(self, residue):
+    if residue.chain_id not in self.dict:
+      self.dict[residue.chain_id] = {}
+    if 1 in residue._angles:  # TODO: verify this is a dict
+      self.dict[residue.chain_id][residue.resid] = residue._angles[1]
+
+  def get_peak(self, chain_id, residue_id):
+    if chain_id in self.dict and residue_id in self.dict[chain_id]:
+      return self.dict[chain_id][residue_id]
+    else:
+      return None
+
+  def get_chains(self):
+    return list(self.dict.keys())
+
+  def get_residues(self, chain_id):
+    return sorted(self.dict[chain_id].keys())
+
+def ranges(p):
+    q = sorted(p)
+    i = 0
+    for j in range(1,len(q)):
+        if q[j] > 1+q[j-1]:
+            yield (q[i],q[j-1])
+            i = j
+    yield (q[i], q[-1])
+
+def identify_regions(results,
+      thresholded_cutoff=0.8,
+      rotamer_cutoff=0.5,
+      extension=10,
+      out=sys.stdout):
+  import numpy as np
+  for chain, chain_out in six.iteritems(results):
+    outliers = []
+    print("For Chain %s:" % chain, file=out)
+    for k in chain_out:
+      if ((np.divide(k[2],k[1]) > thresholded_cutoff) and
+          (np.divide(k[3],k[2]) < rotamer_cutoff)):
+        for i in range(k[0]-extension, k[0]+extension):
+          outliers.append(i)
+    if len(outliers) > 0:
+      print(list(ranges(outliers)), file=out)
+      print("", file=out)
+    else:
+      print("No outliers at this threshold \n", file=out)
+
+def make_dir(f):
+    if not os.path.exists(f):
+        os.makedirs(f)
+
+class main(object):
+  def __init__(self,
+      ringer_results,
+      dir_name=None,
+      threshold=0,
+      extension=10,
+      thresholded_cutoff=0.8,
+      rotamer_cutoff=0.5,
+      graph=False,
+      save=True,
+      rel=False,
+      out=sys.stdout):
+    self.threshold = threshold
+    self.extension = extension
+    self.threshold_cutoff = thresholded_cutoff
+    self.rotamer_cutoff = rotamer_cutoff
+    if (dir_name is None) and (save):
+      dir_name = os.getcwd()
+    hierarchy = RingerDict(ringer_results, 0)
+    self.results_a = defaultdict(list)
+    for chain in hierarchy.get_chains():
+      # Results will be a list of tuples of the form residue number,
+      # number checked in window, number passing threshold in window,
+      # number deviating in window.
+      for i in hierarchy.get_residues(chain):
+        total_n = 0.0
+        threshold_n = 0.0
+        # threshold_deviation = 0
+        n_deviate = 0.0
+        for j in range(-extension, extension+1):
+          chi = hierarchy.get_peak(chain, int(i)+j)
+          if chi:
+            total_n += 1
+            if rel:
+              if chi.relrho > threshold:
+                threshold_n += 1
+                if chi.deviation <= 30:
+                  n_deviate += 1
+            else:
+              if chi.peak_rho > threshold:
+                threshold_n += 1
+                if chi.deviation <= 30:
+                  n_deviate += 1
+        self.results_a[chain].append((i, total_n, threshold_n, n_deviate))
+    print("====Low-scoring, high-signal regions====", file=out)
+    identify_regions(self.results_a, out=out)
+    if graph or save:
+      plot_results(self.results_a,
+        dir_name=dir_name,
+        threshold=threshold,
+        graph=graph,
+        save=save)
+
+  def draw_wx_plot(self, plot, chain_id, threshold=0):
+    plot.figure.clear()
+    _plot_results_for_chain(
+      figure=plot.figure,
+      results_a=self.results_a,
+      chain_id=chain_id,
+      threshold=self.threshold,
+      extension=self.extension)
+
+  @property
+  def chain_ids(self):
+    return sorted(self.results_a.keys())
+
+def _plot_results_for_chain(figure, results_a, chain_id, extension=10,
+    threshold=0):
+  import numpy as np
+  ax = figure.add_subplot(111)
+  ax.set_title("Rolling window - Chain %s, Threshold %f" %
+    (chain_id, threshold), y=1.05)
+  x_a = [k[0] for k in results_a[chain_id]]
+  y_a = [np.divide(k[3],k[2]) for k in results_a[chain_id]]
+  y_b = [np.divide(k[2],k[1]) for k in results_a[chain_id]]
+  ax.plot(x_a, y_a, linewidth=3.0, alpha=0.9, label="Fraction Rotameric (Passing Threshold)")
+  ax.plot(x_a, y_b, linewidth=3.0, alpha=0.9, label="Fraction above Threshold")
+  ax.set_xlabel("Center Residue of %d-Residue Window" % (2*extension+1), labelpad=10)
+  ax.set_ylabel("Fraction of Residues", labelpad=10)
+  ax.set_ylim(0,1)
+  ax.legend(loc=4)
+  # ax.legend(bbox_to_anchor=(0., 1.02, 1., .102), loc=3,
+  #     ncol=2, mode="expand", borderaxespad=0., fontsize="small")
+  ax.yaxis.set_ticks_position('left') # this one is optional but I still recommend it...
+  ax.xaxis.set_ticks_position('bottom')
+
+def plot_results(results_a, dir_name, threshold, graph=False, save=True):
+  import matplotlib.pyplot as plt
+  for chain in results_a.keys():
+    fig = plt.figure(1)
+    _plot_results_for_chain(
+      figure=fig,
+      results_a=results_a,
+      chain_id=chain,
+      threshold=threshold)
+    if graph:
+      fig.show()
+    if save:
+      output = os.path.join(dir_name, chain + "_rolling.png")
+      fig.savefig(output)
+    plt.close()
+
+def run(args, out=sys.stdout):
+  parser = argparse.ArgumentParser()
+  parser.add_argument("file",nargs="?")
+  parser.add_argument("-o", dest="offset", type=int, default=0)
+  parser.add_argument("-t", "--threshold", dest="threshold",
+    help='Threshold cutoff for rho density',
+    nargs='?', type = float, default=0)
+  parser.add_argument("-w", "--extension_around_center", dest = "extension",
+    help='Number of amino acids to extend around the center in both directions. \
+    The total window will therefore be twice this number plus one for the center.'
+    , nargs="?", type=int, default=10)
+  parser.add_argument("--percent_passing_cutoff", dest = "thresholded_cutoff",
+    help='Minimum %% passing threshold to flag as a bad region...'
+    , nargs="?", type=float, default=0.8)
+  parser.add_argument("--rotamericity_cutoff", dest = "rotamer_cutoff",
+    help='Maximum rotamericity to be flagged.'
+    , nargs="?", type=float, default=0.5)
+  parser.add_argument("--graph", dest = "graph", action='store_true')
+  parser.add_argument("--save", dest = "save", action='store_true')
+  parser.add_argument("-r", "--rel", dest = "rel", action='store_true')
+  parser.set_defaults(rel=False, graph=False, save=True)
+  options = parser.parse_args(args)
+  import matplotlib
+  matplotlib.use("Agg")
+  dir_name = None
+  if (options.save):
+    dir_name = os.path.splitext(options.file)[0] + ".output"
+    make_dir(dir_name)
+  result = easy_pickle.load(options.file)
+  return main(
+    ringer_results=result,
+    dir_name=dir_name,
+    threshold=options.threshold,
+    extension=options.extension,
+    thresholded_cutoff=options.thresholded_cutoff,
+    rotamer_cutoff=options.rotamer_cutoff,
+    graph=options.graph,
+    save=options.save,
+    rel=options.rel,
+    out=out)
+
+if __name__ == "__main__":
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ringer/em_rscc.py
+
+"""
+Utility script to calculate per-residue RSCCs for a model versus an EM map with
+an arbitrary origin.
+
+Author: Nat Echols
+Reference:
+  Barad BA, Echols N, Wang RYR, Cheng YC, DiMaio F, Adams PD, Fraser JS.
+  Side-chain-directed model and map validation for 3D Electron Cryomicroscopy.
+  Manuscript in review.
+"""
+
+from __future__ import absolute_import, division, print_function
+import iotbx.phil
+from cctbx import maptbx
+from scitbx.array_family import flex
+import sys
+
+master_phil_str = """
+model = None
+  .type = path
+map = None
+  .type = path
+d_min = 3.0
+  .type = float
+  .help = Optional cutoff resolution for computing F(calc). This will not \
+    affect the dimensions of the ultimate FC map.
+atom_radius = 1.5
+  .type = float
+"""
+
+def run(args, out=sys.stdout):
+  cmdline = iotbx.phil.process_command_line_with_files(
+    args=args,
+    master_phil_string=master_phil_str,
+    pdb_file_def="model",
+    map_file_def="map",
+    usage_string="""\
+em_rscc.py model.pdb map.ccp4
+
+%s""" % __doc__)
+  params = cmdline.work.extract()
+  assert (not None in [params.model, params.map])
+  pdb_in = cmdline.get_file(params.model).file_object
+  m = cmdline.get_file(params.map).file_object
+  print("Input electron density map:", file=out)
+  print("m.all()   :", m.map_data().all(), file=out)
+  print("m.focus() :", m.map_data().focus(), file=out)
+  print("m.origin():", m.map_data().origin(), file=out)
+  print("m.nd()    :", m.map_data().nd(), file=out)
+  print("m.size()  :", m.map_data().size(), file=out)
+  print("m.focus_size_1d():", m.map_data().focus_size_1d(), file=out)
+  print("m.is_0_based()   :", m.map_data().is_0_based(), file=out)
+  print("map: min/max/mean:", flex.min(m.map_data()), flex.max(m.map_data()), flex.mean(m.map_data()), file=out)
+  print("unit cell:", m.unit_cell().parameters(), file=out)
+  symm = m.unit_cell_crystal_symmetry()
+  xrs = pdb_in.input.xray_structure_simple(crystal_symmetry=symm)
+  print("Setting up electron scattering table (d_min=%g)" % params.d_min, file=out)
+  xrs.scattering_type_registry(
+    d_min=params.d_min,
+    table="electron")
+  fc = xrs.structure_factors(d_min=params.d_min).f_calc()
+  cg = maptbx.crystal_gridding(
+    unit_cell=symm.unit_cell(),
+    space_group_info=symm.space_group_info(),
+    pre_determined_n_real=m.map_data().all())
+  fc_map = fc.fft_map(
+    crystal_gridding=cg).apply_sigma_scaling().real_map_unpadded()
+  assert (fc_map.all() == fc_map.focus() == m.map_data().all())
+  em_data = m.map_data()
+  unit_cell_for_interpolation = m.grid_unit_cell()
+  frac_matrix = unit_cell_for_interpolation.fractionalization_matrix()
+  sites_cart = xrs.sites_cart()
+  sites_frac = xrs.sites_frac()
+  print("PER-RESIDUE CORRELATION:", file=out)
+  for chain in pdb_in.hierarchy.only_model().chains():
+    for residue_group in chain.residue_groups():
+      i_seqs = residue_group.atoms().extract_i_seq()
+      values_em = flex.double()
+      values_fc = flex.double()
+      for i_seq in i_seqs :
+        rho_em = maptbx.non_crystallographic_eight_point_interpolation(
+          map=em_data,
+          gridding_matrix=frac_matrix,
+          site_cart=sites_cart[i_seq])
+        rho_fc = fc_map.eight_point_interpolation(sites_frac[i_seq])
+        values_em.append(rho_em)
+        values_fc.append(rho_fc)
+      cc = flex.linear_correlation(x=values_em, y=values_fc).coefficient()
+      print(residue_group.id_str(), cc, file=out)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ringer/em_scoring.py
+
+"""
+Rotamer distribution analysis tool for validation of models generated from
+cryoEM data.  Written for use with EMRinger pkl output.
+
+Author: Benjamin Barad
+Reference:
+  Barad BA, Echols N, Wang RYR, Cheng YC, DiMaio F, Adams PD, Fraser JS. (2015)
+  Side-chain-directed model and map validation for 3D Electron Cryomicroscopy.
+  Nature Methods, in press.
+"""
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.ringer import Peak, Peaklist
+from libtbx import easy_pickle
+from libtbx.utils import Sorry
+from libtbx.math_utils import iceil
+from collections import OrderedDict
+import math
+import os
+import sys
+from six.moves import range
+
+# Residue_codes = ["PHE","TYR","TRP"]
+Residue_codes = ["ARG","ASN","ASP","CYS","GLU","GLN","HIS",
+"LEU","LYS","MET","PHE","SER","TRP","TYR","SEC","PYL"]
+
+Ignored_codes = ["ALA","GLY","PRO","THR","ILE","VAL"]
+
+def statistic(binned_peaks, n_angles=72):
+  """
+  This is the main pair of statistics used for the plots.  Normal approximation
+  to the binomial theorem.
+  """
+  rotamer_count = sum(binned_peaks[0::2])
+  total_count = sum(binned_peaks)
+  stdev = math.sqrt(39.0/n_angles*33.0/n_angles*total_count)
+  mean= total_count*39.0/n_angles
+  # Hacky way to avoid zero division
+  rotamer_ratio=rotamer_count/(total_count+0.000000000000000000001)
+  zscore=(rotamer_count-mean)/(stdev+0.000000000000000000001)
+  # print "\t Rotamer ratio: %.3f" % rotamer_ratio
+  # print "\t Z-score = %.3f" % zscore
+  # if (zscore>0):
+  #   pscore_approx1=0.5-0.5*(math.erf(zscore/math.sqrt(2)))
+  #   pscore_approx2=1.0/12*math.exp(-zscore*zscore/2)+1.0/4*math.exp(-zscore*zscore*2/3)
+  #   # print "\t One approximation of the p-value is %g" % pscore_approx1
+    # print "\t Another approximation of the p-value is %g" % pscore_approx2
+  # else:
+    # print "\t pscore greater than 0.5"
+
+  return zscore, rotamer_ratio
+
+def RMSD_statistic(peak_list):
+  """
+  Still not clear how useful RMSD is but angular deviations tend to be heavily
+  dependent on sample size (as outliers are overweighted).
+  """
+  squared_deviations=[]
+  for peak in peak_list:
+    squared_deviations.append(min((i-peak.chi_value)**2 for i in [60,180,300]))
+  RMSD = (sum(squared_deviations)/len(squared_deviations))**0.5
+  return RMSD
+
+def calculate_peaks(ringer,threshold):
+  """
+  Checks if something is greater than either of its neighbors (including
+  wrapping) and returns if true and if above a threshold)
+  """
+  new_peaks=Peaklist()
+  list = ringer._angles[1].densities
+  for i in range(len(list)):
+    if (list[i]==max(list) and list[i]>threshold):
+      new_peaks.add_new(ringer.resname, ringer.resid, ringer.chain_id, 1, i, list[i])
+  return new_peaks
+
+
+def parse_pickle(filename, out=sys.stdout):
+  print("===== Loading Pickle: %s =====" % filename)
+  ringer_things = easy_pickle.load(filename)
+  return process_raw_results(ringer_things, out=out)
+
+def process_raw_results(ringer_result, out=sys.stdout):
+  """
+  All processes that require reading the pickle. Involves reading out the
+  angles and calculating the thresholds.
+  """
+  import numpy as np
+  chi = 1
+  waves=[]
+  averages=[]
+  maxima=[]
+  for residue in ringer_result :
+    # TODO verify residue._angles is a dict
+    if chi in residue._angles and residue.resname in Residue_codes:
+      waves.append(residue)
+      maxima.append(max(residue._angles[chi].densities))
+      averages.append(np.average(residue._angles[chi].densities))
+  max_max = max(maxima)
+  avg_avg = np.average(averages)
+  thresholds = [avg_avg+i*(max_max-avg_avg)/20 for i in range(20)]
+  if min(thresholds) == max(thresholds):
+    raise Sorry("""No features could be detected in the density around the model, so EMRinger can't
+       proceed. This can be confirmed in pymol or coot. If features are present, raise
+       the scale of the map values and try EMRinger again.""")
+  print("Threshold list: %s" % thresholds, file=out)
+  print("===== Pickle Parsed =====", file=out)
+  return waves, thresholds
+
+def calculate_binned_counts(peak_count, first=60, binsize=12,n_angles=72):
+  """Bin peaks by rotamer regions for statistics."""
+  first_loc = int(first/5)
+  bins = int(n_angles/binsize)
+  binned_output=[0]*bins
+  for i in range(bins):
+    for j in range(binsize):
+      binned_output[i] += peak_count[int(first_loc+i*binsize-binsize/2+j)%n_angles]
+  return binned_output
+
+def calc_ratio(count_list, sampling_angle=5):
+  """
+  Calculate the same statistics as the "statistic" call, but do it without
+  first binning the peaks.
+  """
+  # Calculate the same statistics as the "statistic" call, but do it without ifrst binning the peaks.
+  total_angles=iceil(360.0/sampling_angle)
+  binsize=int(total_angles/6)
+  first_loc=60/sampling_angle
+  binned_list=[0]*6
+  for i in range(6):
+    for j in range(binsize):
+      binned_list[i] += count_list[int(first_loc+i*binsize-binsize/2+j)%total_angles]
+  rotamer_count = sum(binned_list[0::2])
+  total_count = sum(binned_list)
+  stdev = math.sqrt((total_angles/2+3)*(total_angles/2-3)/(total_angles**2)*total_count)
+  mean= total_count*(total_angles/2+3)/total_angles
+  rotamer_ratio=rotamer_count/(total_count+0.000000000000000000001)
+  zscore=(rotamer_count-mean)/(stdev+0.000000000000000000001)
+  return rotamer_ratio, zscore
+
+class main(object):
+  def __init__(self,
+      file_name,
+      ringer_result=None,
+      sampling_angle=5,
+      out_dir=None,
+      out=sys.stdout,
+      quiet=False):
+    self.threshold = waves = None
+    if (ringer_result is not None):
+      waves, self.thresholds = process_raw_results(ringer_result, out=out)
+    else :
+      assert (file_name is not None)
+      waves, self.thresholds = parse_pickle(file_name, out=out)
+    if not quiet:
+      assert (out_dir is None) or os.path.isdir(out_dir)
+      if (out_dir is None) and (not quiet):
+        out_dir = file_name + ".output"
+        if (not os.path.isdir(out_dir)):
+          os.makedirs(file_name+'.output')
+    Weird_residues=OrderedDict()
+    self.peak_count={}
+    residue_peak_count={}
+    rotamer_ratios_residues={}
+    zscores_residues={}
+    for i in Residue_codes:
+      residue_peak_count[i]={}
+      rotamer_ratios_residues[i]=[]
+      zscores_residues[i]=[]
+    binned_peaks={}
+    n_angles = iceil(360.0 / sampling_angle)
+    self.zscores=[]
+    self.rotamer_ratios=[]
+    self.non_zero_thresholds=[]
+    self.length = len(waves)
+    self.peaks=OrderedDict()
+        # calculate peaks and histogram
+    for threshold in self.thresholds:
+      if (not quiet):
+        print("", file=out)
+        print("===== Calculating Statistics for Threshold %.3f =====" %\
+          threshold, file=out)
+      self.peaks[threshold]=Peaklist()
+      Weird_residues[threshold]=Peaklist()
+      self.peak_count[threshold] = [0]*n_angles
+      for i in Residue_codes:
+        residue_peak_count[i][threshold]=[0]*n_angles
+      for i in waves:
+        self.peaks[threshold].append_lists(calculate_peaks(i, threshold))
+      for peak in self.peaks[threshold].get_peaks():
+        self.peak_count[threshold][peak.chi_value] += 1
+        residue_peak_count[peak.resname][threshold][peak.chi_value]+=1
+        if ((peak.chi_value<6) or (peak.chi_value>18 and peak.chi_value<30) or (peak.chi_value>42 and peak.chi_value<54) or (peak.chi_value>66)):
+          Weird_residues[threshold].peaks.append(peak)
+      # Calculate the binned peaks and ratios
+      binned_peaks[threshold] = calculate_binned_counts(self.peak_count[threshold], 60)
+      # print "For threshold %.3f" % threshold
+      # print "Sample size = %d" % sum(binned_peaks[threshold])
+      zscore_n, rotamer_ratio_n = statistic(binned_peaks[threshold], n_angles)
+      if rotamer_ratio_n==0:
+        break
+      for i in Residue_codes:
+        rotamer_ratios_residues_n, zscores_n = calc_ratio(residue_peak_count[i][threshold], sampling_angle)
+        rotamer_ratios_residues[i].append(rotamer_ratios_residues_n)
+        zscores_residues[i].append(zscores_n)
+      self.non_zero_thresholds.append(threshold)
+      self.zscores.append(zscore_n)
+      self.rotamer_ratios.append(rotamer_ratio_n)
+      if (not quiet):
+        print("===== Plotting Histogram for Threshold %.3f =====" % \
+          threshold, file=out)
+        out_file = os.path.join(out_dir, "%.3f.histogram.png" % threshold)
+        plot_peaks(
+          peak_count=self.peak_count[threshold],
+          file_name=out_file,
+          threshold=threshold,
+          first=60,
+          title=RMSD_statistic(self.peaks[threshold].peaks),
+          n_angles=n_angles)
+        print("Saved plot to %s" % out_file, file=out)
+      # plot_rotamers(binned_peaks[threshold], file, threshold, args.first_rotamer)
+    #   print "Outliers at threshold %.2f: %s" % (threshold, str(Weird_residues[threshold]))
+    if len(self.zscores) == 0:
+      raise Sorry("""No scores could be calculated at any threshold for this map. This could be because the
+       map is not sufficiently featured, or because of data corruption in the map.""")
+    if (not quiet):
+      print("", file=out)
+      print("===== Plotting Statistics Across Thresholds =====", file=out)
+      out_file = os.path.join(out_dir, "Total.threshold_scan.png")
+      plot_progression(
+        non_zero_thresholds=self.non_zero_thresholds,
+        rotamer_ratios=self.rotamer_ratios,
+        file_name=out_file,
+        zscores=self.all_scores)
+      print("Saved plot to %s" % out_file, file=out)
+    # for i in Residue_codes:
+    #   plot_progression(non_zero_thresholds, rotamer_ratios_residues[i], file, zscores_residues[i], i)
+      print("", file=out)
+      print("===== Writing Pickles Out =====", file=out)
+      easy_pickle.dump(out_dir + '/Outliers.pkl',Weird_residues)
+      print('Wrote ' + out_dir + '/Outliers.pkl', file=out)
+      easy_pickle.dump(out_dir + '/rotamer_ratios.pkl', self.rotamer_ratios)
+      print('Wrote ' + out_dir + '/rotamer_ratios.pkl', file=out)
+      easy_pickle.dump(out_dir + '/zscores.pkl', self.zscores)
+      print('Wrote ' + out_dir + '/zscores.pkl', file=out)
+      easy_pickle.dump(out_dir + '/emringer_scores.pkl', self.all_scores)
+      print('Wrote ' + out_dir + '/emringer_scores.pkl', file=out)
+      easy_pickle.dump(out_dir + '/thresholds.pkl', self.thresholds)
+      print('Wrote ' + out_dir + '/thresholds.pkl', file=out)
+      easy_pickle.dump(out_dir + '/peak_counts.pkl', self.peak_count)
+      print('Wrote ' + out_dir + '/peak_counts.pkl', file=out)
+    self.zscore_max = max(self.zscores)
+    self._zscore_max_index = self.zscores.index(self.zscore_max)
+
+  @property
+  def all_scores(self):
+    return [ 10*z/math.sqrt(self.length) for z in self.zscores ]
+
+  @property
+  def optimal_threshold(self):
+    return self.non_zero_thresholds[self._zscore_max_index]
+
+  @property
+  def rotamer_ratio(self):
+    return self.rotamer_ratios[self._zscore_max_index]
+
+  @property
+  def score(self):
+    """Overall EM-Ringer score"""
+    return (10 * self.zscore_max / math.sqrt(self.length))
+
+  def show_summary(self, out=sys.stdout):
+    print("", file=out)
+    print("=====Final Statistics for Model/Map Pair=====", file=out)
+    print("Optimal Threshold: %.3f" % self.optimal_threshold, file=out)
+    print("Rotamer-Ratio: %.3f" % self.rotamer_ratio, file=out)
+    print("Max Zscore: %.3f" % self.zscore_max, file=out)
+    print("Model Length: %d" % self.length, file=out)
+    # print "Z-score/(length): %.8f" % (value/length)
+    print("EMRinger Score: %8f" % self.score, file=out)
+    return self
+
+  def draw_wx_peaks_plot(self, plot, i_threshold):
+    threshold = self.thresholds[i_threshold]
+    plot.figure.clear()
+    _plot_peaks(
+      fig=plot.figure,
+      peak_count=self.peak_count[threshold],
+      threshold=threshold,
+      first=60,
+      title=RMSD_statistic(self.peaks[threshold].peaks))
+
+  def draw_wx_progression_plot(self, plot):
+    plot.figure.clear()
+    _plot_progression(
+      fig=plot.figure,
+      non_zero_thresholds=self.non_zero_thresholds,
+      rotamer_ratios=self.rotamer_ratios,
+      zscores=self.all_scores)
+
+########################################################################
+# GUI and Output
+
+def _plot_rotamers(fig, binned_output, threshold, first):
+  """Binned histogram"""
+  colors=['blue','red']*3
+  angles = range(6)
+  bin_angles = [(i*60+first)%360 for i in angles]
+  ax = fig.add_subplot(111)
+  ax.bar(bin_angles, binned_output, align='center', color=colors, width=60)
+
+def plot_rotamers(binned_output, threshold, first):
+  import matplotlib.pyplot as plt
+  fig = plt.figure(1)
+  _plot_rotamers(fig, binned_output, filename, threshold, first)
+  plt.savefig('%s.output/%.3f.Phenixed_Histogram.png' % (filename,threshold))
+  plt.close()
+
+def _plot_peaks(fig, peak_count, threshold, first, title=0, n_angles=72):
+  # rcParams.update({'figure.autolayout': True})
+  colors = ['#F15854']*6+['#5DA5DA']*13+['#F15854']*11+['#5DA5DA']*13+['#F15854']*11+['#5DA5DA']*13+['#F15854']*5
+  ax = fig.add_subplot(111)
+  ax.axvspan((first-30), first+30, color='0.5', alpha=0.5)
+  ax.axvspan(first+90, first+150, color='0.5', alpha=0.5)
+  ax.axvspan(first+210, (first+270), color='0.5', alpha=0.5)
+  ax.tick_params(axis='x',which='both',top='off')
+  ax.tick_params(axis='y',which='both',right='off')
+  peak_count_extra = peak_count+[peak_count[0]]
+  angles = [i*5 for i in range(0,n_angles+1)]
+  ax.bar(angles,peak_count_extra, width=5, align='center', color=colors)
+  ax.set_title('Peak Counts', y=1.05) #  - Threshold %.3f' % (threshold)
+  ax.set_xticks([i*60 for i in range(7)])
+  ax.set_xlim(0,360)
+  ax.set_xlabel(r'Chi1 Angle ($\degree$)', labelpad=10)
+  ax.set_ylabel("Peak Count", labelpad=10)
+
+def plot_peaks(peak_count, file_name, threshold, first, title=0, n_angles=72):
+  import matplotlib.pyplot as plt
+  fig = plt.figure(2, figsize=(5,4))
+  _plot_peaks(fig, peak_count, threshold, first, title, n_angles=n_angles)
+  plt.savefig(file_name)
+  plt.close()
+
+def _plot_progression(fig, non_zero_thresholds, rotamer_ratios, zscores,
+    i="Total"):
+  for j in range(len(zscores)):
+    if zscores[j]>=0:
+      non_zero_thresholds = non_zero_thresholds[j:]
+      rotamer_ratios= rotamer_ratios[j:]
+      zscores=zscores[j:]
+      break
+  ax1 = fig.add_subplot(111)
+  ax1.plot(non_zero_thresholds, zscores, 'b-', linewidth=3.0, alpha=0.7)
+  ax1.set_xlabel('Electron Potential Threshold')
+  # Make the y-axis label and tick labels match the line color.
+  ax1.set_ylabel('EMRinger Score', color='b')
+  for tl in ax1.get_yticklabels():
+    tl.set_color('b')
+  ax1.set_ylim([-1,4])
+  ax1.axhspan(-1,1,color='0.5',alpha=0.1)
+  ax2 = ax1.twinx()
+  ax2.grid()
+  ax2.plot(non_zero_thresholds, rotamer_ratios, 'r-', label = i, linewidth=3.0, alpha=0.7)
+  ax2.set_ylim([0.4,1])
+  ax2.set_ylabel(r'% Rotameric Residues', color='r', labelpad=10)
+  ax1.xaxis.set_ticks_position('bottom')
+  # ax2.set_xlim([0.005,0.03])
+  for tl in ax2.get_yticklabels():
+    tl.set_color('r')
+  if i != "Total":
+    ax1.set_title("Threshold Scan - %s" % i, y=1.05)
+  else:
+    ax1.set_title("Threshold Scan", y=1.05)
+
+def plot_progression(non_zero_thresholds, rotamer_ratios, file_name, zscores,
+    i="Total"):
+  import matplotlib.pyplot as plt
+  fig = plt.figure(3, figsize=(5.5,4))
+  _plot_progression(fig, non_zero_thresholds, rotamer_ratios, zscores, i)
+  plt.savefig(file_name)
+  plt.close()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ringer/emringer.py
+from __future__ import absolute_import, division, print_function
+import iotbx.phil
+from libtbx import group_args
+from libtbx.utils import Sorry
+from iotbx.map_model_manager import map_model_manager
+from mmtbx.ringer import iterate_over_residues
+from mmtbx.ringer import em_rolling
+from mmtbx.ringer import em_scoring
+
+master_params_str = '''
+sampling_angle = 5
+  .type = int
+  .input_size = 64
+sampling_method = linear *spline direct
+  .help = Method for sampling
+  .type = choice(multi=False)
+grid_spacing = 1./5
+  .type = float
+scaling = *sigma volume
+  .help = Method for map scaling.
+  .type = choice(multi=False)
+rolling_window_threshold = 0
+  .type = float(value_min=0)
+  .help = Threshold for calculating statistics across rolling windows of residues
+skip_alt_confs = True
+  .type = bool
+ignore_symmetry_conflicts = False
+  .type = bool
+  .help = Allows using PDB file with symmetry that does not match map
+nproc = 1
+  .type = int
+  .short_caption = Number of processors
+  .input_size = 64
+  '''
+
+def master_params():
+  return iotbx.phil.parse(master_params_str, process_includes=False)
+
+class emringer(object):
+  def __init__(self, model, miller_array, map_inp, params, out):
+    self.model        = model
+    self.miller_array = miller_array
+    self.map_inp      = map_inp
+    self.params       = params
+    self.out          = out
+
+  def validate(self):
+    assert not None in [self.model, self.params, self.out]
+    if (self.model is None):
+      raise Sorry("Model is required.")
+    if (self.miller_array is None and self.map_inp is None):
+      raise Sorry("Map or map coefficients are required.")
+    # Sanity check for crystal symmetry
+    if (self.map_inp is not None and self.model is not None):
+      self.base = map_model_manager(
+        map_manager      = self.map_inp,
+        model            = self.model,
+        ignore_symmetry_conflicts = self.params.ignore_symmetry_conflicts)
+
+      self.cs_consensus = self.base.crystal_symmetry()
+    else:
+      self.base = None
+
+  def run(self):
+    hierarchy = self.model.get_hierarchy()
+    map_data, grid_unit_cell = None, None
+    if self.base is not None:
+      hierarchy = self.base.model().get_hierarchy()
+      map_data = self.base.map_manager().map_data()
+      grid_unit_cell = self.base.map_manager().grid_unit_cell()
+
+    hierarchy.atoms().reset_i_seq()
+
+    self.ringer_result = iterate_over_residues(
+      pdb_hierarchy          = hierarchy,
+      map_coeffs             = self.miller_array,
+      map_data               = map_data,
+      unit_cell              = grid_unit_cell,
+      params                 = self.params,
+      log                    = self.out
+      ).results
+
+    if (self.params.output_base is not None):
+      plots_dir = self.params.output_base + "_plots"
+    else:
+      plots_dir = 'emringer_plots'
+
+    import matplotlib
+    matplotlib.use("Agg")
+    self.scoring_result = em_scoring.main(
+      file_name      = self.params.output_base,
+      ringer_result  = self.ringer_result,
+      out_dir        = plots_dir,
+      sampling_angle = self.params.sampling_angle,
+      quiet          = self.params.quiet,
+      out            = self.out)
+
+    rolling_window_threshold = self.params.rolling_window_threshold
+    self.rolling_result = em_rolling.main(
+      ringer_results = self.ringer_result,
+      dir_name       = plots_dir,
+      threshold      = rolling_window_threshold, #scoring.optimal_threshold,
+      graph          = False,
+      save           = not self.params.quiet,
+      out            = self.out)
+
+  def get_results(self):
+    return group_args(
+      ringer_result  = self.ringer_result,
+      scoring_result = self.scoring_result,
+      rolling_result = self.rolling_result)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ringer/tst_em_rscc.py
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.ringer import em_rscc
+from cctbx import crystal
+
+def exercise():
+  import mmtbx.regression
+  import iotbx.pdb
+  from six.moves import cStringIO as StringIO
+  pdb_file = "tmp_em_rscc.pdb"
+  map_file = "tmp_em_rscc.map"
+  f = open(pdb_file, "w")
+  for line in mmtbx.regression.model_1yjp.splitlines():
+    if line.startswith("ATOM"):
+      f.write(line + "\n")
+  f.close()
+  pdb_in = iotbx.pdb.input(pdb_file)
+  symm = crystal.symmetry(
+    space_group_symbol="P1",
+    unit_cell=(30, 30, 30, 90, 90, 90))
+  xrs = pdb_in.xray_structure_simple(crystal_symmetry=symm)
+  xrs.scattering_type_registry(
+    d_min=3.0,
+    table="electron")
+  fc = xrs.structure_factors(d_min=3.0).f_calc()
+  fft_map = fc.fft_map(resolution_factor=1/3).apply_sigma_scaling()
+  i,j,k = fft_map.n_real()
+  s = i//2
+  f = i//2-1
+  print(i,j,k,s,f)
+  fft_map.as_ccp4_map(
+    file_name=map_file,
+    gridding_first=(-s,-s,-s),
+    gridding_last=(f,f,f))
+  out = StringIO()
+  em_rscc.run(args=[pdb_file, map_file], out=out)
+  for line in out.getvalue().splitlines():
+    if line.find(" A  ")==-1: continue
+    assert abs(float(line.split()[2])-1)<0.1
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ringer/tst_emringer.py
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.ringer import em_scoring as score
+from mmtbx.programs import emringer
+import iotbx.pdb
+from scitbx.array_family import flex
+from libtbx.test_utils import approx_equal, Exception_expected
+from libtbx.utils import null_out, Sorry
+import libtbx.load_env
+import warnings
+import os.path
+from iotbx.cli_parser import run_program
+from six.moves import range
+
+def exercise_emringer_residue_scan():
+  pdb_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/mmtbx/em_ringer/tst_emringer_model.pdb",
+    test=os.path.isfile)
+  map_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/mmtbx/em_ringer/tst_emringer_map.ccp4",
+    test=os.path.isfile)
+  assert (not None in [pdb_file, map_file])
+  emringer_results = run_program(program_class=emringer.Program, args=[pdb_file, map_file, 'quiet=True'])
+  results = emringer_results.ringer_result
+  scoring = emringer_results.scoring_result
+  rolling = emringer_results.rolling_result
+  #results, scoring, rolling = emringer.run([pdb_file, map_file], out=null_out())
+  # Make sure the right number of residues (22 out of 28) get scanned
+  assert len(results)==22
+  modelled_list = [290.742121792,192.844056257,45.4781110306,294.247825632,303.618891108,58.7694040824,331.70068496,46.7136045049,290.167261226,304.261231829,282.651244586,268.729721112,195.972333785,305.321933311,314.81066224,286.028424514,311.180807466,313.004918133,296.67781565,296.949191638,169.644245088,192.496265164]
+  peak_list = [270,180,260,75,305,30,310,90,265,270,270,240,280,260,310,285,295,100,260,165,155,200]
+  peak_rhos = [0.175600306502,0.351591946536,0.206238983746,0.3269057296,0.68375562882,0.251143527693,0.29106077218,0.199922124642,0.298461589197,0.563313760047,0.412696803251,0.511080434089,0.310001828446,0.228239176285,0.563148497472,0.490755919184,0.200978032127,0.274929619102,0.299229846335,0.179215798655,0.150783734124,0.210869945593]
+  for i in range(22):
+    # Make sure the modelled angle is correctly read
+    assert approx_equal(results[i]._angles[1].angle_current, modelled_list[i])
+    # Make sure the peak is chosen correctly
+    assert approx_equal(results[i]._angles[1].peak_chi, peak_list[i])
+    # Make sure the peak rhos are correct
+    assert approx_equal(results[i]._angles[1].peak_rho, peak_rhos[i])
+
+  emringer_results2 = run_program(program_class=emringer.Program, args=[pdb_file, map_file, "rolling_window_threshold=0.5", 'quiet=True'])
+  #results, scoring2, rolling2 = emringer.run([pdb_file, map_file, "rolling_window_threshold=0.5"], out=null_out())
+  results2 = emringer_results2.ringer_result
+  scoring2 = emringer_results2.scoring_result
+  rolling2 = emringer_results2.rolling_result
+  assert rolling.threshold == 0
+  assert rolling2.threshold == 0.5
+  #print rolling.results_a[0]
+  #print rolling2.results_a[0]
+  # just making sure this doesn't break!
+  #results, scoring2, rolling = emringer.run([pdb_file, map_file, "sampling_angle=2"], out=null_out())
+
+
+def exercise_emringer_insertion_codes():
+  """
+  Checks that emringer doesn't crash when there are insertion codes.
+  The correctness of output is not checked.
+  """
+  pdb_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/mmtbx/em_ringer/tst_emringer_insertion_codes_model.pdb",
+    test=os.path.isfile)
+  map_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/mmtbx/em_ringer/tst_emringer_map.ccp4",
+    test=os.path.isfile)
+  assert (not None in [pdb_file, map_file])
+  emringer_results = run_program(program_class=emringer.Program, args=[pdb_file, map_file, 'quiet=True'])
+
+#  results, scoring, rolling = emringer.run([pdb_file, map_file], out=null_out())
+
+# FIXME this will fail right now, which is deliberate
+def exercise_emringer_out_of_bounds():
+  pdb_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/mmtbx/em_ringer/tst_emringer_model.pdb",
+    test=os.path.isfile)
+  map_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/mmtbx/em_ringer/tst_emringer_map.ccp4",
+    test=os.path.isfile)
+  assert (not None in [pdb_file, map_file])
+  pdb_in = iotbx.pdb.input(pdb_file)
+  hierarchy = pdb_in.construct_hierarchy()
+  xyz = hierarchy.atoms().extract_xyz()
+  xyz += flex.vec3_double(xyz.size(), (200., 0.0, 0.0))
+  hierarchy.atoms().set_xyz(xyz)
+  with open("tst_emringer_shifted.pdb", "w") as f:
+    f.write(hierarchy.as_pdb_string(
+      crystal_symmetry=pdb_in.crystal_symmetry()))
+  args = ["tst_emringer_shifted.pdb", map_file]
+  try:
+    results, s, r = emringer.run(args, out=null_out())
+  except Sorry as e:
+    pass
+  else:
+    raise Exception_expected
+
+def exercise_emringer_pickle_loading():
+  pkl_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/mmtbx/em_ringer/tst_emringer_pickle.pkl",
+    test=os.path.isfile)
+  waves,thresholds = score.parse_pickle(pkl_file)
+  assert approx_equal(thresholds,[0.15145128496323776, 0.17806650215606262, 0.20468171934888746, 0.23129693654171235, 0.25791215373453719, 0.28452737092736202, 0.31114258812018691, 0.33775780531301181, 0.36437302250583659, 0.39098823969866148, 0.41760345689148637, 0.44421867408431126, 0.47083389127713604, 0.49744910846996093, 0.52406432566278582, 0.5506795428556106, 0.5772947600484355, 0.60390997724126039, 0.63052519443408517, 0.65714041162691006])
+  return waves, thresholds
+
+def exercise_emringer_peakfinding(waves):
+  list = score.Peaklist()
+  for i in waves:
+    list.append_lists(score.calculate_peaks(i,0.4))
+  assert len(list) == 6
+  print(list)
+  assert [i.chi_value*5 for i in list.get_peaks()] == [305, 270, 270, 240, 310, 285]
+
+
+def exercise_emringer_statistics():
+  # Test statistic calculation
+  peak_list = [5]+[0]*5+[50]+[0]*12+[25]+[0]*10+[10]+[0]*12+[5]+[0]*10+[10]+[0]*17
+  binned_peaks = score.calculate_binned_counts(peak_list)
+  assert binned_peaks==[50,25,10,5,10,5]
+
+  zscore, rotamer_ratio = score.statistic(binned_peaks)
+  assert approx_equal(rotamer_ratio, 2.0/3)
+  assert approx_equal(zscore, 2.570679)
+
+  new_rotamer_ratio, new_zscore  = score.calc_ratio(peak_list)
+  print(zscore)
+  print(new_zscore)
+  assert approx_equal(new_rotamer_ratio, rotamer_ratio)
+  assert approx_equal(new_zscore,zscore)
+
+if __name__=='__main__':
+  keep_going=True
+  try:
+    import wx # special import
+  except ImportError:
+    print("Required cctbx irrelevant dependencies are missing, skipping test.")
+    keep_going=False
+  tstdir = libtbx.env.find_in_repositories("phenix_regression/mmtbx/em_ringer")
+  if (tstdir is None):
+    warnings.warn("phenix_regression not available, skipping test")
+  else :
+    if(keep_going):
+      exercise_emringer_residue_scan()
+      exercise_emringer_insertion_codes()
+      # FIXME
+      #exercise_emringer_out_of_bounds()
+      #w, t = exercise_emringer_pickle_loading()
+      #exercise_emringer_peakfinding(w)
+      print("OK")
+
+
+ *******************************************************************************

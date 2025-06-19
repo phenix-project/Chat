@@ -1,0 +1,1548 @@
+
+
+ *******************************************************************************
+scitbx/source_generators/__init__.py
+"""
+source_generators
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/__init__.py
+"""
+source_generators.array_family
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/generate_algebras.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators.array_family import operator_functor_info
+from scitbx.source_generators.array_family import generate_std_imports
+from scitbx.source_generators import utils
+from six.moves import range
+
+this = "scitbx.source_generators.array_family.generate_algebras"
+
+misc_functions_a = (
+  "absolute", "pow2",
+)
+
+misc_functions_a_a = (
+  "fmod_positive",
+)
+
+misc_functions_x_x_s = (
+  (["approx_equal"], 1,
+   ["ElementType const& tolerance", "tolerance"]),
+)
+
+class empty(object):
+  def join(self, other):
+    self.__dict__.update(other.__dict__)
+
+def format_header(indent, str, max_line_length = 79):
+  maxlen = max_line_length - len(indent)
+  extra_indent = ""
+  lei = len(extra_indent)
+  result = ""
+  rest = str.strip()
+  while (lei + len(rest) > maxlen):
+    if (lei == 0):
+      i = rest.index("<")
+    else:
+      i = rest.index(",")
+      try: i += rest[i+1:].index(",") + 1
+      except Exception: pass
+    result += indent + extra_indent + rest[:i+1] + '\n'
+    extra_indent = "  "
+    lei = 2
+    rest = rest[i+1:].strip()
+  result += indent + extra_indent + rest
+  return result
+
+def format_list(indent, list):
+  r = ""
+  for line in list[:-1]:
+    r += indent + line + "\n"
+  return r + indent + list[-1]
+
+def base_array_type_name(array_type_name):
+  return array_type_name.replace("_plain", "")
+
+def get_template_args(array_type_name):
+  result = [["typename", "ElementType"]]
+  if (base_array_type_name(array_type_name) in ("tiny", "small")):
+    result.append(["std::size_t", "N"])
+  elif (base_array_type_name(array_type_name) in ("ref","const_ref", "versa")):
+    result.append(["typename", "AccessorType"])
+  return result
+
+def get_numbered_template_args(array_type_name, n_params, equal_element_type):
+  single = get_template_args(array_type_name)
+  if (n_params == 1): return [single]
+  result = []
+  for i in range(1, n_params+1):
+    if (equal_element_type):
+      single_numbered = [single[0]]
+    else:
+      single_numbered = [[single[0][0], single[0][1]+str(i)]]
+    if (base_array_type_name(array_type_name) == "tiny"):
+      single_numbered.append(single[1])
+    else:
+      for s in single[1:]:
+        single_numbered.append([s[0], s[1]+str(i)])
+    result.append(single_numbered)
+  return result
+
+def get_template_header_args(numbered_template_args):
+  result = []
+  for p in numbered_template_args:
+    for d in p:
+      if (not d in result): result.append(d)
+  return result
+
+def get_template_parameter_args(numbered_template_args):
+  return [
+    ", ".join(d[1] for d in p)
+    for p in numbered_template_args
+  ]
+
+def get_template_header(numbered_template_args):
+  ha = get_template_header_args(numbered_template_args)
+  return "template<" + ", ".join(" ".join(x) for x in ha) + ">"
+
+def get_template_parameters(array_type_name, template_parameter_args):
+  result = []
+  for p in template_parameter_args:
+    result.append(array_type_name + "<" + p + ">")
+  return result
+
+def get_template_header_and_parameters(array_type_name, n_params, equal_element_type=0):
+  result = empty()
+  result.nta = get_numbered_template_args(
+    array_type_name, n_params, equal_element_type)
+  result.tpa = get_template_parameter_args(result.nta)
+  result.header = get_template_header(result.nta)
+  result.params = get_template_parameters(array_type_name, result.tpa)
+  return result
+
+def derive_return_array_type_simple(param):
+  if (not param.startswith("small")): return param
+  return param.replace("N1", "SCITBX_ARRAY_FAMILY_SMALL_ALGEBRA_MIN_N1_N2")
+
+def wrap_element_type(array_type_name, element_type, addl):
+  r = array_type_name + "<" + ", ".join([element_type] + addl) + ">"
+  if (r.endswith(">>")): return r[:-1] + " >"
+  return r
+
+def adjust_array_type_names(array_type_name):
+  r = empty()
+  r.return_array_type_name = array_type_name
+  r.param_array_type_name = array_type_name
+  if (array_type_name == "ref"):
+    r.return_array_type_name = "versa"
+    r.param_array_type_name = "const_ref"
+  return r
+
+def special_decl_params(array_type_name, special_def):
+  r = adjust_array_type_names(array_type_name)
+  r.return_elment_type = special_def[0]
+  r.function_name = special_def[1]
+  r.arg_element_types = special_def[2:]
+  r.nta = get_numbered_template_args(r.param_array_type_name, 1, 0)
+  addl = []
+  if (len(r.nta[0]) == 2): addl = [r.nta[0][1][1]]
+  r.header = get_template_header(r.nta)
+  r.return_array_type = wrap_element_type(
+    r.return_array_type_name, r.return_elment_type, addl)
+  r.arg_array_types = []
+  for aet in r.arg_element_types:
+    r.arg_array_types.append(wrap_element_type(
+      r.param_array_type_name, aet, addl))
+  return r
+
+def operator_decl_params(array_type_name, op_type, op_class, type_flags,
+  equal_element_type = 0
+):
+  r = adjust_array_type_names(array_type_name)
+  if (type_flags != (1,1)):
+    r.join(get_template_header_and_parameters(r.param_array_type_name, 1,
+      equal_element_type))
+    r.params.insert(type_flags[0], "ElementType")
+    r.return_element_type = ["ElementType"]
+    if (op_class in ("boolean", "bool_result", "logical")):
+      r.return_element_type = ["bool"]
+  else:
+    r.join(get_template_header_and_parameters(
+      r.param_array_type_name, 2, equal_element_type))
+    r.return_element_type = [r.nta[0][0][1]]
+    if (op_class in ("boolean", "bool_result", "logical")):
+      r.return_element_type = ["bool"]
+    elif (op_class != "n/a"):
+      assert op_class == "arithmetic"
+      r.return_element_type = [
+        "typename binary_operator_traits<",
+        "  ElementType1, ElementType2>::" + op_class]
+  if (len(r.return_element_type) == 1):
+    r.return_array_type = [
+      r.return_array_type_name + "<" + r.return_element_type[0]]
+  else:
+    r.return_array_type = [
+      r.return_array_type_name + "<",
+      "  " + r.return_element_type[0],
+      "    " + r.return_element_type[1]]
+  if (len(r.nta[0]) == 2):
+    if (r.nta[0][1][1] == "N1"):
+      r.return_array_type[-1] +=", SCITBX_ARRAY_FAMILY_SMALL_ALGEBRA_MIN_N1_N2"
+    else:
+      r.return_array_type[-1] += ", " + r.nta[0][1][1]
+  r.return_array_type[-1] += ">"
+  r.typedef_return_array_type = (["typedef " +  r.return_array_type[0]]
+    + r.return_array_type[1:])
+  r.element_types = ["ElementType", "ElementType"]
+  if (type_flags == (1,1)):
+    r.element_types = ["ElementType1", "ElementType2"]
+  return r
+
+def get_result_constructor_args(array_type_name, type_flags = None):
+  arg_name = "a"
+  if (type_flags is not None):
+    arg_name = "a%d" % ((type_flags[0] + 1) % 2 + 1,)
+  if (base_array_type_name(array_type_name) == "versa"):
+    return "%s.accessor()" % (arg_name,)
+  return "%s.size()" % (arg_name,)
+
+def binary_operator_algo_params(array_type_name, type_flags):
+  r = empty()
+  r.loop_n = "N"
+  r.size_assert = ""
+  r.result_constructor_args = ""
+  if (base_array_type_name(array_type_name) != "tiny"):
+    r.loop_n = "a%d.size()" % ((type_flags[0] + 1) % 2 + 1,)
+    if (type_flags == (1,1)):
+      r.size_assert = """if (a1.size() != a2.size()) throw_range_error();
+    """
+    r.result_constructor_args = get_result_constructor_args(
+      array_type_name, type_flags)
+  r.begin = ["", ""]
+  for i in range(2):
+    if (type_flags[i]): r.begin[i] = ".begin()"
+  r.type_flags_code = "sa"[type_flags[0]] + "_" + "sa"[type_flags[1]]
+  return r
+
+def generate_unary_ops(f, array_type_name):
+  result_constructor_args = get_result_constructor_args(array_type_name)
+  for op_class, op_symbol in (("arithmetic", "-"),
+                              ("logical", "!")):
+    d = operator_decl_params(array_type_name, "unary", op_class, (1,0))
+    print("""%s
+  inline
+%s
+  operator%s(%s const& a) {
+%s
+    return_array_type;
+    typedef typename return_array_type::value_type return_element_type;""" % (
+      format_header("  ", d.header),
+      format_list("  ", d.return_array_type),
+      op_symbol, d.params[0],
+      format_list("    ", d.typedef_return_array_type)), file=f)
+    if (base_array_type_name(array_type_name) == "tiny"):
+      print("""    return_array_type result;
+    array_operation_a(fn::functor_%s<
+        return_element_type,
+        ElementType>(),
+      a.begin(), result.begin(), a.size(), true_type());
+    return result;
+  }
+""" % (operator_functor_info.unary_functors[op_symbol],), file=f)
+    else:
+      print("""    return return_array_type(%s,
+      make_init_functor(make_array_functor_a(
+        fn::functor_%s<
+          return_element_type,
+          ElementType>(), a.begin())));
+  }
+""" % (result_constructor_args,
+       operator_functor_info.unary_functors[op_symbol]), file=f)
+
+def generate_unary_apply(f, array_type_name):
+  result_constructor_args = get_result_constructor_args(array_type_name)
+  d = operator_decl_params(array_type_name, "unary", "n/a", (1,0))
+  nta = get_numbered_template_args(array_type_name, 1, 0)
+  addl = []
+  if (len(nta[0]) == 2): addl = [nta[0][1][1]]
+  return_array_type = wrap_element_type(
+    d.return_array_type_name, "ReturnElementType", addl)
+  nta.insert(0, [["typename", "UnaryOperation"]])
+  header2 = get_template_header(nta)
+  nta.append([["typename", "ReturnElementType"]])
+  header1 = get_template_header(nta)
+  print("""%s
+  inline
+  %s
+  apply(UnaryOperation const& op,
+        %s const& a,
+        type_holder<ReturnElementType> /*result_type_holder*/) {
+    typedef %s return_array_type;""" % (
+       format_header("  ", header1),
+       return_array_type,
+       d.params[0],
+       return_array_type), file=f)
+  if (base_array_type_name(array_type_name) == "tiny"):
+    print("""    return_array_type result;
+    array_operation_a(op,
+      a.begin(), result.begin(), a.size(), true_type());
+    return result;
+  }""", file=f)
+  else:
+    print("""    return return_array_type(%s,
+      make_init_functor(
+        array_functor_a<UnaryOperation, ElementType, ReturnElementType>(
+          op, a.begin())));
+  }""" % (result_constructor_args,), file=f)
+  print("""
+%s
+  inline
+  %s
+  apply(UnaryOperation const& op,
+        %s const& a) {
+    return apply(op, a, type_holder<typename UnaryOperation::result_type>());
+  }
+""" % (format_header("  ", header2),
+       return_array_type.replace(
+         "ReturnElementType", "typename UnaryOperation::result_type"),
+       d.params[0]), file=f)
+
+def elementwise_binary_op(f,
+      array_type_name, op_class, op_symbol, type_flags, function_name):
+  d = operator_decl_params(array_type_name, "binary", op_class, type_flags)
+  a = binary_operator_algo_params(array_type_name, type_flags)
+  print("""%s
+  inline
+%s
+  %s(
+    %s const& a1,
+    %s const& a2) {
+%s
+    return_array_type;
+    typedef typename return_array_type::value_type return_element_type;""" % (
+      format_header("  ", d.header),
+      format_list("  ", d.return_array_type),
+      function_name, d.params[0], d.params[1],
+      format_list("    ", d.typedef_return_array_type)), file=f)
+  if (base_array_type_name(array_type_name) == "tiny"):
+    print("""    return_array_type result;
+    array_operation_%s(fn::functor_%s<
+        return_element_type,
+        %s,
+        %s>(),
+      a1%s, a2%s, result.begin(), %s, true_type());
+    return result;
+  }
+""" % (a.type_flags_code,
+       operator_functor_info.binary_functors[op_symbol],
+       d.element_types[0], d.element_types[1],
+       a.begin[0], a.begin[1], a.loop_n), file=f)
+  else:
+    print("""    %sreturn return_array_type(%s,
+      make_init_functor(make_array_functor_%s(
+        fn::functor_%s<
+          return_element_type,
+          %s,
+          %s>(), a1%s, a2%s)));
+  }
+""" % (a.size_assert,
+       a.result_constructor_args,
+       a.type_flags_code,
+       operator_functor_info.binary_functors[op_symbol],
+       d.element_types[0], d.element_types[1],
+       a.begin[0], a.begin[1]), file=f)
+
+def elementwise_inplace_binary_op(f,
+      array_type_name, op_class, op_symbol, type_flags):
+  d = operator_decl_params(array_type_name, "binary", "n/a", type_flags)
+  d.params[0] = d.params[0].replace("const_ref", "ref")
+  a = binary_operator_algo_params(array_type_name, type_flags)
+  print("""%s
+  inline
+  %s&
+  operator%s(
+    %s& a1,
+    %s const& a2) {
+    %sarray_operation_in_place_%s(fn::functor_%s<
+        %s,
+        %s>(),
+      a1.begin(), a2%s, %s);
+    return a1;
+  }
+""" % (format_header("  ", d.header),
+       d.params[0],
+       op_symbol, d.params[0], d.params[1],
+       a.size_assert,
+       a.type_flags_code,
+       operator_functor_info.in_place_binary_functors[op_symbol],
+       d.return_element_type[0],
+       d.element_types[1],
+       a.begin[1], a.loop_n), file=f);
+
+def generate_elementwise_binary_op(f, array_type_name, op_class, op_symbol):
+  function_name = "operator" + op_symbol
+  for type_flags in ((1,1), (1,0), (0,1)):
+    elementwise_binary_op(f,
+      array_type_name, op_class, op_symbol, type_flags, function_name)
+
+def generate_elementwise_inplace_binary_op(f,
+      array_type_name, op_class, op_symbol):
+  for type_flags in ((1,1), (1,0)):
+    elementwise_inplace_binary_op(f,
+      array_type_name, op_class, op_symbol, type_flags)
+
+def generate_1arg_element_wise(f, array_type_name, function_names):
+  result_constructor_args = get_result_constructor_args(array_type_name)
+  d = operator_decl_params(array_type_name, "unary", "arithmetic", (1,0))
+  for function_name in function_names:
+    print("""%s
+  inline
+%s
+  %s(%s const& a) {
+%s
+    return_array_type;
+    typedef typename return_array_type::value_type return_element_type;""" % (
+      format_header("  ", d.header),
+      format_list("  ", d.return_array_type),
+      function_name, d.params[0],
+      format_list("    ", d.typedef_return_array_type)), file=f)
+    if (base_array_type_name(array_type_name) == "tiny"):
+      print("""    return_array_type result;
+    array_operation_a(fn::functor_%s<return_element_type, ElementType>(),
+      a.begin(), result.begin(), a.size(), true_type());
+    return result;
+  }
+""" % (function_name,), file=f)
+    else:
+      print("""    return return_array_type(%s,
+      make_init_functor(make_array_functor_a(
+        fn::functor_%s<return_element_type, ElementType>(), a.begin())));
+  }
+""" % (result_constructor_args, function_name), file=f)
+
+def generate_2arg_element_wise(f,
+  array_type_name, function_names,
+  equal_element_type = 0
+):
+  for function_name in function_names:
+    for type_flags in ((1,1), (1,0), (0,1)):
+      d = operator_decl_params(
+        array_type_name, "binary", "n/a", type_flags, equal_element_type)
+      a = binary_operator_algo_params(array_type_name, type_flags)
+      print("""%s
+  inline
+%s
+  %s(
+    %s const& a1,
+    %s const& a2) {
+%s
+    return_array_type;
+    typedef typename return_array_type::value_type return_element_type;""" % (
+       format_header("  ", d.header),
+       format_list("  ", d.return_array_type),
+       function_name, d.params[0], d.params[1],
+       format_list("    ", d.typedef_return_array_type)), file=f)
+      if (base_array_type_name(array_type_name) == "tiny"):
+        print("""
+    return_array_type result;
+    array_operation_%s(fn::functor_%s<
+        return_element_type, %s, %s>(),
+      a1%s, a2%s, result.begin(), %s, true_type());
+    return result;
+  }
+""" % (a.type_flags_code,
+       function_name, d.element_types[0], d.element_types[1],
+       a.begin[0], a.begin[1], a.loop_n), file=f)
+      else:
+        print("""    %sreturn return_array_type(%s,
+      make_init_functor(make_array_functor_%s(
+        fn::functor_%s<return_element_type,
+          %s, %s>(),
+        a1%s, a2%s)));
+  }
+""" % (a.size_assert,
+       a.result_constructor_args,
+       a.type_flags_code,
+       function_name, d.element_types[0], d.element_types[1],
+       a.begin[0], a.begin[1]), file=f)
+
+def generate_x_x_s_element_wise(f,
+  array_type_name, function_names,
+  equal_element_type,
+  addl_args
+):
+  for function_name in function_names:
+    for type_flags in ((1,1), (1,0), (0,1)):
+      d = operator_decl_params(
+        array_type_name, "binary", "bool_result",
+        type_flags, equal_element_type)
+      a = binary_operator_algo_params(array_type_name, type_flags)
+      print("""%s
+  inline
+%s
+  %s(
+    %s const& a1,
+    %s const& a2,
+    %s) {
+%s
+    return_array_type;
+    typedef typename return_array_type::value_type return_element_type;""" % (
+      (format_header("  ", d.header),
+       format_list("  ", d.return_array_type),
+       function_name, d.params[0], d.params[1], addl_args[0],
+       format_list("    ", d.typedef_return_array_type))), file=f)
+      if (base_array_type_name(array_type_name) == "tiny"):
+        print("""
+    return_array_type result;
+    array_operation_%s_s(fn::functor_%s<
+        return_element_type, %s, %s, %s>(),
+      a1%s, a2%s, %s,
+      result.begin(), %s, true_type());
+    return result;
+  }
+""" % (a.type_flags_code,
+       function_name, "ElementType", "ElementType", "ElementType",
+       a.begin[0], a.begin[1], addl_args[1], a.loop_n), file=f)
+      else:
+        print("""    %sreturn return_array_type(%s,
+      make_init_functor(make_array_functor_%s_s(
+        fn::functor_%s<return_element_type,
+          %s, %s, %s>(),
+        a1%s, a2%s, %s)));
+  }
+""" % (a.size_assert,
+       a.result_constructor_args,
+       a.type_flags_code,
+       function_name, "ElementType", "ElementType", "ElementType",
+       a.begin[0], a.begin[1], addl_args[1]), file=f)
+
+def generate_element_wise_special(f,
+  array_type_name, special_def
+):
+  p = special_decl_params(array_type_name, special_def)
+  if (len(p.arg_array_types) == 1):
+    print("""%s
+  inline
+  %s
+  %s(%s const& a) {
+    typedef %s return_array_type;""" % (
+      format_header("  ", p.header),
+      p.return_array_type,
+      p.function_name, p.arg_array_types[0],
+      p.return_array_type), file=f)
+    if (base_array_type_name(array_type_name) == "tiny"):
+      print("""    return_array_type result;
+    array_operation_a(fn::functor_%s<
+      %s,
+      %s >(),
+      a.begin(), result.begin(), a.size(), true_type());
+    return result;
+  }
+""" % (p.function_name,
+       special_def[0], special_def[2]), file=f)
+    else:
+      result_constructor_args = get_result_constructor_args(
+        array_type_name)
+      print("""    return return_array_type(%s,
+      make_init_functor(make_array_functor_a(
+        fn::functor_%s<
+          %s,
+          %s >(), a.begin())));
+  }
+""" % (result_constructor_args,
+       p.function_name,
+       special_def[0], special_def[2]), file=f)
+  else:
+    for type_flags in ((1,1), (1,0), (0,1)):
+      a = binary_operator_algo_params(array_type_name, type_flags)
+      params = []
+      for i in range(2):
+        if (type_flags[i]):
+          params.append(p.arg_array_types[i])
+        else:
+          params.append(p.arg_element_types[i])
+      print("""%s
+  inline
+  %s
+  %s(
+    %s const& a1,
+    %s const& a2) {
+    typedef %s return_array_type;""" % (
+      format_header("  ", p.header), p.return_array_type,
+      p.function_name, params[0], params[1],
+      p.return_array_type), file=f)
+      if (base_array_type_name(array_type_name) == "tiny"):
+        print("""    return_array_type result;
+    array_operation_%s(fn::functor_%s<
+        %s,
+        %s,
+        %s >(),
+      a1%s, a2%s, result.begin(), %s, true_type());
+    return result;
+  }
+""" % (a.type_flags_code,
+       p.function_name,
+       special_def[0], special_def[2], special_def[3],
+       a.begin[0], a.begin[1], a.loop_n), file=f)
+      else:
+        print("""    %sreturn return_array_type(%s,
+      make_init_functor(make_array_functor_%s(
+        fn::functor_%s<
+          %s,
+          %s,
+          %s >(), a1%s, a2%s)));
+  }
+""" % (a.size_assert,
+       a.result_constructor_args,
+       a.type_flags_code,
+       p.function_name,
+       special_def[0], special_def[2], special_def[3],
+       a.begin[0], a.begin[1]), file=f)
+
+def one_type(target_dir, array_type_name):
+  f = utils.join_open(target_dir, "%s_algebra.h" % array_type_name, "w")
+  utils.write_this_is_auto_generated(f, this)
+  include_array_type_name = array_type_name
+  if (array_type_name == "ref"):
+    include_array_type_name = "versa"
+  generic_include = "functors"
+  if (base_array_type_name(array_type_name) == "tiny"):
+    generic_include = "operators"
+  print("""\
+#ifndef SCITBX_ARRAY_FAMILY_%s_ALGEBRA_H
+#define SCITBX_ARRAY_FAMILY_%s_ALGEBRA_H
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+
+#include <scitbx/array_family/%s.h>
+""" % ((array_type_name.upper(),) * 2 + (include_array_type_name,)), file=f)
+  if (array_type_name == "small"):
+    print("""#if (defined(BOOST_MSVC) && BOOST_MSVC <= 1300) // VC++ 7.0
+#define SCITBX_ARRAY_FAMILY_SMALL_ALGEBRA_MIN_N1_N2 N1
+#else
+#define SCITBX_ARRAY_FAMILY_SMALL_ALGEBRA_MIN_N1_N2 (N1<N2?N1:N2)
+#endif
+
+""", file=f)
+  print("""#include <scitbx/array_family/operator_traits_builtin.h>
+#include <scitbx/array_family/detail/operator_functors.h>
+#include <scitbx/array_family/detail/generic_array_%s.h>
+#include <scitbx/array_family/detail/std_imports.h>
+#include <scitbx/array_family/misc_functions.h>
+
+namespace scitbx { namespace af {
+""" % (generic_include,), file=f)
+
+  generate_unary_ops(f, array_type_name)
+  for op_symbol in operator_functor_info.arithmetic_binary_ops:
+    generate_elementwise_binary_op(f,
+      array_type_name, "arithmetic", op_symbol)
+    generate_elementwise_inplace_binary_op(f,
+      array_type_name, "arithmetic", op_symbol + "=")
+  for op_symbol in operator_functor_info.logical_binary_ops:
+    generate_elementwise_binary_op(f,
+      array_type_name, "logical", op_symbol)
+  for op_symbol in operator_functor_info.boolean_binary_ops:
+    generate_elementwise_binary_op(f,
+      array_type_name, "boolean", op_symbol)
+  generate_1arg_element_wise(f,
+    array_type_name,
+    misc_functions_a
+    + generate_std_imports.cmath_1arg
+    + generate_std_imports.cstdlib_1arg
+    + generate_std_imports.complex_1arg)
+  generate_2arg_element_wise(f,
+    array_type_name,
+    misc_functions_a_a
+    + generate_std_imports.cmath_2arg
+    + generate_std_imports.algorithm_2arg)
+  for special_def in generate_std_imports.complex_special:
+    generate_element_wise_special(f, array_type_name, special_def)
+  for args in misc_functions_x_x_s:
+    generate_x_x_s_element_wise(*(f, array_type_name) + args)
+
+  print("}} // namespace scitbx::af", file=f)
+  print(file=f)
+  print("#endif // DOXYGEN_SHOULD_SKIP_THIS", file=f)
+  print(file=f)
+  print("#endif // SCITBX_ARRAY_FAMILY_%s_ALGEBRA_H" % (
+    array_type_name.upper(),), file=f)
+
+  f.close()
+
+def run(target_dir):
+  for array_type_name in ("ref", "tiny", "small", "shared", "versa"):
+    one_type(target_dir, array_type_name)
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/generate_all.py
+from __future__ import absolute_import, division, print_function
+
+import os
+
+import scitbx.source_generators.array_family.generate_reductions
+import scitbx.source_generators.array_family.generate_std_imports
+import scitbx.source_generators.array_family.generate_operator_functors
+import scitbx.source_generators.array_family.generate_operator_traits_builtin
+import scitbx.source_generators.array_family.generate_algebras
+import scitbx.source_generators.array_family.generate_apply
+
+def refresh(array_family):
+  assert os.path.isdir(array_family)
+  array_family_detail = os.path.join(array_family, "detail")
+  assert os.path.isdir(array_family_detail)
+  print('  Generating C++ header files in:\n    "%s"' % array_family)
+  scitbx.source_generators.array_family.generate_reductions.run(array_family)
+  scitbx.source_generators.array_family.generate_std_imports.run(array_family)
+  scitbx.source_generators.array_family.generate_operator_functors.run(array_family)
+  scitbx.source_generators.array_family.generate_operator_traits_builtin.run(array_family)
+  scitbx.source_generators.array_family.generate_algebras.run(array_family)
+  scitbx.source_generators.array_family.generate_apply.run(array_family)
+
+assert __name__ != "__main__"
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/generate_apply.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators.array_family import generate_algebras
+from scitbx.source_generators import utils
+
+this = "scitbx.source_generators.array_family.generate_apply"
+
+def one_type(target_dir, array_type_name):
+  f = utils.join_open(target_dir, "%s_apply.h" % array_type_name, "w")
+  utils.write_this_is_auto_generated(f, this)
+  include_array_type_name = array_type_name
+  if (array_type_name == "ref"):
+    include_array_type_name = "versa"
+  generic_include = "functors"
+  if (generate_algebras.base_array_type_name(array_type_name) == "tiny"):
+    generic_include = "operators"
+  print("""\
+#ifndef SCITBX_ARRAY_FAMILY_%s_APPLY_H
+#define SCITBX_ARRAY_FAMILY_%s_APPLY_H
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+
+#include <scitbx/type_holder.h>
+#include <scitbx/array_family/%s.h>
+#include <scitbx/array_family/detail/generic_array_%s.h>
+
+namespace scitbx { namespace af {
+""" % ((array_type_name.upper(),) * 2 + (
+    include_array_type_name, generic_include)), file=f)
+
+  generate_algebras.generate_unary_apply(f, array_type_name)
+
+  print("""}} // namespace scitbx::af
+
+#endif // DOXYGEN_SHOULD_SKIP_THIS
+
+#endif // SCITBX_ARRAY_FAMILY_%s_APPLY_H""" % (array_type_name.upper(),), file=f)
+  f.close()
+
+def run(target_dir):
+  for array_type_name in (
+    "tiny_plain", "tiny",
+    "small_plain", "small",
+    "shared_plain", "shared",
+    "versa_plain", "versa",
+    "ref"):
+    one_type(target_dir, array_type_name)
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/generate_operator_functors.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators.array_family import operator_functor_info
+from scitbx.source_generators import utils
+
+this = "scitbx.source_generators.array_family.generate_operator_functors"
+
+def generate_unary(f, name, op):
+  print("""
+  template <typename ResultType,
+            typename ArgumentType>
+  struct functor_%s {
+    typedef ResultType result_type;
+    ResultType operator()(ArgumentType const& x) const {
+      return ResultType(%s);
+    }
+  };""" % (name, op), file=f)
+
+def generate_binary(f, name, op):
+  print("""
+  template <typename ResultType,
+            typename ArgumentType1,
+            typename ArgumentType2>
+  struct functor_%s {
+    typedef ResultType result_type;
+    ResultType operator()(ArgumentType1 const& x,
+                          ArgumentType2 const& y) const {
+      return ResultType(%s);
+    }
+  };""" % (name, op), file=f)
+
+def generate_in_place_binary(f, name, op):
+  print("""
+  template <typename ArgumentType1,
+            typename ArgumentType2>
+  struct functor_%s {
+    ArgumentType1& operator()(ArgumentType1& x,
+                              ArgumentType2 const& y) const {
+      %s;
+      return x;
+    }
+  };""" % (name, op), file=f)
+
+def run(target_dir):
+  f = utils.join_open(target_dir, "detail/operator_functors.h", "w")
+  utils.write_this_is_auto_generated(f, this)
+  print("""\
+#ifndef SCITBX_ARRAY_FAMILY_OPERATOR_FUNCTORS_H
+#define SCITBX_ARRAY_FAMILY_OPERATOR_FUNCTORS_H
+
+namespace scitbx { namespace fn {""", file=f)
+
+  for op, ftor_name in operator_functor_info.unary_functors.items():
+    generate_unary(f, ftor_name, op + "x")
+  for op, ftor_name in operator_functor_info.binary_functors.items():
+    generate_binary(f, ftor_name, "x " + op + " y")
+  for op, ftor_name in operator_functor_info.in_place_binary_functors.items():
+    generate_in_place_binary(f, ftor_name, "x " + op + " y")
+
+  print("""
+}} // namespace scitbx::fn
+
+#endif // SCITBX_ARRAY_FAMILY_OPERATOR_FUNCTORS_H""", file=f)
+  f.close()
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/generate_operator_traits_builtin.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators import utils
+import sys
+
+this = "scitbx.source_generators.array_family.generate_operator_traits_builtin"
+
+# Signed types only, to avoid the pitfalls of signed/unsigned conversions.
+types_ordered = (
+  "signed char",
+  "short",
+  "int",
+  "long",
+  "long long",
+  "float",
+  "double",
+  "std::complex<float>",
+  "std::complex<double>",
+)
+
+unsigned = (
+  "unsigned char",
+  "unsigned short",
+  "unsigned int",
+  "unsigned long",
+  "unsigned long long"
+)
+
+floating = ("float", "double")
+
+special_pairs = {
+  ("double", "std::complex<float>"): "std::complex<double>",
+  ("std::complex<float>", "double"): "std::complex<double>",
+}
+
+def build_pairs():
+  op_types = []
+  result_type = []
+  for i, itype in enumerate(types_ordered):
+    for j, jtype in enumerate(types_ordered):
+      op_types.append((itype, jtype))
+      if (i >= j):
+        result_type.append(0)
+      else:
+        result_type.append(jtype)
+  for unsigned_t in unsigned:
+    for floating_t in floating:
+      op_types.append((unsigned_t, floating_t))
+      result_type.append(floating_t)
+      op_types.append((floating_t, unsigned_t))
+      result_type.append(floating_t)
+  for op_t in special_pairs:
+    result_type[op_types.index(op_t)] = special_pairs[op_t]
+  return op_types, result_type
+
+def run(target_dir):
+  op_types, result_type = build_pairs()
+  assert len(op_types) == len(result_type)
+  if ("--Raw" in sys.argv):
+    for i, optype in enumerate(op_types):
+      print("%s + %s = %s" % (
+        optype[0], optype[1], result_type[i]), file=f)
+  else:
+    f = utils.join_open(target_dir, "operator_traits_builtin.h", "w")
+    utils.write_this_is_auto_generated(f, this)
+    print("""\
+#ifndef SCITBX_ARRAY_FAMILY_OPERATOR_TRAITS_BUILTIN_H
+#define SCITBX_ARRAY_FAMILY_OPERATOR_TRAITS_BUILTIN_H
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+
+#include <complex>
+
+namespace scitbx { namespace af {
+
+  // The default traits: the result type is the type of the lhs argument.
+  template<typename TypeLHS, typename TypeRHS>
+  struct binary_operator_traits {
+    typedef TypeLHS arithmetic;
+  };
+
+  // The remainder of this file defines the traits where the
+  // result type is the type of the rhs argument.
+""", file=f)
+
+    for i, optype in enumerate(op_types):
+      if (result_type[i]):
+        print("""  template<>
+  struct binary_operator_traits<%s, %s > {
+    typedef %s arithmetic;
+  };
+""" % (optype[0], optype[1], result_type[i]), file=f)
+
+    print("}} // namespace scitbx::af", file=f)
+    print(file=f)
+    print("#endif // DOXYGEN_SHOULD_SKIP_THIS", file=f)
+    print(file=f)
+    print("#endif // SCITBX_ARRAY_FAMILY_OPERATOR_TRAITS_BUILTIN_H", file=f)
+    f.close()
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/generate_reductions.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators import utils
+
+this = "scitbx.source_generators.array_family.generate_reductions"
+
+def make_dict(**kwds):
+  return kwds
+
+def substitute(subs, template):
+  for key, value in subs.items():
+    template = template.replace("${"+key+"}", value)
+  assert template.find("${") < 0, "Incomplete substitutions."
+  return template[1:]
+
+def generate_order(f, subs):
+  print(substitute(subs, """
+  template <typename ElementType1${templ_decl_2_1},
+            typename ElementType2${templ_decl_2_2}>
+  int
+  inline
+  order(
+    ${array_type_plain}<ElementType1${templ_inst_2_1}> const& a1,
+    ${array_type_plain}<ElementType2${templ_inst_2_2}> const& a2)
+  {
+    return order(a1.const_ref(), a2.const_ref());
+  }
+"""), file=f)
+
+def generate_max_index_etc(f, subs):
+  for func_name in ("max_index", "min_index"):
+    subs["func_name"] = func_name
+    print(substitute(subs, """
+  template <typename ElementType${templ_decl_2}>
+  inline
+  std::size_t
+  ${func_name}(${array_type_plain}<ElementType${templ_inst_2}> const& a)
+  {
+    return ${func_name}(a.const_ref());
+  }
+"""), file=f)
+
+def generate_first_index_etc(f, subs):
+  for func_name in ("first_index", "last_index"):
+    subs["func_name"] = func_name
+    print(substitute(subs, """
+  template <typename ElementType${templ_decl_2}, class PredicateType>
+  inline
+  boost::optional<std::size_t>
+  ${func_name}(${array_type_plain}<ElementType${templ_inst_2}> const& a,
+               PredicateType p)
+  {
+    return ${func_name}(a.const_ref(), p);
+  }
+"""), file=f)
+
+def generate_max_etc(f, subs):
+  for func_name in ("max", "min", "max_absolute",
+                    "sum", "sum_sq",
+                    "product", "mean", "mean_sq"):
+    subs["func_name"] = func_name
+    print(substitute(subs, """
+  template <typename ElementType${templ_decl_2}>
+  inline
+  ElementType
+  ${func_name}(${array_type_plain}<ElementType${templ_inst_2}> const& a)
+  {
+    return ${func_name}(a.const_ref());
+  }
+"""), file=f)
+
+def generate_mean_weighted_etc(f, subs):
+  for func_name in ("mean_weighted", "mean_sq_weighted"):
+    subs["func_name"] = func_name
+    print(substitute(subs, """
+  template <typename ElementTypeValues${templ_decl_2_1eq},
+            typename ElementTypeWeights${templ_decl_2_2eq}>
+  inline
+  ElementTypeValues
+  ${func_name}(
+    ${array_type_plain}<ElementTypeValues${templ_inst_2_1eq}> const& values,
+    ${array_type_plain}<ElementTypeWeights${templ_inst_2_2eq}> const& weights)
+  {
+    return ${func_name}(values.const_ref(), weights.const_ref());
+  }
+"""), file=f)
+
+def one_type(target_dir, subs):
+  array_type = subs["array_type"]
+  subs["array_type_plain"] = array_type + "_plain"
+  subs["ARRAY_TYPE"] = array_type.upper()
+  f = utils.join_open(target_dir, "%s_reductions.h" % array_type, "w")
+  utils.write_this_is_auto_generated(f, this)
+  print(substitute(subs, """
+#ifndef SCITBX_ARRAY_FAMILY_${ARRAY_TYPE}_REDUCTIONS_H
+#define SCITBX_ARRAY_FAMILY_${ARRAY_TYPE}_REDUCTIONS_H
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+
+#include <scitbx/array_family/ref_reductions.h>
+#include <scitbx/array_family/${array_type_plain}.h>
+
+namespace scitbx { namespace af {
+"""), file=f)
+
+  generate_order(f, subs)
+  generate_max_index_etc(f, subs)
+  generate_max_etc(f, subs)
+  generate_mean_weighted_etc(f, subs)
+  generate_first_index_etc(f, subs)
+
+  print(substitute(subs, """
+}} // namespace scitbx::af
+
+#endif // DOXYGEN_SHOULD_SKIP_THIS
+
+#endif // SCITBX_ARRAY_FAMILY_${ARRAY_TYPE}_REDUCTIONS_H
+"""), file=f)
+
+  f.close()
+
+def run(target_dir):
+  tiny_subs = make_dict(
+    array_type="tiny",
+    templ_decl_2=", std::size_t N",
+    templ_decl_2_1=", std::size_t N1",
+    templ_decl_2_2=", std::size_t N2",
+    templ_decl_2_1eq=", std::size_t N",
+    templ_decl_2_2eq="",
+    templ_inst_2=", N",
+    templ_inst_2_1=", N1",
+    templ_inst_2_2=", N2",
+    templ_inst_2_1eq=", N",
+    templ_inst_2_2eq=", N")
+  small_subs = make_dict(
+    array_type="small",
+    templ_decl_2=", std::size_t N",
+    templ_decl_2_1=", std::size_t N1",
+    templ_decl_2_2=", std::size_t N2",
+    templ_decl_2_1eq=", std::size_t N1",
+    templ_decl_2_2eq=", std::size_t N2",
+    templ_inst_2=", N",
+    templ_inst_2_1=", N1",
+    templ_inst_2_2=", N2",
+    templ_inst_2_1eq=", N1",
+    templ_inst_2_2eq=", N2")
+  shared_subs = make_dict(
+    array_type="shared",
+    templ_decl_2="",
+    templ_decl_2_1="",
+    templ_decl_2_2="",
+    templ_decl_2_1eq="",
+    templ_decl_2_2eq="",
+    templ_inst_2="",
+    templ_inst_2_1="",
+    templ_inst_2_2="",
+    templ_inst_2_1eq="",
+    templ_inst_2_2eq="")
+  versa_subs = make_dict(
+    array_type="versa",
+    templ_decl_2=", typename AccessorType",
+    templ_decl_2_1=", typename AccessorType1",
+    templ_decl_2_2=", typename AccessorType2",
+    templ_decl_2_1eq=", typename AccessorType1",
+    templ_decl_2_2eq=", typename AccessorType2",
+    templ_inst_2=", AccessorType",
+    templ_inst_2_1=", AccessorType1",
+    templ_inst_2_2=", AccessorType2",
+    templ_inst_2_1eq=", AccessorType1",
+    templ_inst_2_2eq=", AccessorType2")
+  for subs in (tiny_subs, small_subs, shared_subs, versa_subs):
+    one_type(target_dir, subs)
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/generate_std_imports.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators.array_family import generate_operator_functors
+from scitbx.source_generators import utils
+
+this = "scitbx.source_generators.array_family.generate_std_imports"
+
+cmath_1arg = (
+  'acos', 'cos', 'tan',
+  'asin', 'cosh', 'tanh',
+  'atan', 'exp', 'sin',
+  'fabs', 'log', 'sinh',
+  'ceil', 'floor', 'log10', 'sqrt',
+)
+
+cmath_2arg = (
+  'fmod', 'pow', 'atan2',
+)
+
+cstdlib_1arg = (
+  'abs',
+)
+
+algorithm_2arg = (
+  'each_min', 'each_max',
+)
+
+complex_1arg = (
+# "cos",
+# "cosh",
+# "exp",
+# "log",
+# "log10",
+# "sin",
+# "sinh",
+# "sqrt",
+# "tan",
+# "tanh",
+  "conj",
+)
+
+complex_special = (
+("ElementType", "real", "std::complex<ElementType>"),
+("ElementType", "imag", "std::complex<ElementType>"),
+("ElementType", "abs", "std::complex<ElementType>"),
+("ElementType", "arg", "std::complex<ElementType>"),
+("ElementType", "norm", "std::complex<ElementType>"),
+("std::complex<ElementType>", "pow", "std::complex<ElementType>",
+                                     "int"),
+("std::complex<ElementType>", "pow", "std::complex<ElementType>",
+                                     "ElementType"),
+("std::complex<ElementType>", "pow", "std::complex<ElementType>",
+                                     "std::complex<ElementType>"),
+("std::complex<ElementType>", "pow", "ElementType",
+                                     "std::complex<ElementType>"),
+("std::complex<ElementType>", "polar", "ElementType",
+                                       "ElementType"),
+)
+
+complex_special_addl_1arg = ("real", "imag", "arg", "norm")
+complex_special_addl_2arg = ("polar",)
+
+def filter_function_name(name):
+  if name in ('each_min', 'each_max'):
+    return name[-3:]
+  return name
+
+def generate_1arg(f):
+  for function_name in (
+    cmath_1arg + cstdlib_1arg + complex_1arg + complex_special_addl_1arg):
+    generate_operator_functors.generate_unary(f,
+      function_name, function_name + "(x)")
+
+def generate_2arg(f):
+  for function_name in cmath_2arg + algorithm_2arg + complex_special_addl_2arg:
+    generate_operator_functors.generate_binary(f,
+      function_name, filter_function_name(function_name) + "(x, y)")
+
+def run(target_dir):
+  f = utils.join_open(target_dir, "detail/std_imports.h", "w")
+  utils.write_this_is_auto_generated(f, this)
+  print("""\
+#ifndef SCITBX_ARRAY_FAMILY_STD_IMPORTS_H
+#define SCITBX_ARRAY_FAMILY_STD_IMPORTS_H
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+
+#include <cmath>
+#include <cstdlib>
+#include <complex>
+
+namespace scitbx { namespace fn {
+""", file=f)
+
+  all_function_names = []
+  for function_name in (cmath_1arg + cmath_2arg + cstdlib_1arg
+                        + algorithm_2arg + complex_1arg):
+    if (not function_name in all_function_names):
+      all_function_names.append(function_name)
+  for entry in complex_special:
+    function_name = entry[1]
+    if (not function_name in all_function_names):
+      all_function_names.append(function_name)
+
+  for function_name in all_function_names:
+    print("  using std::" + filter_function_name(function_name) + ";", file=f)
+
+  generate_1arg(f)
+  generate_2arg(f)
+
+  print("""
+}} // namespace scitbx::af
+
+#endif // DOXYGEN_SHOULD_SKIP_THIS
+
+#endif // SCITBX_ARRAY_FAMILY_STD_IMPORTS_H""", file=f)
+  f.close()
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/array_family/operator_functor_info.py
+from __future__ import absolute_import, division, print_function
+arithmetic_unary_ops = ("-")
+arithmetic_binary_ops = ("+", "-", "*", "/", "%")
+arithmetic_in_place_binary_ops = ("+=", "-=", "*=", "/=", "%=")
+
+logical_unary_ops = ("!")
+logical_binary_ops = ("&&", "||")
+
+boolean_binary_ops = ("==", "!=", ">", "<", ">=", "<=")
+
+unary_functors = {
+  "-": "negate",
+  "!": "logical_not",
+}
+
+binary_functors = {
+  "+": "plus",
+  "-": "minus",
+  "*": "multiplies",
+  "/": "divides",
+  "%": "modulus",
+  "&&": "logical_and",
+  "||": "logical_or",
+  "==": "equal_to",
+  "!=": "not_equal_to",
+  ">":  "greater",
+  "<":  "less",
+  ">=": "greater_equal",
+  "<=": "less_equal",
+}
+
+in_place_binary_functors = {
+  "+=": "ip_plus",
+  "-=": "ip_minus",
+  "*=": "ip_multiplies",
+  "/=": "ip_divides",
+  "%=": "ip_modulus",
+}
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/flex_fwd_h.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators.utils import join_open
+from scitbx.source_generators.utils import write_this_is_auto_generated
+import libtbx.load_env
+
+this = "scitbx.source_generators.flex_fwd_h"
+
+motivation = """\
+/* The declarations in this file facilitate cross-module functionality
+   on platforms that do not support comparison of type expressions
+   across dynamically loaded library boundaries. On such platforms
+   Boost.Python uses type_id::name() for comparing type expressions.
+   For a given type, with some compilers (e.g. some EDG based
+   compilers) the result of type_id::name() depends on the first type
+   expression encountered in a translation unit. To ensure that
+   type_id::name() produces the same result in all translation
+   units, this file should be included at the top of all Boost.Python
+   extension modules that involve the types in the function
+   signatures below.
+ */
+"""
+
+common_code = """\
+#ifndef SCITBX_ARRAY_FAMILY_BOOST_PYTHON_FLEX_FWD_H
+#define SCITBX_ARRAY_FAMILY_BOOST_PYTHON_FLEX_FWD_H
+
+#include <boost/python/detail/prefix.hpp>
+
+#if defined(BOOST_MSVC) && BOOST_MSVC == 1600 && defined(_WIN64)
+#pragma optimize("g", off)
+#endif
+
+%s#endif // SCITBX_ARRAY_FAMILY_BOOST_PYTHON_FLEX_FWD_H
+"""
+
+full_code = """\
+#define SCITBX_ARRAY_FAMILY_BOOST_PYTHON_FLEX_FWD_FULL_CODE
+
+%s
+#include <complex>
+#include <vector>
+#include <set>
+
+namespace scitbx { namespace boost_python {
+
+  struct misc_fwd
+  {
+    friend void f(std::vector<unsigned> const&);
+    friend void f(std::set<unsigned> const&);
+    friend void f(std::vector<std::set<unsigned> > const&);
+  };
+
+}} // namespace scitbx::boost_python
+
+#include <scitbx/array_family/versa.h>
+#include <scitbx/array_family/shared.h>
+#include <scitbx/array_family/accessors/flex_grid.h>
+#include <scitbx/array_family/accessors/c_grid.h>
+#include <scitbx/array_family/accessors/c_grid_padded.h>
+#include <scitbx/vec3.h>
+
+#include <boost_adaptbx/std_pair_fwd.h>
+
+#if defined(__sgi) && !defined(__GNUC__)
+
+namespace scitbx { namespace af { namespace boost_python {
+
+  struct misc_fwd
+  {
+    friend void f(af::tiny<unsigned, 2> const&);
+    friend void f(af::tiny<unsigned, 3> const&);
+    friend void f(af::tiny<unsigned, 4> const&);
+    friend void f(af::tiny<double, 3> const&);
+  };
+
+  template <typename T>
+  struct flex_fwd
+  {
+    friend void f(shared_plain<T> const&);
+    friend void f(shared<T> const&);
+    friend void f(versa<T> const&);
+    friend void f(versa<T, flex_grid<> > const&);
+    friend void f(versa<T, c_grid<2> > const&);
+    friend void f(versa<T, c_grid<3> > const&);
+    friend void f(versa<T, c_grid_padded<2> > const&);
+    friend void f(versa<T, c_grid_padded<3> > const&);
+    friend void f(ref<T> const&);
+    friend void f(ref<T, flex_grid<> > const&);
+    friend void f(ref<T, c_grid<2> > const&);
+    friend void f(ref<T, c_grid<3> > const&);
+    friend void f(ref<T, c_grid_padded<2> > const&);
+    friend void f(ref<T, c_grid_padded<3> > const&);
+    friend void f(const_ref<T> const&);
+    friend void f(const_ref<T, flex_grid<> > const&);
+    friend void f(const_ref<T, c_grid<2> > const&);
+    friend void f(const_ref<T, c_grid<3> > const&);
+    friend void f(const_ref<T, c_grid_padded<2> > const&);
+    friend void f(const_ref<T, c_grid_padded<3> > const&);
+  };
+
+  inline void
+  flex_fwd_types()
+  {
+    flex_fwd<bool>();
+    flex_fwd<int>();
+    flex_fwd<long>();
+    flex_fwd<std::size_t>();
+    flex_fwd<float>();
+    flex_fwd<double>();
+    flex_fwd<std::complex<double> >();
+    flex_fwd<std::string>();
+    flex_fwd<vec3<double> >();
+    flex_fwd<tiny<std::size_t, 2> >();
+    flex_fwd<sym_mat3<double> >();
+
+    // for shared_ext.cpp
+    flex_fwd<std::vector<std::size_t> >();
+    flex_fwd<std::set<std::size_t> >();
+  }
+
+}}} // namespace scitbx::af::boost_python
+
+#endif // defined(__sgi) && !defined(__GNUC__)
+
+"""
+
+def write(this, target_dir, common_code, full_code):
+  f = join_open(target_dir, "flex_fwd.h", "w")
+  write_this_is_auto_generated(f, this)
+  if (libtbx.env.build_options.write_full_flex_fwd_h):
+    code = full_code % motivation
+  else:
+    code = ""
+  f.write(common_code % code)
+
+def run(target_dir):
+  write(this, target_dir, common_code, full_code)
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/lbfgs_fem.py
+from __future__ import absolute_import, division, print_function
+
+import os
+
+def run():
+  import libtbx.load_env
+  src_dir = libtbx.env.under_dist(
+    module_name="scitbx", path="lbfgs", test=os.path.isdir)
+  import fable.read
+  all_fprocs = fable.read.process(
+    file_names=[os.path.join(src_dir, f) for f in ["sdrive.f", "lbfgs.f"]])
+  namespace = "scitbx::lbfgs_fem"
+  functions_public = set(["lbfgs", "blockdata_lb2"])
+  functions_detail = set(["lb1", "daxpy", "ddot", "mcstep", "mcsrch"])
+  functions_program = set(["one_pass"])
+  import fable.cout
+  functions_hpp = fable.cout.process(
+    all_fprocs=all_fprocs,
+    namespace=namespace,
+    fem_do_safe=False,
+    suppress_program=True,
+    suppress_common=False,
+    suppress_functions=functions_detail.union(functions_program),
+    suppress_function_definitions=functions_public)
+  functions_cpp = fable.cout.process(
+    all_fprocs=all_fprocs,
+    namespace=namespace,
+    fem_do_safe=False,
+    suppress_program=True,
+    suppress_common=True,
+    suppress_functions=functions_program)
+  functions_cpp[0] = "#include <scitbx/lbfgs_fem.hpp>"
+  sdrive_cpp = fable.cout.process(
+    all_fprocs=all_fprocs,
+    namespace=namespace,
+    fem_do_safe=False,
+    suppress_common=True,
+    suppress_functions=functions_detail.union(functions_public))
+  sdrive_cpp[0] = functions_cpp[0]
+  #
+  def make_target_dir(path):
+    result = libtbx.env.under_build(path=path)
+    if (not os.path.isdir(result)):
+      os.makedirs(result)
+      assert os.path.isdir(result)
+    return result
+  target_dir = make_target_dir(path="include/scitbx")
+  with open(os.path.join(target_dir, "lbfgs_fem.hpp"), "w") as fh:
+    fh.write("\n".join(functions_hpp))
+  target_dir = make_target_dir(path="scitbx/lbfgs")
+  with open(os.path.join(target_dir, "lbfgs_fem.cpp"), "w") as fh:
+    fh.write("\n".join(functions_cpp))
+  with open(os.path.join(target_dir, "sdrive_fem.cpp"), "w") as fh:
+    fh.write("\n".join(sdrive_cpp))
+
+if __name__ == "__main__":
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/source_generators/utils.py
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import write_this_is_auto_generated # implicit import
+import os
+
+def norm_join(path1, path2):
+  return os.path.normpath(os.path.join(path1, path2))
+
+def join_open(path1, path2, mode, verbose=0):
+  path = norm_join(path1, path2)
+  if (mode == "w" and verbose):
+    print("     ", path2)
+  return open(path, mode)
+
+
+ *******************************************************************************

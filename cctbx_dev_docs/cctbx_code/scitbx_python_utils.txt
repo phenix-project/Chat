@@ -1,0 +1,813 @@
+
+
+ *******************************************************************************
+scitbx/python_utils/__init__.py
+"""
+ python_utils
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/command_line.py
+from __future__ import absolute_import, division, print_function
+class parse_options(object):
+
+  def __init__(self, argv, keywords, case_sensitive=True):
+    self.keywords = keywords
+    self.n = 0
+    keywords_lower = []
+    for keyword in keywords:
+      setattr(self, keyword, False)
+      if (not case_sensitive):
+        keywords_lower.append(keyword.lower())
+    self.regular_args = []
+    for arg in argv:
+      if (not arg.startswith("--")):
+        self.regular_args.append(arg)
+        continue
+      flds = arg[2:].split("=")
+      assert len(flds) in (1,2)
+      try:
+        if (case_sensitive):
+          i = keywords.index(flds[0])
+        else:
+          i = keywords_lower.index(flds[0].lower())
+      except ValueError:
+        raise RuntimeError("Unknown option: " + arg)
+      if (len(flds) == 1):
+        setattr(self, keywords[i], True)
+      else:
+        setattr(self, keywords[i], flds[1])
+      self.n += 1
+
+def parse_options_with_chunk(argv, keywords=[], case_sensitive=True):
+  flags = parse_options(
+    argv=argv,
+    keywords=["ChunkSize", "ChunkMember"] + keywords,
+    case_sensitive=case_sensitive)
+  if (flags.ChunkSize == False):
+    flags.ChunkSize = 1
+  else:
+     flags.ChunkSize = int(flags.ChunkSize)
+  if (flags.ChunkMember == False):
+    flags.ChunkMember = 0
+  else:
+     flags.ChunkMember = int(flags.ChunkMember)
+  assert flags.ChunkSize > 0
+  assert flags.ChunkMember >= 0
+  assert flags.ChunkMember < flags.ChunkSize
+  return flags
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/dicts.py
+from __future__ import absolute_import, division, print_function
+class easy(dict):
+
+  def __init__(self, **kw):
+    dict.update(self, kw)
+
+  def __getattr__(self, key):
+    try: return dict.__getitem__(self, key)
+    except KeyError: raise AttributeError
+
+  def __setattr__(self, key, value):
+    dict.__setitem__(self, key, value)
+
+class with_default_value(dict):
+
+  def __init__(self, default_value):
+    self.default_value = default_value
+
+  def __getitem__(self, key):
+    try: return dict.__getitem__(self, key)
+    except Exception: pass
+    val = self.default_value
+    dict.__setitem__(self, key, val)
+    return val
+
+class with_default_factory(dict):
+
+  def __init__(self, default_factory):
+    self.default_factory = default_factory
+
+  def __getitem__(self, key):
+    try: return dict.__getitem__(self, key)
+    except Exception: pass
+    val = self.default_factory()
+    dict.__setitem__(self, key, val)
+    return val
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/graph_tools.py
+from __future__ import absolute_import, division, print_function
+# A *VERY* lightweight graph class
+# More efficient implementation can be found in the BGL I guess
+#
+# For my (PHZ) purposes, a simple, lightweight python
+# implementation was good enough
+#
+
+import sys
+from libtbx.utils import Sorry
+
+class graph(object):
+  def __init__(self):
+
+    self.node_objects ={}
+    self.edge_objects = {}
+
+    self.o = {}
+
+  def insert_node(self,
+               name,
+               edge_object,
+               node_object=None):
+
+    if name in self.node_objects:
+      if self.node_objects[ name ] == []: # only allow an update if it was blanco
+        self.node_objects.update( {name:node_object} )
+    else:
+      self.node_objects.update( {name:node_object} )
+
+    # The edge objects are stored a s adouble dictionairy
+    if name not in self.edge_objects:
+      # edge object is not there, place it fully!
+      self.edge_objects.update( {name: {} } )
+      self.o.update( {name : []} )
+      for item in edge_object:
+        self.edge_objects[name].update( { item : edge_object[item] } )
+        if not item in self.o[name]:
+          self.o[name].append( item )
+    else:
+      # edge object is there
+      tmp_edges = self.edge_objects[ name ]
+      for item in edge_object:
+        if item in self.edge_objects[ name ]:
+          if self.edge_objects[ name ][ item ] is None:
+            self.edge_objects[ name ].update( {item :  edge_object[item] } )
+        else:
+          self.edge_objects[ name ].update( {item :  edge_object[item] } )
+        if not item in self.o[name]:
+          self.o[name].append( item )
+
+
+  def remove_node(self,name):
+    # remove it from the object list please
+    if name in self.node_objects:
+      del self.node_objects[name]
+    # take care of outgoing and incomming
+    if name in self.o:
+      del self.o[name]
+
+    if name in self.edge_objects:
+      del self.edge_objects[name]
+
+    for item in self.edge_objects:
+      if name in self.edge_objects[item]:
+        del self.edge_objects[item][name]
+
+    for item in self.o:
+      if name in self.o[ item ]:
+        del self.o[item][self.o[item].index( name )]
+
+
+  def assert_is_clean(self):
+    # check if the dictionairy have the same items
+    clean=True
+    for item in self.node_objects:
+      if item not in self.o:
+        clean = False
+    for item in self.o:
+      if item not in self.node_objects:
+        clean = False
+
+    if not clean:
+      raise Sorry("The graph is not clean")
+    assert( clean )
+    # we now also check wether or not the graph is 'done'
+    # by checking if outgoing nodes do not point into thin air
+
+    clean = True
+
+    for item in self.node_objects:
+      clean = True
+      if item in self.edge_objects:
+        con_list = self.o[ item ]
+        if len(con_list) > 0:
+          for trial_node in con_list:
+            if trial_node not in self.node_objects:
+              clean=False
+      else:
+        clean=False
+
+      if not clean:
+        raise Sorry("The graph does not seem to be finished, \nsome connections point into thin air!")
+
+
+  def is_contained_in(self,
+                      new_graph):
+    # This routine does !NOT! compare topologies
+    # but relies on nodes being named in the same way
+    # It compares the incommnig and outygoing connections
+    # More efficient implementations might be possible
+    #
+    new_graph.assert_is_clean()
+
+    is_contained_in = True
+
+    for item in self.o:
+      if len(self.o[item] ) > len( new_graph.o[item]):
+        is_contained_in = False
+
+      for this_one in self.o[ item ]:
+        if not this_one in new_graph.o[ item ]:
+          is_contained_in = False
+    return( is_contained_in )
+
+
+  def is_equivalent_to(self,new_graph):
+    self_in_new = self.is_contained_in(new_graph)
+    new_in_self = new_graph.is_contained_in(self)
+    is_equivalent = True
+
+    if not self_in_new:
+      is_equivalent = False
+    if not new_in_self:
+      is_equivalent = False
+
+    return is_equivalent
+
+
+  def find_all_paths(self, start, end, path=[]):
+    ## please check
+    ## http://www.python.org/doc/essays/graphs.html
+    path = path + [start]
+    if start == end:
+      return [path]
+    if start not in self.o:
+      return []
+    paths = []
+    for node in self.o[start]:
+      if node not in path:
+        newpaths = self.find_all_paths(node, end, path)
+        for newpath in newpaths:
+          paths.append(newpath)
+    return paths
+
+
+  def find_paths_of_length(self, start, length, path=[]):
+    ## please check
+    ## http://www.python.org/doc/essays/graphs.html
+    path = path + [start]
+    if len(path)==length:
+      return [path]
+    if start not in self.o:
+      return []
+    paths = []
+    for node in self.o[start]:
+      if node not in path:
+        newpaths = self.find_paths_of_length(node, length, path)
+        for newpath in newpaths:
+          paths.append(newpath)
+    return paths
+
+
+
+
+  def find_shortest_path(self, start, end, path=[]):
+    ## please check
+    ## http://www.python.org/doc/essays/graphs.html
+    ## This is not the most optimal way of doing it
+    ## and a proper Dijkstra method might be implemented at a later stage
+    ## assumed are distance between nodes of equal length
+    ## the properties that can be stored there, can represent methods
+    ## such as symmetry operators etc etc etc
+
+    path = path + [start]
+    if start == end:
+      return path
+    if start not in self.o:
+      return None
+    shortest = None
+    for node in self.o[start]:
+      if node not in path:
+        newpath = self.find_shortest_path(node, end, path)
+        if newpath:
+          if not shortest or len(newpath) < len(shortest):
+            shortest = newpath
+    return shortest
+
+
+  def show(self,out=None):
+    if out is None:
+      out=sys.stdout
+    print(file=out)
+    print("----------------------------", file=out)
+    print(file=out)
+    print("Outgoing edges", file=out)
+    for node in self.o:
+      print(node, "---->", self.o[node], file=out)
+    print(file=out)
+    for node_1 in self.edge_objects:
+      for node_2 in self.edge_objects[ node_1 ] :
+        print(node_1 , " ---> ", node_2 , " :: ",  \
+              self.edge_objects[ node_1 ][ node_2 ])
+    print(file=out)
+    print("----------------------------", file=out)
+    print(file=out)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/misc.py
+from __future__ import absolute_import, division, print_function
+import sys
+from six.moves import range
+from six.moves import zip
+
+class store(object):
+
+  def __init__(self, **kw):
+    self.__dict__.update(kw)
+
+class sorted_store(object):
+
+  def keys(self):
+    raise RuntimeError("Programming error: derived class must override keys()")
+
+  def __init__(self, *args, **kw):
+    assert len(args) + len(kw) == len(list(self.keys()))
+    for key,value in zip(list(self.keys())[:len(args)], args):
+      setattr(self, key, value)
+    for key,value in kw.items():
+      assert key in list(self.keys())
+      assert getattr(self, key, None) is None
+      setattr(self, key, value)
+
+  def show(self, f=None, indentation=""):
+    if (f is None): f = sys.stdout
+    for key in self.keys():
+      print("%s%s:" % (indentation, key), getattr(self, key), file=f)
+
+def get_caller_name(n_back=2):
+  try: raise Exception
+  except Exception:
+    t = sys.exc_info()[2]
+    f = t.tb_frame
+    for i in range(n_back):
+      if (f.f_back is None): return None
+      f = f.f_back
+    return f.f_code.co_name
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/random_transform.py
+from __future__ import absolute_import, division, print_function
+## This file conatins some usefull transformations
+## for the generation of specific random variables
+import random
+import math
+from scitbx.array_family import flex
+from six.moves import range
+
+
+## This function generates approximately
+## 1 million Gaussian variates in about 0.35 seconds
+## on longnose.
+##
+## Theorectical (central) moments are (with mu=0 and sigma=1)
+## given below, as well as the result from sampling, in paranthesis.
+## mu1 = 0 (0.00041)
+## mu2 = 1 (0.99954)
+## mu3 = 0 (6.08714e-05)
+## mu4 = 3 (2.99848)
+## It behaves as expected.
+## Similar results are obtained when changing mu and sigma.
+def normal_variate(mu=0.0,sigma=1.0,N=100):
+  "Normal variate via Box-Muller transform"
+  U1 = flex.random_double(size=N)
+  U2 = flex.random_double(size=N)
+  return flex.sqrt(-2.0*flex.log(U1))*flex.cos(2.0*math.pi*U2)*sigma+mu
+
+
+
+
+## This function generates approximately
+## 1 million t variates in about 0.6 seconds
+## on longnose.
+##
+## for something_very_big < a,
+## the t-vbaraites will go to Gaussian variates
+## Note that the variance is undefined if a<=2
+## for a=6, mu=0, sigma=1, the results are
+## mu1 = 0    ( 0.00055754)
+## mu2 = 1.5  ( 1.49899419)
+## mu3 = 0    (-0.01446477)
+## mu3 = 13.5 (13.29293869)
+def t_variate(a=1.0,mu=0.0,sigma=1.0,N=100):
+  "T-variate via Baley's one-liner"
+  U1 = flex.random_double(size=N)
+  U2 = flex.random_double(size=N)
+  return ( flex.sqrt(a*(flex.pow(U1,-2.0/a)-1.0))
+           *flex.cos(2.0*math.pi*U2)*sigma+mu )
+
+
+
+
+## This function generates approximately
+## 1 million normalised-Wilson (amplitudes) variates
+## per 0.78 seconds.
+##
+## Expected and simulated raw moments:
+## mu1 : 0.886  (0.88592)
+## mu2 : 1      (0.99946)
+## mu4 : 2      (1.99826)
+
+def wilson_amplitude_variate(N=100):
+  "Wilson amplitude variate; The Rayleigh distribution"
+  ## Get wilson variate via two gaussians with half a variance
+  A = normal_variate(mu=0,sigma=math.sqrt(0.5),N=N)
+  B = normal_variate(mu=0,sigma=math.sqrt(0.5),N=N)
+  return flex.sqrt(A*A+B*B)
+
+# As before, this takes about 0.81 seconds for 1 million r.v.'s
+def wilson_intensity_variate(N=100):
+  "Wilson intensity variate; The exponetial distribution"
+  return flex.pow2(wilson_amplitude_variate(N=N))
+
+# This random variate is distributed as the (error free) |I+-I-|
+# normalised by 4*( (sum f") * (sum  f_nought) )^(1/2)
+def pseudo_normalized_abs_delta_i(N=100):
+  x = flex.random_double(size=N)
+  x = -0.5*flex.log( 1.0-x )
+  return(x)
+
+
+
+def poisson_variate(N=100, llambda=1):
+  import random
+  result = flex.int()
+  assert llambda >= 0
+  l = math.exp(-llambda)
+  for ii in range(N):
+    x = 0
+    p = 1.0
+    done =False
+    while not done:
+      x = x + 1
+      u = random.random()
+      p = p*u
+      if p <= l:
+        done = True
+    result.append( x-1 )
+  return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/robust_statistics.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+
+def percentile(x, percent):
+  ## see http://cnx.rice.edu/content/m10805/latest/
+  assert percent >=0.0
+  assert percent <=1.0
+  n = x.size()
+  order = flex.sort_permutation(x)
+  np = float(n+1)*percent
+  ir = int(np)
+  fr = np - int(np)
+  tmp1 = x[ order[ir-1] ]
+  tmp2 = x[ order[ir] ]
+  result = tmp1 + fr*(tmp2-tmp1)
+  return result
+
+def median(x):
+  result=percentile(x, 0.5)
+  return( result )
+
+def hinges(x):
+  h1 = percentile( x, 0.25 )
+  h2 = percentile( x, 0.75 )
+  return h1, h2
+
+def h_spread(x):
+  low, high = hinges( x)
+  return ( high - low )
+
+def trimean(x):
+  h1, h2 = hinges(x)
+  m = median(x)
+  result = (h1+h2+2.0*m)/4.0
+  return result
+
+def trimmed_mean(x,percent):
+  low = percentile(x,percent/2.0)
+  high = percentile(x,1.0-percent/2.0)
+  tmp = x.select ( ( x > low ).iselection() )
+  tmp = tmp.select( ( tmp < high ).iselection() )
+  return flex.mean(tmp)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/signal_utils.py
+from __future__ import absolute_import, division, print_function
+import signal
+import sys
+
+class keyboard_interrupt_handler(object):
+
+  def __init__(self, max_n_events=3):
+    self.prev_handler = signal.signal(signal.SIGINT, self.__call__)
+    self.max_n_events = max_n_events
+    self.n_events = 0
+
+  def __del__(self):
+    # self.disable() leads to SystemError
+    if (self.prev_handler is not None):
+      raise RuntimeError(
+        "Internal error: interrupt not disabled before it goes out of scope.")
+
+  def disable(self):
+    if (self.prev_handler is not None):
+      signal.signal(signal.SIGINT, self.prev_handler)
+      self.prev_handler = None
+
+  def __call__(self, signum, frame):
+    self.n_events += 1
+    sys.stdout.flush()
+    sys.stderr.flush()
+    print()
+    print('Keyboard interrupt #%d.' % self.n_events)
+    print()
+    if (self.n_events == self.max_n_events):
+      self.disable()
+      raise KeyboardInterrupt
+    print('Continuing to next checkpoint. Please wait.')
+    if (self.max_n_events > 0):
+      n_left = self.max_n_events-self.n_events
+      print('To stop immediately send %d more keyboard interrupt%s.' % (
+        n_left, ["", "s"][max(0,min(n_left-1, 1))]))
+    print()
+    sys.stdout.flush()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/tst_graph.py
+from __future__ import absolute_import, division, print_function
+from scitbx.python_utils import graph_tools as gt
+
+def tst_graph():
+  ll = gt.graph()
+  ll.insert_node( name = 'a',
+                  node_object = 'ploep_a',
+                  edge_object = { 'b': 'a_to_b', 'c': 'a_to_c' } )
+
+  ll.insert_node( name = 'b',
+                  node_object = 'ploep_b',
+                  edge_object = { 'c': 'b_to_c' } )
+
+  ll.insert_node( name = 'c',
+                  node_object = 'ploep_c',
+                  edge_object = {  } )
+
+
+
+
+  path_found = ll.find_all_paths('a', 'c')
+  path_possible =  [['a', 'c'], ['a', 'b', 'c']]
+  for path in path_possible:
+    assert (path in path_found)
+
+  shortest = ll.find_shortest_path('a', 'c')
+  assert (shortest == ['a','c'])
+
+  assert ( (ll.o == { 'a':['b','c'], 'b':['c'],'c':[] }) or
+           (ll.o == { 'a':['c','b'], 'b':['c'],'c':[] }) )
+
+  kk = gt.graph()
+  kk.insert_node( name = 'a',
+                  node_object = 'ploep_a',
+                  edge_object = { 'b': 'a_to_b', 'c': 'a_to_c' } )
+
+  kk.insert_node( name = 'b',
+                  node_object = 'ploep_b',
+                  edge_object = { 'c': 'b_to_c' } )
+
+  kk.insert_node( name = 'c',
+                  node_object = 'ploep_c',
+                  edge_object = {  } )
+
+  assert ll.is_equivalent_to( kk )
+
+  kk.insert_node( name = 'b',
+                  node_object=None,
+                  edge_object={ 'a': 'b_to_a'} )
+
+  assert ll.is_contained_in( kk )
+  assert not kk.is_contained_in( ll )
+
+  ll.assert_is_clean()
+  kk.assert_is_clean()
+
+  kk.remove_node( 'b' )
+  kk.assert_is_clean()
+
+  kk.insert_node( name = 'a',
+                  node_object = 'ploep_a',
+                  edge_object = { 'b': 'a_to_b', 'c': 'a_to_c' } )
+
+  kk.insert_node( name = 'b',
+                  node_object = 'ploep_b',
+                  edge_object = { 'c': 'b_to_c' } )
+
+  kk.insert_node( name = 'd',
+                  node_object = 'ploep_a',
+                  edge_object = { 'b': 'd_to_b', 'c': 'd_to_c' } )
+
+  kk.insert_node( name = 'e',
+                  node_object = 'ploep_b',
+                  edge_object = { 'd': 'e_to_d' } )
+
+  kk.insert_node( name = 'c',
+                  node_object = 'ploep_b',
+                  edge_object = { 'd': 'c_to_d' } )
+
+  a_paths = [['a', 'c', 'd'], ['a', 'b', 'c']]
+  c_paths = [['c', 'd', 'b']]
+  b_paths = [['b', 'c', 'd']]
+  e_paths = [['e', 'd', 'c'], ['e', 'd', 'b']]
+  d_paths = [['d', 'b', 'c']]
+  for ps, solution in [('a', a_paths), ('b', b_paths), ('c', c_paths),
+                       ('d', d_paths), ('e', e_paths)]:
+    for p in kk.find_paths_of_length(ps, 3):
+      assert p in solution
+
+
+
+def run():
+  tst_graph()
+
+
+  print('OK')
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/tst_random_transform.py
+from __future__ import absolute_import, division, print_function
+from libtbx.test_utils import approx_equal
+from scitbx.array_family import flex
+from scitbx.python_utils import random_transform as rt
+
+def exercise_gauss():
+  data = rt.normal_variate(mu=0,sigma=1,N=1000000)
+  mu1 = flex.mean(data)
+  mu2 = flex.mean(data*data)
+  mu3 = flex.mean(data*data*data)
+  assert approx_equal(mu1,0,eps=0.02)
+  assert approx_equal(mu2,1,eps=0.02)
+  assert approx_equal(mu3,0,eps=0.02)
+
+def exercise_t_variate():
+  data = rt.t_variate(a=6, mu=0,sigma=1,N=1000000)
+  mu1 = flex.mean(data)
+  mu2 = flex.mean(data*data)
+  assert approx_equal(mu1,0,eps=0.02)
+  assert approx_equal(mu2,1.5,eps=0.04)
+
+def exercise_wilson_amplitude_variate():
+  data = rt.wilson_amplitude_variate(N=1000000)
+  mu1 = flex.mean(data)
+  mu2 = flex.mean(data*data)
+  assert approx_equal(mu1,0.886,eps=0.02)
+  assert approx_equal(mu2,1.000,eps=0.02)
+
+def exercise_wilson_intensity_variate():
+  data = rt.wilson_intensity_variate(N=1000000)
+  mu1 = flex.mean(data)
+  mu2 = flex.mean(data*data)
+  assert approx_equal(mu1,1.000,eps=0.02)
+  assert approx_equal(mu2,2.000,eps=0.04)
+
+def exercise_pseudo_normalized_abs_delta_i():
+  data = rt.pseudo_normalized_abs_delta_i(N=1000000)
+  mu1 = flex.mean( data )
+  assert approx_equal(mu1,0.5,eps=0.02)
+
+def exercise_poisson():
+  import random
+  random.seed(0) # failure rate is fairly high without fixed seed
+  a = rt.poisson_variate(100000,1).as_double()
+  m = flex.mean(a)
+  v = flex.mean(a*a)-m*m
+  assert approx_equal(m,1.0,eps=0.05)
+  assert approx_equal(v,1.0,eps=0.05)
+
+  a = rt.poisson_variate(100000,10).as_double()
+  m = flex.mean(a)
+  v = flex.mean(a*a)-m*m
+  assert approx_equal(m,10.0,eps=0.05)
+  assert approx_equal(v,10.0,eps=0.05)
+
+def run():
+  exercise_poisson()
+  exercise_gauss()
+  exercise_t_variate()
+  exercise_wilson_amplitude_variate()
+  exercise_wilson_intensity_variate()
+  exercise_pseudo_normalized_abs_delta_i()
+  print('OK')
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/python_utils/tst_robust.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.python_utils import robust_statistics as rs
+from six.moves import range
+
+def tst_median():
+  x = flex.double(range(10))
+  assert rs.median(x)==4.5
+  x = flex.double(range(11))
+  assert rs.median(x)==5.0
+
+def tst_hinges():
+  n = 12
+  x = flex.double(range(n))
+  hinges = rs.hinges(x)
+  assert hinges[0] == 2.25
+  assert hinges[1] == 8.75
+
+def tst_h_spread():
+  n = 12
+  x = flex.double(range(n))
+  assert rs.h_spread(x) == 6.5
+
+def tst_trimean():
+  n = 13
+  x = flex.double(range(n))
+  assert rs.trimean(x) == rs.median(x)
+
+def tst_percentile():
+  n = 10
+  x = flex.double(range(n))
+  assert rs.percentile(x,0.50) == rs.median(x)
+
+def tst_trimmed_mean():
+  n = 10
+  x = flex.double(range(n))
+  assert rs.trimmed_mean(x,0.50)==4.5
+
+def run():
+  tst_median()
+  tst_hinges()
+  tst_trimean()
+  tst_h_spread()
+  tst_percentile()
+  tst_trimmed_mean()
+  print("OK")
+
+run()
+
+
+ *******************************************************************************

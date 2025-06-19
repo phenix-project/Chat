@@ -1,0 +1,1334 @@
+
+
+ *******************************************************************************
+cctbx/command_line/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/auto_sharpen.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.auto_sharpen
+
+import sys
+
+if (__name__ == "__main__"):
+
+  deprecated = True
+  for ok in ['--force','force']:
+    if ok in sys.argv:
+      sys.argv.remove(ok)
+      deprecated = False
+  if deprecated:
+    from libtbx.utils import Sorry
+    raise Sorry("phenix.auto_sharpen is replaced by phenix.map_sharpening"+
+      " Add the keyword '--force' to use anyway")
+
+  from cctbx.maptbx.auto_sharpen import run
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/brehm_diederichs.py
+#!/usr/bin/env python
+#
+# brehm_diederichs.py
+#
+#  Copyright (C) 2014 Diamond Light Source
+#
+#  Author: Richard Gildea
+#
+#  This code is distributed under the BSD license, a copy of which is
+#  included in the root directory of this package.
+
+from __future__ import absolute_import, division, print_function
+# LIBTBX_PRE_DISPATCHER_INCLUDE_SH export BOOST_ADAPTBX_FPE_DEFAULT=1
+
+import os
+import iotbx.phil
+from libtbx.phil import command_line
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from iotbx.reflection_file_reader import any_reflection_file
+
+
+master_phil_scope = iotbx.phil.parse("""
+asymmetric = 3
+  .type = int(value_min=0, value_max=3)
+nproc = 1
+  .type = int(value_min=1)
+show_plot = True
+  .type = bool
+save_plot = False
+  .type = bool
+suffix = "_reindexed"
+  .type = str
+""")
+
+
+def run(args):
+  cmd_line = command_line.argument_interpreter(master_params=master_phil_scope)
+  working_phil, files = cmd_line.process_and_fetch(
+    args=args, custom_processor="collect_remaining")
+  working_phil.show()
+  params = working_phil.extract()
+
+  miller_array_all = None
+  lattice_ids = None
+  space_group = None
+  file_name_dict = {}
+  lattice_id = -1
+
+  for file_name in files:
+    lattice_id += 1
+    #print "lattice_id: %i" %(lattice_id)
+    reader = any_reflection_file(file_name)
+
+    as_miller_arrays = reader.as_miller_arrays(merge_equivalents=False)
+    #for ma in as_miller_arrays: print ma.info().labels
+    intensities = [ma for ma in as_miller_arrays
+                   if ma.info().labels == ['I', 'SIGI']][0]
+    intensities = intensities.customized_copy(anomalous_flag=True).set_info(
+      intensities.info())
+    intensities.set_observation_type_xray_intensity()
+    #intensities.crystal_symmetry().show_summary()
+    #print intensities.info().labels
+    if space_group is None:
+      space_group = intensities.space_group()
+    else:
+      assert intensities.space_group() == space_group
+    assert reader.file_type() == 'ccp4_mtz'
+
+    file_name_dict[lattice_id] = file_name
+
+    ids = intensities.customized_copy(
+      data=flex.double(intensities.size(), lattice_id), sigmas=None)
+    assert ids.size() == intensities.size()
+    if miller_array_all is None:
+      miller_array_all = intensities
+      lattice_ids = ids
+    else:
+      miller_array_all = miller_array_all.customized_copy(
+        indices=miller_array_all.indices().concatenate(intensities.indices()),
+        data=miller_array_all.data().concatenate(intensities.data()),
+        sigmas=miller_array_all.sigmas().concatenate(intensities.sigmas()))
+      lattice_ids = lattice_ids.customized_copy(
+        indices=lattice_ids.indices().concatenate(ids.indices()),
+        data=lattice_ids.data().concatenate(ids.data()))
+    assert miller_array_all.size() == lattice_ids.size()
+
+    intensities = intensities.map_to_asu()
+    intensities = intensities.customized_copy(anomalous_flag=True)
+    intensities_p1 = intensities.expand_to_p1().merge_equivalents().array()
+    intensities = intensities_p1.customized_copy(
+      crystal_symmetry=intensities.crystal_symmetry())
+
+  L = (miller_array_all, lattice_ids)
+  L[0].crystal_symmetry().show_summary()
+  from cctbx.merging import brehm_diederichs
+  if params.nproc == 1:
+    result_sets = brehm_diederichs.run(
+      L, asymmetric=params.asymmetric, nproc=1, show_plot=params.show_plot,
+      save_plot=params.save_plot)
+  else:
+    result_sets = brehm_diederichs.run_multiprocess(
+      L, asymmetric=params.asymmetric, nproc=params.nproc,
+      show_plot=params.show_plot, save_plot=params.save_plot)
+
+  out_file = open('reindex.txt', 'wb')
+
+  for reindexing_op, wedges in result_sets.iteritems():
+    cb_op = sgtbx.change_of_basis_op(reindexing_op)
+    for wedge in wedges:
+      file_name = file_name_dict[wedge]
+      if out_file is not None:
+        print(file_name, cb_op.as_hkl(), file=out_file)
+      basename = os.path.basename(file_name)
+      out_name = os.path.splitext(basename)[0] + params.suffix + ".mtz"
+      reader = any_reflection_file(file_name)
+      assert reader.file_type() == 'ccp4_mtz'
+      mtz_object = reader.file_content()
+      if not cb_op.is_identity_op():
+        print("reindexing %s" %file_name)
+        mtz_object.change_basis_in_place(cb_op)
+      mtz_object.write(out_name)
+
+
+if __name__ == '__main__':
+  import sys
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/cctbx_test_nightly.py
+# LIBTBX_SET_DISPATCHER_NAME cctbx_regression.test_nightly
+
+from __future__ import absolute_import, division, print_function
+from libtbx.command_line import run_tests_parallel
+import sys, os
+import libtbx.load_env
+
+if (__name__ == "__main__"):
+  args = [
+    "module=libtbx",
+    "module=boost_adaptbx",
+    "module=scitbx",
+    "module=cctbx",
+    "module=iotbx",
+    "module=crys3d",
+    "module=smtbx",
+    "nproc=Auto",
+  ]
+
+  if (libtbx.env.find_in_repositories("chem_data") is not None and
+      os.path.exists(libtbx.env.find_in_repositories("chem_data"))):
+    args.append("module=mmtbx")
+
+  if (run_tests_parallel.run(args) > 0):
+    sys.exit(1)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/cod_select_and_pickle.py
+from __future__ import absolute_import, division, print_function
+if (__name__ == "__main__"):
+  from cctbx.omz.cod_select_and_pickle import run
+  import libtbx.load_env
+  import sys
+  run(args=sys.argv[1:], command_name=libtbx.env.dispatcher_name)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/diffuse.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.diffuse
+
+from __future__ import absolute_import, division, print_function
+import sys
+import iotbx.pdb
+import math
+from cctbx.array_family import flex
+from cctbx import miller
+from libtbx.utils import Sorry
+from libtbx import adopt_init_args
+from six.moves import range
+
+msg="""
+Description
+-----------
+This program calculates reciprocal space diffuse scattering maps from
+multi-model PDB ensembles.
+
+Output
+------
+MTZ file containing diffuse scattering intensity values (I) at each Bragg peak.
+
+Command line Usage
+------------------
+phenix.diffuse pdb=test.pdb probabilities=0.3,0.3,0.3,0.1 resolution=4.0 prefix=tst
+
+pdb: input PDB file. CRYST1 symmetry description is required.
+
+probabilities: the weighted probability for each model in the corresponding PDB
+file. The values listed in this option will be assigned to the PDB models
+starting with MODEL 0. Alternatively, leaving out the probabilities option will
+lead to equal weights for each model in the PDB file.
+
+resolution: the desired d_min for the output MTZ data set
+
+prefix: the desired MTZ file name
+
+Author
+------
+Andrew Van Benschoten (andrew.vanbenschoten@ucsf.edu)
+"""
+
+def run(arg):
+  args = get_input_dict(arg)
+  if(len(args)!=4):
+    msg="""Bad inputs.
+Usage example:
+  phenix.diffuse pdb=m.pdb probabilities=0.5,0.5 resolution=4.0 prefix=tst"""
+    raise Sorry(msg)
+  data = ensemble(
+    pdb_file_name = args['pdb'],
+    probabilities = args['probabilities'])
+  data.get_models()
+  for model in data.models:
+    model.initialize(d_min = float(args['resolution']))
+  diffuse(
+    models           = data.models,
+    crystal_symmetry = data.symmetry,
+    scale_factor     = 1).write_mtz_file(prefix = args['prefix'])
+
+class ensemble(object):
+
+  def __init__(self, pdb_file_name, probabilities):
+    adopt_init_args(self, locals())
+    pdb_inp = iotbx.pdb.input(file_name=pdb_file_name)
+    self.hierarchy = pdb_inp.construct_hierarchy()
+    self.symmetry = pdb_inp.crystal_symmetry_from_cryst1()
+    self.xray_structures_p1 = [xrs.expand_to_p1() for xrs in
+      pdb_inp.xray_structures_simple(crystal_symmetry=self.symmetry)]
+
+  def get_models(self):
+    self.models = []
+    models = self.hierarchy.models()
+    weights = []
+    if(self.probabilities is not None):
+      new_probs = get_probabilities(self.probabilities)
+      for i in range(0,len(new_probs)):
+        d = float(new_probs[i])
+        weights.append(d)
+      if(len(new_probs) != len(models)):
+        raise Sorry(
+          "The number of models and number of given probabilities must match")
+    else:
+      for model_ in models:
+        d = float(1/len(models))
+        weights.append(d)
+    for i, model_ in enumerate(models):
+      m = model(
+        model             = model,
+        xray_structure_p1 = self.xray_structures_p1[i],
+        probability       = weights[i])
+      self.models.append(m)
+
+class model(object):
+
+  def __init__(self, model, xray_structure_p1, probability):
+    adopt_init_args(self, locals())
+    assert xray_structure_p1.crystal_symmetry().space_group().type().number()==1
+
+  def initialize(self, d_min):
+    f = self.xray_structure_p1.structure_factors(d_min=d_min).f_calc()
+    self.f_weighted = f*self.probability
+    f_squared = abs(f).set_observation_type_xray_amplitude().f_as_f_sq()
+    self.f_squared_weighted = f_squared*self.probability
+
+class diffuse(object):
+  "Class for all diffuse maps produced in reciprocal space"
+
+  #REMOVE SAMPLING
+  def __init__(self, models, crystal_symmetry, scale_factor):
+    adopt_init_args(self, locals())
+    self.lattice = {}
+    self.calculate_map()
+
+  def calculate_map(self):
+    sum_fc = None
+    sum_fc_square = None
+    for model in self.models:
+      x, y = model.f_weighted.data(), model.f_squared_weighted.data()
+      if sum_fc is None:
+        sum_fc = x
+        sum_fc_square = y
+      else:
+        sum_fc = sum_fc + x
+        sum_fc_square = sum_fc_square + y
+    self.diffuse_signal = self.models[0].f_weighted.customized_copy(
+      data = sum_fc_square - flex.abs(sum_fc)**2)
+    self.write_squared_amplitudes(miller_array = self.diffuse_signal)
+
+  def write_squared_amplitudes(self, miller_array):
+    eps = 1.e-9
+    for hkl, intensity in miller_array:
+      h_int = hkl[0]
+      k_int = hkl[1]
+      l_int = hkl[2]
+      intensity_new = intensity/self.scale_factor
+      if h_int not in self.lattice:
+        self.lattice[h_int] = {}
+      if k_int not in self.lattice[h_int]:
+        self.lattice[h_int][k_int] = {}
+      if l_int not in self.lattice[h_int][k_int]:
+        self.lattice[h_int][k_int][l_int] = 0
+      self.lattice[h_int][k_int][l_int] += intensity_new
+
+  def write_mtz_file(self, prefix):
+    indices = flex.miller_index()
+    i_obs = flex.double()
+    sig_i = flex.double()
+    assert self.scale_factor != 0
+    for key_h in self.lattice:
+      for key_k in self.lattice[key_h]:
+        for key_l in self.lattice[key_h][key_k]:
+          indices.append([key_h, key_k, key_l])
+          # why convert to int and then go back to float? must be a bug?..
+          io = float("%4d"%self.lattice[key_h][key_k][key_l])/self.scale_factor
+          i_obs.append(io)
+          sig_i.append(math.sqrt(io))
+    # get miller array object
+    ma = miller.array(miller_set=miller.set(self.crystal_symmetry, indices),
+      data=i_obs, sigmas=sig_i)
+    ma.set_observation_type_xray_intensity()
+    mtz_dataset = ma.as_mtz_dataset(column_root_label="I")
+    mtz_dataset.mtz_object().write(prefix + '.mtz')
+
+def get_input_dict(args):
+  dic = dict()
+  for arg in args:
+    spl=arg.split('=')
+    if len(spl)==2:
+      dic[spl[0]] = spl[1]
+  if 'probabilities' not in dic:
+    dic['probabilities'] = None
+  return dic
+
+def get_probabilities(input):
+  result = flex.double([float(d) for d in input.split(',')])
+  if(abs(1.0-flex.sum(result))>1.e-3):
+    raise Sorry("Sorry, the given probabilities must sum to one")
+  return result
+
+if __name__ == '__main__':
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/eltbx.show_fp_fdp.py
+from __future__ import absolute_import, division, print_function
+from cctbx.eltbx import henke, sasaki, wavelengths
+from libtbx.option_parser import option_parser
+from libtbx.utils import Sorry, Usage
+import sys
+
+def run(args):
+  if (len(args) == 0) or ("--help" in args):
+    raise Usage("""
+eltbx.show_fp_fdp.py --elements=S,CL --wavelength=1.54
+eltbx.show_fp_fdp.py --elements=S,CL --source=CuA1""")
+  parser = option_parser()
+  parser.add_option('--elements')
+  parser.add_option('--xray_source')
+  parser.add_option('--wavelength')
+  options, args = parser.parse_args(args)
+
+  if (options.xray_source is not None):
+    print("Source: %s" % options.xray_source)
+  elif (options.wavelength is not None):
+    print("Wavelength: %g Angstrom" % float(options.wavelength))
+  print()
+  for element in options.elements.split(','):
+    print("Element: %s" % element)
+    fdp = []
+    for table_name, table in (('Henke et al.', henke.table),
+                              ('Sasaki et al.', sasaki.table)):
+      inelastic_scattering = table(element)
+      if (options.xray_source):
+        fp_fdp = inelastic_scattering.at_angstrom(
+          wavelengths.characteristic(options.xray_source).as_angstrom())
+      elif (options.wavelength):
+        fp_fdp = inelastic_scattering.at_angstrom(float(options.wavelength))
+      else :
+        raise Sorry("Either --xray_source=... or --wavelength=... required")
+      print("  %-14s: f'=%-9.6g, f''=%-9.6f" % (
+        table_name, fp_fdp.fp(), fp_fdp.fdp()))
+      fdp.append(fp_fdp.fdp())
+    print("  diff f''=%.2f %%" % ((fdp[1] - fdp[0])/(fdp[1] + fdp[0]) * 100))
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/euclidean_model_matching.py
+from __future__ import absolute_import, division, print_function
+from libtbx import easy_pickle
+from libtbx.option_parser import option_parser
+from scitbx.python_utils import dicts
+from cctbx import euclidean_model_matching as emma
+import sys
+
+class match_record(object):
+
+  def __init__(self, n_matches, model_size):
+    self.n_matches = n_matches
+    self.model_size = model_size
+
+  def __repr__(self):
+    return "%d/%d" % (self.n_matches, self.model_size)
+
+def run():
+  command_line = (option_parser(
+    usage="usage: cctbx.euclidean_model_matching [OPTIONS] "
+          "reference_structure.pickle structure.pickle",
+    description="")
+    .option("--tolerance",
+            type="float",
+            default=3)
+    .option("--match_hydrogens", type='bool', default=True)
+  ).process(args=sys.argv[1:])
+  if len(command_line.args) != 2:
+    command_line.parser.print_help()
+    sys.exit(1)
+  reference_structure = easy_pickle.load(command_line.args[0])
+  if (type(reference_structure) in (type([]), type(()))):
+    reference_structure = reference_structure[0]
+  structures = easy_pickle.load(command_line.args[1])
+  if (not type(structures) in (type([]), type(()))):
+    structures = [structures]
+
+  if not command_line.options.match_hydrogens:
+    reference_structure.select_inplace(
+      ~reference_structure.element_selection('H'))
+    for structure in structures:
+      structure.select_inplace(~structure.element_selection('H'))
+  print("Reference model:")
+  reference_structure.show_summary()
+  print()
+  reference_model = reference_structure.as_emma_model()
+
+  match_list = []
+  match_histogram = dicts.with_default_value(0)
+  for structure in structures:
+    structure.show_summary()
+    if (hasattr(structure, "info")):
+      print(structure.info)
+    print()
+    refined_matches = emma.model_matches(
+      reference_model,
+      structure.as_emma_model(),
+      tolerance=command_line.options.tolerance,
+      models_are_diffraction_index_equivalent=False,
+      break_if_match_with_no_singles=True).refined_matches
+    if (len(refined_matches)):
+      refined_matches[0].show()
+      m = len(refined_matches[0].pairs)
+    else:
+      print("No matches")
+      m = 0
+    match_list.append(match_record(m, structure.scatterers().size()))
+    match_histogram[m] += 1
+    print()
+  print("match_list:", match_list)
+  keys = list(match_histogram.keys())
+  keys.sort()
+  keys.reverse()
+  print("matches: frequency")
+  sum = 0
+  for key in keys:
+    v = match_histogram[key]
+    sum += v
+  s = 0
+  for key in keys:
+    v = match_histogram[key]
+    s += v
+    print("  %3d: %3d = %5.1f%%, %5.1f%%" % (key, v, 100.*v/sum, 100.*s/sum))
+  print()
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/find_reticular_twin_laws.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.find_reticular_twin_laws
+
+import sys
+from cctbx.sgtbx import reticular_twin_laws
+from iotbx.option_parser import option_parser
+
+def run(args, command_name="phenix.find_reticular_twin_laws"):
+  command_line = (option_parser(
+    usage=command_name+" [options] ",
+    description="Example: %s data1.mtz" % command_name)
+    .enable_show_defaults()
+    .enable_symmetry_comprehensive()
+    .option(None, "--max_index",
+            action="store", dest="max_index",default=3,type="int",metavar="INT")
+    .option(None,"--max_delta", dest="max_delta", default=5.0,type="float",metavar="FLOAT")
+  ).process(args=args)
+  co = command_line.options
+  if (len(args) == 0):
+    command_line.parser.show_help()
+    return
+
+
+  max_delta = co.max_delta
+  max_index = co.max_index
+  xs = command_line.symmetry
+
+  print("----- Input symmetry -----")
+  xs.show_summary()
+  print()
+  print(" Settings:")
+  print("   max_delta: ", max_delta)
+  print("   max_index: ", max_index)
+  print()
+  print("----- Finding reticular twin laws -----")
+  print()
+  print("""
+
+
+
+   Reticular twin laws are grouped by their associated sublattice.
+   The matrix M acting on the input (base) lattice is listed, as well as the metric R value (%)
+   between the symmetrized sublattice and the unsymmetrized sublattice.
+   reticular twin laws of twin index 1, are 'normal' twin laws
+
+
+  """)
+  tl = reticular_twin_laws.reticular_twin_laws(xs,max_delta,max_index)
+  print("--------------- Twin law listing ---------------")
+  print()
+  tl.show()
+
+
+
+
+
+if __name__ == "__main__":
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/form_factor_query.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.form_factor_query
+
+from cctbx.eltbx import sasaki, henke
+import libtbx.phil
+from libtbx.utils import Sorry, Usage
+import sys
+
+master_params = libtbx.phil.parse("""\
+form_factor_query {
+  element = None
+    .type = str
+  wavelength = None
+    .type = float
+  table = *sasaki henke
+    .type = choice(multi = True)
+  unit = *angstroms ev kev
+    .type = choice
+}
+""")
+
+def run(args, command_name="phenix.form_factor_query"):
+  phil_objects=[]
+  argument_interpreter = master_params.command_line_argument_interpreter(
+    home_scope="form_factor_query")
+  plain_element = None
+  plain_wavelength = None
+  for arg in args:
+    if (arg.find('=') != -1):
+      try:
+        command_line_params = argument_interpreter.process(arg=arg)
+      except KeyboardInterrupt: raise
+      except Exception:
+        raise Sorry("Unknown keyword: %s" % arg)
+      else:
+        phil_objects.append(command_line_params)
+    else:
+      try:
+        plain_wavelength = float(arg)
+      except KeyboardInterrupt: raise
+      except Exception:
+        plain_element = arg
+
+  working_params = master_params.fetch(sources=phil_objects)
+  params = working_params.extract()
+  element = params.form_factor_query.element
+  if (element is None):
+    element = plain_element
+  wavelength = params.form_factor_query.wavelength
+  if (wavelength is None):
+    wavelength = plain_wavelength
+  unit = params.form_factor_query.unit
+
+  if (element is None or wavelength is None):
+    raise Usage(
+      "%s element=symbol wavelength=float [table=sasaki|henke]"
+      " [unit=angstroms|ev|kev]" % command_name)
+
+  for table in ["sasaki", "henke"]:
+    if (table not in params.form_factor_query.table): continue
+    t = eval(table).table(element)
+    print("Information from %s table about %s (Z = %s) at %s %s" % (
+      table.capitalize(), t.label(), t.atomic_number(), wavelength,
+      {"angstroms": "A"}.get(unit, unit)))
+    if (unit == "angstroms"):
+      f = t.at_angstrom(wavelength)
+    elif (unit == "ev"):
+      f = t.at_ev(wavelength)
+    elif (unit == "kev"):
+      f = t.at_kev(wavelength)
+    else:
+      raise Sorry("Invalid unit chosen for query: %s" % unit)
+    if (f.is_valid_fp()):
+      print("fp:  %.6g" % f.fp())
+    else:
+      print("fp:  unknown")
+    if (f.is_valid_fdp()):
+      print("fdp: %.6g" % f.fdp())
+    else:
+      print("fdp: unknown")
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/precession_view.py
+from __future__ import absolute_import, division, print_function
+
+# TODO display indices of plane on image
+#      adjustable minimum spot size
+
+import cctbx.miller.display
+from libtbx.utils import Sorry, Usage
+import libtbx.phil
+from six.moves import cStringIO as StringIO
+import os
+import sys
+
+master_phil = libtbx.phil.parse("""
+include scope cctbx.miller.display.master_phil
+h = None
+  .type = int
+k = None
+  .type = int
+l = None
+  .type = int
+output_file = None
+  .type = path
+width = 800
+  .type = int
+height = 800
+  .type = int
+silent = True
+  .type = bool
+format = *Auto png eps
+  .type = choice
+""", process_includes=True)
+
+def run(args, out=sys.stdout):
+  if (len(args) == 0):
+    params_out = StringIO()
+    master_phil.show(out=params_out, prefix="  ")
+    raise Usage("""\
+cctbx.precession_view data.mtz [ [h=X] | [k=X] | [l=X] ] output_file=img.png
+
+Draws a color image of a reciprocal space plane.  For interactive use, run
+phenix.data_viewer, which includes both 2D and 3D views (and can also save
+images).
+
+Full parameters:
+%s""" % params_out.getvalue())
+  import iotbx.phil
+  from iotbx import file_reader
+  import PIL.ImageDraw as ImageDraw
+  import PIL.Image as Image
+  phil_mods = libtbx.phil.parse("""
+expand_to_p1 = True
+expand_anomalous = True
+slice_mode = True
+""")
+  master_phil_mod = master_phil.fetch(source=phil_mods)
+  cmdline = iotbx.phil.process_command_line_with_files(
+    args=args,
+    master_phil=master_phil_mod,
+    reflection_file_def="data",
+    pdb_file_def="symmetry_file")
+  params = cmdline.work.extract()
+  hkl_in = file_reader.any_file(params.data, force_type="hkl")
+  hkl_in.check_file_type("hkl")
+  selected_array = None
+  obs_arrays = []
+  complex_arrays = []
+  for array in hkl_in.file_server.miller_arrays :
+    if (params.labels is None):
+      if (array.is_xray_amplitude_array() or
+          array.is_xray_intensity_array()):
+        obs_arrays.append(array)
+      elif (array.is_complex_array()):
+        complex_arrays.append(array)
+    elif (array.info().label_string() == params.labels):
+      selected_array = array
+      break
+  if (selected_array is None):
+    if (len(obs_arrays) == 1):
+      selected_array = obs_arrays[0]
+      print("Using %s since no labels were specified." % \
+        selected_array.info().label_string(), file=out)
+    elif (len(obs_arrays) > 1):
+      raise Sorry("""Multiple equally suitable arrays of data found:
+  %s
+Please choose one by specifying the 'labels' parameter.""" %
+  "  ".join([ a.info().label_string() for a in obs_arrays ]))
+  params.slice_mode = True
+  if (params.h is not None):
+    assert (params.k is None) and (params.l is None)
+    params.slice_axis = "h"
+    params.slice_index = params.h
+  elif (params.k is not None):
+    assert (params.h is None) and (params.l is None)
+    params.slice_axis = "k"
+    params.slice_index = params.k
+  elif (params.l is not None):
+    assert (params.h is None) and (params.k is None)
+    params.slice_axis = "l"
+    params.slice_index = params.l
+  scene = cctbx.miller.display.scene(
+    miller_array=selected_array,
+    settings=params)
+  postscript = False
+  if (params.output_file is not None):
+    if (params.output_file.endswith("eps")):
+      if (params.format == "png"):
+        raise Sorry("Postscript format requested, but output file ends in .png!")
+      postscript = True
+    elif (not params.output_file.endswith("png")):
+      raise Sorry("Output file extension must be .eps or .png.")
+  else :
+    prefix = os.path.basename(os.path.splitext(params.data)[0])
+    if (params.format == "Auto") or (params.format == "png"):
+      ext = "png"
+      postscript = False
+    else :
+      ext = "eps"
+      postscript = True
+    if (params.slice_axis == "h"):
+      params.output_file = "%s_%dkl.%s" % (prefix, params.slice_index, ext)
+    elif (params.slice_axis == "k"):
+      params.output_file = "%s_h%dl.%s" % (prefix, params.slice_index, ext)
+    else :
+      params.output_file = "%s_hk%d.%s" % (prefix, params.slice_index, ext)
+  if (params.black_background):
+    bg = (0,0,0)
+  else :
+    bg = (255,255,255)
+  if (postscript):
+    render = render_postscript(
+      w=params.width,
+      h=params.height,
+      scene=scene,
+      settings=params)
+    canvas = open(params.output_file, "w")
+    render.paint(canvas)
+    canvas.close()
+  elif (not params.silent):
+    render = render_pil(
+      w=params.width*8,
+      h=params.height*8,
+      scene=scene,
+      settings=params)
+    im = Image.new('RGBA', (params.width*8, params.height*8), bg)
+    canvas = ImageDraw.Draw(im)
+    render.render(canvas)
+    im2 = im.resize((params.width, params.height), Image.ANTIALIAS)
+    im2.save(params.output_file)
+  if (not params.silent):
+    print("Wrote %s" % params.output_file, file=out)
+  else :
+    return scene, params
+
+def frac2int(c):
+  return (int(c[0]*255), int(c[1]*255), int(c[2]*255))
+
+class render_pil(cctbx.miller.display.render_2d):
+  def __init__(self, w, h, *args, **kwds):
+    self._w = w
+    self._h = h
+    cctbx.miller.display.render_2d.__init__(self, *args, **kwds)
+
+  def GetSize(self):
+    return (self._w, self._h)
+
+  def get_scale_factor(self) : # XXX why is this necessary?
+    return 110.
+
+  def draw_line(self, canvas, x1, y1, x2, y2):
+    canvas.line([(x1,y1),(x2,y2)], fill=frac2int(self._foreground), width=2)
+
+  def draw_text(self, canvas, text, x, y):
+    # FIXME this is coming up blank
+    canvas.text((x,y), text, fill=frac2int(self._foreground))
+
+  def draw_open_circle(self, canvas, x, y, radius, color=None):
+    radius = max(radius, 4.)
+    if (color is None) : color = self._foreground
+    canvas.ellipse(
+      xy=[(x-radius, y-radius), (x+radius, y+radius)],
+      outline=frac2int(color),
+      fill=frac2int(self._background))
+
+  def draw_filled_circle(self, canvas, x, y, radius, color):
+    radius = max(radius, 4.)
+    canvas.ellipse(
+      xy=[(x-radius, y-radius), (x+radius, y+radius)],
+      outline=frac2int(color),
+      fill=frac2int(color))
+
+class render_postscript(cctbx.miller.display.render_2d):
+  def __init__(self, w, h, *args, **kwds):
+    self._w = w
+    self._h = h
+    cctbx.miller.display.render_2d.__init__(self, *args, **kwds)
+
+  def GetSize(self):
+    return (self._w, self._h)
+
+  def get_scale_factor(self) : # XXX why is this necessary?
+    return 110.
+
+  def paint(self, canvas):
+    # XXX I have no idea why this is wrong, but actually getting the image
+    # dimensions right appears to be far more difficult
+    self.setup_colors()
+    canvas.write("%!PS-Adobe-3.0 EPSF-3.0\n")
+    canvas.write("%%Pages: 1\n")
+    canvas.write("%%BeginPreview:\n")
+    canvas.write("%%%%BoundingBox: 0 0 %d %d\n" % self.GetSize())
+    canvas.write("<< /PageSize [ %d %d ] /ImagingBBox null >> setpagedevice\n"
+      % self.GetSize())
+    canvas.write("/Helvetica findfont 14 scalefont setfont\n")
+    canvas.write("%g %g %g setrgbcolor\n" % self._background)
+    canvas.write("0 0 %d %d rectfill\n" % self.GetSize())
+    self.render(canvas)
+
+  def draw_line(self, canvas, x1, y1, x2, y2):
+    w, h = self.GetSize()
+    c = self._foreground
+    canvas.write("""
+newpath
+%d %d moveto
+%d %d lineto
+%g %g %g setrgbcolor
+stroke
+""" % (x1, w-y1, x2, w-y2, c[0], c[1], c[2]))
+
+  def draw_text(self, canvas, text, x, y):
+    w, h = self.GetSize()
+    c = self._foreground
+    canvas.write("""
+newpath
+%d %d moveto
+(%s) true charpath
+%g %g %g setrgbcolor
+stroke
+""" % (x, w-y, text, c[0], c[1], c[2]))
+
+  def draw_open_circle(self, canvas, x, y, radius, color=None):
+    w, h = self.GetSize()
+    if (color is None) : color = self._foreground
+    canvas.write("""
+newpath
+%d %d %d 0 360 arc
+%g %g %g setrgbcolor
+stroke
+""" % (x, w-y, radius, color[0], color[1], color[2]))
+
+  def draw_filled_circle(self, canvas, x, y, radius, color):
+    w, h = self.GetSize()
+    canvas.write("""
+newpath
+%d %d %d 0 360 arc
+%g %g %g setrgbcolor
+fill
+""" % (x, w-y, radius, color[0], color[1], color[2]))
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/qscore.py
+# LIBTBX_SET_DISPATCHER_NAME mmtbx.development.qscore
+from __future__ import absolute_import, division, print_function
+
+from iotbx.cli_parser import run_program
+from cctbx.programs import qscore
+
+if __name__ == '__main__':
+  run_program(program_class=qscore.Program)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/samosa_join.py
+# LIBTBX_SET_DISPATCHER_NAME samosa.join
+from __future__ import absolute_import, division, print_function
+import sys
+
+if (__name__ == "__main__"):
+  show_plots = False
+  if ("--plots" in sys.argv):
+    sys.argv.remove("--plots")
+    show_plots = True
+  from cctbx.examples.merging.samosa.join import run
+  result = run(args=sys.argv[1:])
+  if result is None:
+    sys.exit(1)
+  if (show_plots):
+    result.plots.show_all_pyplot()
+    from wxtbx.command_line import loggraph
+    loggraph.run([result.loggraph_file])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/samosa_scale.py
+# LIBTBX_SET_DISPATCHER_NAME samosa.scale
+from __future__ import absolute_import, division, print_function
+import sys
+
+if (__name__ == "__main__"):
+  show_plots = False
+  if ("--plots" in sys.argv):
+    sys.argv.remove("--plots")
+    show_plots = True
+  from cctbx.examples.merging.samosa.scale import run
+  result = run(show_plots=show_plots,args=sys.argv[1:])
+  #if result is None:
+  #  sys.exit(1)
+  #if (show_plots):
+  #  result.plots.show_all_pyplot()
+  #  from wxtbx.command_line import loggraph
+  #  loggraph.run([result.loggraph_file])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/segment_and_split_map.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.segment_and_split_map
+
+import sys
+
+if (__name__ == "__main__"):
+  from cctbx.maptbx.segment_and_split_map import run
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/space_group_info.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+def run(args):
+  if (len(args) == 0): args = ["--help"]
+  from libtbx.option_parser import libtbx_option_parser
+  import libtbx.load_env
+  command_line = (libtbx_option_parser(
+    usage="%s [options] space_group_symbol ..." % libtbx.env.dispatcher_name)
+      .option(None, "--primitive",
+        action="store_true",
+        help="Convert centred space groups to primitive setting.")
+      .option(None, "--symops",
+        action="store_true",
+        help="Show list of symmetry operations.")
+  ).process(args=args)
+  co = command_line.options
+  from cctbx import sgtbx
+  args = command_line.args
+  if (args == ["all"]):
+    args = [str(no) for no in range(1,230+1)]
+  for symbol in args:
+    sgi = sgtbx.space_group_info(symbol=symbol)
+    if (co.primitive):
+      sgi = sgi.primitive_setting()
+    sgi.show_summary()
+    gr = sgi.group()
+    print("  Crystal system:", gr.crystal_system())
+    print("  Point group type:", gr.point_group_type())
+    print("  Laue group type:", gr.laue_group_type())
+    print("  Number of symmetry operations:", gr.order_z())
+    print("  Lattice centering operations:", gr.n_ltr())
+    if (gr.n_ltr() != 1):
+      print("  Number of symmetry operations in primitive setting:", \
+        gr.order_p())
+    if (gr.is_centric()): s = gr(0, 1, 0)
+    else:                 s = None
+    print("  Center of inversion:", s)
+    print("  Dimensionality of continuous allowed origin shifts:", \
+      sgi.number_of_continuous_allowed_origin_shifts())
+    ssi_vm = sgi.structure_seminvariants().vectors_and_moduli()
+    print("  Structure-seminvariant vectors and moduli:", \
+      len(ssi_vm))
+    if (len(ssi_vm) != 0):
+      for vm in ssi_vm:
+        print("    (%2d, %2d, %2d)" % vm.v, "%2d" % vm.m)
+    print("  Direct-space asymmetric unit:")
+    dau = sgi.direct_space_asu()
+    print("    Number of faces: %d" % len(dau.cuts))
+    for cut in dau.cuts:
+      print("    " + cut.as_xyz())
+    print("  ADP constraint matrix:")
+    _ = sgi.group().adp_constraints().gradient_sum_matrix()
+    from scitbx import matrix
+    print(matrix.rec(tuple(_), _.focus()).mathematica_form(
+      one_row_per_line=True,
+      prefix="    "))
+    if (co.symops):
+      print("  List of symmetry operations:")
+      for s in sgi.group():
+        print("    %s" % str(s))
+    print()
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/structure_factor_timings.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx import eltbx
+from cctbx import miller
+from cctbx.array_family import flex
+import iotbx.pdb
+from libtbx.utils import user_plus_sys_time
+from libtbx import easy_pickle
+import sys
+
+def timings(structure, d_min, fft_only=False,
+            wing_cutoff_reference=1.e-6,
+            wing_cutoff_others=1.e-3):
+  structure_ng = structure.deep_copy_scatterers()
+  structure_5g = structure.deep_copy_scatterers()
+  structure_4g = structure.deep_copy_scatterers()
+  structure_2g = structure.deep_copy_scatterers()
+  structure_1g = structure.deep_copy_scatterers()
+  structure_ng.scattering_type_registry(d_min=d_min, table="n_gaussian")
+  structure_5g.scattering_type_registry(table="wk1995")
+  structure_4g.scattering_type_registry(table="it1992")
+  custom_dict = {}
+  custom_dict.update(eltbx.xray_scattering.two_gaussian_agarwal_isaacs.table)
+  structure_2g.scattering_type_registry(custom_dict=custom_dict)
+  custom_dict.update(eltbx.xray_scattering.one_gaussian_agarwal_1978.table)
+  structure_1g.scattering_type_registry(custom_dict=custom_dict)
+  miller_set = miller.build_set(
+    crystal_symmetry=structure,
+    d_min=d_min,
+    anomalous_flag=False)
+  miller_set.show_summary()
+  print("d_min:", d_min)
+  if (fft_only):
+    timer = user_plus_sys_time()
+    f_calc_reference = xray.structure_factors.from_scatterers(
+      miller_set=miller_set,
+      wing_cutoff=wing_cutoff_reference,
+      exp_table_one_over_step_size=0)(
+        xray_structure=structure,
+        miller_set=miller_set,
+        algorithm="fft").f_calc().data()
+    print("fft exp function wing_cutoff=%3.1e: %.2f seconds" % (
+      wing_cutoff_reference, timer.elapsed()))
+  else:
+    timer = user_plus_sys_time()
+    f_calc_reference = xray.structure_factors_simple(
+      structure_5g.unit_cell(),
+      structure_5g.space_group(),
+      miller_set.indices(),
+      structure_5g.scatterers(),
+      structure_5g.scattering_type_registry()).f_calc()
+    print("direct simple: %.2f seconds" % timer.elapsed())
+  f_calc_reference = flex.abs(f_calc_reference)
+  print("wing_cutoff for following fft calculations: %3.1e"%wing_cutoff_others)
+  for structure in (structure_ng, structure_5g, structure_4g,
+                    structure_2g, structure_1g):
+    structure.scattering_type_registry().show_summary()
+    if (not fft_only):
+      for calc_type,cos_sin_flag in (("direct cos+sin function:",False),
+                                     ("direct cos+sin table:",True)):
+        timer = user_plus_sys_time()
+        f_calc = miller_set.structure_factors_from_scatterers(
+          xray_structure=structure,
+          algorithm="direct",
+          cos_sin_table=cos_sin_flag).f_calc()
+        print("  %-24s %.2f seconds," % (calc_type, timer.elapsed()), end=' ')
+        ls = xray.targets_least_squares_residual(
+          f_calc_reference, f_calc.data(), False, 1)
+        print("r-factor: %.6f" % ls.target())
+    for calc_type,exp_table_one_over_step_size in (("fft exp function:",0),
+                                                   ("fft exp table:",-100)):
+      timer = user_plus_sys_time()
+      f_calc = xray.structure_factors.from_scatterers(
+        miller_set=miller_set,
+        wing_cutoff=wing_cutoff_others,
+        exp_table_one_over_step_size=exp_table_one_over_step_size)(
+          xray_structure=structure,
+          miller_set=miller_set,
+          algorithm="fft").f_calc()
+      print("  %-24s %.2f seconds," % (calc_type, timer.elapsed()), end=' ')
+      ls = xray.targets_least_squares_residual(
+        f_calc_reference, f_calc.data(), False, 1)
+      print("r-factor: %.6f" % ls.target())
+  print()
+
+def read_structure(file_name):
+  try: return easy_pickle.load(file_name)
+  except KeyboardInterrupt: raise
+  except Exception: pass
+  try:
+    if file_name.endswith('.res') or file_name.endswith('.ins'):
+      return xray.structure.from_shelx(filename=file_name)
+    else:
+      return iotbx.pdb.input(file_name=file_name).xray_structure_simple()
+  except KeyboardInterrupt: raise
+  except Exception: pass
+  raise RuntimeError("Unknown file format: %s" % file_name)
+
+def run(args):
+  "usage: cctbx.structure_factor_timings" \
+  + " [--fft_only] coordinate_file [d-spacing ...]"
+  try: i = args.index("--fft_only")
+  except Exception: fft_only = False
+  else:
+    fft_only = True
+    args = args[:]
+    del args[i]
+  if (len(args) == 0):
+    print(run.__doc__, file=sys.stderr)
+    return
+  file_name = args[0]
+  try:
+    d_spacings = [float(arg) for arg in args[1:]]
+  except Exception:
+    print(run.__doc__, file=sys.stderr)
+    return
+  if (d_spacings == []):
+    d_spacings = [4,3,2,1]
+  structure = read_structure(file_name)
+  structure.show_summary()
+  print()
+  for d_min in d_spacings:
+    timings(structure=structure, d_min=d_min, fft_only=fft_only)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/subgroups.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+def run(args):
+  if (len(args) == 0):
+    from libtbx.utils import Usage
+    import libtbx.load_env
+    raise Usage(
+      "%s all|list-of-space-group-symbols-or-numbers"
+        % libtbx.env.dispatcher_name)
+  from cctbx.sgtbx import space_group_info
+  from cctbx.sgtbx.subgroups import show
+  if (args == ["all"]):
+    for space_group_number in range(1,231):
+      show(parent_group_info=space_group_info(space_group_number))
+  else:
+    for arg in args:
+      show(parent_group_info=space_group_info(symbol=arg))
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/version.py
+from __future__ import absolute_import, division, print_function
+import libtbx.load_env
+import os
+
+def run():
+  version = None
+  for tag_file in ["TAG", "cctbx_bundle_TAG"]:
+    tag_path = libtbx.env.under_dist("libtbx", os.path.join("..", tag_file))
+    if (os.path.isfile(tag_path)):
+      try: version = open(tag_path).read().strip()
+      except KeyboardInterrupt: raise
+      except Exception: pass
+      else: break
+  if (version is None):
+    version = libtbx.env.command_version_suffix
+  print(version)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/command_line/wavelength_units.py
+from __future__ import absolute_import, division, print_function
+def raise_usage():
+  from libtbx.utils import Usage
+  raise Usage("cctbx.wavelength_units 1A|1keV [...]")
+
+def run(args):
+  if (len(args) == 0): raise_usage()
+  from cctbx import factor_kev_angstrom
+  for arg in args:
+    l = arg.lower()
+    if (l.endswith("a")):
+      try: a = eval(arg[:-1])
+      except Exception: raise_usage()
+      k = factor_kev_angstrom / a
+    elif (l.endswith("kev")):
+      try: k = eval(arg[:-3])
+      except Exception: raise_usage()
+      a = factor_kev_angstrom / k
+    else:
+      raise_usage()
+    print("%.5f A = %.5f keV" % (a, k))
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************

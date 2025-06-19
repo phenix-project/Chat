@@ -1,0 +1,2828 @@
+
+
+ *******************************************************************************
+mmtbx/command_line/secondary_structure_restraints.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.secondary_structure_restraints
+
+from mmtbx.secondary_structure import sec_str_master_phil_str, \
+  sec_str_master_phil, manager
+import iotbx.pdb
+import mmtbx.model
+import iotbx.phil
+from scitbx.array_family import flex
+from libtbx.utils import Sorry
+from six.moves import cStringIO as StringIO
+import sys, os
+
+master_phil_str = """
+show_all_params = False
+  .type = bool
+  .style = hidden
+filter_outliers = True
+  .type = bool
+  .style = hidden
+format = *phenix phenix_refine phenix_bonds pymol pdb refmac kinemage csv
+  .type = choice
+  .style = hidden
+quiet = False
+  .type = bool
+  .style = hidden
+verbose = -1
+  .type = int
+  .style = hidden
+output_prefix = None
+  .type = str
+ignore_annotation_in_file = False
+  .type = bool
+  .help = ignore annotation that is present in input file
+file_name = None
+  .type = path
+  .multiple = True
+  .optional = True
+  .style = hidden
+  %s
+""" % sec_str_master_phil_str
+
+master_phil = iotbx.phil.parse(master_phil_str, process_includes=True)
+
+def show_usage():
+  help_msg = """\
+phenix.secondary_structure_restraints: tool for manipulating with secondary
+  structure restraints. It can search and output them in various formats.
+
+Please note, that if HELIX/SHEET records are present in supplied .pdb file,
+automatic search will not be executed. These records will be outputted in
+choosen format instead.
+
+Usage examples:
+  phenix.secondary_structure_restraints model.pdb
+  phenix.secondary_structure_restraints model.pdb format=phenix_refine
+  phenix.secondary_structure_restraints model.pdb ignore_annotation_in_file=True
+  phenix.secondary_structure_restraints model.pdb search_method=from_ca
+
+Full scope of parameters:
+  """
+  print(help_msg)
+  master_phil.show()
+
+def run(args, params=None, out=sys.stdout, log=sys.stderr):
+  # params keyword is for running program from GUI dialog
+  if ( ((len(args) == 0) and (params is None)) or
+       ((len(args) > 0) and ((args[0] == "-h") or (args[0] == "--help"))) ):
+    show_usage()
+    return
+
+  # parse command-line arguments
+  if (params is None):
+    pcl = iotbx.phil.process_command_line_with_files(
+      args=args,
+      master_phil_string=master_phil_str,
+      pdb_file_def="file_name")
+    work_params = pcl.work.extract()
+  # or use parameters defined by GUI
+  else:
+    work_params = params
+  pdb_files = work_params.file_name
+
+  work_params.secondary_structure.enabled=True
+  assert work_params.format in ["phenix", "phenix_refine", "phenix_bonds",
+      "pymol", "refmac", "kinemage", "pdb", 'csv']
+  if work_params.quiet :
+    out = StringIO()
+
+  pdb_combined = iotbx.pdb.combine_unique_pdb_files(file_names=pdb_files)
+  pdb_structure = iotbx.pdb.input(source_info=None,
+    lines=flex.std_string(pdb_combined.raw_records))
+  cs = pdb_structure.crystal_symmetry()
+
+  corrupted_cs = False
+  if cs is not None:
+    if [cs.unit_cell(), cs.space_group()].count(None) > 0:
+      corrupted_cs = True
+      cs = None
+    elif cs.unit_cell().volume() < 10:
+      corrupted_cs = True
+      cs = None
+
+  if cs is None:
+    if corrupted_cs:
+      print("Symmetry information is corrupted, ", file=out)
+    else:
+      print("Symmetry information was not found, ", file=out)
+    print("putting molecule in P1 box.", file=out)
+    from cctbx import uctbx
+    atoms = pdb_structure.atoms()
+    box = uctbx.non_crystallographic_unit_cell_with_the_sites_in_its_center(
+      sites_cart=atoms.extract_xyz(),
+      buffer_layer=3)
+    atoms.set_xyz(new_xyz=box.sites_cart)
+    cs = box.crystal_symmetry()
+
+  defpars = mmtbx.model.manager.get_default_pdb_interpretation_params()
+  defpars.pdb_interpretation.automatic_linking.link_carbohydrates=False
+  defpars.pdb_interpretation.c_beta_restraints=False
+  defpars.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
+  defpars.pdb_interpretation.allow_polymer_cross_special_position=True
+  # defpars.pdb_interpretation.flip_symmetric_amino_acids=False
+  # defpars.pdb_interpretation.sort_atoms=False
+  model = mmtbx.model.manager(
+      model_input=pdb_structure,
+      crystal_symmetry=cs,
+      stop_for_unknowns=False)
+  model.process(pdb_interpretation_params=defpars)
+  pdb_hierarchy = model.get_hierarchy()
+  geometry = None
+  if pdb_hierarchy.contains_nucleic_acid():
+    model.process(make_restraints = True)
+    geometry = model.get_restraints_manager().geometry
+  if len(pdb_hierarchy.models()) != 1 :
+    raise Sorry("Multiple models not supported.")
+  ss_from_file = None
+  if (hasattr(pdb_structure, "extract_secondary_structure") and
+      not work_params.ignore_annotation_in_file):
+    ss_from_file = pdb_structure.extract_secondary_structure()
+  m = manager(pdb_hierarchy=pdb_hierarchy,
+    geometry_restraints_manager=geometry,
+    sec_str_from_pdb_file=ss_from_file,
+    params=work_params.secondary_structure,
+    verbose=work_params.verbose)
+
+  # bp_p = nucleic_acids.get_basepair_plane_proxies(
+  #     pdb_hierarchy,
+  #     m.params.secondary_structure.nucleic_acid.base_pair,
+  #     geometry)
+  # st_p = nucleic_acids.get_stacking_proxies(
+  #     pdb_hierarchy,
+  #     m.params.secondary_structure.nucleic_acid.stacking_pair,
+  #     geometry)
+  # hb_b, hb_a = nucleic_acids.get_basepair_hbond_proxies(pdb_hierarchy,
+  #     m.params.secondary_structure.nucleic_acid.base_pair)
+  result_out = StringIO()
+  # prefix_scope="refinement.pdb_interpretation"
+  # prefix_scope=""
+  prefix_scope=""
+  if work_params.format == "phenix_refine":
+    prefix_scope = "refinement.pdb_interpretation"
+  elif work_params.format == "phenix":
+    prefix_scope = "pdb_interpretation"
+  ss_phil = None
+  working_phil = m.as_phil_str(master_phil=sec_str_master_phil)
+  phil_diff = sec_str_master_phil.fetch_diff(source=working_phil)
+
+  if work_params.format in ["phenix", "phenix_refine"]:
+    comment = "\n".join([
+      "# These parameters are suitable for use in e.g. phenix.real_space_refine",
+      "# or geometry_minimization. To use them in phenix.refine add ",
+      "# 'refinement.' if front of pdb_interpretation."])
+    if work_params.format == "phenix_refine":
+      comment = "\n".join([
+      "# These parameters are suitable for use in phenix.refine only.",
+      "# To use them in other Phenix tools remove ",
+      "# 'refinement.' if front of pdb_interpretation."])
+    print(comment, file=result_out)
+    if (prefix_scope != ""):
+      print("%s {" % prefix_scope, file=result_out)
+    if work_params.show_all_params :
+      working_phil.show(prefix="  ", out=result_out)
+    else :
+      phil_diff.show(prefix="  ", out=result_out)
+    if (prefix_scope != ""):
+      print("}", file=result_out)
+  elif work_params.format == "pdb":
+    if m.actual_sec_str.fits_in_pdb_format():
+      print(m.actual_sec_str.as_pdb_str(), file=result_out)
+    else:
+      raise Sorry("Annotations could not fit in PDB format.")
+  elif work_params.format == "phenix_bonds" :
+    raise Sorry("Not yet implemented.")
+  elif work_params.format in ["pymol", "refmac", "kinemage", 'csv'] :
+    m.show_summary(log=out)
+    model.process(make_restraints=True)
+    (hb_proxies, hb_angle_proxies, planarity_proxies,
+        parallelity_proxies) = m.create_all_new_restraints(
+        pdb_hierarchy=pdb_hierarchy,
+        grm=model.get_restraints_manager().geometry,
+        log=out)
+    if hb_proxies.size() > 0:
+      if work_params.format == "pymol" :
+        file_load_add = "load %s" % work_params.file_name[0]
+        # surprisingly, pymol handles filenames with whitespaces without quotes...
+        print(file_load_add, file=result_out)
+        bonds_in_format = hb_proxies.as_pymol_dashes(
+            pdb_hierarchy=pdb_hierarchy)
+      elif work_params.format == "kinemage" :
+        bonds_in_format = hb_proxies.as_kinemage(
+            pdb_hierarchy=pdb_hierarchy)
+      elif work_params.format == "csv" :
+        bonds_in_format = hb_proxies.as_csv(
+            pdb_hierarchy=pdb_hierarchy)
+      else :
+        bonds_in_format = hb_proxies.as_refmac_restraints(
+            pdb_hierarchy=pdb_hierarchy)
+      print(bonds_in_format, file=result_out)
+    if hb_angle_proxies.size() > 0:
+      if work_params.format == "pymol":
+        angles_in_format = hb_angle_proxies.as_pymol_dashes(
+            pdb_hierarchy=pdb_hierarchy)
+        print(angles_in_format, file=result_out)
+  result = result_out.getvalue()
+  out_prefix = os.path.basename(work_params.file_name[0])
+  if work_params.output_prefix is not None:
+    out_prefix = work_params.output_prefix
+  filename = "%s_ss.eff" % out_prefix
+  if work_params.format == "pymol":
+    filename = "%s_ss.pml" % out_prefix
+  outf = open(filename, "w")
+  outf.write(result)
+  outf.close()
+  print(result, file=out)
+
+  return os.path.abspath(filename)
+
+# =============================================================================
+# GUI-specific functions
+def validate_params(params):
+  pass
+
+if __name__ == "__main__" :
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/secondary_structure_validation.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.secondary_structure_validation
+
+from mmtbx.programs import ss_validation
+from iotbx.cli_parser import run_program
+
+if __name__ == "__main__":
+  run_program(ss_validation.Program)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/select_best_starting_model.py
+
+from __future__ import absolute_import, division, print_function
+import libtbx.phil
+import sys
+from iotbx import extract_xtal_data
+
+master_phil_str = """
+input {
+  model = None
+    .type = path
+    .multiple = True
+  include scope iotbx.extract_xtal_data.xray_data_str
+  skip_twin_detection = False
+    .type = bool
+}
+include scope mmtbx.refinement.select_best_starting_model.master_phil
+nproc = Auto
+  .type = int
+output {
+  write_files = False
+    .type = bool
+  model_file_name = best_model.pdb
+    .type = path
+  data_file_name = best_model_data.mtz
+    .type = path
+}
+"""
+
+def master_params():
+  return libtbx.phil.parse(master_phil_str, process_includes=True)
+
+def run(args, external_params=None, out=sys.stdout):
+  from mmtbx.refinement import select_best_starting_model
+  from iotbx.file_reader import any_file
+  import iotbx.phil
+  cmdline = iotbx.phil.process_command_line_with_files(
+    args=args,
+    master_phil=master_params(),
+    pdb_file_def="input.model",
+    reflection_file_def="input.xray_data.file_name",
+    usage_string="""\
+mmtbx.select_best_starting_model data.mtz model1.pdb model2.pdb [...]
+
+Given experimental data and a set of models, determines whether any of the
+models can be refined directly (i.e. if isomorphous), and picks the one
+with the best R-free below a specified cutoff.  Will optionally perform
+rigid-body refinement on suitable models if requested.""")
+  params = cmdline.work.extract()
+  validate_params(params)
+  hkl_in = any_file(params.input.xray_data.file_name)
+  data_and_flags = extract_xtal_data.run(
+    reflection_file_server=hkl_in.file_server,
+    parameters=params.input.xray_data)
+  model_data = []
+  for file_name in params.input.model :
+    model_in = cmdline.get_file(
+      file_name=file_name,
+      force_type="pdb").file_object
+    pdb_hierarchy = model_in.hierarchy
+    xray_structure = model_in.xray_structure_simple()
+    model_data.append((pdb_hierarchy, xray_structure))
+  # we can optionally pass a parameter block from elsewhere (e.g. phenix ligand
+  # pipeline) and just use this run() method to load files
+  params_ = external_params
+  if (params_ is None):
+    params_ = params
+  result = select_best_starting_model.select_model(
+    model_names=params.input.model,
+    model_data=model_data,
+    f_obs=data_and_flags.f_obs,
+    r_free_flags=data_and_flags.r_free_flags,
+    params=params_,
+    nproc=params.nproc,
+    skip_twin_detection=params.input.skip_twin_detection,
+    log=out)
+  if result.success() and params.output.write_files :
+    result.save_best_model(file_name=params.output.model_file_name)
+    print("", file=out)
+    print("Wrote best model to %s" % params.output.model_file_name, file=out)
+    result.save_updated_data(file_name=params.output.data_file_name)
+    print("Wrote updated data to %s" % params.output.data_file_name, file=out)
+  return result
+
+def validate_params(params):
+  if (len(params.input.model) == 0):
+    raise Sorry("No models specified.")
+  elif (params.input.xray_data.file_name is None):
+    raise Sorry("No data file specified.")
+  return True
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/show_r_factors_by_shell.py
+
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import Sorry, Usage
+from libtbx import slots_getstate_setstate
+import re
+import sys
+
+master_phil = """
+mtz_file = None
+  .type = path
+f_obs_label = F-obs-filtered
+  .type = str
+f_calc_label = F-model
+  .type = str
+r_free_label = R-free-flags
+  .type = str
+n_bins = 10
+  .type = int
+"""
+
+class r_factor_shell(object):
+  __slots__ = ["d_min", "d_max", "r_work", "r_free"]
+
+  def __init__(self, d_min, d_max, r_work, r_free):
+    self.d_min = d_min
+    self.d_max = d_max
+    self.r_work = r_work
+    self.r_free = r_free
+
+  def show(self, out, prefix="  "):
+    print("%s%6.3f - %6.3f  %6.4f  %6.4f" % (prefix, self.d_max,
+      self.d_min, self.r_work, self.r_free), file=out)
+
+class r_factor_shells(slots_getstate_setstate):
+  __slots__ = ["shells", "overall"]
+
+  def __init__(self, f_obs, f_calc, r_free_flags, n_bins=10):
+    assert (not None in [f_obs, f_calc, r_free_flags])
+    assert (f_obs.data().size() == f_calc.data().size())
+    r_free_flags = r_free_flags.common_set(other=f_obs)
+    f_obs.setup_binner(n_bins=n_bins)
+    self.shells = []
+    self.overall = None
+    for bin in f_obs.binner().range_used():
+      sele_bin = f_obs.binner().selection(bin)
+      f_obs_bin = f_obs.select(sele_bin)
+      f_calc_bin = f_calc.select(sele_bin)
+      r_free_flags_bin = r_free_flags.select(sele_bin)
+      f_obs_work = f_obs_bin.select(~(r_free_flags_bin.data()))
+      f_calc_work = f_calc_bin.select(~(r_free_flags_bin.data()))
+      f_obs_free = f_obs_bin.select(r_free_flags_bin.data())
+      f_calc_free = f_calc_bin.select(r_free_flags_bin.data())
+      shell = r_factor_shell(
+        d_min=f_obs_work.d_min(),
+        d_max=f_obs_work.d_max_min()[0],
+        r_work=f_obs_work.r1_factor(f_calc_work),
+        r_free=f_obs_free.r1_factor(f_calc_free))
+      self.shells.append(shell)
+    f_obs_work = f_obs.select(~(r_free_flags.data()))
+    f_calc_work = f_calc.select(~(r_free_flags.data()))
+    f_obs_free = f_obs.select(r_free_flags.data())
+    f_calc_free = f_calc.select(r_free_flags.data())
+    self.overall = r_factor_shell(
+      d_min=f_obs.d_min(),
+      d_max=f_obs.d_max_min()[0],
+      r_work = f_obs_work.r1_factor(f_calc_work),
+      r_free = f_obs_free.r1_factor(f_calc_free))
+
+  def show(self, out=sys.stdout, prefix="  "):
+    print("", file=out)
+    for shell in self.shells :
+      shell.show(out=out, prefix=prefix)
+    print("", file=out)
+    self.overall.show(out=out, prefix=prefix)
+    print("", file=out)
+
+def run(args, out=sys.stdout):
+  if (len(args) == 0) or ("--help" in args):
+    raise Usage("""mmtbx.show_r_factors_by_shell DATA_FILE [OPTIONS]
+
+example:
+  mmtbx.show_r_factors_by_shell refine_001.mtz 10
+
+Shows a table of R-factors by resolution shell, starting from the reflections
+in a typical phenix.refine output MTZ file.
+
+Full parameters:
+%s
+""" % (master_phil))
+  from iotbx import file_reader
+  import iotbx.phil
+  cmdline = iotbx.phil.process_command_line_with_files(
+    args=args,
+    master_phil_string=master_phil,
+    reflection_file_def="mtz_file",
+    integer_def="n_bins")
+  params = cmdline.work.extract()
+  if (params.mtz_file is None):
+    raise Sorry("No MTZ file supplied!")
+  mtz_in = file_reader.any_file(params.mtz_file,
+    force_type="hkl",
+    raise_sorry_if_errors=True)
+  f_calc = f_obs = r_free_flags = None
+  for array in mtz_in.file_server.miller_arrays :
+    labels = array.info().labels
+    first_label_non_anom = re.sub(r"\(.*", "", labels[0])
+    if ((labels[0] == params.f_obs_label) or
+        (first_label_non_anom == params.f_obs_label)):
+      f_obs = array
+    elif ((labels[0] == params.f_calc_label) or
+          (first_label_non_anom == params.f_calc_label)):
+      f_calc = abs(array)
+    elif ((labels[0] == params.r_free_label) or
+          (first_label_non_anom == params.r_free_label)):
+      r_free_flags = array.customized_copy(data=array.data()==1)
+  shells = r_factor_shells(
+    f_obs=f_obs,
+    f_calc=f_calc,
+    r_free_flags=r_free_flags,
+    n_bins=params.n_bins)
+  shells.show(out=out)
+  return shells
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/sisa.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.sisa
+'''
+Author      : Uervirojnangkoorn, M.
+Created     : 12/1/2014
+Description : Commands linked to sisa libraries.
+'''
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from libtbx.easy_mp import pool_map
+import math
+import sys,os
+from six.moves import range
+
+def read_input(args):
+  from mmtbx.sisa.optimize.mod_input import process_input
+  iparams, txt_out_input = process_input(args)
+  return iparams, txt_out_input
+
+def sisa_optimize_mproc(micro_cycle_no, stack_no, miller_arrays, indices_selected, cdf_set, iparams):
+  from mmtbx.sisa.optimize.mod_optimize import sisa_optimizer
+  somer = sisa_optimizer()
+  result = somer.run_optimize(micro_cycle_no, stack_no, miller_arrays, indices_selected, cdf_set, iparams)
+  return result
+
+def update_miller_arrays(miller_arrays, indices_selected, phis_selected, foms_selected):
+  flex_phib = miller_arrays[1].data()
+  flex_fomb = miller_arrays[2].data()
+  for i in range(len(indices_selected)):
+    flex_phib[indices_selected[i]] = phis_selected[i]
+    flex_fomb[indices_selected[i]] = foms_selected[i]
+
+  miller_arrays_out = []
+  miller_arrays_out.append(miller_arrays[0])
+  miller_arrays_out.append(miller_arrays[1].customized_copy(data=flex_phib))
+  miller_arrays_out.append(miller_arrays[2].customized_copy(data=flex_fomb))
+  miller_arrays_out.append(miller_arrays[3])
+  miller_arrays_out.append(miller_arrays[4])
+
+  return miller_arrays_out
+
+if __name__=="__main__":
+  txt_out = ''
+
+  iparams, txt_out_input = read_input(sys.argv[:1])
+  txt_out += txt_out_input
+
+  from mmtbx.sisa.optimize.mod_mtz import mtz_handler
+  mtzh = mtz_handler()
+  miller_arrays, fp_sort_index_stacks, txt_out_format = mtzh.format_miller_arrays(iparams)
+  print(txt_out_format)
+  txt_out += txt_out_format
+
+  for i in range(iparams.n_macro_cycles):
+    txt_out += 'Macrocycle no. %4.0f\n'%(i+1)
+    print('Macrocycle no. %4.0f\n'%(i+1))
+    for j in range(len(fp_sort_index_stacks)):
+      #select the index group
+      i_sel = fp_sort_index_stacks[j]
+
+      #generate cdf_set for selected reflections
+      from mmtbx.sisa.optimize.mod_optimize import sisa_optimizer
+      somer = sisa_optimizer()
+      hl_selected = flex.hendrickson_lattman([miller_arrays[3].data()[ii_sel] for ii_sel in i_sel])
+      cdf_set = somer.calc_pdf_cdf_from_hl(hl_selected)
+
+      def sisa_optimize_mproc_wrapper(arg):
+        return sisa_optimize_mproc(arg, j, miller_arrays, i_sel, cdf_set, iparams)
+
+      sisa_optimize_results = pool_map(
+              args=range(iparams.n_micro_cycles),
+              func=sisa_optimize_mproc_wrapper,
+              processes=iparams.n_processors)
+
+      list_phis = []
+      foms_sum = None
+      list_skews = []
+      for result in sisa_optimize_results:
+        if result is not None:
+          phis, foms, skews, txt_out_optim = result
+          list_phis.append(phis)
+          list_skews.append(skews)
+          if foms_sum is None:
+            foms_sum = foms[:]
+          else:
+            foms_sum += foms[:]
+          print(txt_out_optim)
+          txt_out += txt_out_optim
+
+      #calculate centroid of list_phis
+      phis_averaged, skews_averaged, skews_std, n_phis_selected = somer.pickbestidv(
+                                list_phis,
+                                list_skews,
+                                -99, 99)
+      foms_averaged = foms_sum/len(list_phis)
+
+      skew_phis_averaged, mapcc_phis_averaged, mpe_phis_averaged = somer.calc_stats(\
+              miller_arrays, i_sel, phis_averaged, foms_averaged, iparams)
+
+      txt_out_tmp = 'Averaged phis skew=%6.2f mapcc=%6.2f mpe=%6.2f'%( \
+        skew_phis_averaged, mapcc_phis_averaged, mpe_phis_averaged*180/math.pi)
+      print(txt_out_tmp)
+      txt_out += txt_out_tmp
+
+
+      #update miller_arrays
+      miller_arrays = update_miller_arrays(miller_arrays,
+                                           i_sel,
+                                           phis_averaged, foms_averaged)
+
+      #output mtz for optimized stack n
+      file_name_out = iparams.project_name + '/' + iparams.run_name + '/' + \
+        'sisa_cycle_'+str(i+1)+'_stack_'+str(j+1)+'.mtz'
+      mtzh.write_mtz(miller_arrays, file_name_out)
+
+  f = open(iparams.project_name + '/' + iparams.run_name +'/log.txt', 'w')
+  f.write(txt_out)
+  f.close()
+
+  print('Sisa done.')
+
+  if iparams.autodm:
+    print('Proceed with automatic density modification...(your density-modified map will be AutoBuild_run_n_/overall_best_denmod_map_coeffs.mtz.')
+    cmd='phenix.autobuild data=' + file_name_out + ' seq_file=' + str(iparams.seq_file) + \
+        ' maps_only=True n_cycle_build_max=1 n_cycle_rebuild_max=0' + \
+        ' input_ha_file=' + str(iparams.ha_file) + ' model=' + str(iparams.model_file)
+    print('Running: '+cmd)
+    os.system(cmd)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/sort_hetatms.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.sort_hetatms
+
+# TODO sort waters by distance from macromolecule
+# FIXME special treatment required for carbohydrates?
+
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import Sorry, Usage, null_out
+from libtbx import adopt_init_args
+from libtbx import runtime_utils
+import libtbx.phil
+import operator
+import os
+import sys
+from six.moves import zip
+
+sorting_params_str = """
+preserve_chain_id = False
+  .type = bool
+  .help = The default behavior is to group heteroatoms with the nearest \
+    macromolecule chain, whose ID is inherited.  This parameter disables \
+    the change of chain ID, and preserves the original chain ID.
+waters_only = False
+  .type = bool
+  .help = Rearrange waters, but leave all other ligands alone.
+sort_waters_by = none *b_iso
+  .type = choice
+  .help = Ordering of waters - by default it will sort them by the isotropic \
+    B-factor.
+  .caption = Don't_sort Isotropic_B
+set_hetatm_record = True
+  .type = bool
+  .help = Convert ATOM to HETATM where appropriate.
+  .short_caption = Set HETATM label
+ignore_selection = None
+  .type = atom_selection
+  .help = Selection of atoms to skip.  Any residue group which overlaps with \
+    this selection will be preserved with the original chain ID and numbering.
+renumber = True
+  .type = bool
+  .help = Renumber heteroatoms once they are in new chains.
+sequential_numbering = True
+  .type = bool
+  .help = If True, the heteroatoms will be renumbered starting from the next \
+    available residue number after the end of the associated macromolecule \
+    chain.  Otherwise, numbering will start from 1.
+distance_cutoff = 6.0
+  .type = float
+  .help = Cutoff for identifying nearby macromolecule chains.  This should be \
+    kept relatively small for speed reasons, but it may miss waters that are \
+    far out in solvent channels.
+  .input_size = 80
+remove_waters_outside_radius = False
+  .type = bool
+  .help = Remove waters more than the specified distnace cutoff to the \
+    nearest polymer chain (to avoid PDB complaints).
+  .short_caption = Max. water-to-polymer distance
+loose_chain_id = X
+  .type = str
+  .help = Chain ID assigned to heteroatoms that can't be mapped to a nearby \
+    macromolecule chain.
+  .short_caption = Loose chain ID
+  .input_size = 48
+model_skip_expand_with_mtrix = False
+  .type = bool
+  .help = If set to false then expand the model into NCS copies using \
+    matrix (MTRIX) records present in PDB file
+"""
+
+master_params = """
+file_name = None
+  .type = path
+  .short_caption = Model file
+  .help = Input file
+  .style = bold file_type:pdb input_file OnChange:extract_symmetry
+output_file = None
+  .type = path
+  .style = bold file_type:pdb output_file new_file
+unit_cell = None
+  .type = unit_cell
+space_group = None
+  .type = space_group
+ignore_symmetry = False
+  .type = bool
+  .help = Don't take symmetry-related chains into account when determining \
+    the nearest macromolecule.
+preserve_remarks = False
+  .type = bool
+  .help = Propagate all REMARK records to the output file.
+verbose = False
+  .type = bool
+remove_hetatm_ter_records = True
+  .type = bool
+  .short_caption = Remove TER records after HETATM chains
+  .help = The official PDB format only allows TER records at the end of \
+    polymer chains, whereas the CCTBX PDB-handling tools will insert TER \
+    after each chain of any type.  If this parameter is True, the extra \
+    TER records will be removed.
+%s
+include scope libtbx.phil.interface.tracking_params
+""" % sorting_params_str
+
+def master_phil():
+  return libtbx.phil.parse(master_params)
+
+def sort_hetatms(
+    pdb_hierarchy,
+    xray_structure,
+    params=None,
+    verbose=False,
+    return_pdb_hierarchy=True,
+    log=null_out()):
+  """
+  Rearrange a PDB hierarchy so that heteroatoms are grouped with the closest
+  macromolecule, accounting for symmetry.  Assorted ligands will be arranged
+  first in each new chain, followed by waters.  See the PHIL block
+  sorting_params_str for options.
+  """
+  if (params is None):
+    import iotbx.phil
+    params = iotbx.phil.parse(sorting_params_str).fetch().extract()
+  from iotbx import pdb
+  from scitbx.array_family import flex
+  pdb_atoms = pdb_hierarchy.atoms()
+  pdb_atoms.reset_i_seq()
+  # the i_seq will be reset in various places, so I substitute the tmp
+  # attribute
+  for atom in pdb_atoms :
+    atom.tmp = atom.i_seq # XXX why can't this be an array operation?
+  pdb_atoms = pdb_hierarchy.deep_copy().atoms()
+  n_atoms = pdb_atoms.size()
+  assert (n_atoms == len(xray_structure.scatterers()))
+  ignore_selection = flex.bool(n_atoms, False)
+  mm_selection = flex.bool(n_atoms, False)
+  hd_selection = xray_structure.hd_selection()
+  sites_frac = xray_structure.sites_frac()
+  new_sites_cart = xray_structure.sites_cart()
+  pair_asu_table = xray_structure.pair_asu_table(
+    distance_cutoff=params.distance_cutoff)
+  asu_mappings = pair_asu_table.asu_mappings()
+  asu_table = pair_asu_table.table()
+  mm_chains = []
+  hetatm_chains = []
+  if (params.ignore_selection is not None):
+    sel_cache = pdb_hierarchy.atom_selection_cache()
+    ignore_selection = sel_cache.selection(params.ignore_selection)
+  assert (len(pdb_hierarchy.models()) == 1)
+  for chain in pdb_hierarchy.only_model().chains():
+    chain_atoms = chain.atoms()
+    het_sel = chain_atoms.extract_hetero()
+    if (het_sel.size() == chain_atoms.size()):
+      hetatm_chains.append(chain)
+    elif ((chain.is_protein(ignore_water=False)) or
+          (chain.is_na(ignore_water=False))):
+      mm_chains.append(chain)
+      i_seqs = chain_atoms.extract_tmp_as_size_t()
+      mm_selection.set_selected(i_seqs, True)
+    else :
+      hetatm_chains.append(chain)
+  if (len(hetatm_chains) == 0):
+    print("No heteroatoms - hierarchy will not be modified.", file=log)
+    if (return_pdb_hierarchy):
+      return pdb_hierarchy
+    else :
+      return sort_hetatms_result(
+        pdb_hierarchy=pdb_hierarchy,
+        n_mm_chains=len(mm_chains),
+        n_het_residues=0)
+  n_het_residues = 0
+  new_hierarchy = pdb.hierarchy.root()
+  new_model = pdb.hierarchy.model()
+  new_chain_i_seqs = []
+  new_hierarchy.append_model(new_model)
+  new_hetatm_chains = []
+  new_hetatm_chain_ids = []
+  new_start_resseq = []
+  for chain in mm_chains :
+    new_chain_i_seqs.append(flex.size_t(chain.atoms().extract_tmp_as_size_t()))
+    new_model.append_chain(chain.detached_copy())
+    new_hetatm_chains.append(pdb.hierarchy.chain(id=chain.id))
+    if (params.preserve_chain_id) and (chain.id in new_hetatm_chain_ids):
+      print("Warning: chain ID '%s' is duplicated", file=log)
+    new_hetatm_chain_ids.append(chain.id)
+    if (params.sequential_numbering):
+      last_resseq = chain.residue_groups()[-1].resseq_as_int()
+      new_start_resseq.append(last_resseq + 1)
+    else :
+      new_start_resseq.append(1)
+  hetatm_residue_groups = []
+  hetatm_residue_chain_ids = []
+  loose_chain_id = params.loose_chain_id
+  if (loose_chain_id is None):
+    loose_chain_id = " "
+  loose_residues = pdb.hierarchy.chain(id=loose_chain_id)
+  preserve_chains = []
+  for chain in hetatm_chains :
+    chain_id = chain.id
+    for rg in chain.residue_groups():
+      n_het_residues += 1
+      if (params.preserve_chain_id):
+        if (chain_id in new_hetatm_chain_ids):
+          i_chain = new_hetatm_chain_ids.index(chain_id)
+          new_hetatm_chains[i_chain].append_residue_group(rg.detached_copy())
+        else :
+          print("Warning: no corresponding macromolecule chain match for %s %s" % \
+            (chain_id, rg.resid()), file=log)
+          loose_residues.append_residue_group(rg.detached_copy())
+        chain.remove_residue_group(rg)
+        continue
+      keep_residue_group = False
+      rg_atoms = rg.atoms()
+      i_seqs = rg_atoms.extract_tmp_as_size_t()
+      atom_groups = rg.atom_groups()
+      if ((params.waters_only) and
+          (not atom_groups[0].resname in ["HOH","WAT"])):
+        keep_residue_group = True
+      else :
+        for i_seq in i_seqs :
+          if (ignore_selection[i_seq]):
+            keep_residue_group = True
+            break
+      if (not keep_residue_group):
+        rg_copy = rg.detached_copy()
+        for new_atom, old_atom in zip(rg_copy.atoms(), rg_atoms):
+          new_atom.tmp = old_atom.tmp # detached_copy() doesn't preserve tmp
+        hetatm_residue_groups.append(rg_copy)
+        hetatm_residue_chain_ids.append(chain_id)
+        chain.remove_residue_group(rg)
+    if (len(chain.residue_groups()) > 0):
+      preserve_chains.append(chain.detached_copy())
+  for chain in preserve_chains :
+    new_model.append_chain(chain)
+  unit_cell = xray_structure.unit_cell()
+  n_deleted = 0
+  if (not params.preserve_chain_id):
+    for k, rg in enumerate(hetatm_residue_groups):
+      chain_id = hetatm_residue_chain_ids[k]
+      atom_groups = rg.atom_groups()
+      if (len(atom_groups) == 0):
+        continue
+      is_water = (atom_groups[0].resname in ["HOH", "WAT", "DOD"])
+      rg_atoms = rg.atoms()
+      i_seqs = rg_atoms.extract_tmp_as_size_t()
+      closest_distance = sys.maxsize
+      closest_i_seq = None
+      closest_rt_mx = None
+      for i_seq, atom in zip(i_seqs, rg_atoms):
+        if (params.set_hetatm_record):
+          atom.hetero = True
+        if (hd_selection[i_seq]):
+          continue
+        site_i = sites_frac[i_seq]
+        asu_dict = asu_table[i_seq]
+        rt_mx_i_inv = asu_mappings.get_rt_mx(i_seq, 0).inverse()
+        for j_seq, j_sym_groups in asu_dict.items():
+          if (hd_selection[j_seq]) or (not mm_selection[j_seq]):
+            continue
+          site_j = sites_frac[j_seq]
+          for j_sym_group in j_sym_groups:
+            rt_mx = rt_mx_i_inv.multiply(asu_mappings.get_rt_mx(j_seq,
+              j_sym_group[0]))
+            site_ji = rt_mx * site_j
+            dxyz = unit_cell.distance(site_i, site_ji)
+            if (dxyz < closest_distance):
+              closest_distance = dxyz
+              closest_rt_mx = rt_mx.inverse() # XXX I hope this is right...
+              closest_i_seq = j_seq
+      if (closest_i_seq is None):
+        # XXX possible bug: what about waters H-bonded to ligands, but still
+        # outside radius of macromolecule?
+        if (is_water and params.remove_waters_outside_radius):
+          print("Water %s is not near any polymer chain, will delete" \
+            % rg.id_str(), file=log)
+          n_deleted += len(rg.atoms())
+          continue
+        # XXX not sure what to do here - if we have only one macromolecule
+        # chain, does it make more sense to keep all hetatms grouped together
+        # regardless of distance?  e.g. waters in 1BS2
+        else :
+          print("Residue group %s %s is not near any macromolecule chain" % \
+            (chain_id, rg.resid()), file=log)
+          loose_residues.append_residue_group(rg)
+      else :
+        for j_seqs, hetatm_chain in zip(new_chain_i_seqs, new_hetatm_chains):
+          if (closest_i_seq in j_seqs):
+            if (verbose):
+              if (closest_rt_mx.is_unit_mx()):
+                print("Residue group %s added to chain %s (distance = %.3f)" % \
+                  (rg.atoms()[0].id_str(), hetatm_chain.id, closest_distance), file=log)
+              else :
+                print(("Residue group %s added to chain %s "+
+                   "(distance = %.3f, symop = %s)") % \
+                  (rg.atoms()[0].id_str(), hetatm_chain.id, closest_distance,
+                   str(closest_rt_mx)), file=log)
+            if (not closest_rt_mx.is_unit_mx()):
+              # closest macromolecule is in another ASU, so map the hetatms to
+              # be near the copy in the current ASU
+              for atom in rg.atoms():
+                site_frac = unit_cell.fractionalize(site_cart=atom.xyz)
+                new_site_frac = closest_rt_mx * site_frac
+                atom.xyz = unit_cell.orthogonalize(site_frac=new_site_frac)
+            hetatm_chain.append_residue_group(rg)
+            break
+        else :
+          raise RuntimeError("Can't find chain for i_seq=%d" % closest_i_seq)
+  # even if waters aren't sorted, we still want them to come last
+  for chain in new_hetatm_chains :
+    waters_and_b_iso = []
+    for rg in chain.residue_groups():
+      ags = rg.atom_groups()
+      if (ags[0].resname in ["WAT","HOH"]):
+        b_iso = flex.mean(rg.atoms().extract_b())
+        waters_and_b_iso.append((rg, b_iso))
+        chain.remove_residue_group(rg)
+    if (len(waters_and_b_iso) > 0):
+      if (params.sort_waters_by != "none"):
+        waters_and_b_iso.sort(key=operator.itemgetter(1))
+      for water, b_iso in waters_and_b_iso :
+        chain.append_residue_group(water)
+  if (params.renumber):
+    for chain, start_resseq in zip(new_hetatm_chains, new_start_resseq):
+      resseq = start_resseq
+      for rg in chain.residue_groups():
+        rg.resseq = resseq
+        resseq += 1
+  for chain in new_hetatm_chains :
+    for residue_group in chain.residue_groups():
+      residue_group.link_to_previous = True # suppress BREAK records
+    if len(chain.atoms()) > 0:  # Skip empty chains
+      new_model.append_chain(chain)
+  if (len(loose_residues.residue_groups()) > 0):
+    new_model.append_chain(loose_residues)
+  n_atoms_new = len(new_hierarchy.atoms())
+  if (n_atoms_new != n_atoms - n_deleted):
+    raise RuntimeError("Atom counts do not match: %d --> %d" % (n_atoms,
+      n_atoms_new))
+  if (n_deleted > 0):
+    print("WARNING: %d atoms removed from model" % n_deleted, file=log)
+    print("  You must refine this model again before deposition!", file=log)
+  if (return_pdb_hierarchy):
+    return new_hierarchy
+  else :
+    return sort_hetatms_result(
+      pdb_hierarchy=new_hierarchy,
+      n_mm_chains=len(mm_chains),
+      n_het_residues=n_het_residues)
+
+def run(args, out=sys.stdout, sorting_params=None):
+  import iotbx.phil
+  if (len(args) == 0) or ("--help" in args):
+    raise Usage("""\
+mmtbx.sort_hetatms model.pdb [options]
+
+Rearrange non-macromolecular heteroatoms (waters and other ligands, by default)
+into new chains having the same ID as the closest macromolecule chain.  Will
+also renumber residues and sort waters by B-factor with default settings.
+
+Full parameters:
+
+%s
+""" % iotbx.phil.parse(master_params).as_str(prefix="  "))
+  import iotbx.pdb
+  from cctbx import crystal
+  cmdline = iotbx.phil.process_command_line_with_files(
+    args=args,
+    master_phil_string=master_params,
+    pdb_file_def="file_name")
+  params = cmdline.work.extract()
+  validate_params(params)
+  pdb_in = iotbx.pdb.input(params.file_name)
+  pdb_symm = pdb_in.crystal_symmetry()
+  space_group = params.space_group
+  unit_cell = params.unit_cell
+  if (pdb_symm is None) and (not params.ignore_symmetry):
+    if (space_group is None) or (unit_cell is None):
+      raise Sorry("Crystal symmetry information is required; please specify "+
+        "the space_group and unit_cell parameters.")
+  else :
+    if (space_group is None) and (pdb_symm is not None):
+      space_group = pdb_symm.space_group_info()
+    if (unit_cell is None) and (pdb_symm is not None):
+      unit_cell = pdb_symm.unit_cell()
+  final_symm = None
+  if (not params.ignore_symmetry):
+    final_symm = crystal.symmetry(
+      space_group_info=space_group,
+      unit_cell=unit_cell)
+  pdb_hierarchy = pdb_in.construct_hierarchy()
+  xray_structure = pdb_in.xray_structure_simple(
+    crystal_symmetry=final_symm)
+  if (sorting_params is None):
+    sorting_params = params
+  result = sort_hetatms(
+    pdb_hierarchy=pdb_hierarchy,
+    xray_structure=xray_structure,
+    params=sorting_params,
+    verbose=params.verbose,
+    return_pdb_hierarchy=False,
+    log=out)
+  if (params.output_file is None):
+    params.output_file = os.path.splitext(
+      os.path.basename(params.file_name))[0] + "_sorted.pdb"
+  if (not result.pdb_hierarchy.fits_in_pdb_format()):
+    params.output_file = result.pdb_hierarchy.write_pdb_or_mmcif_file(
+      target_filename = params.output_file)
+
+  else: # standard pdb file
+    f = open(params.output_file, "w")
+    if (params.preserve_remarks):
+      remarks = pdb_in.remark_section()
+      if (len(remarks) > 0):
+        f.write("\n".join(remarks))
+        f.write("\n")
+    pdb_str = result.pdb_hierarchy.as_pdb_string(crystal_symmetry=final_symm)
+    if (params.remove_hetatm_ter_records):
+      n_hetatm = n_atom = 0
+      for line in pdb_str.splitlines():
+        if (line[0:3] == "TER"):
+          if (n_atom != 0):
+            f.write("%s\n" % line)
+          n_atom = n_hetatm = 0
+          continue
+        elif (line.startswith("HETATM")):
+          n_hetatm += 1
+        elif (line.startswith("ATOM")):
+          n_atom += 1
+        f.write("%s\n" % line)
+    else :
+      f.write(pdb_str)
+    f.write("END")
+    f.close()
+
+  print("Wrote %s" % params.output_file, file=out)
+  out.flush()
+  return sort_hetatms_result(
+    file_name=os.path.abspath(params.output_file),
+    n_mm_chains=result.n_mm_chains,
+    n_het_residues=result.n_het_residues)
+
+class sort_hetatms_result(object):
+  def __init__(self, n_mm_chains, n_het_residues, pdb_hierarchy=None,
+      file_name=None):
+    adopt_init_args(self, locals())
+    assert ([pdb_hierarchy, file_name].count(None) == 1)
+
+  def finish_job(self):
+    return ([(self.file_name, "Modified model")],
+            [("Number of macromolecule chains", self.n_mm_chains),
+             ("Number of heteroatom residues", self.n_het_residues)])
+
+def validate_params(params):
+  if (params.file_name is None):
+    raise Sorry("Model file (file_name) not specified.")
+  if not os.path.isfile(params.file_name):
+    raise Sorry("Model file (%s) is missing." %(params.file_name))
+  from iotbx.data_manager import DataManager
+  if (params.model_skip_expand_with_mtrix):
+    # phenix.famos doesn't need NCS expanded model and some files in PDB contain
+    # faulty matrices causing a Sorry on expansion.
+    # Use this keyword for phenix.famos to avoid expansion
+    dm = DataManager(custom_options=['model_skip_expand_with_mtrix'])
+  else:
+    dm = DataManager()
+  m = dm.get_model(params.file_name)
+  if not m:
+    raise Sorry("Unable to read the file %s" %(params.file_name))
+
+  return True
+
+class launcher(runtime_utils.target_with_save_result):
+  def run(self):
+    return run(args=list(self.args), out=sys.stdout)
+
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/ss_idealization.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME mmtbx.ss_idealization
+
+from mmtbx.programs import ss_idealization
+from iotbx.cli_parser import run_program
+
+if __name__ == "__main__":
+  run_program(ss_idealization.Program)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/suitename.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.suitename
+# LIBTBX_SET_DISPATCHER_NAME molprobity.suitename
+# LIBTBX_SET_DISPATCHER_NAME cctbx.suitename
+
+from __future__ import absolute_import, division, print_function
+from iotbx.cli_parser import CCTBXParser
+from libtbx.utils import multi_out, show_total_time
+import sys
+from  mmtbx.programs import suitename
+from iotbx.cli_parser import run_program
+
+#=============================================================================
+def old_run(args):
+
+  # create parser
+  logger = multi_out()
+  logger.register('stderr', sys.stderr)
+  logger2 = multi_out()
+  logger2.register('stdout', sys.stdout)
+
+  parser = CCTBXParser(
+    program_class=suitename.Program,
+    logger=logger)
+  namespace = parser.parse_args(sys.argv[1:])
+
+  # start program
+  print('Starting job', file=logger)
+  print('='*79, file=logger)
+  task = suitename.Program(
+    parser.data_manager, parser.working_phil.extract(), logger=logger2)
+
+  # validate inputs
+  task.validate()
+
+  # run program
+  task.run()
+
+  # stop timer
+  print('', file=logger)
+  print('='*79, file=logger)
+  print('Job complete', file=logger)
+  show_total_time(out=logger)
+
+# =============================================================================
+
+if __name__ == '__main__':
+  #run(sys.argv[1:])
+  run_program(program_class=suitename.Program, hide_parsing_output=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/suitename_old.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.suitename_old
+# LIBTBX_SET_DISPATCHER_NAME molprobity.suitename_old
+# LIBTBX_SET_DISPATCHER_NAME cctbx.suitename_old
+
+from __future__ import absolute_import, division, print_function
+import sys
+from  mmtbx.programs import suitename_old
+
+if __name__ == '__main__':
+  suitename_old.run(args=sys.argv[1:])
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/super.py
+from __future__ import absolute_import, division, print_function
+import mmtbx.alignment
+import iotbx.pdb
+from iotbx.pdb import amino_acid_codes
+from cctbx.array_family import flex
+from scitbx.math import superpose
+from scitbx.math import matrix
+import libtbx.phil
+from libtbx.utils import Sorry
+import sys, os
+from six.moves import zip
+
+master_params = libtbx.phil.parse("""\
+super {
+  fixed = None
+    .type = str
+  moving = None
+    .type = str
+  moved = "moved.pdb"
+    .type = str
+  alignment_style = *local global
+    .type = choice
+  gap_opening_penalty = 20
+    .type = float
+  gap_extension_penalty = 2
+    .type = float
+  similarity_matrix = *blosum50 dayhoff
+    .type = choice
+}
+""")
+
+def extract_sequence_and_sites(pdb_input):
+  seq = []
+  sites = flex.vec3_double()
+  use_sites = flex.bool()
+  model = pdb_input.construct_hierarchy().models()[0]
+  for chain in model.chains():
+    for resi in chain.conformers()[0].residues():
+      if (   iotbx.pdb.common_residue_names_get_class(name=resi.resname)
+          != "common_amino_acid"):
+        continue
+      resn = resi.resname
+      single = amino_acid_codes.one_letter_given_three_letter[resn]
+      seq.append(single)
+      use = False
+      xyz = (0,0,0)
+      for atom in resi.atoms():
+        if (atom.name == " CA "):
+          xyz = atom.xyz
+          use = True
+          break
+      sites.append(xyz)
+      use_sites.append(use)
+  return "".join(seq), sites, use_sites
+
+def run(args, command_name="mmtbx.super"):
+  if (len(args) == 0):
+    print("usage: %s fixed.pdb moving.pdb [parameter=value ...]" % command_name)
+    return
+
+  print("#")
+  print("#                       ", command_name)
+  print("#")
+  print("# A lightweight sequence-based structure superposition tool.")
+  print("#")
+  print("#")
+
+  phil_objects = []
+  argument_interpreter = master_params.command_line_argument_interpreter(
+    home_scope="super")
+  fixed_pdb_file_name = None
+  moving_pdb_file_name = None
+  for arg in args:
+    if (os.path.isfile(arg)):
+      if (fixed_pdb_file_name is None): fixed_pdb_file_name = arg
+      elif (moving_pdb_file_name is None): moving_pdb_file_name = arg
+      else: raise Sorry("Too many file names.")
+    else:
+      try: command_line_params = argument_interpreter.process(arg=arg)
+      except KeyboardInterrupt: raise
+      except Exception: raise Sorry("Unknown file or keyword: %s" % arg)
+      else: phil_objects.append(command_line_params)
+
+  working_params = master_params.fetch(sources=phil_objects)
+  params = working_params.extract()
+
+  def raise_missing(what):
+      raise Sorry("""\
+Missing file name for %(what)s structure:
+  Please add
+    %(what)s=file_name
+  to the command line to specify the %(what)s structure.""" % vars())
+
+  if (fixed_pdb_file_name is None):
+    if (params.super.fixed is None): raise_missing("fixed")
+  else:
+    params.super.fixed = fixed_pdb_file_name
+  if (moving_pdb_file_name is None):
+    if (params.super.moving is None): raise_missing("moving")
+  else:
+    params.super.moving = moving_pdb_file_name
+
+  print("#Parameters used:")
+  print("#phil __ON__")
+  print()
+  working_params = master_params.format(python_object=params)
+  working_params.show()
+  print()
+  print("#phil __OFF__")
+  print()
+
+  print("Reading fixed structure:", params.super.fixed)
+  fixed_pdb = iotbx.pdb.input(file_name=params.super.fixed)
+  print()
+  print("Reading moving structure:", params.super.moving)
+  moving_pdb = iotbx.pdb.input(file_name=params.super.moving)
+  print()
+
+  fixed_seq, fixed_sites, fixed_site_flags = extract_sequence_and_sites(
+    pdb_input=fixed_pdb)
+  moving_seq, moving_sites, moving_site_flags = extract_sequence_and_sites(
+    pdb_input=moving_pdb)
+
+  print("Computing sequence alignment...")
+  align_obj = mmtbx.alignment.align(
+    seq_a=fixed_seq,
+    seq_b=moving_seq,
+    gap_opening_penalty=params.super.gap_opening_penalty,
+    gap_extension_penalty=params.super.gap_extension_penalty,
+    similarity_function=params.super.similarity_matrix,
+    style=params.super.alignment_style)
+  print("done.")
+  print()
+
+  alignment = align_obj.extract_alignment()
+  matches = alignment.matches()
+  equal = matches.count("|")
+  similar = matches.count("*")
+  total = len(alignment.a) - alignment.a.count("-")
+  alignment.pretty_print(
+    matches=matches,
+    block_size=50,
+    n_block=1,
+    top_name="fixed",
+    bottom_name="moving",
+    comment="""\
+The alignment used in the superposition is shown below.
+
+The sequence identity (fraction of | symbols) is %4.1f%%
+of the aligned length of the fixed molecule sequence.
+
+The sequence similarity (fraction of | and * symbols) is %4.1f%%
+of the aligned length of the fixed molecule sequence.
+""" % (100.*equal/max(1,total), 100.*(equal+similar)/max(1,total)))
+
+  fixed_sites_sel = flex.vec3_double()
+  moving_sites_sel = flex.vec3_double()
+  for ia,ib,m in zip(alignment.i_seqs_a, alignment.i_seqs_b, matches):
+    if (m not in ["|", "*"]): continue
+    if (fixed_site_flags[ia] and moving_site_flags[ib]):
+      fixed_sites_sel.append(fixed_sites[ia])
+      moving_sites_sel.append(moving_sites[ib])
+
+  print("Performing least-squares superposition of C-alpha atom pairs:")
+  print("  Number of C-alpha atoms pairs in matching residues")
+  print("  indicated by | or * above:", fixed_sites_sel.size())
+  if (fixed_sites_sel.size() == 0):
+    raise Sorry("No matching C-alpha atoms.")
+  lsq_fit = superpose.least_squares_fit(
+    reference_sites=fixed_sites_sel,
+    other_sites=moving_sites_sel)
+  rmsd = fixed_sites_sel.rms_difference(lsq_fit.other_sites_best_fit())
+  print("  RMSD between the aligned C-alpha atoms: %.3f" % rmsd)
+  print()
+
+  print("Writing moved pdb to file: %s" % params.super.moved)
+  pdb_hierarchy = moving_pdb.construct_hierarchy()
+  for atom in pdb_hierarchy.atoms():
+    atom.xyz = lsq_fit.r * matrix.col(atom.xyz) + lsq_fit.t
+  pdb_hierarchy.write_pdb_file(file_name=params.super.moved, append_end=True)
+  print()
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/superpose.py
+# LIBTBX_SET_DISPATCHER_NAME mmtbx.superpose
+
+from __future__ import absolute_import, division, print_function
+import sys
+import mmtbx.superpose
+
+if __name__ == "__main__":
+  mmtbx.superpose.run(args=sys.argv[1:])
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/table_one.py
+from __future__ import absolute_import, division, print_function
+from mmtbx.validation import dummy_validation
+from mmtbx.validation import molprobity
+import mmtbx.command_line.molprobity
+from iotbx import file_reader
+import iotbx.table_one
+from libtbx import object_oriented_patterns as oop
+from libtbx.str_utils import make_header
+from libtbx.utils import Sorry, null_out
+from libtbx import runtime_utils
+import libtbx.phil.command_line
+from libtbx import easy_pickle
+from libtbx import easy_mp
+from libtbx import Auto
+import libtbx.phil
+import os.path
+import time
+import sys
+from six.moves import zip
+from six.moves import range
+
+structure_params_str = """
+  structure
+    .multiple = True
+    .optional = True
+    .short_caption = Structure files
+    .style = auto_align box
+  {
+    name = None
+      .type = str
+      .input_size = 400
+      .short_caption = Structure name
+      .help = Structure name (will become column label)
+      .style = bold
+    pdb_file = None
+      .type = path
+      .short_caption = PDB file
+      .style = bold file_type:pdb
+      .help = PDB file
+    mtz_file = None
+      .type = path
+      .short_caption = MTZ file
+      .style = bold file_type:mtz OnChange:extract_table_one_labels
+      .help = MTZ file
+    data_labels = None
+      .type = str
+      .input_size = 160
+      .style = renderer:draw_table_one_label_widget
+    r_free_flags_label = None
+      .type = str
+      .short_caption = R-free flags label
+      .input_size = 160
+      .style = renderer:draw_table_one_label_widget
+      .help = R-free flags label
+    wavelength = None
+      .type = float
+    cif_file = None
+      .type = path
+      .multiple = True
+      .optional = True
+      .short_caption = CIF file
+      .help = Restraints file
+    cif_directory = None
+      .type = path
+      .short_caption = CIF directory
+      .style = directory
+      .help = Directory containing restraints - all CIF files found will be \
+        used.
+    data_type = *xray neutron
+      .type = choice
+    unmerged_data = None
+      .type = path
+      .help = Secondary reflections file with unmerged intensities, for \
+        calculation of merging statistics.
+      .style = bold file_type:hkl OnChange:extract_unmerged_intensities \
+        help_page:unmerged_data.htm
+    unmerged_labels = None
+      .type = str
+      .input_size = 160
+      .style = renderer:draw_unmerged_intensities_widget
+    use_internal_variance = False
+      .type = bool
+      .help = Estimate intensity variance for unmerged data
+    count_anomalous_pairs_separately = False
+      .type = bool
+      .short_caption = Count anomalous pairs separately
+      .help = If true, the program will treat F+ and F- (if present) as \
+        independent reflections when calculating data statistics.  (Not \
+        recommended.)
+    enable_twinning = False
+      .type = bool
+      .help = Enable twinning
+    twin_law = Auto
+      .type = str
+      .short_caption = Twin law
+      .help = Twin law if available, automatic detection if not
+  }
+"""
+
+master_phil_str = """
+table_one {
+  %s
+  processing {
+    re_compute_r_factors = True
+      .type = bool
+      .short_caption = Always re-compute R-factors
+      .style = bold
+    n_bins = 10
+      .type = int
+      .short_caption = Number of resolution bins
+    ligand_selection = None
+      .type = str
+      .short_caption = Ligand atom selection
+      .help = If specified, will determine which atoms or residues are \
+        counted as ligands (instead of automatic behavior).
+      .input_size = 400
+  }
+  multiprocessing {
+    include scope libtbx.easy_mp.parallel_phil_str_no_threading
+  }
+  output {
+    directory = None
+      .type = path
+      .help = This is only used by the PHENIX GUI.
+      .short_caption = Output directory
+      .style = bold output_dir
+    include scope libtbx.phil.interface.tracking_params
+    show_missing_fields = True
+      .type = bool
+    format = txt csv *rtf
+      .type = choice(multi=True)
+      .caption = Text CSV RTF
+      .short_caption = Output formats
+      .style = bold
+    base_name = Table1
+      .type = str
+      .short_caption = Base file name
+      .style = bold
+    verbose = True
+      .type = str
+    text_field_separation = 2
+      .type = int
+  }
+}""" % structure_params_str
+
+class _(oop.injector, molprobity.molprobity):
+  """
+  Injector dummy class to add as_table1_column() method to the main molprobity
+  object.  This extracts statistics from the various validation objects and
+  unmerged data, checks for consistency, and returns an iotbx.table_one.column
+  object.
+  """
+  def as_table1_column(self,
+      label,
+      wavelength,
+      log,
+      re_compute_r_factors=Auto):
+    """
+    Extract information for display in the traditional 'Table 1' of
+    crystallographic statistics in structure articles.
+    """
+    outer_shell = None
+    data_stats = self.data_stats
+    if (data_stats is None):
+      data_stats = dummy_validation()
+    merging_stats = dummy_validation()
+    merging_outer = dummy_validation()
+    n_refl_uniq = data_stats.n_refl
+    n_refl_refine = data_stats.n_refl_refine
+    n_free = data_stats.n_free
+    completeness = data_stats.completeness
+    completeness_outer = data_stats.completeness_outer
+    d_max_min = self.d_max_min()
+    d_max, d_min = d_max_min
+    if (self.merging is not None):
+      merging_stats = self.merging.overall
+      merging_outer = self.merging.bins[-1]
+      n_refl_uniq = merging_stats.n_uniq
+      epsilon = 0.001
+      if ((merging_stats.d_min > d_min + 2*epsilon) or
+          (merging_stats.d_max < d_max - 2*epsilon)):
+        raise Sorry(("Resolution limits for unmerged data in the structure "+
+          "'%s' do not cover the "+
+          "full range present in the merged data: %g - %g (merged) versus "+
+          "%g - %g (unmerged)") % (label, d_max, d_min,
+            merging_stats.d_max, merging_stats.d_min))
+    r_work = self.r_work()
+    r_free = self.r_free()
+    n_tls_groups = None
+    if (self.header_info is not None):
+      if (self.header_info.n_tls_groups > 0):
+        n_tls_groups = self.header_info.n_tls_groups
+      use_header_values = (not re_compute_r_factors or
+          (not self.header_info.is_phenix_refinement() and
+           (re_compute_r_factors is Auto)))
+      r_work, r_free, warned = rfactor_sanity_check(
+        r_work_pdb=self.header_info.r_work,
+        r_free_pdb=self.header_info.r_free,
+        r_work_fmodel=r_work,
+        r_free_fmodel=r_free,
+        out=log,
+        structure_name=label,
+        re_compute_r_factors=not use_header_values)
+      if (use_header_values):
+        n_refl_refine = data_stats.n_refl
+    adp_result = self.adp_stats.result()
+    adp_mean = [None for i in range(4)]
+    for i,prop in enumerate(['overall', 'protein', 'other', 'water']):
+      if getattr(adp_result, prop) is not None:
+        adp_mean[i] = getattr(adp_result, prop).mean
+    return iotbx.table_one.column(
+      label=label,
+      space_group=self.space_group_info(),
+      unit_cell=self.unit_cell().parameters(),
+      # data properties
+      wavelength=wavelength,
+      d_max_min=d_max_min,
+      n_refl_all=merging_stats.n_obs,
+      n_refl=n_refl_uniq,
+      multiplicity=merging_stats.mean_redundancy,
+      completeness=completeness * 100.0,
+      i_over_sigma=merging_stats.i_over_sigma_mean,
+      wilson_b=data_stats.wilson_b,
+      r_sym=merging_stats.r_merge,
+      r_meas=merging_stats.r_meas,
+      r_pim=merging_stats.r_pim,
+      cc_one_half=merging_stats.cc_one_half,
+      cc_star=merging_stats.cc_star,
+      # refinement
+      n_refl_refine=n_refl_refine,
+      n_free=n_free,
+      r_work=r_work,
+      r_free=r_free,
+      cc_work=merging_stats.cc_work,
+      cc_free=merging_stats.cc_free,
+      # model properties
+      n_atoms=self.model_stats_new.result().n_atoms - self.model_stats_new.result().n_hd,
+      n_macro_atoms=self.model_stats_new.result().n_protein_atoms + self.model_stats_new.result().n_nucleotide_atoms,
+      n_ligand_atoms=self.model_stats_new.result().n_other_atoms,
+      n_waters=self.model_stats_new.result().n_water_atoms,
+      n_residues=self.model_stats_new.result().n_protein,
+      bond_rmsd=self.rms_bonds(),
+      angle_rmsd=self.rms_angles(),
+      rama_favored=self.rama_favored(),
+      rama_allowed=self.rama_allowed(),
+      rama_outliers=self.rama_outliers(),
+      rota_outliers=self.rota_outliers(),
+      clashscore=self.clashscore(),
+      adp_mean=adp_mean[0],
+      adp_mean_mm=adp_mean[1],
+      adp_mean_lig=adp_mean[2],
+      adp_mean_wat=adp_mean[3],
+      n_tls_groups=n_tls_groups,
+      anomalous_flag=data_stats.anomalous_flag,
+      ).add_outer_shell(
+        # XXX we need a consistency check here as well
+        d_max_min=(data_stats.d_max_outer, data_stats.d_min_outer),
+        n_refl=data_stats.n_refl_outer,
+        n_refl_all=merging_outer.n_obs,
+        n_refl_refine=data_stats.n_refl_refine_outer,
+        n_free=data_stats.n_free_outer,
+        cc_one_half=merging_outer.cc_one_half,
+        cc_star=merging_outer.cc_star,
+        r_sym=merging_outer.r_merge,
+        r_meas=merging_outer.r_meas,
+        r_pim=merging_outer.r_pim,
+        i_over_sigma=merging_outer.i_over_sigma_mean,
+        multiplicity=merging_outer.mean_redundancy,
+        completeness=completeness_outer * 100,
+        cc_work=merging_outer.cc_work,
+        cc_free=merging_outer.cc_free,
+        r_work=data_stats.r_work_outer,
+        r_free=data_stats.r_free_outer)
+
+# XXX This is possibly problematic.  We should encourage the deposition of as
+# much data as possible, regardless of what was actually used in the final
+# refinement.
+def resolution_sanity_check(
+    d_max_pdb,
+    d_min_pdb,
+    d_max_f_obs,
+    d_min_f_obs,
+    structure_name,
+    out):
+  warned = False
+  if (d_max_pdb is not None):
+    (d_max, d_min) = (d_max_pdb, d_min_pdb)
+    print("Using resolution limits reported in PDB file for structure %s" % \
+      structure_name, file=out)
+    if ((d_max != d_max_pdb) or (d_min != d_min_pdb)):
+      warned = True
+      print("""\
+*** WARNING: Resolution limits in the PDB file for structure '%s'
+             are inconsistent with resolution limits in the MTZ file:
+             %.2f - %.2f (in PDB file)
+             %.2f - %.2f (in MTZ file)
+    This is not a fatal error, since the data processing may output more data
+    than are used in refinement, but you should check to make sure that you
+    have not accidentally specified the wrong model file.
+""" % (structure_name, d_max_pdb, d_min_pdb, d_max_f_obs, d_min_f_obs), file=out)
+  else :
+    (d_max, d_min) = (d_max_f_obs, d_min_f_obs)
+  return (d_max, d_min, warned)
+
+def rfactor_sanity_check(
+    r_work_pdb,
+    r_free_pdb,
+    r_work_fmodel,
+    r_free_fmodel,
+    out,
+    structure_name,
+    re_compute_r_factors,
+    tolerance_ignore=0.001,
+    tolerance_warn=0.004):
+  warned = False
+  if (r_work_pdb is not None) and (r_free_pdb is not None):
+    if (not re_compute_r_factors):
+      print("Using R-factors in PDB header", file=out)
+      (r_work, r_free) = (r_work_pdb, r_free_pdb)
+    else :
+      print("Using re-computed R-factors", file=out)
+      (r_work, r_free) = (r_work_fmodel, r_free_fmodel)
+    delta_r_work = abs(r_work_pdb - r_work_fmodel)
+    delta_r_free = abs(r_free_pdb - r_free_fmodel)
+    if ((delta_r_work > tolerance_warn) or
+        (delta_r_free > tolerance_warn)):
+      warned = True
+      print("""\
+*** WARNING: R-factors reported in the PDB file do not match those calculated
+             by phenix.model_vs_data:
+             r_work=%.4f r_free=%.4f (in PDB file)
+             r_work=%.4f r_free=%.4f (from phenix.model_vs_data)
+    This is not a fatal error, but if we can't recalculate the reported
+    R-factors, others probably won't be able to either.  This may be due to
+    inconsistent use of a twin operator; phenix.model_vs_data may apply one
+    automatically, but only if it significantly improves R-work.  Alternately,
+    it can indicate that the model was further modified after the last round
+    of refinement, that the wrong MTZ file was used, or that a different
+    resolution limit was used for refinement.
+    If applicable, use F-obs-filtered data from MTZ file from last refinement run.
+""" % (r_work_pdb, r_free_pdb, r_work_fmodel, r_free_fmodel), file=out)
+    elif ((delta_r_work > tolerance_ignore) or
+          (delta_r_free > tolerance_ignore)):
+      print("""\
+    NOTE: small discrepancy in R-factors reported in PDB file versus those
+          calculated by phenix.model_vs_data:
+             r_work=%.4f r_free=%.4f (in PDB file)
+             r_work=%.4f r_free=%.4f (from phenix.model_vs_data)
+    This is probably not a big deal, but please double-check that you used the
+    correct data file and have not changed the resolution limit for refinement.
+    If applicable, use F-obs-filtered data from MTZ file from last refinement run.
+""" % (r_work_pdb, r_free_pdb, r_work_fmodel, r_free_fmodel), file=out)
+  else :
+    print("Using re-computed R-factors for structure %s" % \
+      structure_name, file=out)
+    (r_work, r_free) = (r_work_fmodel, r_free_fmodel)
+  return (r_work, r_free, warned)
+
+def run_single_structure(params,
+    n_bins,
+    ligand_selection=None,
+    log=None):
+  if (log is None) : log = null_out()
+  twin_law = Auto
+  skip_twin_detection = not params.enable_twinning
+  if (params.twin_law is not None):
+    twin_law = params.twin_law
+    skip_twin_detection = True
+  molprobity_args = [
+    "pdb.file_name=\"%s\"" % params.pdb_file,
+    "xray_data.file_name=\"%s\"" % params.mtz_file,
+    "xray_data.labels=\"%s\"" % params.data_labels,
+    "xray_data.r_free_flags.file_name=\"%s\"" % params.mtz_file,
+    "xray_data.r_free_flags.label=\"%s\"" % params.r_free_flags_label,
+    "n_bins=%d" % n_bins,
+    "count_anomalous_pairs_separately=%s" % \
+    params.count_anomalous_pairs_separately,
+    "coot=False",
+    "maps=False",
+    "probe_dots=False",
+    "use_pdb_header_resolution_cutoffs=True",
+    "output.quiet=True",
+    "nonbonded_distance_threshold=None",
+    "input.twin_law=%s" % twin_law,
+    "input.skip_twin_detection=%s" % skip_twin_detection
+  ] + [ "monomers.file_name=\"%s\"" % cif for cif in params.cif_file ]
+  if (ligand_selection is not None):
+    molprobity_args.append("ligand_selection=\"%s\"" % ligand_selection)
+  if (params.unmerged_data is not None):
+    molprobity_args.extend([
+      "unmerged_data.file_name=\"%s\"" % params.unmerged_data,
+      "unmerged_data.labels=\"%s\"" % params.unmerged_labels,
+      "unmerged_data.use_internal_variance=\"%s\"" %
+      params.use_internal_variance
+    ])
+  if (params.data_type == "neutron"):
+    molprobity_args.extend(["scattering_table=neutron", "keep_hydrogens=True"])
+  if (params.cif_directory is not None):
+    files = os.listdir(params.cif_directory)
+    for file_name in files :
+      full_path = os.path.join(params.cif_directory, file_name)
+      if (os.path.isdir(full_path)) : continue
+      f = file_reader.any_file(full_path)
+      if (f.file_type == "cif"):
+        molprobity_args.append("monomers.file_name=\"%s\"" % f.file_name)
+  return mmtbx.command_line.molprobity.run(args=molprobity_args, out=log)
+
+class table_one(iotbx.table_one.table):
+  __slots__ = iotbx.table_one.table.__slots__ + [
+    "output_dir", "params", "output_files", ] #"n_warnings"]
+
+  def __init__(self, params, out=sys.stdout):
+    iotbx.table_one.table.__init__(self,
+      text_field_separation=params.output.text_field_separation)
+    self.output_dir = os.getcwd()
+    self.params = params
+    self.output_files = []
+    make_header("Running data analysis and validation", out=out)
+    results = easy_mp.parallel_map(
+      iterable=list(range(len(self.params.structure))),
+      func=self.run_single_structure,
+      processes=params.multiprocessing.nproc,
+      method=params.multiprocessing.technology,
+      preserve_exception_message=True)
+    for structure, result in zip(params.structure, results):
+      print("", file=out)
+      print("Collecting stats for structure %s" % structure.name, file=out)
+      column = result.validation.as_table1_column(
+        label=structure.name,
+        wavelength=structure.wavelength,
+        re_compute_r_factors=params.processing.re_compute_r_factors,
+        log=out)
+      self.add_column(column)
+
+  def run_single_structure(self, i_struct):
+    return run_single_structure(
+      params=self.params.structure[i_struct],
+      n_bins=self.params.processing.n_bins,
+      ligand_selection=self.params.processing.ligand_selection)
+
+  def save_multiple(self, file_base, formats):
+    for format in formats :
+      file_name = "%s.%s" % (file_base, format)
+      method = getattr(self, "save_%s" % format)
+      method(file_name)
+      self.output_files.append((file_name, "Table as '%s'" % format))
+
+  def finish_job(self, job=None):
+    return (self.output_files, [])
+
+def extract_labels(params, out, parameter_scope="structure"):
+  """
+  Guess MTZ file column labels for experimental data and R-free flags.  Only
+  invoked when this program is run from the command line, but the Phenix GUI
+  does something similar.
+  """
+  for i, structure in enumerate(params.structure):
+    if (structure.mtz_file is None):
+      raise Sorry("Missing MTZ file for structure #%d." % (i+1))
+    if ([structure.data_labels, structure.r_free_flags_label].count(None)>0):
+      mtz_file = file_reader.any_file(structure.mtz_file, force_type="hkl")
+      mtz_file.assert_file_type("hkl")
+      server = mtz_file.file_server
+      file_name = mtz_file.file_name
+      if (structure.data_labels is None):
+        print("Attempting to guess labels for %s..." % file_name, file=out)
+        data = server.get_xray_data(
+          file_name=file_name,
+          labels=None,
+          ignore_all_zeros=True,
+          parameter_scope=parameter_scope,
+          parameter_name="data_labels")
+        structure.data_labels = data.info().label_string()
+      if (structure.r_free_flags_label is None):
+        print("Attempting to guess R-free label for %s..." % file_name, file=out)
+        rfree = server.get_r_free_flags(
+          file_name=file_name,
+          label=None,
+          test_flag_value=None,
+          disable_suitability_test=False,
+          parameter_scope=parameter_scope+".r_free_flags")
+        structure.r_free_flags_label = rfree[0].info().label_string()
+
+def run(args,
+    out=sys.stdout,
+    auto_extract_labels=True,
+    use_current_directory_if_not_specified=False,
+    warn=True):
+  master_params = libtbx.phil.parse(master_phil_str,
+    process_includes=True)
+  if (len(args) == 0):
+    print("""\
+************************************************************************
+  phenix.table_one - statistics harvesting for publication
+************************************************************************
+
+  note: this is somewhat difficult to configure on the command line at
+        present; you may find it more convenient to use the PHENIX GUI.
+
+""", file=out)
+    print("# Parameter template for phenix.table_one:", file=out)
+    master_params.show(out=out)
+    print("# (the 'structure' scope may be copied as many times as ", file=out)
+    print("#  necessary to handle multiple datasets.)", file=out)
+    print("# Alternate usage:", file=out)
+    print("#   phenix.table_one model.pdb data.mtz [logfile]*", file=out)
+    return None
+  if (warn):
+    print("""
+  note: this is somewhat difficult to configure on the command line at
+        present; you may find it more convenient to use the PHENIX GUI.
+    """, file=out)
+    time.sleep(2)
+  master_parmas = libtbx.phil.parse(master_phil_str)
+  interpreter = libtbx.phil.command_line.argument_interpreter(
+    master_phil=master_params,
+    home_scope="table_one")
+  file_phil = []
+  cmdline_phil = []
+  pdb_file = None
+  mtz_file = None
+  unmerged_data = None
+  log_files = []
+  for arg in args :
+    if os.path.isfile(arg):
+      f = file_reader.any_file(arg)
+      if (f.file_type == "phil"):
+        file_phil.append(f.file_object)
+      elif (f.file_type == "pdb"):
+        pdb_file = f.file_name
+      elif (f.file_type == "hkl"):
+        mtz_file = f.file_name
+      elif (f.file_type == "txt"):
+        log_files.append(f.file_name)
+    else :
+      if arg.startswith("unmerged_data="):
+        unmerged_data = os.path.abspath("=".join(arg.split("=")[1:]))
+        continue
+      if arg.startswith("--"):
+        arg = arg[2:] + "=True"
+      try :
+        arg_phil = interpreter.process(arg=arg)
+      except RuntimeError :
+        print("Ignoring unknown argument %s" % arg, file=out)
+      else :
+        cmdline_phil.append(arg_phil)
+  working_phil = master_params.fetch(sources=file_phil+cmdline_phil)
+  params = working_phil.extract()
+  if (pdb_file is not None):
+    if (len(params.table_one.structure) > 0):
+      raise Sorry("You already have a structure defined in the parameter "+
+        "file; to add structures, you should edit the parameters instead of "+
+        "specifying additional PDB and data files on the command line.")
+    if (mtz_file is None):
+      raise Sorry("You have supplied a PDB file, but no corresponding MTZ "+
+                  "file.")
+    log_file_str = "\n".join([ "log_file=%s" % f for f in log_files ])
+    structure_params = libtbx.phil.parse(structure_params_str)
+    new_structure = structure_params.extract().structure[0]
+    new_structure.pdb_file = pdb_file
+    new_structure.mtz_file = mtz_file
+    new_structure.unmerged_data = unmerged_data
+    params.table_one.structure.append(new_structure)
+  if auto_extract_labels :
+    extract_labels(params.table_one, out=out)
+  if use_current_directory_if_not_specified :
+    if (params.table_one.output.directory is None):
+      params.table_one.output.directory = os.getcwd()
+  validate_params(params)
+  if (params.table_one.multiprocessing.nproc is None):
+    params.table_one.multiprocessing.nproc = 1
+  final_phil = master_params.format(python_object=params)
+  if params.table_one.output.verbose :
+    print("", file=out)
+    print("#Final effective parameters:", file=out)
+    final_phil.show(out=out)
+    print("#---end", file=out)
+    print("", file=out)
+  with open("table_one.eff", "w") as f:
+    final_phil.show(out=f)
+  table1 = table_one(params.table_one, out=out)
+  easy_pickle.dump("%s.pkl" % params.table_one.output.base_name, table1)
+  table1.save_multiple(
+    file_base=params.table_one.output.base_name,
+    formats=params.table_one.output.format)
+  return table1
+
+def validate_params(params):
+  if (len(params.table_one.structure) == 0):
+    raise Sorry("No structures defined.")
+  if (not os.path.isdir(params.table_one.output.directory)):
+    raise Sorry("Please specify a valid output directory.")
+  for i, struct in enumerate(params.table_one.structure):
+    if (None in [struct.name, struct.pdb_file, struct.mtz_file]):
+      raise Sorry(("Structure #%d is missing either a PDB file or an MTZ "+
+        "file or a structure name.") % (i+1))
+    for cfile in struct.cif_file:
+      if (file_reader.any_file(cfile).file_type == "pdb"):
+        raise Sorry("A restraint cif is file expected in the CIF file field.")
+#    elif (None in [struct.data_labels, struct.r_free_flags_label]):
+#      raise Sorry(("Need both data labels and R-free flag label for MTZ file "+
+#        "%s (structure #%d).") % (struct.mtz_file, i+1))
+  if (params.table_one.output.text_field_separation < 1):
+    raise Sorry("Text field separation must be at least one character.")
+  if (len(params.table_one.output.format) == 0):
+    raise Sorry("No formats selected for output!")
+  return True
+
+class launcher(runtime_utils.target_with_save_result):
+  def run(self):
+    if not os.path.exists(self.output_dir):
+      os.makedirs(self.output_dir)
+    os.chdir(self.output_dir)
+    return run(args=list(self.args), out=sys.stdout, warn=False)
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:],
+    auto_extract_labels=True,
+    use_current_directory_if_not_specified=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/tls.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.tls
+
+from mmtbx.tls import command_line
+import sys
+
+if(__name__ == "__main__"):
+  command_line.run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/tls_analysis.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.tls_analysis
+
+import sys
+from libtbx.utils import Sorry
+import time
+import mmtbx.tls.analysis
+
+legend = """phenix.tls_analysis:
+  Given PDB file with TLS records analyze each (T,L,S) triplet and interpret it
+  in terms of parameters of elemental motions (rotations and translations).
+
+Citation:
+  From deep TLS validation to ensembles of atomic models built from elemental
+  motions
+  Urzhumtsev,A., Afonine,P.V., Van Benschoten,A.H., Fraser,J.S. & Adams,P.D.
+  Acta Cryst. (2015). D71
+
+How to run:
+  phenix.tls_analysis model.pdb"""
+
+def run(args):
+  t0 = time.time()
+  print("-"*79)
+  print(legend)
+  print("-"*79)
+  if(len(args) != 1): raise Sorry("PDB file must be provided.")
+  mmtbx.tls.analysis.cmd_driver(pdb_file_name = args[0])
+  print("Time: %-10.3f"%(time.time()-t0))
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/tls_as_xyz.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.tls_as_xyz
+
+import sys
+from libtbx.utils import Sorry
+import mmtbx.tls.tls_as_xyz
+import iotbx.phil
+
+legend = """phenix.tls_as_xyz:
+  Given PDB file with TLS records generate ensemble of models (multi-model PDB
+  file) that are consistent with TLS parameters.
+
+How to run:
+  phenix.tls_as_xyz model.pdb
+
+"""
+
+master_params_str = """
+n_models=499
+  .type=int
+"""
+
+def master_params():
+  return iotbx.phil.parse(master_params_str)
+
+def run(args, log=sys.stdout):
+  print("-"*79, file=log)
+  print(legend, file=log)
+  print("-"*79, file=log)
+  inputs = mmtbx.utils.process_command_line_args(args = args,
+    master_params = master_params())
+  params = inputs.params.extract()
+  file_names = inputs.pdb_file_names
+  if(len(file_names) != 1): raise Sorry("PDB file must be provided.")
+  output_file_name_prefix = file_names[0].replace(".pdb", "")
+  mmtbx.tls.tls_as_xyz.run(
+    pdb_file_name    = file_names[0],
+    n_models         = params.n_models,
+    log              = log,
+    output_file_name_prefix = output_file_name_prefix)
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/undowser.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.undowser_validation
+# LIBTBX_SET_DISPATCHER_NAME molprobity.undowser_validation
+# LIBTBX_PRE_DISPATCHER_INCLUDE_SH export PHENIX_GUI_ENVIRONMENT=1
+
+import sys
+
+from iotbx.cli_parser import CCTBXParser
+from libtbx.utils import multi_out, show_total_time
+from mmtbx.programs import undowser
+from iotbx.cli_parser import run_program
+
+# =============================================================================
+def old_run(args):
+
+  # create parser
+  logger = multi_out()
+  logger.register('stderr', sys.stderr)
+  logger2 = multi_out()
+  logger2.register('stdout', sys.stdout)
+
+  parser = CCTBXParser(
+    program_class=undowser.Program,
+    logger=logger)
+  namespace = parser.parse_args(sys.argv[1:])
+
+  # start program
+  print('Starting job', file=logger)
+  print('='*79, file=logger)
+  task = undowser.Program(
+    parser.data_manager, parser.working_phil.extract(), logger=logger2)
+
+  # validate inputs
+  task.validate()
+
+  # run program
+  task.run()
+
+  # stop timer
+  print('', file=logger)
+  print('='*79, file=logger)
+  print('Job complete', file=logger)
+  show_total_time(out=logger)
+
+# =============================================================================
+if __name__ == '__main__':
+  #run(sys.argv[1:])
+  run_program(program_class=undowser.Program, hide_parsing_output=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/undowser2.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.undowser2_validation
+# LIBTBX_SET_DISPATCHER_NAME mmtbx.undowser2_validation
+# LIBTBX_SET_DISPATCHER_NAME molprobity.undowser2_validation
+# LIBTBX_PRE_DISPATCHER_INCLUDE_SH export PHENIX_GUI_ENVIRONMENT=1
+
+import sys
+
+from iotbx.cli_parser import CCTBXParser
+from libtbx.utils import multi_out, show_total_time
+from mmtbx.programs import undowser2
+from iotbx.cli_parser import run_program
+
+# =============================================================================
+def old_run(args):
+
+  # create parser
+  logger = multi_out()
+  logger.register('stderr', sys.stderr)
+  logger2 = multi_out()
+  logger2.register('stdout', sys.stdout)
+
+  parser = CCTBXParser(
+    program_class=undowser2.Program,
+    logger=logger)
+  namespace = parser.parse_args(sys.argv[1:])
+
+  # start program
+  print('Starting job', file=logger)
+  print('='*79, file=logger)
+  task = undowser2.Program(
+    parser.data_manager, parser.working_phil.extract(), logger=logger2)
+
+  # validate inputs
+  task.validate()
+
+  # run program
+  task.run()
+
+  # stop timer
+  print('', file=logger)
+  print('='*79, file=logger)
+  print('Job complete', file=logger)
+  show_total_time(out=logger)
+
+# =============================================================================
+if __name__ == '__main__':
+  #run(sys.argv[1:])
+  run_program(program_class=undowser2.Program, hide_parsing_output=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/validate_H_cl_app.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.validate_H
+import sys, time
+from mmtbx.monomer_library.pdb_interpretation import grand_master_phil_str
+import iotbx.phil
+import mmtbx.model
+from mmtbx.monomer_library import pdb_interpretation
+from mmtbx.hydrogens.validate_H import validate_H
+
+master_params_str = """\
+cif_file = None
+  .type = path
+  .multiple = True
+use_neutron_distances = True
+  .type = bool
+output_prefix = "output"
+  .type = str
+input_model_fname = None
+  .type = path
+"""
+
+def master_params():
+  return iotbx.phil.parse(master_params_str, process_includes=True)
+
+
+class cl_validate_H():
+  def __init__(self, cl_args):
+    self.help_message = """\
+This tool will validate hydrogen atoms in a model file.
+Usage:
+  %s model.pdb """ % 'validate_H_cl_app.py'
+    self.log = sys.stdout
+    self.cl_args = cl_args
+    self.master_params_str = master_params_str
+    self.pdbf_def = 'input_model_fname'
+    self.ciff_def = 'cif_file'
+
+  def parse_cl(self):
+    self.master_par = master_params()
+    self.params = self.master_par.extract()
+    if len(self.cl_args) < 1 or "--help" in self.cl_args or "-h" in self.cl_args:
+      self.show_help()
+      return 1
+    self.input_objects = iotbx.phil.process_command_line_with_files(
+      args         = self.cl_args[0:],
+      master_phil  = self.master_par,
+      pdb_file_def = self.pdbf_def,
+      cif_file_def = self.ciff_def
+      )
+    self.work_params = self.input_objects.work.extract()
+    # If everything looks fine:
+    return 0
+
+  def show_help(self):
+    print(self.help_message, file=self.log)
+    self.master_par.show(self.log)
+
+  def read_model_file(self):
+    self.pdb_inp = iotbx.pdb.input(
+      file_name=getattr(self.work_params, self.pdbf_def))
+    return 0
+
+  def print_overall_results(self, overall_counts_hd):
+    oc = overall_counts_hd
+    print('*'*79, file=self.log)
+    print('H/D ATOMS IN THE INPUT MODEL:\n', file=self.log)
+    print('Total number of hydrogen atoms: ',  oc.count_h, file=self.log)
+    print('Total number of deuterium atoms: ', oc.count_d, file=self.log)
+    print('Number of H atoms (protein): ', oc.count_h_protein, file=self.log)
+    print('Number of D atoms (protein): ', oc.count_d_protein, file=self.log)
+    print('Number of H atoms (water): ', oc.count_h_water, file=self.log)
+    print('Number of D atoms (water): ', oc.count_d_water, file=self.log)
+    print('*'*79, file=self.log)
+    print('WATER MOLECULES:\n', file=self.log)
+    print('Number of water: ', oc.count_water, file=self.log)
+    print('Number of water with 0 H (or D): ', oc.count_water_0h, file=self.log)
+    print('Number of water with 1 H (or D): ', oc.count_water_1h, file=self.log)
+    print('Number of water with 2 H (or D): ', oc.count_water_2h, file=self.log)
+    print('Number of water in alternative conformation: ', \
+      oc.count_water_altconf, file=self.log)
+    print('Number of water without oxygen atom: ', \
+      oc.count_water_no_oxygen, file=self.log)
+
+  def print_renamed(self, renamed):
+    print('*'*79, file=self.log)
+    print('The following atoms were renamed:', file=self.log)
+    for entry in renamed:
+      id_str = entry[0]
+      oldname = entry[2]
+      newname = entry[1]
+      print('%s atom %s --> %s' % (id_str, oldname, newname), file=self.log)
+
+  def print_atoms_occ_lt_1(self, hd_atoms_with_occ_0, single_hd_atoms_occ_lt_1):
+    if hd_atoms_with_occ_0:
+      print('*'*79, file=self.log)
+      print('H (or D) atoms with zero occupancy:', file=self.log)
+      for item in hd_atoms_with_occ_0:
+        print(item[0])
+    if single_hd_atoms_occ_lt_1:
+      print('H (or D) atoms with occupancy < 1:', file=self.log)
+      for item in single_hd_atoms_occ_lt_1:
+        print('%s with occupancy %s' %(item[0], item[1]), file=self.log)
+
+  def print_results_hd_sites(
+        self, count_exchanged_sites, hd_sites_analysis, overall_counts_hd):
+    sites_different_xyz = hd_sites_analysis.sites_different_xyz
+    sites_different_b   = hd_sites_analysis.sites_different_b
+    sites_sum_occ_not_1 = hd_sites_analysis.sites_sum_occ_not_1
+    sites_occ_sum_no_scattering = hd_sites_analysis.sites_occ_sum_no_scattering
+    print('*'*79, file=self.log)
+    print('H/D EXCHANGED SITES:\n', file=self.log)
+    print('Number of H/D exchanged sites: ', count_exchanged_sites, file=self.log)
+    print('Number of atoms modelled only as H: ', \
+     overall_counts_hd.count_h_protein - count_exchanged_sites, file=self.log)
+    print('Number of atoms modelled only as D: ', \
+     overall_counts_hd.count_d_protein - count_exchanged_sites, file=self.log)
+    if sites_different_xyz:
+      print('\nH/D pairs not at identical positions:', file=self.log)
+      for item in sites_different_xyz:
+        print('%s and  %s at distance %s' % \
+          (item[0][5:-1], item[1][5:-1], item[2]), file=self.log)
+    if sites_different_b:
+      print('\nH/D pairs without identical ADPs:', file=self.log)
+      for item in sites_different_b:
+        print('%s and %s ' % (item[0][5:-1], item[1][5:-1]), file=self.log)
+    if sites_sum_occ_not_1:
+      print('\nH/D pairs with occupancy sum != 1:', file=self.log)
+      for item in sites_sum_occ_not_1:
+        print(' %s  and %s with occupancy sum %s' % \
+          (item[0][5:-1], item[1][5:-1], item[2]), file=self.log)
+    if sites_occ_sum_no_scattering:
+      print('\nRotatable H/D pairs with zero scattering occupancy sum:', file=self.log)
+      for item in sites_occ_sum_no_scattering:
+        print(' %s with occ %s and  %s with occ %s' %\
+          (item[0][5:-1], item[2], item[1][5:-1], item[3]), file=self.log)
+
+  def print_missing_HD_atoms(self, missing_HD_atoms):
+    print('*'*79, file=self.log)
+    print('MISSING H or D atoms:\n', file=self.log)
+    for item in missing_HD_atoms:
+      print('%s conformer %s : %s ' % (item[0][8:-1], item[3], ", ".join(item[1])), file=self.log)
+
+  def print_outliers_bonds_angles(self, outliers_bonds, outliers_angles):
+    print('*'*79, file=self.log)
+    if outliers_bonds:
+      print('BOND OUTLIERS:\n', file=self.log)
+      for item in outliers_bonds:
+        print('Bond %s, observed: %s, delta from target: %s' % \
+          (item[1], item[2], item[3]), file=self.log)
+    if outliers_angles:
+      print('ANGLE OUTLIERS:\n', file=self.log)
+      for item in outliers_angles:
+        print('Angle %s, observed: %s, delta from target: %s' % \
+          (item[1], item[2], item[3]), file=self.log)
+
+  def print_xray_distance_warning(self):
+    print('*'*79, file=self.log)
+    print('WARNING: Model has a majority of X-H bonds with X-ray bond lengths.\n \
+          Input was to use neutron distances. Please check your model carefully.',
+          file=self.log)
+
+  def print_results(self, results):
+    overall_counts_hd  = results.overall_counts_hd
+    count_exchanged_sites = results.count_exchanged_sites
+    renamed            = results.renamed
+    hd_sites_analysis  = results.hd_sites_analysis
+    missing_HD_atoms   = results.missing_HD_atoms
+    hd_atoms_with_occ_0 = overall_counts_hd.hd_atoms_with_occ_0
+    single_hd_atoms_occ_lt_1 = overall_counts_hd.single_hd_atoms_occ_lt_1
+    outliers_bonds     = results.outliers_bonds
+    outliers_angles    = results.outliers_angles
+    bond_results       = results.bond_results
+    if overall_counts_hd:
+      self.print_overall_results(overall_counts_hd)
+    if renamed:
+      self.print_renamed(renamed)
+    if hd_atoms_with_occ_0 or single_hd_atoms_occ_lt_1:
+      self.print_atoms_occ_lt_1(hd_atoms_with_occ_0, single_hd_atoms_occ_lt_1)
+    if count_exchanged_sites is not None:
+      self.print_results_hd_sites(
+        count_exchanged_sites, hd_sites_analysis, overall_counts_hd)
+    if missing_HD_atoms:
+      self.print_missing_HD_atoms(missing_HD_atoms)
+    if outliers_bonds or outliers_angles:
+      self.print_outliers_bonds_angles(outliers_bonds, outliers_angles)
+    if bond_results.xray_distances_used:
+      self.print_xray_distance_warning()
+
+  def get_pdb_interpretation_params(self):
+    pdb_interpretation_phil = iotbx.phil.parse(
+      input_string = grand_master_phil_str, process_includes = True)
+    pi_params = pdb_interpretation_phil.extract()
+    pi_params.pdb_interpretation.use_neutron_distances = \
+      self.work_params.use_neutron_distances
+    #pi_params.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
+    #pi_params.pdb_interpretation.restraints_library.cdl=False
+    return pi_params
+
+  def run(self):
+    r = self.parse_cl()
+    if r != 0:
+      return
+    r = self.read_model_file()
+    if r != 0:
+      return
+
+    pi_params = self.get_pdb_interpretation_params()
+    model = mmtbx.model.manager(
+      model_input       = self.pdb_inp,
+      stop_for_unknowns = False,
+      restraint_objects = self.input_objects.cif_objects)
+    model.process(pdb_interpretation_params=pi_params,
+      make_restraints=True)
+    print("Model object created from file %s:" % \
+      getattr(self.work_params, self.pdbf_def), file=self.log)
+
+    # If needed, this could be wrapped in try...except to catch errors.
+    c = validate_H(model = model,
+                   use_neutron_distances = pi_params.pdb_interpretation.use_neutron_distances)
+    c.validate_inputs()
+    c.run()
+    results = c.get_results()
+    self.print_results(results)
+
+    #results.pdb_hierarchy_curated.write_pdb_file(file_name="%s.pdb" % 'bla2')
+if __name__ == "__main__":
+
+  t0 = time.time()
+  validate_H_app = cl_validate_H(
+    cl_args=sys.argv[1:])
+  validate_H_app.run()
+  print("Finished. Time: %8.3f"%(time.time()-t0))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/validate_ligands.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME mmtbx.development.validate_ligands
+from iotbx.cli_parser import run_program
+from mmtbx.programs import validate_ligands
+
+if __name__ == '__main__':
+  run_program(program_class=validate_ligands.Program)
+
+#old stuff
+
+#from __future__ import absolute_import, division, print_function
+#from libtbx.str_utils import make_sub_header
+#from libtbx.utils import Sorry
+#import os
+#import sys
+#
+#def master_phil():
+#  from mmtbx.command_line import generate_master_phil_with_inputs
+#  return generate_master_phil_with_inputs(
+#    enable_automatic_twin_detection=True,
+#    phil_string="""
+#ligand_code = None
+#  .type = str
+#  .multiple = True
+#reference_structure = None
+#  .type = path
+#only_segid = None
+#  .type = str
+#verbose = False
+#  .type = bool
+#""")
+#
+#def run(args, out=sys.stdout):
+#  usage_string = """\
+#mmtbx.validate_ligands model.pdb data.mtz LIGAND_CODE [...]
+#
+#Print out basic statistics for residue(s) with the given code(s), including
+#electron density values/CC.
+#"""
+#  import mmtbx.validation.ligands
+#  import mmtbx.command_line
+#  args_ = []
+#  for arg in args :
+#    if (len(arg) == 3) and arg.isalnum() and (not os.path.exists(arg)):
+#      args_.append("ligand_code=%s" % arg)
+#    else :
+#      args_.append(arg)
+#  cmdline = mmtbx.command_line.load_model_and_data(
+#    args=args_,
+#    master_phil=master_phil(),
+#    process_pdb_file=False,
+#    usage_string=usage_string)
+#  params = cmdline.params
+#  if (params.ligand_code is None) or (len(params.ligand_code) == 0):
+#    raise Sorry("Ligand code required!")
+#  make_sub_header("Validating ligands", out=out)
+#  for ligand_code in params.ligand_code :
+#    validations = mmtbx.validation.ligands.validate_ligands(
+#      pdb_hierarchy=cmdline.pdb_hierarchy,
+#      fmodel=cmdline.fmodel,
+#      ligand_code=ligand_code,
+#      reference_structure=params.reference_structure,
+#      only_segid=params.only_segid)
+#    if (validations is None):
+#      raise Sorry("No ligands named '%s' found." % ligand_code)
+#    mmtbx.validation.ligands.show_validation_results(validations=validations,
+#      out=out,
+#      verbose=params.verbose)
+#
+#if (__name__ == "__main__"):
+#  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/validation_summary.py
+
+"""
+Convenience tool for collecting validation statistics with minimal overhead.
+"""
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.validation import molprobity
+import iotbx.pdb
+from libtbx import slots_getstate_setstate, Auto
+from libtbx.utils import Sorry, Usage
+from libtbx import str_utils
+from libtbx import easy_mp
+import os
+import sys
+from six.moves import range
+import mmtbx.model
+
+def summary(pdb_file=None,
+            pdb_hierarchy=None,
+            crystal_symmetry=None):
+  header_info = None
+  if (pdb_hierarchy is None):
+    assert (pdb_file is not None)
+    pdb_in = iotbx.pdb.input(pdb_file)
+    pdb_hierarchy = pdb_in.construct_hierarchy()
+    pdb_hierarchy.atoms().reset_i_seq()
+    header_info = molprobity.pdb_header_info(
+      pdb_file=pdb_file)
+    crystal_symmetry=pdb_in.crystal_symmetry()
+  else :
+    assert (pdb_file is None)
+  #
+  assert crystal_symmetry is not None
+
+  cache = pdb_hierarchy.atom_selection_cache()
+  sel = cache.selection('protein')
+  pdb_hierarchy = pdb_hierarchy.select(sel)
+  #
+  model = pdb_hierarchy.as_model_manager(crystal_symmetry = crystal_symmetry)
+  return molprobity.molprobity(
+    model=model,
+    keep_hydrogens=False,
+    header_info=header_info).summarize()
+
+class parallel_driver(object):
+  """
+  Simple wrapper for passing to easy_mp.pool_map.
+  """
+  def __init__(self, pdb_hierarchy, crystal_symmetry):
+    self.pdb_hierarchy = pdb_hierarchy
+    self.crystal_symmetry = crystal_symmetry
+
+  def __call__(self, i_model):
+    import iotbx.pdb.hierarchy
+    model_hierarchy = iotbx.pdb.hierarchy.root()
+    model = self.pdb_hierarchy.models()[i_model].detached_copy()
+    model.id = ""
+    model_hierarchy.append_model(model)
+    return summary(pdb_hierarchy=model_hierarchy,
+        crystal_symmetry=self.crystal_symmetry)
+
+molprobity_stat_labels = [
+  "Ramachandran Outliers",
+  "Ramachandran Favored",
+  "Rotamer Outliers",
+  "C-beta Outliers",
+  "Clashscore",
+  "MolProbity Score",
+]
+
+class ensemble(slots_getstate_setstate):
+  """
+  MolProbity validation results for an ensemble of models.  Note that the
+  number of atoms in each model is not necessarily consistent.
+  """
+
+  __slots__ = [
+    "rama_outliers",
+    "rama_favored",
+    "rotamer_outliers",
+    "c_beta_deviations",
+    "clashscore",
+    "mpscore",
+  ]
+
+  def __init__(self, pdb_hierarchy, n_models, crystal_symmetry, nproc=Auto):
+    assert (len(pdb_hierarchy.models()) == n_models)
+    validate = parallel_driver(pdb_hierarchy, crystal_symmetry)
+    summaries = easy_mp.pool_map(
+      processes=nproc,
+      fixed_func=validate,
+      args=range(n_models))
+    for name in self.__slots__ :
+      array = []
+      for s in summaries :
+        array.append(getattr(s, name))
+      setattr(self, name, array)
+
+  def show(self, out=None, prefix="", show_percentiles=None):
+    if (out is None):
+      out = sys.stdout
+    def min_max_mean(array):
+      if (len(array) == 0) or (array.count(None) == len(array)):
+        return (None, None, None)
+      else :
+        return min(array), max(array), sum(array) / len(array)
+    def fs(format, value):
+      return str_utils.format_value(format, value, replace_none_with=("(none)"))
+    def format_all(format, array):
+      min, max, mean = min_max_mean(array)
+      return "%s %s %s" % (fs(format, min), fs(format, max), fs(format, mean))
+    print("%s                           min    max   mean" % prefix, file=out)
+    print("%sRamachandran outliers = %s %%" % (prefix,
+      format_all("%6.2f", self.rama_outliers)), file=out)
+    print("%s             favored  = %s %%" % (prefix,
+      format_all("%6.2f", self.rama_favored)), file=out)
+    print("%sRotamer outliers      = %s %%" % (prefix,
+      format_all("%6.2f", self.rotamer_outliers)), file=out)
+    print("%sC-beta deviations     = %s" % (prefix,
+      format_all("%6d", self.c_beta_deviations)), file=out)
+    print("%sClashscore            = %s" % (prefix,
+      format_all("%6.2f", self.clashscore)), file=out)
+    if (self.mpscore is not None):
+      print("%sMolprobity score      = %s" % (prefix,
+        format_all("%6.2f", self.mpscore)), file=out)
+
+def run(args, out=sys.stdout):
+  import optparse
+  if (len(args) == 0) or ("--help" in args):
+    raise Usage("""
+mmtbx.validation_summary model.pdb
+
+Prints a brief summary of validation criteria, including Ramachandran
+statistics, rotamer outliers, clashscore, C-beta deviations, plus R-factors
+and RMS(bonds)/RMS(angles) if found in PDB header.  (This is primarily used
+for evaluating the output of refinement tests; general users are advised to
+run phenix.model_vs_data or the validation GUI.)
+""")
+  parser = optparse.OptionParser()
+  options, args = parser.parse_args(args)
+  pdb_file = args[0]
+  if (not os.path.isfile(pdb_file)):
+    raise Sorry("Not a file: %s" % pdb_file)
+  pdb_in = iotbx.pdb.input(pdb_file)
+  hierarchy = pdb_in.construct_hierarchy()
+  xrs = pdb_in.xray_structures_simple()
+  crystal_symmetry=pdb_in.crystal_symmetry()
+  if not crystal_symmetry:
+    raise Sorry("Need crystal_symmetry in input PDB file")
+  s = None
+  extra = ""
+  if (len(xrs) == 1):
+    s = summary(pdb_file=pdb_file,crystal_symmetry=crystal_symmetry)
+  else :
+    s = ensemble(pdb_hierarchy=hierarchy,
+      n_models=len(xrs),
+      crystal_symmetry=crystal_symmetry)
+    extra = " (%d models)" % len(xrs)
+  print("", file=out)
+  print("Validation summary for %s%s:" % (pdb_file, extra), file=out)
+  s.show(out=out, prefix="  ", show_percentiles=True)
+  print("", file=out)
+  return s
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/verify_mon_lib_data.py
+
+from __future__ import absolute_import, division, print_function
+
+def run():
+  from mmtbx.monomer_library import server
+  from libtbx.utils import Sorry
+  try :
+    cif1 = server.mon_lib_list_cif()
+    cif2 = server.geostd_list_cif()
+    cif3 = server.mon_lib_ener_lib_cif()
+    assert (not None in [cif1, cif2, cif3])
+  except server.MonomerLibraryServerError :
+    raise Sorry("The monomer library installation could not be found.  If "+
+      "you are using a Phenix installer, we recommend downloading the "+
+      "installer again and reinstalling.")
+  else :
+    print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/water_b_factors.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME mmtbx.development.water_b_factors
+
+from iotbx.cli_parser import run_program
+from mmtbx.programs.water_b_factors import Program
+
+if (__name__ == '__main__'):
+  results = run_program(program_class=Program)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/xmanip.py
+from __future__ import absolute_import, division, print_function
+# LIBTBX_SET_DISPATCHER_NAME phenix.xmanip
+
+from mmtbx import xmanip
+import sys
+
+if (__name__ == "__main__"):
+  xmanip.run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/xtrapol8.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.development.xtrapol8
+from __future__ import absolute_import, division, print_function
+
+from iotbx.cli_parser import run_program
+from mmtbx.programs import xtrapol8
+
+if __name__ == '__main__':
+  run_program(program_class=xtrapol8.Program)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/command_line/xtriage.py
+# LIBTBX_SET_DISPATCHER_NAME phenix.xtriage
+# LIBTBX_SET_DISPATCHER_NAME mmtbx.xtriage
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.scaling import xtriage
+import sys
+
+if (__name__ == "__main__"):
+  xtriage.run(args=sys.argv[1:])
+
+
+ *******************************************************************************

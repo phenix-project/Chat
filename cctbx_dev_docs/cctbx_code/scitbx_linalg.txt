@@ -1,0 +1,1185 @@
+
+
+ *******************************************************************************
+scitbx/linalg/__init__.py
+from __future__ import absolute_import, division, print_function
+from scitbx.linalg.ext import *
+from scitbx.linalg.householder import *
+from scitbx.array_family import flex
+import scitbx.matrix
+
+class random_normal_matrix_generator(ext.random_normal_matrix_generator):
+
+  def __init__(self, m, n):
+    super(random_normal_matrix_generator, self).__init__(m, n)
+    self.state = flex.random_generator.getstate()
+
+
+def matrix_equality_ratio(a, b, eps=None):
+  if isinstance(a, scitbx.matrix.rec):
+    a = a.as_flex_double_matrix()
+  if isinstance(b, scitbx.matrix.rec):
+    b = b.as_flex_double_matrix()
+  if eps is not None:
+    return ext.matrix_equality_ratio(a, b, eps)
+  else:
+    return ext.matrix_equality_ratio(a, b)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/boost_python/__init__.py
+"""
+linalg/boost_python/__init__
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/eigensystem.py
+from __future__ import absolute_import, division, print_function
+from scitbx.linalg.ext import eigensystem_real_symmetric as real_symmetric # implicit import
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/ext.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+bp.import_ext("scitbx_linalg_ext")
+from scitbx_linalg_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/householder.py
+from __future__ import absolute_import, division, print_function
+from scitbx.linalg import ext
+
+class householder_qr_decomposition(ext.householder_qr_decomposition):
+
+  def __init__(self, matrix, may_accumulate_q):
+    super(householder_qr_decomposition, self).__init__(
+      matrix, may_accumulate_q)
+    self.r = matrix
+
+class householder_lq_decomposition(ext.householder_lq_decomposition):
+
+  def __init__(self, matrix, may_accumulate_q):
+    super(householder_lq_decomposition, self).__init__(
+      matrix, may_accumulate_q)
+    self.l = matrix
+
+class householder_bidiagonalisation(ext.householder_bidiagonalisation):
+
+  def __init__(self, matrix):
+    super(householder_bidiagonalisation, self).__init__(matrix)
+    self.bidiagonal = matrix
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/svd.py
+from __future__ import absolute_import, division, print_function
+import libtbx
+import scitbx.linalg
+from scitbx.array_family import flex
+
+class real_bidiagonal(scitbx.linalg.svd_decomposition_of_bidiagonal_matrix):
+
+  def compute(self):
+    super(real_bidiagonal, self).compute()
+    assert self.has_converged
+    self.sort()
+
+
+class real(object):
+  """ SVD decomposition of a real matrix.
+
+      TODO: fix crashes for n x 1 or 1 x n matrices
+
+      References:
+        [1] Tony F. Chan,
+            An improved algorithm for computing the singular value
+            decomposition,
+            ACM Trans. Math. Soft. 8 (1982), no. 1, 72-83.
+  """
+
+  crossover = 5/3
+  """ crossover from [1, table II] (note: LAPACK uses m > 1.6*n) """
+
+  def __init__(self, a, accumulate_u, accumulate_v, epsilon=None):
+    """ Compute the decomposition of a (A = U S V^T).
+        The matrix a is overwritten in the process.
+        The singular values are available in self.sigma.
+        The matrices U and V are assembled only if requested, in which case
+        they are avalaible in self.u and self.v.
+        The argument epsilon is the "precision" to compute the singular
+        values with, in the sense of the epsilon machine.
+    """
+    from scitbx.linalg import bidiagonal_matrix_kind
+    m, n = a.focus()
+    u = flex.double()
+    u.reshape(flex.grid(0,0))
+    v = u
+
+    common_svd_args = libtbx.group_args(accumulate_u=accumulate_u,
+                                        accumulate_v=accumulate_v)
+    if epsilon is not None:
+      common_svd_args.epsilon = epsilon
+
+    if m > self.crossover * n:
+      # many more rows than columns
+      qr = scitbx.linalg.householder_qr_decomposition(
+        a, may_accumulate_q=accumulate_u)
+      r = a.matrix_copy_upper_triangle()
+      if accumulate_u:
+        qr.accumulate_q_in_place()
+        q = a
+      bidiag = scitbx.linalg.householder_bidiagonalisation(r)
+      if accumulate_u: u = bidiag.u()
+      if accumulate_v: v = bidiag.v()
+      d, f = r.matrix_upper_bidiagonal()
+      svd = real_bidiagonal(diagonal=d, off_diagonal=f,
+                            kind=bidiagonal_matrix_kind.upper_diagonal,
+                            u=u, v=v,
+                            **common_svd_args.__dict__)
+      svd.compute()
+      if accumulate_u:
+        u = q.matrix_multiply(u)
+    elif n > self.crossover * m:
+      # many more columns than rows
+      lq = scitbx.linalg.householder_lq_decomposition(
+        a, may_accumulate_q=accumulate_u)
+      l = a.matrix_copy_lower_triangle()
+      if accumulate_v:
+        lq.accumulate_q_in_place()
+        q = a
+      bidiag = scitbx.linalg.householder_bidiagonalisation(l)
+      if accumulate_u: u = bidiag.u()
+      if accumulate_v: v = bidiag.v()
+      d, f = l.matrix_upper_bidiagonal()
+      svd = real_bidiagonal(diagonal=d, off_diagonal=f,
+                            kind=bidiagonal_matrix_kind.upper_diagonal,
+                            u=u, v=v,
+                            **common_svd_args.__dict__)
+      svd.compute()
+      if accumulate_v:
+        v = q.matrix_transpose().matrix_multiply(v)
+    else:
+      # balanced number of rows and columns
+      bidiag = scitbx.linalg.householder_bidiagonalisation(a)
+      if accumulate_u: u = bidiag.u()
+      if accumulate_v: v = bidiag.v()
+      if m >= n:
+        d, f = a.matrix_upper_bidiagonal()
+        kind=bidiagonal_matrix_kind.upper_diagonal
+      else:
+        d, f = a.matrix_lower_bidiagonal()
+        kind=bidiagonal_matrix_kind.lower_diagonal
+      svd = real_bidiagonal(diagonal=d, off_diagonal=f,
+                            kind=kind,
+                            u=u, v=v,
+                            **common_svd_args.__dict__)
+      svd.compute()
+
+    self.u, self.v, self.sigma = u, v, d
+    self._svd = svd
+
+  def reconstruct(self):
+    """ Reconstruct the matrix A from its singular values and vectors """
+    assert self.u and self.v, "Missing singular vectors"
+    return scitbx.linalg.reconstruct_svd(self.u, self.v, self.sigma)
+
+  def numerical_rank(self, delta):
+    return self._svd.numerical_rank(delta)
+
+def inverse_via_svd(a,is_singular_threshold=1e-16):
+  svd_obj = real(a.deep_copy(),True,True,1e-16)
+  u = svd_obj.u
+  v = svd_obj.v
+  sigma = svd_obj.sigma
+  selection = flex.bool( sigma < flex.max( sigma )*is_singular_threshold  ).iselection()
+  inv_sigma = sigma.deep_copy()
+  inv_sigma.set_selected(selection,1.0)
+  inv_sigma =  1.0/inv_sigma
+  inv_sigma.set_selected(selection,0.0)
+  ia = scitbx.linalg.reconstruct_svd(v,u,inv_sigma) #.matrix_transpose(), inv_sigma)
+  return(ia, sigma)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/tests/__init__.py
+"""
+linalg/tests/__init__
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/tests/tst_cholesky.py
+from __future__ import absolute_import, division, print_function
+import scitbx.math
+import scitbx.linalg
+from scitbx import matrix
+from scitbx.array_family import flex
+from libtbx.test_utils import approx_equal
+import random
+from six.moves import range
+
+def exercise_cholesky_decomposition():
+  from scitbx.examples import immoptibox_ports
+  immoptibox_ports.py_cholesky_decomposition \
+    = immoptibox_ports.cholesky_decomposition
+  immoptibox_ports.cholesky_decomposition \
+    = exercise_scitbx_cholesky_decomposition
+  immoptibox_ports.tst_flex_counts = 0
+  immoptibox_ports.exercise_cholesky()
+  immoptibox_ports.cholesky_decomposition \
+    = immoptibox_ports.py_cholesky_decomposition
+  assert immoptibox_ports.tst_flex_counts == 299
+  del immoptibox_ports.tst_flex_counts
+
+def exercise_scitbx_cholesky_decomposition(a):
+  from scitbx.examples import immoptibox_ports
+  c = immoptibox_ports.py_cholesky_decomposition(a)
+  al = a.matrix_symmetric_as_packed_l()
+  chol = scitbx.linalg.l_l_transpose_cholesky_decomposition_in_place(al)
+  cl = al
+  if (c is None):
+    assert chol.failure
+  else:
+    assert approx_equal(cl, c.matrix_lower_triangle_as_packed_l())
+    for i_trial in range(10):
+      b = flex.random_double(size=a.focus()[0], factor=2)-1
+      x = chol.solve(b)
+      assert approx_equal(a.matrix_multiply(x), b)
+  immoptibox_ports.tst_flex_counts += 1
+  return c
+
+
+def exercise_gill_murray_wright_cholesky_decomposition():
+
+  def p_as_mx(p):
+    n = len(p)
+    m = flex.double(flex.grid(n,n))
+    m.matrix_diagonal_set_in_place(1)
+    for i in range(n):
+      if p[i] != i:
+        m.matrix_swap_rows_in_place(i, p[i])
+    return matrix.sqr(m)
+
+  def core(a):
+    c = flex.double(a)
+    c.resize(flex.grid(a.n))
+    u = c.matrix_upper_triangle_as_packed_u()
+    gwm = scitbx.linalg.gill_murray_wright_cholesky_decomposition_in_place(
+      u,
+      epsilon=1.e-8)
+    assert gwm.epsilon == 1.e-8
+    u = c.matrix_upper_triangle_as_packed_u()
+    gwm = scitbx.linalg.gill_murray_wright_cholesky_decomposition_in_place(u)
+    assert gwm.epsilon == scitbx.math.floating_point_epsilon_double_get()
+    assert gwm.packed_u.id() == u.id()
+    p, e = gwm.pivots, gwm.e
+    r = matrix.sqr(u.matrix_packed_u_as_upper_triangle())
+    if a.n != (0,0):
+      rtr = r.transpose() * r
+      pm = p_as_mx(p)
+      papt = pm * a * pm.transpose()
+      paept = papt + matrix.diag(e)
+      delta_decomposition = scitbx.linalg.matrix_equality_ratio(paept, rtr)
+      assert delta_decomposition < 10, delta_decomposition
+      b = flex.random_double(size=a.n[0], factor=2)-1
+      x = gwm.solve(b=b)
+      px = pm * matrix.col(x)
+      pb = pm * matrix.col(b)
+      if 0:
+        eigen = scitbx.linalg.eigensystem.real_symmetric(
+          paept.as_flex_double_matrix())
+        lambda_ = eigen.values()
+        print("condition number: ", lambda_[0]/lambda_[-1])
+      delta_solve = scitbx.linalg.matrix_cholesky_test_ratio(
+        a=paept.as_flex_double_matrix(),
+        x=flex.double(px),
+        b=flex.double(pb),
+        epsilon=gwm.epsilon)
+      assert delta_solve < 10, delta_solve
+    return p, e, r
+  # empty matrix
+  a = matrix.sqr([])
+  p, e, r = core(a)
+  assert p.size() == 0
+  assert e.size() == 0
+  assert len(r) == 0
+  n_max = 15
+  n_trials_per_n = 10
+  # identity matrices
+  for n in range(1,n_max+1):
+    a = matrix.diag([1]*n)
+    p, e, r = core(a)
+    assert list(p) == list(range(n))
+    assert approx_equal(e, [0]*n)
+    assert approx_equal(r, a)
+  # null matrices
+  for n in range(1,n_max+1):
+    a = matrix.sqr([0]*n*n)
+    p, e, r = core(a)
+    assert list(p) == list(range(n))
+    assert list(e) == [scitbx.math.floating_point_epsilon_double_get()]*n
+    for i in range(n):
+      for j in range(n):
+        if (i != j): r(i,j) == 0
+        else: r(i,j) == r(0,0)
+  # random semi-positive diagonal matrices
+  for n in range(1,n_max+1):
+    for i_trial in range(n_trials_per_n):
+      a = matrix.diag(flex.random_double(size=n))
+      p, e, r = core(a)
+      assert approx_equal(e, [0]*n)
+      for i in range(n):
+        for j in range(n):
+          if (i != j): approx_equal(r(i,j), 0)
+  # random diagonal matrices
+  for n in range(1,n_max+1):
+    for i_trial in range(n_trials_per_n):
+      a = matrix.diag(flex.random_double(size=n, factor=2)-1)
+      p, e, r = core(a)
+      for i in range(n):
+        for j in range(n):
+          if (i != j): approx_equal(r(i,j), 0)
+  # random semi-positive definite matrices
+  for n in range(1,n_max+1):
+    for i_trial in range(n_trials_per_n):
+      m = matrix.sqr(flex.random_double(size=n*n, factor=2)-1)
+      a = m.transpose_multiply()
+      p, e, r = core(a)
+      assert approx_equal(e, [0]*n)
+  # random matrices
+  for n in range(1,n_max+1):
+    size = n*(n+1)//2
+    for i_trial in range(n_trials_per_n):
+      a = (flex.random_double(size=size, factor=2)-1) \
+            .matrix_packed_u_as_symmetric()
+      core(matrix.sqr(a))
+      a.matrix_diagonal_set_in_place(0)
+      core(matrix.sqr(a))
+  # J. Nocedal and S. Wright:
+  # Numerical Optimization.
+  # Springer, New York, 1999, pp. 145-150.
+  for i in range(3):
+    for j in range(3):
+      a = flex.double([[4,2,1],[2,6,3],[1,3,-0.004]])
+      a.matrix_swap_rows_in_place(i=i, j=j)
+      a.matrix_swap_columns_in_place(i=i, j=j)
+      p, e, r = core(matrix.sqr(a))
+      if (i == 0 and j == 0):
+        assert list(p) == [1,1,2] # swap row 0 and 1 and nothing else
+      assert approx_equal(e, [0.0, 0.0, 3.008])
+      assert approx_equal(r,
+        [2.4494897427831779, 0.81649658092772592, 1.2247448713915889,
+         0.0, 1.8257418583505538, 0.0,
+         0.0, 0.0, 1.2263767773404712])
+
+def run():
+  exercise_cholesky_decomposition()
+  exercise_gill_murray_wright_cholesky_decomposition()
+  print('OK')
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/tests/tst_eigensystem.py
+from __future__ import absolute_import, division, print_function
+import scitbx.linalg
+from scitbx.linalg import eigensystem, time_eigensystem_real_symmetric
+from scitbx.array_family import flex
+from libtbx.test_utils import approx_equal
+from scitbx.math.tests.tst_math import matrix_mul
+import random
+import time
+from six.moves import range
+
+def exercise_eigensystem():
+  s = eigensystem.real_symmetric(
+    m=flex.double(flex.grid(0,0)),
+    relative_epsilon=1e-6,
+    absolute_epsilon=1e-6)
+  s.values().all() == (0,)
+  assert s.vectors().all() == (0,0)
+  u = s.generalized_inverse_as_packed_u()
+  assert u.all() == (0,)
+  m = u.matrix_packed_u_as_symmetric()
+  assert m.all() == (0,0)
+  #
+  for n in range(1,10):
+    m = flex.double(flex.grid(n,n))
+    s = eigensystem.real_symmetric(m)
+    assert approx_equal(tuple(s.values()), [0]*n)
+    v = s.vectors()
+    for i in range(n):
+      for j in range(n):
+        x = 0
+        if (i == j): x = 1
+        assert approx_equal(v[(i,j)], x)
+    v = []
+    for i in range(n):
+      j = (i*13+17) % n
+      v.append(j)
+      m[i*(n+1)] = j
+    s = eigensystem.real_symmetric(m)
+    if (n == 3):
+      ss = eigensystem.real_symmetric((m[0],m[4],m[8],m[1],m[2],m[5]))
+      assert approx_equal(s.values(), ss.values())
+      assert approx_equal(s.vectors(), ss.vectors())
+    v.sort()
+    v.reverse()
+    assert approx_equal(s.values(), v)
+    if (n > 1):
+      assert approx_equal(flex.min(s.vectors()), 0)
+    assert approx_equal(flex.max(s.vectors()), 1)
+    assert approx_equal(flex.sum(s.vectors()), n)
+    for t in range(10):
+      for i in range(n):
+        for j in range(i,n):
+          m[i*n+j] = random.random() - 0.5
+          if (i != j):
+            m[j*n+i] = m[i*n+j]
+      s = eigensystem.real_symmetric(m)
+      if (n == 3):
+        ss = eigensystem.real_symmetric((m[0],m[4],m[8],m[1],m[2],m[5]))
+        assert approx_equal(s.values(), ss.values())
+        assert approx_equal(s.vectors(), ss.vectors())
+      v = list(s.values())
+      v.sort()
+      v.reverse()
+      assert list(s.values()) == v
+      for i in range(n):
+        l = s.values()[i]
+        x = s.vectors()[i*n:i*n+n]
+        mx = matrix_mul(m, n, n, x, n, 1)
+        lx = [e*l for e in x]
+        assert approx_equal(mx, lx)
+  #
+  m = (1.4573362052597449, 1.7361052947659894, 2.8065584999742659,
+       -0.5387293498219814, -0.018204949672480729, 0.44956507395617257)
+  n_repetitions = 10000
+  t0 = time.time()
+  v = time_eigensystem_real_symmetric(m, n_repetitions)
+  assert v == (0,0,0)
+  print("time_eigensystem_real_symmetric: %.3f micro seconds" % (
+    (time.time() - t0)/n_repetitions*1.e6))
+  from scitbx.linalg import time_lapack_dsyev
+  for use_fortran in [False, True]:
+    if (not use_fortran):
+      if (not scitbx.linalg.fem_is_available()): continue
+      impl_id = "fem"
+    else:
+      if (not scitbx.linalg.for_is_available()): continue
+      impl_id = "for"
+    v = time_lapack_dsyev(m, 2, use_fortran)
+      # to trigger one-time initialization of SAVE variables
+    t0 = time.time()
+    v = time_lapack_dsyev(m, n_repetitions, use_fortran)
+    assert v == (0,0,0)
+    print("time_lapack_dsyev %s: %.3f micro seconds" % (
+      impl_id, (time.time() - t0)/n_repetitions*1.e6))
+  #
+  s = eigensystem.real_symmetric(m=m)
+  assert s.min_abs_pivot() > 0
+  assert s.min_abs_pivot() < 1.e-10
+  assert approx_equal(s.generalized_inverse_as_packed_u(), [
+    0.77839538602575065, 0.25063185439711611, -0.03509803174624003,
+    0.68162798233326816, -0.10755998636596431, 0.37330996497431423])
+  s = eigensystem.real_symmetric(m=m, absolute_epsilon=10)
+  assert s.min_abs_pivot() == 10
+  assert approx_equal(s.vectors(), [0, 0, 1, 0, 1, 0, 1, 0, 0])
+  assert approx_equal(s.values(),
+    [2.8065584999742659, 1.7361052947659894, 1.4573362052597449])
+  s = eigensystem.real_symmetric(m=m, relative_epsilon=0)
+  assert s.min_abs_pivot() == 0
+  assert approx_equal(s.values(), [3,2,1])
+
+def compare_times(max_n_power=8):
+  from scitbx.linalg import lapack_dsyev
+  mt = flex.mersenne_twister(seed=0)
+  show_tab_header = True
+  tfmt = "%5.2f"
+  for n_power in range(5,max_n_power+1):
+    n = 2**n_power
+    l = mt.random_double(size=n*(n+1)//2) * 2 - 1
+    a = l.matrix_packed_l_as_symmetric()
+    aes = a.deep_copy()
+    ala = [a.deep_copy(), a.deep_copy()]
+    wla = [flex.double(n, -1e100), flex.double(n, -1e100)]
+    t0 = time.time()
+    es = eigensystem.real_symmetric(aes)
+    tab = [n, tfmt % (time.time() - t0)]
+    for i,use_fortran in enumerate([False, True]):
+      t0 = time.time()
+      info = lapack_dsyev(
+        jobz="V", uplo="U", a=ala[i], w=wla[i], use_fortran=use_fortran)
+      if (info == 99):
+        tab.append(" --- ")
+      else:
+        assert info == 0
+        tab.append(tfmt % (time.time() - t0))
+        assert approx_equal(list(reversed(es.values())), wla[i])
+    if (show_tab_header):
+      print("      time [s]           eigenvalues")
+      print(" n    es   fem   for     min    max")
+      show_tab_header = False
+    tab.extend([es.values()[-1], es.values()[0]])
+    print("%3d %s %s %s [%6.2f %6.2f]" % tuple(tab))
+
+def run():
+  exercise_eigensystem()
+  compare_times()
+  print('OK')
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/tests/tst_lapack_dsyev.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+def exercise(use_fortran):
+  from scitbx.linalg import lapack_dsyev
+  from scitbx.array_family import flex
+  from scitbx.math.tests.tst_math import matrix_mul
+  from libtbx.test_utils import approx_equal
+  import random
+  random.seed(0)
+  #
+  for diag in [0, 1]:
+    for n in range(1, 11):
+      for uplo in ["U", "L"]:
+        a = flex.double(flex.grid(n,n), 0)
+        for i in range(n):
+          a[(i,i)] = diag
+        w = flex.double(n, -1e100)
+        a_inp = a.deep_copy()
+        info = lapack_dsyev(
+          jobz="V", uplo=uplo, a=a, w=w, use_fortran=use_fortran)
+        if (info == 99):
+          if (not use_fortran):
+            print("Skipping tests: lapack_dsyev not available.")
+          return
+        assert info == 0
+        assert approx_equal(w, [diag]*n)
+        if (diag != 0):
+          assert approx_equal(a, a_inp)
+  #
+  for i_trial in range(10):
+    for n in range(1, 11):
+      for uplo in ["U", "L"]:
+        a = flex.double(flex.grid(n,n))
+        for i in range(n):
+          for j in range(i,n):
+            a[i*n+j] = random.random() - 0.5
+            if (i != j):
+              a[j*n+i] = a[i*n+j]
+        w = flex.double(n, -1e100)
+        a_inp = a.deep_copy()
+        info = lapack_dsyev(
+          jobz="V", uplo=uplo, a=a, w=w, use_fortran=use_fortran)
+        assert info == 0
+        for i in range(1,n):
+          assert w[i-1] <= w[i]
+        for i in range(n):
+          l = w[i]
+          x = a[i*n:i*n+n]
+          ax = matrix_mul(a_inp, n, n, x, n, 1)
+          lx = [e*l for e in x]
+          assert approx_equal(ax, lx)
+  #
+  a = flex.double([
+     0.47,  0.10, -0.21,
+     0.10,  0.01, -0.03,
+    -0.21, -0.03, 0.35])
+  a.reshape(flex.grid(3,3))
+  w = flex.double(3, -1e100)
+  info = lapack_dsyev(jobz="V", uplo=uplo, a=a, w=w, use_fortran=use_fortran)
+  assert info == 0
+  assert approx_equal(w, [-0.0114574, 0.1978572, 0.6436002])
+  assert approx_equal(a, [
+    -0.2236115,  0.9734398, -0.0491212,
+    -0.5621211, -0.1699700, -0.8094010,
+    -0.7962523, -0.1533793,  0.5851983])
+
+def run(args):
+  assert len(args) == 0
+  for use_fortran in [False, True]:
+    exercise(use_fortran=use_fortran)
+  print("OK")
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/tests/tst_lapack_svd.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+def exercise_impl(svd_impl_name, use_fortran):
+  import scitbx.linalg
+  svd_impl = getattr(scitbx.linalg, "lapack_%s" % svd_impl_name)
+  from scitbx.array_family import flex
+  from scitbx import matrix
+  from libtbx.test_utils import approx_equal
+  #
+  for diag in [0, 1]:
+    for n in range(1, 11):
+      a = flex.double(flex.grid(n,n), 0)
+      for i in range(n):
+        a[(i,i)] = diag
+      a_inp = a.deep_copy()
+      svd = svd_impl(a=a, use_fortran=use_fortran)
+      if (svd is None):
+        if (not use_fortran):
+          print("Skipping tests: lapack_%s not available." % svd_impl_name)
+        return
+      assert svd.info == 0
+      assert approx_equal(svd.s, [diag]*n)
+      assert svd.u.all() == (n,n)
+      assert svd.vt.all() == (n,n)
+
+  mt = flex.mersenne_twister(seed=0)
+  for m in range(1,11):
+    for n in range(1,11):
+      a = matrix.rec(elems=tuple(mt.random_double(m*n)*4-2), n=(m,n))
+      svd = svd_impl(
+        a=a.transpose().as_flex_double_matrix(), use_fortran=use_fortran)
+      assert svd.info == 0
+      sigma = matrix.diag(svd.s) # min(m,n) x min(m,n)
+      # FORTRAN layout, so transpose
+      u  = matrix.rec(svd.u ,  svd.u.all()).transpose()
+      vt = matrix.rec(svd.vt, svd.vt.all()).transpose()
+      assert approx_equal(u * sigma * vt, a)
+  #
+  a = matrix.rec(elems=[
+     0.47,  0.10, -0.21,
+    -0.21, -0.03, 0.35], n=(3,2))
+  svd = svd_impl(
+    a=a.transpose().as_flex_double_matrix(), use_fortran=use_fortran)
+  assert svd.info == 0
+  assert approx_equal(svd.s, [0.55981345199567534, 0.35931726783538481])
+  # again remember column-major storage
+  assert approx_equal(svd.u, [
+    0.81402078804155853, -0.5136261274467826, 0.27121644094748704,
+    -0.42424674329757839, -0.20684171439391938, 0.88160717215094342])
+  assert approx_equal(svd.vt, [
+    0.8615633693608673, -0.50765003750177129,
+    0.50765003750177129, 0.8615633693608673])
+
+def exercise():
+  for svd_impl_name in ["dgesvd", "dgesdd"]:
+    for use_fortran in [False, True]:
+      exercise_impl(svd_impl_name=svd_impl_name, use_fortran=use_fortran)
+
+def compare_times(
+      comprehensive=False,
+      svd_impl_name="dgesvd",
+      use_fortran=False):
+  import scitbx.linalg.svd
+  from scitbx.array_family import flex
+  import time
+  from libtbx.utils import progress_displayed_as_fraction
+  mt = flex.mersenne_twister(seed=0)
+  samples = []
+  if not comprehensive:
+    dims = (100, 200)
+    for m in dims:
+      for n in dims:
+        samples.append((m, n))
+  else:
+    if comprehensive == "timing-1":
+      dims = range(100, 600, 100)
+      for m in dims:
+        for n in dims:
+          samples.append((m, n))
+    elif comprehensive == "timing-2":
+      for k in (1, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9,
+                2, 3, 4, 5, 6, 7, 8, 9, 10,
+                20, 30, 40, 50, 60, 70, 80, 90, 100):
+        for n in (10, 20, 30, 40, 50, 60, 70, 80, 90, 100):
+          samples.append((int(k*n), n))
+    else:
+      raise RuntimeError(comprehensive)
+  if not comprehensive:
+    header = " m   n  real %s %s" % (
+      svd_impl_name, ["fem", "for"][int(use_fortran)])
+  else:
+    handwritten_wrt_lapack = []
+    progress = progress_displayed_as_fraction(len(samples))
+  lapack_svd_impl = getattr(scitbx.linalg, "lapack_%s" % svd_impl_name)
+  try:
+    for m, n in samples:
+      if comprehensive: progress.advance()
+      a = mt.random_double(size=m*n)*4-2
+      a.reshape(flex.grid(m,n))
+      ac = a.deep_copy()
+      t0 = time.time()
+      svd_real = scitbx.linalg.svd.real(
+        ac, accumulate_u=True, accumulate_v=True)
+      time_svd_real = time.time() - t0
+      t0 = time.time()
+      at = a.matrix_transpose()
+      svd_lapack = lapack_svd_impl(a=at, use_fortran=use_fortran)
+      if (svd_lapack is None):
+        return
+      svd_lapack.u.matrix_transpose()
+      svd_lapack.vt.matrix_transpose()
+      time_dgesvd = time.time() - t0
+      if not comprehensive:
+        if (header is not None):
+          print(header)
+          header = None
+        print("%3d %3d %4.2f %4.2f" % (m, n, time_svd_real, time_dgesvd))
+      else:
+        handwritten_wrt_lapack.append((m, n, time_svd_real/time_dgesvd))
+  finally:
+    if comprehensive:
+      print("handwrittenwrtlapack%s%s={" % (svd_impl_name,
+                                            ['', 'fortran'][use_fortran]))
+      print(",".join([ "{%3d, %3d, %4.2f}" % (m, n, t)
+                       for (m, n, t) in handwritten_wrt_lapack ]))
+      print("}")
+
+def run(args):
+  from libtbx.option_parser import option_parser
+  command_line = (option_parser()
+    .option(None, "--comprehensive",
+            action="store",
+            type="string",
+            default='')
+    .option(None, "--languages",
+            action="store",
+            type="string",
+            default='fem,fortran')
+    .option(None, "--implementations",
+            action="store",
+            type="string",
+            default='dgesvd,dgesdd')
+  ).process(args=sys.argv[1:])
+  exercise()
+  comprehensive = command_line.options.comprehensive
+  use_fortran_flags = [ {'fem':False, 'fortran':True}[l]
+                        for l in command_line.options.languages.split(',') ]
+  svd_impl_names = command_line.options.implementations.split(',')
+  for svd_impl_name in svd_impl_names:
+    for use_fortran in use_fortran_flags:
+      compare_times(svd_impl_name=svd_impl_name,
+                    use_fortran=use_fortran,
+                    comprehensive=comprehensive)
+  print("OK")
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/tests/tst_matrix.py
+from __future__ import absolute_import, division, print_function
+import scitbx.linalg
+import scitbx.linalg.eigensystem
+from scitbx.array_family import flex
+from libtbx.test_utils import approx_equal
+from scitbx.linalg import matrix_normality_ratio
+from six.moves import range
+
+def exercise_random_normal_matrix():
+  for m, n in [ (3,5), (4,5), (5,5), (5,4), (5,3) ]:
+    gen = scitbx.linalg.random_normal_matrix_generator(m, n)
+    for i in range(10):
+      assert matrix_normality_ratio(gen.normal_matrix()) < 10
+
+  sigma = flex.double((1, 2, 3))
+  for m, n in [ (3,5), (4,5), (5,5), (5,4), (5,3) ]:
+    gen = scitbx.linalg.random_normal_matrix_generator(m, n)
+    a = gen.matrix_with_singular_values(sigma)
+    eig_u = scitbx.linalg.eigensystem.real_symmetric(
+      a.matrix_multiply(a.matrix_transpose()))
+    eig_v = scitbx.linalg.eigensystem.real_symmetric(
+      a.matrix_transpose().matrix_multiply(a))
+    assert approx_equal(list(eig_u.values()), [9, 4, 1] + [0,]*(m-3))
+    assert approx_equal(list(eig_v.values()),  [9, 4, 1] + [0,]*(n-3))
+
+def exercise_householder():
+  a = flex.double([
+    ( 4.0, 1.0,-1.0, 2.0),
+    (1.0, 4.0, 1.0,-1.0),
+    (-1.0, 1.0, 4.0, 1.0),
+    (2.0,-1.0, 1.0, 4.0)])
+  qr = scitbx.linalg.householder_qr_decomposition(a, may_accumulate_q=True)
+  del a
+  q = qr.q()
+
+def run():
+  exercise_householder()
+  exercise_random_normal_matrix()
+  print('OK')
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/linalg/tests/tst_svd.py
+from __future__ import absolute_import, division, print_function
+import math
+import scitbx.math
+import scitbx.linalg.svd
+from scitbx.linalg import matrix_equality_ratio, matrix_normality_ratio
+from six.moves import range
+try: import tntbx
+except ImportError: tntbx = None
+import libtbx.utils
+import sys
+import random
+from libtbx.test_utils import approx_equal
+
+import scitbx.linalg as linalg
+
+from scitbx.array_family import flex
+
+def exercise_svd_basic(klass):
+  a = flex.double(range(1,19))
+  sigma = [ 45.8945322027251, 1.6407053035305987, 0 ]
+  a.resize(flex.grid(6,3))
+  svd = klass(
+    a.deep_copy(),
+    accumulate_u=True,
+    accumulate_v=True)
+
+  assert approx_equal(svd.sigma, sigma)
+  a1 = svd.reconstruct()
+  assert matrix_equality_ratio(a, a1) < 10
+  assert matrix_normality_ratio(svd.u) < 10
+  assert matrix_normality_ratio(svd.v) < 10
+  svd = klass(a.deep_copy(),
+                             accumulate_u=False, accumulate_v=False)
+  assert approx_equal(svd.sigma, sigma)
+  if klass == scitbx.linalg.svd.real:
+    assert not svd.u and not svd.v
+  else:
+    try:
+      svd.u
+      raise Exception_expected
+    except Exception:
+      pass
+  try:
+    svd.reconstruct()
+    raise Exception_expected
+  except AssertionError:
+    pass
+  except RuntimeError:
+    if klass == scitbx.linalg.svd_decompose:
+      pass
+
+  a = a.matrix_transpose()
+  svd = klass(
+    a.deep_copy(),
+    accumulate_u=True,
+    accumulate_v=True)
+  assert approx_equal(svd.sigma, sigma)
+  a1 = svd.reconstruct()
+  assert matrix_equality_ratio(a, a1) < 10
+  assert matrix_normality_ratio(svd.u) < 10
+  assert matrix_normality_ratio(svd.v) < 10
+
+  a = flex.double(range(1,13))
+  sigma = [25.436835633480246818, 1.7226122475210637387, 0]
+  a.reshape(flex.grid(3,4))
+  svd = klass(
+    a.deep_copy(),
+    accumulate_u=True,
+    accumulate_v=True)
+  assert approx_equal(svd.sigma, sigma)
+  a1 = svd.reconstruct()
+  assert matrix_equality_ratio(a, a1) < 10
+  assert matrix_normality_ratio(svd.u) < 10
+  assert matrix_normality_ratio(svd.v) < 10
+
+  a = a.matrix_transpose()
+  svd = klass(
+    a.deep_copy(),
+    accumulate_u=True,
+    accumulate_v=True)
+  assert approx_equal(svd.sigma, sigma)
+  a1 = svd.reconstruct()
+  assert matrix_equality_ratio(a, a1) < 10
+  assert matrix_normality_ratio(svd.u) < 10
+  assert matrix_normality_ratio(svd.v) < 10
+
+
+class test_case(object):
+
+  n_matrices_per_dimension = 1
+  full_coverage = True
+  show_progress = False
+  exercise_tntbx = False
+  eps=scitbx.math.double_numeric_limits.epsilon
+
+  def __init__(self, klass, **kwds):
+    libtbx.adopt_optional_init_args(self, kwds)
+    self.klass = klass
+    self.exercise_tntbx = self.exercise_tntbx and tntbx is not None
+    if self.exercise_tntbx:
+      self.accumulate_u = self.accumulate_v = True
+    else:
+      self.accumulate_u = self.accumulate_v = False
+
+  def matrices(self):
+    for k in (1, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9,
+              2, 3, 4, 5, 6, 7, 8, 9, 10,
+              20, 30, 40, 50, 60, 70, 80, 90, 100):
+      for n in (10, 20, 30, 40, 50, 60, 70, 80, 90, 100):
+        if not self.full_coverage and random.random() < 0.9: continue
+        m = int(k*n)
+        gen = scitbx.linalg.random_normal_matrix_generator(m, n)
+        for p in range(self.n_matrices_per_dimension):
+          sigma = self.sigma(m,n)
+          yield sigma, gen.matrix_with_singular_values(sigma)
+
+  def exercise_increasing_dimensions(self):
+    print("Scaling with m and m/n: ", end=' ')
+    n_tests = 0
+    for sigma, a in self.matrices():
+      m, n = a.focus()
+      if self.show_progress:
+        if not n_tests: print()
+        print((m,n), end=' ')
+        sys.stdout.flush()
+      svd = self.klass(a, self.accumulate_u, self.accumulate_v)
+      if self.show_progress:
+        print('!', end=' ')
+        sys.stdout.flush()
+      sigma = sigma.select(flex.sort_permutation(sigma, reverse=True))
+      delta = (svd.sigma - sigma).norm()/sigma.norm()/min(m,n)/self.eps
+      assert delta < 10
+      n_tests += 1
+
+      if not self.exercise_tntbx:
+        if self.show_progress: print()
+        continue
+      svd = tntbx.svd_m_ge_n_double(a)
+      if self.show_progress:
+        print('!')
+        sys.stdout.flush()
+      sigma = sigma.select(flex.sort_permutation(sigma, reverse=True))
+      delta = ((svd.singular_values() - sigma).norm()
+               /sigma.norm()/min(m,n)/self.eps)
+      assert delta < 10
+    if self.show_progress: print()
+    print("%i done" % n_tests)
+
+  def time(self):
+    from libtbx.easy_profile import easy_profile
+    self.scitbx_report = []
+    self.tntbx_report = []
+    prof_scitbx = easy_profile(self.klass,
+                                file_name='svd.py', func_name='__init__',
+                                line=None)
+    if tntbx is not None:
+      prof_tntbx = easy_profile(lambda m: tntbx.svd_m_ge_n_double(m),
+                                  file_name='tst_svd.py', func_name='<lambda>',
+                                  line=None)
+    for sigma, a in self.matrices():
+      m, n = a.focus()
+      if self.show_progress:
+        print((m,n), end=' ')
+        sys.stdout.flush()
+      flops = min(2*m*n**2 - 2*n**3/3, m*n**2 + n**3)
+      runs = max(int(1e4/flops), 1)
+      if tntbx:
+        prof_tntbx.runs = runs
+        sys.stdout.flush()
+        t = prof_tntbx.time(a)
+        if self.show_progress:
+          print('!', end=' ')
+        self.tntbx_report.append((m, n, t))
+      prof_scitbx.runs = runs
+      t = prof_scitbx.time(a, accumulate_u=True, accumulate_v=True)
+      if self.show_progress:
+        print('!')
+      self.scitbx_report.append((m, n, t))
+    print('scitbx = {')
+    print(', '.join([ "{%i, %i, %f}" % (m, n, t)
+                      for m, n, t in self.scitbx_report ]))
+    print('};')
+    if tntbx:
+      print('(***************************************************)')
+      print('(***************************************************)')
+      print('tntbx = {')
+      print(', '.join([ "{%i, %i, %f}" % (m, n, t)
+                        for m, n, t in self.tntbx_report ]))
+      print('};')
+
+
+class chunks_of_small_and_big_singular_values_case(test_case):
+  """ Top left half of singular values small, lower right big """
+
+  big = 1e50
+
+  def sigma(self, m, n):
+    p = min(m,n)
+    sigma = flex.random_double(p - p//2, factor=1/self.big)
+    sigma.extend(flex.random_double(p//2, factor=self.big) + self.big)
+    return sigma
+
+
+def exercise_densely_distributed_singular_values(show_progress, full_coverage, klass):
+  n = 40
+  m = 2*n
+  n_runs = 20
+  tol = 10*scitbx.math.double_numeric_limits.epsilon
+  gen = scitbx.linalg.random_normal_matrix_generator(m, n)
+  sigmas = []
+  sigmas.append( flex.double([ 10**(-i/n) for i in range(n) ]) )
+  sigmas.append( sigmas[0].select(flex.random_permutation(n))   )
+  sigmas.append( sigmas[0].reversed()                           )
+  print("Densely distributed singular values:", end=' ')
+  n_tests = 0
+  for i in range(n_runs):
+    if not full_coverage and random.random() < 0.8: continue
+    n_tests += 1
+    for i_case, sigma in enumerate(sigmas):
+      a = gen.matrix_with_singular_values(sigma)
+      svd = klass(a, accumulate_u=False, accumulate_v=False)
+      if i_case > 0: sigma = sigma.select(
+        flex.sort_permutation(sigma, reverse=True))
+      delta = (svd.sigma - sigma)/sigma/tol
+      assert delta.all_lt(5)
+  print("%i done." % n_tests)
+
+def exercise_singular_matrix(klass):
+  n = 20
+  m = 3*n
+  tol = 10*scitbx.math.double_numeric_limits.epsilon
+  rows = [ flex.random_double(m) for i in range(n-2) ]
+  rows.append(rows[n//2] + rows[n//3])
+  rows.append(rows[n//4] - rows[n//5])
+  random.shuffle(rows)
+  a = flex.double()
+  for r in rows: a.extend(r)
+  a.reshape(flex.grid(n, m))
+  a = a.matrix_transpose()
+  svd = klass(a.deep_copy(), accumulate_u=True, accumulate_v=True)
+  assert svd.numerical_rank(svd.sigma[0]*tol) == n-2
+
+def exercise_inverse():
+
+  #standard 2x2 matrix
+  a = flex.double( flex.grid(2,2), 0.0 )
+  a[(0,0)] = 1
+  a[(0,1)] = 2
+  a[(1,0)] = 3
+  a[(1,1)] = 4
+  result,sigma = scitbx.linalg.svd.inverse_via_svd(a)
+  assert approx_equal(result[(0,0)],-2.0,eps=1e-6)
+  assert approx_equal(result[(0,1)], 1.0,eps=1e-6)
+  assert approx_equal(result[(1,0)], 1.5,eps=1e-6)
+  assert approx_equal(result[(1,1)],-0.5,eps=1e-6)
+  uu = a.matrix_multiply(result)
+
+  for ii in range(10):
+    n = 30
+    # random matrix
+    a = flex.double( flex.grid(n,n),0 )
+    for aa in range(n):
+      for bb in range(aa,n):
+        tmp = random.random()
+        a[(aa,bb)]=tmp
+        a[(bb,aa)]=tmp
+
+    result,sigma = scitbx.linalg.svd.inverse_via_svd(a.deep_copy(), 1e-6)
+    uu = a.matrix_multiply(result)
+    for aa in range(n):
+      for bb in range(n):
+        tmp=0
+        if aa==bb: tmp=1.0
+        assert approx_equal( uu[(aa,bb)], tmp, 0.02 )
+
+
+def run_for_class(show_progress, exercise_tntbx, full_coverage, klass):
+  print("Executing for: %s" %str(klass))
+  if klass == scitbx.linalg.svd.real:
+    exercise_inverse()
+  exercise_svd_basic(klass)
+  exercise_svd_basic(klass)
+  exercise_singular_matrix(klass)
+  exercise_densely_distributed_singular_values(show_progress=show_progress,
+                                               full_coverage=full_coverage,
+                                               klass=klass)
+  t = chunks_of_small_and_big_singular_values_case(
+    show_progress=show_progress,
+    exercise_tntbx=exercise_tntbx,
+    full_coverage=full_coverage,
+    klass=klass
+  )
+  t.exercise_increasing_dimensions()
+  print(libtbx.utils.format_cpu_times(klass))
+
+def run(show_progress, exercise_tntbx, full_coverage):
+  run_for_class(show_progress, exercise_tntbx, full_coverage, scitbx.linalg.svd.real)
+  run_for_class(show_progress, exercise_tntbx, full_coverage, linalg.svd_decompose)
+
+def time(show_progress, exercise_tntbx):
+  t = chunks_of_small_and_big_singular_values_case(
+    show_progress=show_progress,
+    exercise_tntbx=exercise_tntbx)
+  t.time()
+
+if __name__ == '__main__':
+  show_progress = '--show-progress' in sys.argv[1:]
+  exercise_tntbx = '--exercise-tntbx' in sys.argv[1:]
+  full_coverage = '--full-coverage' in sys.argv[1:]
+  if '--time' not in sys.argv[1:]:
+    run(show_progress=show_progress, exercise_tntbx=exercise_tntbx,
+        full_coverage=full_coverage)
+  else:
+    time(show_progress=show_progress, exercise_tntbx=exercise_tntbx)
+
+
+ *******************************************************************************

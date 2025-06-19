@@ -1,0 +1,805 @@
+
+
+ *******************************************************************************
+mmtbx/chemical_components/__init__.py
+from __future__ import absolute_import, division, print_function
+from mmtbx.chemical_components import cif_parser
+from libtbx.utils import Sorry
+import libtbx.load_env
+import os
+import sys
+from six.moves import zip
+
+l_amino_types = ['L-PEPTIDE LINKING']
+d_amino_types = ['D-PEPTIDE LINKING']
+amino_types = ['PEPTIDE LINKING',
+               'PEPTIDE-LIKE',
+               ] + l_amino_types + d_amino_types
+rna_types = [
+  'RNA LINKING',
+  'L-RNA LINKING',
+  'RNA OH 3 PRIME TERMINUS',
+  'RNA OH 5 PRIME TERMINUS',
+  ]
+dna_types = [
+  'DNA LINKING',
+  'L-DNA LINKING',
+  'DNA OH 3 PRIME TERMINUS',
+  'DNA OH 5 PRIME TERMINUS',
+  ]
+rna_dna_types = rna_types + dna_types
+
+l_sugar_types = ["L-SACCHARIDE",
+                 'L-SACCHARIDE, ALPHA LINKING',
+                 'L-SACCHARIDE, BETA LINKING',
+                 'L-SACCHARIDE 1,4 AND 1,4 LINKING',
+                 ]
+d_sugar_types = ["D-SACCHARIDE",
+                 'D-SACCHARIDE, ALPHA LINKING',
+                 'D-SACCHARIDE, BETA LINKING',
+                 'D-SACCHARIDE 1,4 AND 1,4 LINKING',
+                 ]
+sugar_types = ["SACCHARIDE",
+              ] + l_sugar_types + d_sugar_types
+terminii = [
+  'L-PEPTIDE NH3 AMINO TERMINUS',
+  'L-PEPTIDE COOH CARBOXY TERMINUS',
+  'D-PEPTIDE NH3 AMINO TERMINUS',
+]
+non_polymer = [
+  "NON-POLYMER",
+  ]
+non_alpha_peptide = [
+  'L-BETA-PEPTIDE, C-GAMMA LINKING', # IAS
+  'D-BETA-PEPTIDE, C-GAMMA LINKING', # ACB
+  'D-GAMMA-PEPTIDE, C-DELTA LINKING', # FGA
+  'L-GAMMA-PEPTIDE, C-DELTA LINKING', # GGL
+  ]
+
+loaded_cifs = {}
+
+def find_data_dir():
+  for relative_path in [
+        "chem_data/chemical_components",
+        "chemical_components",
+        "ext_ref_files/chemical_components"]:
+    result = libtbx.env.find_in_repositories(relative_path=relative_path)
+    if (result is not None): return result
+  return None
+
+data_dir = find_data_dir()
+
+def get_cif_filename(code):
+  if (data_dir is None): return ""
+  if (not code): return ""
+  code=code.strip()
+  if (len(code) == 0):
+    raise Sorry("Residue code is blank.")
+  return os.path.join(
+    data_dir, "%s" % code[0].lower(), "data_%s.cif" % code.upper())
+
+def is_chemical_components_file(filename):
+  try:
+    cif_model = iotbx.cif.reader(file_path=file_name).model()
+    for cif_block in cif_model.values():
+      if "_atom_site" in cif_block:
+        return True
+  except Exception as e:
+    return False
+
+def is_code(code):
+  filename = get_cif_filename(code)
+  if os.path.exists(filename): return True
+  return False
+
+def is_residue_specified(code, alternate=False):
+  if is_code(code):
+    return get_atom_names(code, alternate=alternate)
+  return False
+
+def get_cif_dictionary(code,
+                       filename=None,
+                       old_reader=False,
+                       ):
+  if filename is not None:
+    if old_reader:
+      cif = cif_parser.run2(filename)
+    else:
+      cif = cif_parser.run(filename)
+  elif code in loaded_cifs:
+    cif = loaded_cifs[code]
+  else:
+    filename = get_cif_filename(code)
+    cif=None
+    if os.path.exists(filename):
+      if old_reader:
+        cif = cif_parser.run2(filename)
+      else:
+        cif = cif_parser.run(filename)
+      loaded_cifs[code] = cif
+    if cif:
+      for loop_id in ['_pdbx_chem_comp_descriptor', '_chem_comp']:
+        for loop in cif.get(loop_id,[]):
+          for attr in loop.__dict__:
+            item = getattr(loop, attr)
+            if type(item)==type(''):
+              item = item.replace('\n', '')
+              assert item.find('\n')==-1, '%s : %s' % (attr, item)
+              setattr(loop, attr, str(item).strip())
+  return cif
+
+def get_alternative_name(code, name):
+  for atom, alt in zip(get_atom_names(code),
+                       get_atom_names(code, alternate=True)):
+    if atom==name: return alt
+
+def get_smiles(code):
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  desc = cif.get("_pdbx_chem_comp_descriptor", {})
+  for item in desc:
+    try:
+      if item.program.strip()=="CACTVS" and item.type.strip()=="SMILES_CANONICAL":
+        return item.descriptor
+    except Exception: pass
+  for item in desc:
+    try:
+      if item.program=="CACTVS" and item.type=="SMILES":
+        return item.descriptor
+    except Exception: pass
+  try: return item.descriptor
+  except Exception: return ""
+
+def get_field_simple(code, loop, field):
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  desc = cif.get(loop, {})[0]
+  return getattr(desc, field, "")
+
+def get_type(code):
+  return get_field_simple(code, "_chem_comp", "type")
+
+def get_name(code):
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  desc = cif.get("_pdbx_chem_comp_identifier", {})
+  for item in desc:
+    if getattr(item, "identifier", None) is not None:
+      return item.identifier
+    else:
+      return "Unknown or not read"
+
+def get_atom_type_symbol(code):
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  tmp = []
+  for item in cif.get("_chem_comp_atom", []):
+    tmp.append(item.type_symbol)
+  return tmp
+
+def get_hydrogen_names(code,
+                       wrap=False,
+                       alternate=False
+                       ):
+  if wrap and alternate: assert 0
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  tmp = []
+  for item in cif["_chem_comp_atom"]:
+    if item.type_symbol in ["H"]:
+      if wrap:
+        name = item.atom_id
+        if len(name)==4:
+          name = name[3]+name[:3]
+        tmp.append(name)
+      elif alternate:
+        tmp.append(item.alt_atom_id)
+      else:
+        tmp.append(item.atom_id)
+  return tmp
+
+def get_atom_names(code, alternate=False, heavy_atom_only=False):
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  tmp = []
+  for item in cif["_chem_comp_atom"]:
+    if heavy_atom_only:
+      if item.type_symbol in ['H', 'D']: continue
+    if alternate:
+      tmp.append(item.alt_atom_id)
+    else:
+      tmp.append(item.atom_id)
+  return tmp
+
+def get_bond_pairs(code, alternate=False, heavy_atom_only=False, use_tuple=False):
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  if heavy_atom_only:
+    heavy_atom_only = get_atom_names(code, heavy_atom_only=True)
+  tmp = []
+  bonds = cif.get("_chem_comp_bond", {})
+  for item in bonds:
+    if heavy_atom_only:
+      if item.atom_id_1 not in heavy_atom_only or item.atom_id_2 not in heavy_atom_only:
+        continue
+    if alternate:
+      atom1 = get_alternative_name(code, item.atom_id_1)
+      atom2 = get_alternative_name(code, item.atom_id_2)
+      pair = [atom1, atom2]
+    else:
+      pair = [item.atom_id_1, item.atom_id_2]
+    pair.sort()
+    if use_tuple:
+      tmp.append(tuple(pair))
+    else:
+      tmp.append(pair)
+  return tmp
+
+def generate_chemical_components_codes(sort_reverse_by_smiles=False,
+                                       only_non_polymer=False,
+                                       ):
+  def _cmp_smiles_length(f1, f2):
+    c1 = f1[5:-4]
+    c2 = f2[5:-4]
+    if not c1:
+      return 1
+    if not c2:
+      return -1
+    s1 = get_smiles(c1)
+    s2 = get_smiles(c2)
+    if len(s1)>len(s2):
+      return -1
+    else:
+      return 1
+
+  data_dir = find_data_dir()
+  dirs = os.listdir(data_dir)
+  dirs.sort()
+  filenames = []
+  for d in dirs:
+    if not os.path.isdir(os.path.join(data_dir, d)): continue
+    filenames += os.listdir(os.path.join(data_dir, d))
+    # if len(filenames)>100: break
+  if sort_reverse_by_smiles:
+    import functools
+    filenames = sorted(filenames, key=functools.cmp_to_key(_cmp_smiles_length))
+  else:
+    filenames.sort()
+  for filename in filenames:
+    if filename.find("data_")!=0: continue
+    code = filename[5:-4]
+    if only_non_polymer and get_group(code)!='non-polymer': continue
+    yield code
+
+def get_header(code):
+  filename=get_cif_filename(code)
+  if not filename: return ""
+  f=open(filename)
+  lines=f.readlines()
+  f.close()
+  outl=""
+  for i, line in enumerate(lines):
+    outl+="  %s" % line
+    if i<3: continue
+    if line.find("_chem_comp.")==-1:
+      break
+  return outl
+
+def get_group(code, split_rna_dna=False, split_l_d=False, verbose=False):
+  t = get_type(code)
+  if verbose: print('get_group',code, t)
+  if t is not None:
+    t=t.replace('"','').upper()
+  else:
+    if code in ['AD', 'TD']:
+      t='L-DNA LINKING'
+  if t in sugar_types:
+    if split_l_d:
+      if t in l_sugar_types:
+        return 'L-saccharide'
+      elif t in d_sugar_types:
+        return 'D-saccharide'
+    return 'saccharide'
+  elif t in amino_types:
+    if split_l_d:
+      if t in l_amino_types:
+        return 'L-peptide'
+      elif t in d_amino_types:
+        return 'D-peptide'
+      else:
+        return 'amino_acid'
+    return 'amino_acid'
+  elif t in non_alpha_peptide:
+    assert not split_l_d
+    return 'non-alpha peptide'
+  elif t in terminii:
+    # assert not split_l_d
+    return 'amino_acid_terminal'
+  elif t in rna_dna_types:
+    # assert not split_rna_dna
+    if split_rna_dna:
+      if t in rna_types:
+        return 'RNA'
+      elif t in dna_types:
+        return 'DNA'
+      else:
+        assert 0
+    return 'rna_dna'
+  elif t in ['NON-POLYMER',
+             'PEPTIDE-LIKE',
+            ]:
+    return t.lower()
+  elif t in ['OTHER']:
+    return t.lower()
+  print(t)
+  assert 0
+
+def get_restraints_group(code, split_rna_dna=True, split_l_d=True):
+  g = get_group(code, split_rna_dna, split_l_d)
+  print(g)
+  if g in ['L-peptide', 'D-peptide', 'peptide',
+            'L-saccharide', 'D-saccharide', 'saccharide',
+           # 'non-polymer',
+           'RNA', 'DNA',
+          ]:
+    return g
+  return {'amino_acid'          : 'peptide',
+          'amino_acid_terminal' : 'peptide',
+          'non-polymer'         : 'ligand',
+          # 'saccharide' : 'pyranose',
+          }[g]
+  assert 0
+
+def get_as_atom_group(code):
+  import iotbx
+  from mmtbx.ligands.hierarchy_utils import _new_atom
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  tmp = []
+  ag = iotbx.pdb.hierarchy.atom_group()
+  ag.resname=code
+  '''comp_id : BB9 <class 'str'>
+  atom_id : HG <class 'str'>
+  alt_atom_id : HG <class 'str'>
+  type_symbol : H <class 'str'>
+  charge : 0 <class 'int'>
+  pdbx_align : 1 <class 'int'>
+  pdbx_aromatic_flag : N <class 'str'>
+  pdbx_leaving_atom_flag : N <class 'str'>
+  pdbx_stereo_config : N <class 'str'>
+  model_Cartn_x : 14.295 <class 'float'>
+  model_Cartn_y : -4.046 <class 'float'>
+  model_Cartn_z : 26.134 <class 'float'>
+  pdbx_model_Cartn_x_ideal : -3.161 <class 'float'>
+  pdbx_model_Cartn_y_ideal : -1.326 <class 'float'>
+  pdbx_model_Cartn_z_ideal : -0.0 <class 'float'>
+  pdbx_component_atom_id : HG <class 'str'>
+  pdbx_component_comp_id : BB9 <class 'str'>
+  pdbx_ordinal : 12 <class 'int'>'''
+# def _new_atom(name, element, xyz, occ, b, hetero, segid=' '*4):
+  use_model=True
+  for item in cif["_chem_comp_atom"]:
+    xyz = (item.model_Cartn_x,
+           item.model_Cartn_y,
+           item.model_Cartn_z,
+           )
+    print(xyz)
+    if '?' in xyz:
+      xyz = (item.pdbx_model_Cartn_x_ideal,
+             item.pdbx_model_Cartn_y_ideal,
+             item.pdbx_model_Cartn_z_ideal,
+             )
+      print(xyz)
+      use_model=False
+      break
+  for item in cif["_chem_comp_atom"]:
+    if use_model:
+      xyz = (item.model_Cartn_x,
+             item.model_Cartn_y,
+             item.model_Cartn_z,
+             )
+    else:
+      xyz = (item.pdbx_model_Cartn_x_ideal,
+             item.pdbx_model_Cartn_y_ideal,
+             item.pdbx_model_Cartn_z_ideal,
+             )
+    assert '?' not in xyz
+    atom = _new_atom(item.atom_id,
+                     item.type_symbol,
+                     xyz,
+                     1.,
+                     20.,
+                     True,
+                     )
+    ag.append_atom(atom)
+  return ag
+
+def get_as_hierarchy(code):
+  import iotbx
+  ag = get_as_atom_group(code)
+  rg = iotbx.pdb.hierarchy.residue_group()
+  rg.resseq='1'
+  rg.append_atom_group(ag)
+  chain = iotbx.pdb.hierarchy.chain()
+  chain.id='A'
+  chain.append_residue_group(rg)
+  model = iotbx.pdb.hierarchy.model()
+  model.append_chain(chain)
+  ph = iotbx.pdb.hierarchy.root()
+  ph.append_model(model)
+  ph.reset_atom_i_seqs()
+  return ph
+
+if __name__=="__main__":
+  print('\nSMILES')
+  print(get_smiles(sys.argv[1]))
+  print('\nType')
+  print(get_type(sys.argv[1]))
+  print('\nWeight')
+  print(get_field_simple(sys.argv[1], "_chem_comp", "formula_weight"))
+  print('\nName')
+  print(get_name(sys.argv[1]))
+  print('\nAtom names')
+  print(get_atom_names(sys.argv[1]))
+  print('\nAlternate atom names')
+  print(get_atom_names(sys.argv[1], alternate=True))
+  print('\nHydrogen names')
+  print(get_hydrogen_names(sys.argv[1]))
+  print('\nAlternate hydrogen names')
+  print(get_hydrogen_names(sys.argv[1], alternate=True))
+  print('\nWrapped hydrogen names')
+  print(get_hydrogen_names(sys.argv[1], wrap=True))
+  print('\nBond pairs')
+  print(get_bond_pairs(sys.argv[1]))
+  print('\nAlternate name bond pairs')
+  print(get_bond_pairs(sys.argv[1], alternate=True))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/chemical_components/cif_parser.py
+from __future__ import absolute_import, division, print_function
+import os, sys
+
+cif_keyword_dictionary = {
+  "_chem_comp" : {"id" : str,
+                  "name" : str,
+                  "type" : str,
+                  "pdbx_type" : str,
+                  "formula" : str,
+                  "mon_nstd_parent_comp_id" : str,
+                  "pdbx_synonyms" : str,
+                  "pdbx_formal_charge" : int,
+                  "pdbx_initial_date" : str,
+                  "pdbx_modified_date" : str,
+                  "pdbx_ambiguous_flag" : str,
+                  "pdbx_release_status" : str,
+                  "pdbx_replaced_by" : str,
+                  "pdbx_replaces" : str,
+                  "formula_weight" : float,
+                  "one_letter_code" : str,
+                  "three_letter_code" : str,
+                  "pdbx_model_coordinates_details" : str,
+                  "pdbx_model_coordinates_missing_flag" : str,
+                  "pdbx_ideal_coordinates_details" : str,
+                  "pdbx_ideal_coordinates_missing_flag" : str,
+                  "pdbx_model_coordinates_db_code" : str,
+                  "pdbx_processing_site" : str,
+                  # added 11/2008
+                  "pdbx_subcomponent_list" : str,
+                  },
+  "_chem_comp_atom" : {"comp_id": str,
+                       "atom_id": str,
+                       "alt_atom_id": str,
+                       "type_symbol": str,
+                       "charge" : int,
+                       "pdbx_align": int,
+                       "pdbx_aromatic_flag": str,
+                       "pdbx_leaving_atom_flag": str,
+                       "pdbx_stereo_config": str,
+                       "model_Cartn_x": float,
+                       "model_Cartn_y": float,
+                       "model_Cartn_z": float,
+                       "pdbx_model_Cartn_x_ideal": float,
+                       "pdbx_model_Cartn_y_ideal": float,
+                       "pdbx_model_Cartn_z_ideal": float,
+                       "pdbx_ordinal" : int,
+                       # added 11/2008
+                       "pdbx_component_atom_id" : str,
+                       "pdbx_component_comp_id" : str,
+                       },
+  "_chem_comp_bond" : {"comp_id": str,
+                       "atom_id_1": str,
+                       "atom_id_2": str,
+                       "value_order": str,
+                       "pdbx_aromatic_flag": str,
+                       "pdbx_stereo_config": str,
+                       "pdbx_ordinal": int,
+                       },
+  "_pdbx_chem_comp_descriptor" : {"comp_id" : str,
+                                  "type" : str,
+                                  "program" : str,
+                                  "program_version" : str,
+                                  "descriptor" : str,
+                                  },
+  "_pdbx_chem_comp_identifier" : {"comp_id" : str,
+                                  "type" : str,
+                                  "program" : str,
+                                  "program_version" : str,
+                                  "identifier" : str,
+                                  },
+  }
+
+class empty(object):
+  def __repr__(self):
+    outl = "\nObject"
+    for attr in self.__dict__:
+      outl += "\n  %s : %s %s" % (attr, getattr(self, attr), type(getattr(self, attr)))
+    return outl
+
+  def __len__(self):
+    return len(self.__dict__)
+
+def smart_split_cif_line(line):
+  line = " %s " % line
+  tmp = []
+  delimiters = [" ", "'", '"']
+  while line:
+    delimiter=" "
+    if line[0] in delimiters:
+      delimiter=line[0]
+    start = line.find(delimiter)
+    finish = line.find(delimiter, start+1)
+    items = line.split(delimiter)
+    items = list(filter(None, items))
+    if not items: break
+    item=items[0]
+    tmp.append(item)
+    if finish==-1:
+      if len(items)==2:
+        tmp.append(items[1])
+      break
+    if delimiter==" ":
+      line = line[len(item)+1:].strip()
+    else:
+      line = line[len(item)+3:].strip()
+  return tmp
+
+def run2(filename):
+  if not os.path.exists(filename): return None
+  lines = []
+  with open(filename) as f:
+    lines = f.read().splitlines()
+  merge = True
+  while merge:
+    merge = []
+    for i, line in enumerate(lines):
+      if line.find(";")==0:
+        if i not in merge:
+          merge.append(i)
+      elif line.find('"')==0:
+        if i not in merge:
+          merge.append(i)
+      elif line.find("_chem_comp.name")==0:
+        if len(line.split())==1:
+          if i+1 not in merge:
+            merge.append(i+1)
+      elif line.find("_chem_comp.pdbx_synonyms")==0:
+        if len(line.split())==1:
+          if i+1 not in merge:
+            merge.append(i+1)
+    if merge:
+      merge.reverse()
+      for i in merge:
+        if lines[i][1:].strip():
+          if lines[i][0] in [";"]:
+            lines[i-1] += ' "%s"' % lines[i][1:].strip()
+          else:
+            lines[i-1] += ' "%s"' % lines[i].strip()
+        del lines[i]
+
+  line_iter = iter(lines)
+
+  complete_cif_data = {}
+  loop_list = []
+  non_loop = {}
+  code = ""
+  pdbx_reading = False
+  remove_loop_fields = {}
+  loop_index = 0
+  for line in line_iter:
+    line = line.replace("\t", " "*8)
+    if line.find("#")==0: continue
+    if line.find("_pdbx")==0: pdbx_reading = True
+    line = "%s  " % line
+    if False:
+      while line.find('"')>-1:
+        start = line.find('"')
+        finish = line.find('"', start+1)
+        if finish==-1: break
+        line = "%s%s%s" % (line[:start],
+                           line[start+1:finish].replace(" ", "_space_"),
+                           line[finish+1:])
+      if pdbx_reading:
+        while line.find("'")>-1:
+          start = line.find("'")
+          finish = line.find("'", start+1)
+          if finish==-1: break
+          line = "%s%s%s" % (line[:start],
+                             line[start+1:finish].replace(" ", "_space_"),
+                             line[finish+1:])
+    if line.find("loop_")==0:
+      loop_list = []
+      loop_index = 0
+      continue
+    if line.find(";")==0: continue
+    if line.find("_")==0:
+      for cif_key in cif_keyword_dictionary:
+        if line.find(cif_key)==-1: continue
+        for attr in cif_keyword_dictionary[cif_key]:
+          test = "%s.%s " % (cif_key, attr)
+          if line.find(test)>-1:
+            loop_list.append(attr)
+            if len(line.split())>1:
+              non_loop[test] = line.split()[1:]
+            break
+        if line.find(test)>-1: break
+      else:
+        tmp = line.split()[0]
+        cif_key, attr = tmp.split(".")
+        remove_loop_fields.setdefault(cif_key, [])
+        remove_loop_fields[cif_key].append(loop_index)
+      loop_index+=1
+    else:
+      if loop_list:
+        if code and line.find(code)!=0: continue
+        obj = empty()
+        i=0
+        #for ptr, item in enumerate(line.split()):
+        for ptr, item in enumerate(smart_split_cif_line(line)):
+          if ptr in remove_loop_fields.get(cif_key, []): continue
+          if len(loop_list)<=i:
+            print('Problem with CIF line parsing')
+            print(line)
+            print(loop_list)
+            continue
+          if loop_list[i]=="comp_id": code = item
+          if item not in ["?", "."]:
+            item = cif_keyword_dictionary[cif_key][loop_list[i]](item)
+          if type(item)==type(""):
+            if item[0]=='"' and item[-1]=='"':
+              item = item[1:-1]
+            item = item.replace("_space_", " ")
+          setattr(obj, loop_list[i], item)
+          i+=1
+        complete_cif_data.setdefault(cif_key, [])
+        if hasattr(obj, "alt_atom_id"):
+          if len(obj.alt_atom_id)>5: assert 0
+        complete_cif_data[cif_key].append(obj)
+  # non loop parsing
+  for cif_key in cif_keyword_dictionary:
+    obj = empty()
+    for key in non_loop:
+      if key.find("%s." % cif_key)==0:
+        if len(non_loop[key])==1:
+          item = non_loop[key][0]
+        else:
+          item = " ".join(non_loop[key])
+        sk = key.split(".")[1].strip()
+        if item not in ["?", "."]:
+          try: item = cif_keyword_dictionary[cif_key][sk](item)
+          except Exception:
+            print(key)
+            print(sk)
+            print(cif_key)
+            print(list(cif_keyword_dictionary[cif_key].keys()))
+            raise
+        setattr(obj, sk, item)
+    if len(obj):
+      complete_cif_data[cif_key] = [obj]
+  return complete_cif_data
+
+def get_func(cif_key, sk):
+  func = None
+  if cif_key in cif_keyword_dictionary:
+    func = cif_keyword_dictionary[cif_key].get(sk, None)
+  return func
+
+def get_typed_field(cif_key, sk, field, func=None):
+  if func is None:
+    func = get_func(cif_key, sk)
+  if field not in ["?", "."] and func not in [None, str]:
+    field = func(field)
+  return field
+
+def run(filename):
+  from iotbx import cif
+  if not os.path.exists(filename): return None
+  complete_cif_data = {}
+  cm = cif.reader(filename, strict=False, raise_if_errors=False).model()
+  for code, rc in cm.items():
+    for key, item in rc.items():
+      cif_key = key.split('.')[0]
+      sk = key.split(".")[1].strip()
+      complete_cif_data.setdefault(cif_key, [])
+      if type(item)==type(''):
+        item=[item]
+      else:
+        continue
+      for i, row in enumerate(item):
+        if len(complete_cif_data[cif_key])<i+1:
+          complete_cif_data[cif_key].append(empty())
+        func = get_func(cif_key, sk)
+        row = get_typed_field(cif_key, sk, row, func=func)
+        setattr(complete_cif_data[cif_key][i], sk, row)
+    for i, loop in enumerate(rc.iterloops()):
+      if not loop: continue
+      for j, (key, item) in enumerate(loop.items()):
+        if not j:
+          objs=[]
+          for k in range(len(item)):
+            objs.append(empty())
+          cif_key = key.split('.')[0]
+        sk = key.split(".")[1].strip()
+        func = get_func(cif_key, sk)
+        for k in range(len(item)):
+          setattr(objs[k], sk, get_typed_field(cif_key, sk, item[k], func))
+        complete_cif_data[cif_key] = objs
+  return complete_cif_data
+
+if __name__=="__main__":
+  import os, sys
+  cif = run(sys.argv[1])
+  cif2 = run2(sys.argv[1])
+  for key in cif:
+    print('_'*80)
+    print(key)
+    for item in cif[key]:
+      print(item)
+
+  print(cif)
+  assert cif.keys()==cif2.keys(), '%s!=%s' % (cif.keys(), cif2.keys())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/chemical_components/tst.py
+from __future__ import absolute_import, division, print_function
+import mmtbx.chemical_components
+from mmtbx.chemical_components import get_atom_names, get_hydrogen_names
+from mmtbx.chemical_components import get_bond_pairs
+
+def excercise(code):
+  print('\nAtom names')
+  print(get_atom_names(code))
+  print('\nAlternate atom names')
+  print(get_atom_names(code, alternate=True))
+  print('\nHydrogen names')
+  print(get_hydrogen_names(code))
+  print('\nAlternate hydrogen names')
+  print(get_hydrogen_names(code, alternate=True))
+  print('\nWrapped hydrogen names')
+  print(get_hydrogen_names(code, wrap=True))
+  print('\nBond pairs')
+  print(get_bond_pairs(code))
+  print('\nAlternate name bond pairs')
+  print(get_bond_pairs(code, alternate=True))
+
+def run():
+  if (mmtbx.chemical_components.data_dir is None):
+    print("Skipping tests: mmtbx.chemical_components.data_dir not available")
+  else:
+    for code in ["HOH", "ATP", "hem"]:
+      print("\n%s\n%s" % ('_'*80,("%s " % code)*20))
+      excercise(code)
+  print("OK")
+
+if __name__=="__main__":
+  run()
+
+
+ *******************************************************************************

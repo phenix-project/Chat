@@ -1,0 +1,2184 @@
+
+
+ *******************************************************************************
+iotbx/gui_tools/__init__.py
+""" Used by the PHENIX GUI to manage file objects and associated
+phil parameters.
+"""
+
+from __future__ import absolute_import, division, print_function
+# TODO better tests!  major functionality is tested as part of the handlers
+# specific to HKL/PDB formats, but not every method yet
+
+from iotbx import file_reader
+from libtbx.utils import hashlib_md5
+from libtbx import adopt_init_args
+import os
+import six
+
+class manager(object):
+  file_type = None
+  file_type_label = None
+  def __init__(self,
+                allowed_param_names=None,
+                allowed_multiple_params=None,
+                debug=False,
+                auto_reload_files=True,
+                use_md5_sum=False):
+    adopt_init_args(self, locals())
+    assert ((allowed_param_names is None) or
+            (isinstance(allowed_param_names, list)))
+    assert ((allowed_multiple_params is None) or
+            (isinstance(allowed_param_names, list)))
+    self.clear_cache()
+    self._param_callbacks = {}
+
+  def clear_cache(self):
+    self._file_mtimes = {}
+    self._file_md5sums = {}
+    self._cached_input_files = {}
+    self._param_files = {}
+    self.clear_format_specific_cache()
+
+  def get_file_count(self):
+    return len(self._param_files)
+
+  def clear_format_specific_cache(self):
+    pass
+
+  def set_param_callback(self, file_param_name, callback_handler):
+    assert hasattr(callback_handler, "__call__")
+    self._param_callbacks[file_param_name] = callback_handler
+
+  def add_file_callback(self, file_name):
+    pass
+
+  def remove_file_callback(self, file_name):
+    pass
+
+  def input_files(self):
+    for (file_name, file_object) in six.iteritems(self._cached_input_files):
+      yield (file_name, file_object)
+
+  def open_file(self, file_name):
+    input_file = file_reader.any_file(file_name)
+    return input_file
+
+  def save_file(self, input_file=None, file_name=None):
+    if (input_file is None):
+      input_file = self.open_file(file_name)
+    input_file.check_file_type(self.file_type)
+    file_name = input_file.file_name
+    self._cached_input_files[file_name] = input_file
+    self.add_file_callback(file_name)
+    if self.use_md5_sum :
+      file_records = open(file_name).read()
+      m = hashlib_md5(file_records)
+      self._file_md5sums[file_name] = m
+    else :
+      mtime = os.path.getmtime(file_name)
+      self._file_mtimes[file_name] = mtime
+    return self.save_other_file_data(input_file)
+
+  def add_file(self, *args, **kwds):
+    return self.save_file(*args, **kwds)
+
+  def save_other_file_data(self, input_file):
+    return None
+
+  def file_is_modified(self, file_name):
+    if (not self.auto_reload_files):
+      return False
+    elif (not file_name in self._cached_input_files):
+      return True
+    elif self.use_md5_sum :
+      file_records = open(file_name).read()
+      m = hashlib_md5(file_records)
+      old_md5sum = self._file_md5sums.get(file_name, None)
+      if (old_md5sum is None) or (old_md5sum != m):
+        self._file_md5sums[file_name] = m
+        return True
+    else :
+      mtime = os.path.getmtime(file_name)
+      old_mtime = self._file_mtimes.get(file_name, None)
+      if (old_mtime is None) or (old_mtime < mtime):
+        self._file_mtimes[file_name] = mtime
+        return True
+    return False
+
+  def remove_file(self, file_name):
+    if (file_name in self._cached_input_files):
+      self._cached_input_files.pop(file_name)
+      if self.use_md5_sum :
+        self._file_md5sums.pop(file_name)
+      else :
+        self._file_mtimes.pop(file_name)
+      if (self.allowed_param_names is not None):
+        for param_name, param_file in six.iteritems(self._param_files):
+          if self.allow_multiple(param_name):
+            if (file_name in param_file):
+              param_file.remove(file_name)
+              if (len(param_file) == 0 ):
+                self._param_files.pop(param_name)
+              break
+          elif (param_file == file_name):
+            self._param_files.pop(param_name)
+            break
+      self.remove_file_callback(file_name)
+
+  def get_file(self, file_name=None, file_param_name=None):
+    if (file_name is None) and (file_param_name is not None):
+      file_name = self._param_files.get(file_param_name)
+      if (isinstance(file_name, list)):
+        return file_name
+    if (file_name is None):
+      return None
+    if (not os.path.isfile(file_name)):
+      raise IOError(2001, "failed os.path.isfile", file_name)
+    if (file_name in self._cached_input_files):
+      if self.file_is_modified(file_name):
+        input_file = self.open_file(file_name)
+        self.save_file(input_file)
+      return self._cached_input_files[file_name]
+    return None
+
+  def allow_multiple(self, param_name):
+    if (self.allowed_multiple_params is not None):
+      return (param_name in self.allowed_multiple_params)
+    return False
+
+  def get_current_file_names(self):
+    file_names = list(self._cached_input_files.keys())
+    file_names.sort()
+    return file_names
+
+  def set_param_file(self, file_name, file_param_name, input_file=None,
+      run_callback=True):
+    if self.allowed_param_names is not None :
+      if not file_param_name in self.allowed_param_names :
+        raise KeyError("Unrecognized input file parameter %s (allowed: %s)."%
+          (file_param_name, ", ".join(self.allowed_param_names)))
+    opened_file = False
+    if (file_name is None) or (file_name == "") or (file_name == "None"):
+      self._param_files.pop(file_param_name, None)
+    else :
+      if (input_file is not None):
+        self.save_file(input_file)
+      elif (self.get_file(file_name) is None):
+        input_file = self.open_file(file_name)
+        opened_file = True
+        self.save_file(input_file)
+      if self.allow_multiple(file_param_name):
+        if (not file_param_name in self._param_files):
+          self._param_files[file_param_name] = []
+        if (not file_name in self._param_files[file_param_name]):
+          self._param_files[file_param_name].append(file_name)
+      else :
+        self._param_files[file_param_name] = file_name
+    if run_callback :
+      callback = self._param_callbacks.get(file_param_name, None)
+      if (callback is not None):
+        callback(file_name)
+    return opened_file
+
+  def unset_param_file(self, file_name, file_param_name, run_callback=True):
+    if (self.allow_multiple(file_param_name) and
+        (file_param_name in self._param_files)):
+      param_files = self._param_files.get(file_param_name)
+      if (file_name in param_files):
+        param_files.remove(file_name)
+      if (len(param_files) == 0):
+        self._param_files.pop(file_param_name)
+    else :
+      if (self._param_files[file_param_name] == file_name):
+        self._param_files.pop(file_param_name)
+    if run_callback :
+      callback = self._param_callbacks.get(file_param_name, None)
+      if (callback is not None):
+        callback(None)
+
+  def get_file_params(self, file_name):
+    params = []
+    for file_param_name in self._param_files :
+      param_files = self._param_files[file_param_name]
+      if isinstance(param_files, list) and (file_name in param_files):
+        params.append(file_param_name)
+      elif (param_files == file_name):
+        params.append(file_param_name)
+    return params
+
+  def get_param_files(self, file_param_name):
+    file_name = self._param_files.get(file_param_name)
+    if (file_name is None):
+      return []
+    elif isinstance(file_name, list):
+      return file_name
+    else :
+      return [ file_name ]
+
+  def get_file_type_label(self, file_name=None, input_file=None):
+    return self.file_type_label
+
+  def get_files_dict(self):
+    return self._cached_input_files
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/gui_tools/cif_conversions.py
+
+# bkpoon (09/27/2016) changed to use cif_as_pdb and pdb_as_cif for more
+# functionality
+
+from __future__ import absolute_import, division, print_function
+import iotbx.cif
+import iotbx.phil
+from iotbx.cli_parser import run_program
+from iotbx.command_line import cif_as_pdb
+from iotbx.pdb import pdb_input_from_any
+from libtbx.utils import Sorry
+from mmtbx.programs import pdb_as_cif
+import os.path
+import sys
+
+master_phil = iotbx.phil.parse("""
+convert
+  .short_caption = mmCIF/PDB conversion
+  .caption = This tool will convert between the two supported model formats: \
+    files in PDB format will be output as mmCIF and vice-versa.  Note that \
+    many of the tools in Phenix support both formats, and phenix.refine can \
+    output mmCIF files directly if desired. The output filename will be the \
+    same as the input filename, but the extension is changed (e.g. test.pdb \
+    becomes test.cif and vice-versa).
+  .style = auto_align box caption_img:icons/custom/phenix.pdbtools.png
+{
+  file_name = None
+    .type = path
+    .short_caption = Model file
+    .style = file_type:pdb bold input_file
+}
+""")
+
+def run(args=(), params=None, out=sys.stdout):
+  assert (params.convert.file_name is not None)
+  file_name = params.convert.file_name
+  error_message = 'Unable to parse %s. ' % file_name
+  error_message += 'Please make sure that the file exists and is a valid model in PDB or CIF format.'
+  if (not os.path.exists(file_name)):
+    raise Sorry(error_message)
+  try:
+    model = pdb_input_from_any(file_name=file_name)
+  except Exception:
+    raise Sorry(error_message)
+  output_file = os.path.splitext(os.path.basename(file_name))[0]
+  if (model.file_format == "pdb"):
+    print("Converting %s to mmCIF format." % file_name, file=out)
+    run_program(program_class=pdb_as_cif.Program, args=[file_name])
+    output_file += '.cif'
+  elif (model.file_format == 'cif'):
+    print("Converting %s to PDB format." % file_name, file=out)
+    cif_as_pdb.run([file_name])
+    output_file += '.pdb'
+  else:
+    raise Sorry(error_message)
+  if (not os.path.exists(output_file)):
+    raise Sorry('Could not find output file. Please check that %s exists'
+                % output_file)
+  return output_file
+
+def validate_params(params):
+  if (params.convert.file_name is None):
+    raise Sorry("No model file specified!")
+  return True
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/gui_tools/import_data_and_flags.py
+from __future__ import absolute_import, division, print_function
+
+# XXX this should probably be moved to iotbx/command_line at some point (once
+# code for handling command-line arguments is added).  However, it is very
+# similar to an existing program in the phenix tree (import_and_add_free.py),
+# so there is some potential for confusion.
+
+import libtbx.phil
+from libtbx.utils import Sorry
+import string
+import os
+import sys
+
+master_phil = libtbx.phil.parse("""
+import_data
+  .short_caption = Import data and add/extend R-free flags
+  .caption = This utility is used to combine new data with an existing set of \
+    R-free flags, or create new flags if necessary.  All arrays in the data \
+    file will be included to the output.  The reflection file \
+    editor offers additional options for file manipulation.
+  .style = box auto_align caption_img:icons/custom/phenix.reflection_file_editor.png
+{
+  data_file = None
+    .type = path
+    .short_caption = Data file
+    .style = bold file_type:hkl input_file
+  flags_file = None
+    .type = path
+    .short_caption = File with R-free flags
+    .style = file_type:hkl input_file
+  output_file = None
+    .type = path
+    .style = bold file_type:hkl new_file
+  fraction_free = 0.05
+    .type = float
+    .short_caption = Fraction to flag for R-free
+    .help = Typically between 0.05 and 0.1.  This option is ignored if an \
+      existing set of flags is being extended.
+  ignore_shells = False
+    .type = bool
+    .short_caption = Disable check for test sets in thin shells
+    .style = noauto
+}
+""")
+
+def run(args=(), params=None, out=None):
+  if (out is None):
+    out = sys.stdout
+  validate_params(params)
+  from iotbx import reflection_file_editor
+  from iotbx import reflection_file_utils
+  from iotbx import file_reader
+  data_in = file_reader.any_file(params.import_data.data_file,
+    force_type="hkl")
+  data_in.check_file_type("hkl")
+  miller_arrays = data_in.file_server.miller_arrays
+  new_arrays = []
+  labels = ["H","K","L"]
+  warnings = []
+  have_r_free = False
+  for array in miller_arrays :
+    if (reflection_file_editor.is_rfree_array(array, array.info())):
+      have_r_free = True
+      if (params.import_data.flags_file is not None):
+        raise Sorry("The data file (%s) already contains R-free flags." %
+          params.import_data.data_file)
+    if (array.is_xray_reconstructed_amplitude_array()):
+      if ("F(+)" in labels):
+        labels.extend(["F_rec(+)", "SIGF_rec(+)", "F_rec(-)", "SIGF_rec(-)"])
+      else :
+        labels.extend(["F(+)", "SIGF(+)", "F(-)", "SIGF(-)"])
+    else :
+      labels.extend(array.info().labels)
+    array = array.map_to_asu()
+    if (not array.is_unique_set_under_symmetry()):
+      array = array.merge_equivalents().array()
+    new_arrays.append(array)
+  complete_set = reflection_file_utils.make_joined_set(
+    new_arrays).complete_set()
+  if (not have_r_free):
+    if (params.import_data.flags_file is not None):
+      flags_in = file_reader.any_file(params.import_data.flags_file,
+        force_type="hkl")
+      flags_in.check_file_type("hkl")
+      flags_and_values = flags_in.file_server.get_r_free_flags(
+        file_name=flags_in.file_name,
+        label=None,
+        test_flag_value=None,
+        disable_suitability_test=False,
+        parameter_scope=None,
+        return_all_valid_arrays=True)
+      if (len(flags_and_values) == 0):
+        raise Sorry("No R-free flags were found in the file %s." %
+          params.import_data.flags_file)
+      elif (len(flags_and_values) > 1):
+        raise Sorry(("Multiple valid sets of R-free flags were found in the "+
+          "file %s.  Please use the reflection file editor to select a "+
+          "single set of flags.") % params.import_data.flags_file)
+      old_flags, test_flag_value = flags_and_values[0]
+      labels.extend(old_flags.info().labels)
+      old_flags = old_flags.map_to_asu().merge_equivalents().array()
+      old_flags = old_flags.customized_copy(
+        data=old_flags.data()==test_flag_value)
+      missing_set = complete_set.lone_set(old_flags)
+      n_missing = missing_set.indices().size()
+      fraction_free = old_flags.data().count(True) / old_flags.data().size()
+      if (n_missing != 0):
+        (n_bins, n_free, sse, accu) = reflection_file_editor.get_r_free_stats(
+          miller_array=old_flags,
+          test_flag_value=True)
+        min_bins = int(old_flags.indices().size() * 0.005)
+        if (n_bins < (n_free / 100)) or (sse > 0.005) or (n_bins < min_bins):
+          if (not params.import_data.ignore_shells):
+            raise Sorry(("The R-free flags in %s appear to have been "+
+              "assigned in thin resolution shells.  PHENIX is unable to "+
+              "properly extend flags created in this manner.  If you "+
+              "prefer to ignore this check and want to create new flags using "+
+              "random assignment, or if you think this message is in error, "+
+              "you can use the reflection file editor instead. "+
+              "(To view the distribution of R-free flags, click the "+
+              "toolbar button \"Other tools\" and select \"Inspect R-free "+
+              "flags\".)") % params.import_data.flags_file)
+          else :
+            print("WARNING: ignoring thin shells", file=out)
+        if (n_missing <= 20) : # XXX hack
+          from scitbx.array_family import flex
+          missing_flags = missing_set.array(data=flex.bool(n_missing, False))
+        else :
+          missing_flags = missing_set.generate_r_free_flags(
+            fraction_free=fraction_free,
+            max_free=None,
+            use_lattice_symmetry=True)
+        new_flags = old_flags.concatenate(other=missing_flags)
+      else :
+        new_flags = old_flags
+      new_arrays.append(new_flags)
+  mtz_out = new_arrays[0].as_mtz_dataset(
+    column_root_label="A")
+  for i, array in enumerate(new_arrays[1:]):
+    mtz_out.add_miller_array(
+      miller_array=array,
+      column_root_label="%s" % string.uppercase[i+1])
+  mtz_obj = mtz_out.mtz_object()
+  for i, column in enumerate(mtz_obj.columns()):
+    column.set_label(labels[i])
+  if (params.import_data.output_file is None):
+    base,ext = os.path.splitext(params.import_data.data_file)
+    params.import_data.output_file = base + "_flags.mtz"
+  mtz_obj.write(file_name=params.import_data.output_file)
+  print("Data and flags written to %s" % params.import_data.output_file, file=out)
+  return params.import_data.output_file
+
+def validate_params(params):
+  if (params.import_data.data_file is None):
+    raise Sorry("Please specify a data file.")
+  elif (not os.path.isfile(params.import_data.data_file)):
+    raise Sorry("%s is not a recognizable file." %params.import_data.data_file)
+  return True
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/gui_tools/models.py
+from __future__ import absolute_import, division, print_function
+
+# TODO: TESTS!, manage CIF files better, detect duplicates
+
+import iotbx.gui_tools
+from iotbx import file_reader
+from libtbx.utils import Sorry
+from six.moves import cStringIO as StringIO
+import os, tempfile
+
+model_file_types = {"pdb" : "PDB", "mmcif" : "mmCIF", }
+
+class cif_handler(iotbx.gui_tools.manager):
+  file_type = "cif"
+  file_type_label = "CIF"
+
+class model_handler(iotbx.gui_tools.manager):
+  file_type = "pdb"
+  file_type_label = "PDB"
+  def __init__(self,
+                allowed_param_names=None,
+                allowed_multiple_params=None,
+                debug=False,
+                cif_param_names=None,
+                multiple_cif_params=None,
+                tmp_dir=None):
+    iotbx.gui_tools.manager.__init__(self,
+      allowed_param_names=allowed_param_names,
+      allowed_multiple_params=allowed_multiple_params,
+      debug=debug)
+    self.cif_handler = cif_handler(
+      allowed_param_names=cif_param_names,
+      allowed_multiple_params=multiple_cif_params)
+    self.tmp_dir = tmp_dir
+    self.add_callback = lambda file_name : True
+    self.remove_callback = lambda file_name : True
+    self._viewable_file_params = []
+
+  def get_file_type_label(self, file_name=None, input_file=None):
+    if (file_name is not None) and (input_file is None):
+      input_file = self._cached_input_files.get(file_name, None)
+    if (input_file is not None):
+      file_type = input_file.file_object.input.file_type()
+      return model_file_types[file_type]
+
+  def clear_format_specific_cache(self):
+    if hasattr(self, "cif_handler"):
+      self.cif_handler.clear_cache()
+    self._cached_pdb_hierarchies = {}
+    self._cached_bonds = {}
+    self._cached_xray_structures = {}
+
+  def set_callbacks(self, add_callback, remove_callback):
+    self.add_callback = add_callback
+    self.remove_callback = remove_callback
+
+  def add_file_callback(self, file_name):
+    self.add_callback(file_name)
+
+  def remove_file_callback(self, file_name):
+    self.remove_callback(file_name)
+
+  def save_other_file_data(self, input_file):
+    file_name = input_file.file_name
+    pdb_hierarchy = input_file.file_object.hierarchy
+    self._cached_pdb_hierarchies[file_name] = pdb_hierarchy
+    return pdb_hierarchy
+
+  def get_complete_model_file(self, file_param_name=None):
+    file_names = []
+    if (file_param_name is not None):
+      file_names = self.get_param_files(file_param_name)
+    else :
+      file_names = list(self._cached_input_files.keys())
+    if (len(file_names) == 1):
+      return file_names[0]
+    elif (len(file_names) != 0):
+      pdb_hierarchies = []
+      for file_name in file_names :
+        pdb_hierarchies.append(self.get_pdb_hierarchy(file_name))
+      tmp_dir = self.tmp_dir
+      if tmp_dir is None :
+        tmp_dir = tempfile.gettempdir()
+      assert os.path.isdir(tmp_dir)
+      file_name = os.path.join(tmp_dir, "current_model.pdb")
+      f = open(file_name, "w")
+      for pdb_hierarchy in pdb_hierarchies :
+        f.write(pdb_hierarchy.as_pdb_string())
+      f.write("END")
+      f.close()
+      return file_name
+    return None
+
+  # XXX crude hack for programs which have multiple input models, not all of
+  # which should be viewed together (e.g. phenix.refine and reference model)
+  def get_files_for_viewing(self, file_param_name=None):
+    if (len(self._viewable_file_params) == 0):
+      return self.get_current_file_names()
+    else :
+      file_names = []
+      for param_name in self._viewable_file_params :
+        file_names.extend(self.get_param_files(param_name))
+      return file_names
+
+  def set_viewable_params(self, params):
+    assert isinstance(params, list) or isinstance(params, tuple)
+    self._viewable_file_params = params
+
+  def combine_pdb_files(self, file_names):
+    symm = None
+    pdb_str = StringIO()
+    hierarchies = []
+    for file_name in file_names :
+      pdb_file = self._cached_input_files[file_name]
+      file_symm = pdb_file.crystal_symmetry()
+      if (file_symm is not None) and (symm is not None):
+        symm = file_symm
+      hierarchy_str = self.get_pdb_hierarchy(file_name).as_pdb_string()
+      hierarchies.append(hierarchy_str)
+    if (symm is not None):
+      import iotbx.pdb
+      cryst1 = iotbx.pdb.format_cryst1_record(symm)
+      scale = iotbx.pdb.format_scale_records(symm.unit_cell())
+      pdb_str.write(cryst1 + "\n")
+      pdb_str.write(scale + "\n")
+    pdb_str.write("\n".join(hierarchies))
+    return pdb_str.getvalue()
+
+  def get_combined_pdb_input(self, file_param_name=None):
+    if (file_param_name is not None):
+      file_names = self.get_param_files(file_param_name)
+      if (len(file_names) == 1):
+        hierarchy = self.get_pdb_hierarchy(file_names[0])
+        xray_structure = self.get_xray_structure(file_names[0])
+        return (hierarchy, xray_structure)
+    else :
+      file_names = list(self._cached_input_files.keys())
+    if (len(file_names) == 0):
+      raise Sorry("No PDB files loaded.")
+    pdb_str = self.combine_pdb_files(file_names)
+    import iotbx.pdb
+    pdb_in = iotbx.pdb.input(source_info=None, lines=pdb_str)
+    hierarchy = pdb_in.construct_hierarchy()
+    xray_structure = pdb_in.xray_structure_simple()
+    return (hierarchy, xray_structure)
+
+  #--- CIF files
+  def save_cif_file(self, *args, **kwds):
+    self.cif_handler.save_file(*args, **kwds)
+
+  def set_param_cif_file(self, *args, **kwds):
+    self.cif_handler.set_param_file(*args, **kwds)
+
+  def get_current_cif_file_names(self):
+    return self.cif_handler.get_current_file_names()
+
+  def get_cifs(self):
+    files = []
+    for file_name in self.cif_handler.get_current_file_names():
+      files.append(self.get_cif_file(file_name))
+    return files
+
+  def get_cif_objects(self):
+    return [ file.file_object for file in self.get_cifs() ]
+
+  def get_cif_file(self, file_name):
+    return self.cif_handler.get_file(file_name)
+
+  def remove_cif_file(self, file_name):
+    return self.cif_handler.remove_file(file_name)
+  #---
+
+  def get_pdb_hierarchy(self, file_name):
+    input_file = self.get_file(file_name)
+    if (input_file is not None):
+      if (not file_name in self._cached_pdb_hierarchies):
+        pdb_hierarchy = input_file.file_object.hierarchy
+        self._cached_pdb_hierarchies[file_name] = pdb_hierarchy
+      return self._cached_pdb_hierarchies.get(file_name)
+    return None
+
+  def get_xray_structure(self, file_name):
+    pdb_file = self.get_file(file_name)
+    if pdb_file is not None :
+      xray_structure = self._cached_xray_structures.get(file_name, None)
+      if xray_structure is None :
+        xray_structure = pdb_file.file_object.xray_structure_simple()
+        self._cached_xray_structures[file_name] = xray_structure
+      return xray_structure
+    return None
+
+  def get_connectivity(self, file_name):
+    assert os.path.isfile(file_name)
+    if (self.get_file(file_name) is None):
+      self.save_file(file_name=file_name)
+    if ((file_name in self._cached_bonds) and
+        (not self.file_is_modified(file_name))):
+      return self._cached_bonds[file_name]
+    pdb_hierarchy = self.get_pdb_hierarchy(file_name)
+    assert (pdb_hierarchy is not None)
+    atomic_bonds = pdb_hierarchy.distance_based_simple_two_way_bond_sets()
+    self._cached_bonds[file_name] = atomic_bonds
+    return atomic_bonds
+
+  def get_pdb_file_symmetry(self, file_name):
+    pdb_file = self.get_file(file_name)
+    if (pdb_file is None):
+      pdb_file = file_reader.any_file(file_name)
+      pdb_file.assert_file_type("pdb")
+    return pdb_file.crystal_symmetry()
+
+  def create_copy_with_fake_symmetry(self, file_name, tmp_dir=None):
+    import iotbx.pdb
+    if (tmp_dir is None):
+      if (self.tmp_dir is None):
+        tmp_dir = tempfile.gettempdir()
+      else :
+        tmp_dir = self.tmp_dir
+    assert os.path.isdir(tmp_dir)
+    pdb_hierarchy = self.get_pdb_hierarchy(file_name)
+    if pdb_hierarchy is None :
+      pdb_file = file_reader.any_file(file_name)
+      pdb_file.assert_file_type("pdb")
+      self.save_file(pdb_file)
+      pdb_hierarchy = self._cached_pdb_hierarchies[file_name]
+    xyz = pdb_hierarchy.atoms().extract_xyz()
+    symm = get_fake_symmetry(xyz.min(), xyz.max())
+    output_file = os.path.join(tmp_dir, os.path.basename(file_name))
+    f = open(output_file, "w")
+    f.write("%s\n" % iotbx.pdb.format_cryst1_and_scale_records(
+                        crystal_symmetry=symm,
+                        write_scale_records=True))
+    f.write(pdb_hierarchy.as_pdb_string())
+    f.close()
+    return output_file
+
+def get_fake_symmetry(xyz_min, xyz_max):
+  from iotbx import crystal_symmetry_from_any
+  a = xyz_max[0] - xyz_min[0] + 10.0
+  b = xyz_max[1] - xyz_min[1] + 10.0
+  c = xyz_max[2] - xyz_min[2] + 10.0
+  combined = "%.3f,%.3f,%.3f,90,90,90,P1" % (a, b, c)
+  symm = crystal_symmetry_from_any.from_string(combined)
+  return symm
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/gui_tools/reflections.py
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function
+
+import iotbx.gui_tools
+from iotbx import file_reader
+from libtbx.utils import Sorry
+import os
+import six
+from six.moves import range
+from libtbx.phil import parse
+import textwrap
+
+
+def space_group_as_str(space_group):
+  from cctbx import sgtbx
+  if space_group is None :
+    return ""
+  elif isinstance(space_group, sgtbx.space_group_info):
+    return str(space_group)
+  else :
+    sg_info = sgtbx.space_group_info(group=space_group)
+    return str(sg_info)
+
+def unit_cell_as_str(unit_cell, separator=" "):
+  assert isinstance(separator, str) and separator != ""
+  if unit_cell is not None :
+    format = separator.join([ "%g" for i in range(6) ])
+    return format % unit_cell.parameters()
+  else :
+    return ""
+
+class reflections_handler(iotbx.gui_tools.manager):
+  file_type = "hkl"
+  file_type_label = "Reflections"
+  def __init__(self,
+                allowed_param_names=None,
+                allowed_multiple_params=None,
+                debug=False,
+                minimum_data_score=4,
+                prefer_amplitudes=False):
+    iotbx.gui_tools.manager.__init__(self,
+      allowed_param_names=allowed_param_names,
+      allowed_multiple_params=allowed_multiple_params,
+      debug=debug)
+    self.minimum_data_score = minimum_data_score
+    self.prefer_amplitudes = prefer_amplitudes
+
+  def get_miller_array(self, labels, file_name=None, file_param_name=None):
+    hkl_file = self.get_file(file_name=file_name,
+      file_param_name=file_param_name)
+    if (hkl_file is None):
+      return None
+    for array in hkl_file.file_server.miller_arrays :
+      array_label_string = array.info().label_string()
+      array_labels = array.info().labels
+      if ((array_label_string == labels) or
+          (array_labels == labels) or
+          (",".join(array_labels) == labels)):
+        return array
+    return None
+
+  def get_wavelength(self, *args, **kwds):
+    array = self.get_miller_array(*args, **kwds)
+    if (array is not None):
+      info = array.info()
+      if (info is not None):
+        return info.wavelength
+    return None
+
+  def check_symmetry(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    hkl_server = hkl_file.file_server
+    ma = hkl_server.miller_arrays[0]
+    if (ma.space_group() is None) or (ma.unit_cell() is None):
+      raise Sorry("Incomplete symmetry for this reflections file.  Please "+
+        "use a format that includes both space group and unit cell, such as "+
+        "an MTZ or merged Scalepack file.")
+    return True
+
+  def get_file_type_label(self, file_name=None, input_file=None):
+    if (input_file is not None):
+      return input_file.file_object.file_type()
+
+  def get_all_labels(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    if hkl_file is None :
+      labels = []
+      for (file_name, hkl_file) in self.input_files():
+        miller_arrays = hkl_file.file_server.miller_arrays
+        labels.extend([ a.info().label_string() for a in miller_arrays ])
+    else :
+      miller_arrays = hkl_file.file_server.miller_arrays
+      labels = [ a.info().label_string() for a in miller_arrays ]
+    return labels
+
+  def get_rfree_labels(self, *args, **kwds):
+    prefer_neutron = kwds.pop("neutron", None)
+    hkl_file = self.get_file(*args, **kwds)
+    labels = []
+    if hkl_file is not None :
+      hkl_server = hkl_file.file_server
+      arrays_and_flags = hkl_server.get_r_free_flags(
+        file_name                = None,
+        label                    = None,
+        test_flag_value          = None,
+        disable_suitability_test = False,
+        parameter_scope          = "",
+        return_all_valid_arrays  = True,
+        minimum_score            = 1)
+      if (prefer_neutron is not None):
+        xray_arrays = []
+        neutron_arrays = []
+        other_arrays = []
+        for array_and_flag_value in arrays_and_flags :
+          array = array_and_flag_value[0]
+          label = array.info().label_string().lower()
+          if ("neutron" in label):
+            neutron_arrays.append(array_and_flag_value)
+          elif ("xray" in label):
+            xray_arrays.append(array_and_flag_value)
+          else :
+            other_arrays.append(array_and_flag_value)
+        if (prefer_neutron) and (len(neutron_arrays) > 0):
+          arrays_and_flags = neutron_arrays + other_arrays
+        elif (not prefer_neutron) and (len(xray_arrays) > 0):
+          arrays_and_flags = xray_arrays + other_arrays
+      if len(arrays_and_flags) > 0 :
+        labels = [ a.info().label_string() for a, fl in arrays_and_flags ]
+    return labels
+
+  def has_rfree(self, *args, **kwds):
+    return len(self.get_rfree_labels(*args, **kwds)) > 0
+
+  def has_neutron_rfree(self, *args, **kwds):
+    kwds['neutron'] = True
+    labels = self.get_rfree_labels(*args, **kwds)
+    return ([ "neutron" in l.lower() for l in labels ].count(True) > 0)
+
+  def get_rfree_flag_value(self, array_name, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    flag = None
+    if hkl_file is not None :
+      hkl_server = hkl_file.file_server
+      arrays_and_flags = hkl_server.get_r_free_flags(
+        file_name                = None,
+        label                    = None,
+        test_flag_value          = None,
+        disable_suitability_test = False,
+        parameter_scope          = "",
+        return_all_valid_arrays  = True,
+        minimum_score            = 1)
+      for miller_array, array_flag in arrays_and_flags :
+        label = miller_array.info().label_string()
+        if label == array_name :
+          flag = array_flag
+          break
+    return flag
+
+  def get_experimental_phase_labels(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    labels = []
+    if hkl_file is not None :
+      hkl_server = hkl_file.file_server
+      miller_arrays = hkl_server.get_experimental_phases(
+        file_name               = hkl_file.file_name,
+        labels                  = None,
+        ignore_all_zeros        = True,
+        parameter_scope         = "",
+        return_all_valid_arrays = True,
+        minimum_score           = 1)
+      labels = [ array.info().label_string() for array in miller_arrays ]
+    return labels
+
+  def has_phases(self, *args, **kwds):
+    return len(self.get_experimental_phase_labels(*args, **kwds)) > 0
+
+  def get_phase_arrays(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    labels = []
+    if hkl_file is not None :
+      hkl_server = hkl_file.file_server
+      miller_arrays = hkl_server.get_phases_deg(
+        file_name=hkl_file.file_name,
+        labels=None,
+        convert_to_phases_if_necessary=False,
+        original_phase_units=None,
+        parameter_scope=None,
+        parameter_name=None,
+        return_all_valid_arrays=True,
+        minimum_score=1)
+      return miller_arrays
+    return []
+
+  def get_phase_deg_labels(self, *args, **kwds):
+    miller_arrays = self.get_phase_arrays(*args, **kwds)
+    labels = []
+    for array in miller_arrays :
+      labels_str = array.info().label_string()
+      if labels_str.startswith("FOM") : continue
+      labels.append(labels_str)
+    return labels
+
+  def get_phase_column_labels(self, *args, **kwds):
+    labels = []
+    miller_arrays = self.get_phase_arrays(*args, **kwds)
+    for array in miller_arrays :
+      for label in array.info().labels :
+        if label.upper().startswith("PH"):
+          labels.append(label)
+          break
+    return labels
+
+  def get_data_arrays(self, *args, **kwds):
+    prefer_neutron = kwds.pop("neutron", None)
+    hkl_file = self.get_file(*args, **kwds)
+    if hkl_file is not None :
+      hkl_server = hkl_file.file_server
+      miller_arrays = hkl_server.get_xray_data(
+        file_name               = None,
+        labels                  = None,
+        ignore_all_zeros        = False,
+        parameter_scope         = "",
+        return_all_valid_arrays = True,
+        minimum_score           = self.minimum_data_score)
+      if self.prefer_amplitudes :
+        f_arrays = []
+        other_arrays = []
+        for array in miller_arrays :
+          if array.is_xray_amplitude_array():
+            f_arrays.append(array)
+          else :
+            other_arrays.append(array)
+        miller_arrays = f_arrays + other_arrays
+      elif (prefer_neutron is not None):
+        xray_arrays = []
+        neutron_arrays = []
+        other_arrays = []
+        for array in miller_arrays :
+          label = array.info().label_string().lower()
+          if ("neutron" in label):
+            neutron_arrays.append(array)
+          elif ("xray" in label):
+            xray_arrays.append(array)
+          else :
+            other_arrays.append(array)
+        if (prefer_neutron) and (len(neutron_arrays) > 0):
+          miller_arrays = neutron_arrays + other_arrays
+        elif (not prefer_neutron) and (len(xray_arrays) > 0):
+          miller_arrays = xray_arrays + other_arrays
+      return miller_arrays
+    return []
+
+  def get_data_labels(self, *args, **kwds):
+    return extract_labels(self.get_data_arrays(*args, **kwds))
+
+  def get_amplitude_arrays(self, *args, **kwds):
+    allow_conversion = kwds.pop('allow_conversion', False)
+    hkl_file = self.get_file(*args, **kwds)
+    if hkl_file is not None :
+      hkl_server = hkl_file.file_server
+      miller_arrays = hkl_server.get_amplitudes(
+        file_name               = None,
+        labels                  = None,
+        convert_to_amplitudes_if_necessary = allow_conversion,
+        parameter_scope         = "",
+        parameter_name          = "",
+        return_all_valid_arrays = True,
+        minimum_score           = 1,
+        strict                  = True)
+      return miller_arrays
+    return []
+
+  def get_amplitude_labels(self, *args, **kwds):
+    return extract_labels(self.get_amplitude_arrays(*args, **kwds))
+
+  def get_amplitude_column_labels(self, *args, **kwds):
+    miller_arrays = self.get_amplitude_arrays(*args, **kwds)
+    labels = []
+    for array in miller_arrays :
+      # XXX what about anomalous data?
+      labels.extend(array.info().labels[0])
+    return labels
+
+  def get_intensity_arrays(self, *args, **kwds):
+    miller_arrays = self.get_data_arrays(*args, **kwds)
+    i_arrays = []
+    for array in miller_arrays :
+      if array.is_xray_intensity_array():
+        i_arrays.append(array)
+    return i_arrays
+
+  def get_intensity_labels(self, *args, **kwds):
+    return extract_labels(self.get_intensity_arrays(*args, **kwds))
+
+  # space-separated, column labels only
+  def get_data_labels_for_wizard(self, *args, **kwds):
+    miller_arrays = self.get_data_arrays(*args, **kwds)
+    labels = [ " ".join(array.info().labels) for array in miller_arrays ]
+    return labels
+
+  def has_data(self, *args, **kwds):
+    return len(self.get_data_labels(*args, **kwds)) > 0
+
+  def has_neutron_data(self, *args, **kwds):
+    kwds['neutron'] = True
+    labels = self.get_data_labels(*args, **kwds)
+    return ([ "neutron" in l.lower() for l in labels ].count(True) > 0)
+
+  def get_anomalous_data_labels(self, *args, **kwds):
+    kwds = dict(kwds) # XXX gross...
+    allow_dano = kwds.pop("allow_reconstructed_amplitudes", True)
+    hkl_file = self.get_file(*args, **kwds)
+    labels = []
+    if hkl_file is not None :
+      hkl_server = hkl_file.file_server
+      miller_arrays = hkl_server.get_xray_data(
+        file_name               = None,
+        labels                  = None,
+        ignore_all_zeros        = False,
+        parameter_scope         = "",
+        return_all_valid_arrays = True,
+        minimum_score           = self.minimum_data_score)
+      for array in miller_arrays :
+        if (array.anomalous_flag()):
+          if ((array.is_xray_reconstructed_amplitude_array()) and
+              (not allow_dano)):
+            continue
+          labels.append(array.info().label_string())
+    return labels
+
+  def has_anomalous_data(self, *args, **kwds):
+    return (len(self.get_anomalous_data_labels(*args, **kwds)) > 0)
+
+  def get_phaser_map_fc_labels(self, *args, **kwds):
+    labels = self.get_fmodel_labels(*args, **kwds)
+    first_column_only = kwds.pop('first_column_only', False)
+    hkl_file = self.get_file(*args, **kwds)
+    if (hkl_file is not None):
+      for miller_array in hkl_file.file_server.miller_arrays :
+        if (miller_array.is_complex_array()):
+          labels_str = miller_array.info().label_string()
+          if labels_str.startswith("FWT"):
+            labels.append(miller_array.info().labels[0])
+    return labels
+
+  def get_fmodel_labels(self, *args, **kwds):
+    first_column_only = kwds.pop('first_column_only', False)
+    hkl_file = self.get_file(*args, **kwds)
+    labels_list = []
+    if (hkl_file is not None):
+      for miller_array in hkl_file.file_server.miller_arrays :
+        if (miller_array.is_complex_array()):
+          labels = miller_array.info().label_string()
+          if (labels.startswith("F-model") or
+              labels.upper().startswith("FMODEL") or
+              labels.upper().startswith("FC")):
+            if (first_column_only):
+              labels_list.append(miller_array.info().labels[0])
+            else :
+              labels_list.append(labels)
+    return labels_list
+
+  def get_map_coeff_labels(self, *args, **kwds):
+    # FIXME this is just gross...
+    kwds_basic = {}
+    kwds_maps = {}
+    for kwd in dict(kwds):
+      if (kwd in ["file_name", "file_param_name"]):
+        kwds_basic[kwd] = kwds[kwd]
+      else :
+        kwds_maps[kwd] = kwds[kwd]
+    hkl_file = self.get_file(*args, **kwds_basic)
+    if hkl_file is not None :
+      return get_map_coeff_labels(hkl_file.file_server, **kwds_maps)
+    return []
+
+  def get_map_coeff_labels_for_build(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    if hkl_file is not None :
+      return get_map_coeffs_for_build(hkl_file.file_server)
+    return []
+
+  def get_map_coeff_labels_for_fft(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    labels_list = []
+    if hkl_file is not None :
+      all_labels = get_map_coeff_labels(hkl_file.file_server,
+        keep_array_labels=True)
+      for labels in all_labels :
+        if isinstance(labels, str):
+          labels_list.append(labels)
+        else :
+          labels_list.append(" ".join(labels))
+    return labels_list
+
+  def get_two_fofc_map_labels(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    labels_list = []
+    if (hkl_file is not None):
+      for array in hkl_file.file_server.miller_arrays :
+        labels = array.info().label_string()
+        if (labels.startswith("FWT") or labels.startswith("2FOFC")):
+          labels_list.append(labels)
+    return labels_list
+
+  def get_fofc_map_labels(self, *args, **kwds):
+    hkl_file = self.get_file(*args, **kwds)
+    labels_list = []
+    if (hkl_file is not None):
+      for array in hkl_file.file_server.miller_arrays :
+        labels = array.info().label_string()
+        if (labels.startswith("DELFWT") or labels.startswith("FOFC")):
+          labels_list.append(labels)
+    return labels_list
+
+  def get_amplitude_column_labels(self, *args, **kwds):
+    miller_arrays = self.get_amplitude_arrays(*args, **kwds)
+    labels = []
+    for array in miller_arrays :
+      # XXX what about anomalous data?
+      labels.extend(array.info().labels[0])
+    return labels
+
+  def d_max_min(self, file_name=None, file_param_name=None,
+      array_name=None, array_names=None):
+    from iotbx.reflection_file_editor import get_best_resolution
+    miller_arrays = []
+    if (file_name is None) and (file_param_name is None):
+      for phil_name, file_name in six.iteritems(self._param_files):
+        input_file = self.get_file(file_name)
+        if (input_file is not None):
+          miller_arrays.extend(input_file.file_server.miller_arrays)
+    else :
+      hkl_file = self.get_file(file_name, file_param_name)
+      if (hkl_file is None):
+        return (None, None)
+      for miller_array in hkl_file.file_server.miller_arrays :
+        label = miller_array.info().label_string()
+        if (array_name is not None):
+          if (label == array_name):
+            miller_arrays = [miller_array]
+            break
+        elif (array_names is not None):
+          if (label in array_names):
+            miller_arrays.append(miller_array)
+        else :
+          miller_arrays.append(miller_array)
+    (d_max, d_min) = get_best_resolution(miller_arrays)
+    return (d_max, d_min)
+
+  def get_resolution_range(self, *args, **kwds):
+    (d_max, d_min) = self.d_max_min(*args, **kwds)
+    if (d_max is None):
+      return ""
+    else :
+      return "(%.3f - %.3f)" % (d_max, d_min)
+
+  def get_resolution_limits(self, *args, **kwds):
+    (d_max, d_min) = self.d_max_min(*args, **kwds)
+    (d_max_str, d_min_str) = ("", "")
+    if (d_max is not None):
+      d_max_str = "(%.3f)" % d_max
+    if (d_min is not None):
+      d_min_str = "(%.3f)" % d_min
+    return (d_max_str, d_min_str)
+
+  def space_group(self, *args, **kwds):
+    symm = self.crystal_symmetry(*args, **kwds)
+    if symm is not None :
+      return symm.space_group()
+    return None
+
+  def space_group_as_str(self, *args, **kwds):
+    space_group = self.space_group(*args, **kwds)
+    return space_group_as_str(space_group)
+
+  def unit_cell(self, *args, **kwds):
+    symm = self.crystal_symmetry(*args, **kwds)
+    if symm is not None :
+      return symm.unit_cell()
+    return None
+
+  def unit_cell_as_str(self, file_name=None, file_param_name=None,
+      separator=" "):
+    unit_cell = self.unit_cell(file_name, file_param_name)
+    return unit_cell_as_str(unit_cell, separator)
+
+  def crystal_symmetry(self, file_name=None, file_param_name=None):
+    final_symm = None
+    if file_name is None and file_param_name is None :
+      for param_name, file_name in six.iteritems(self._param_files):
+        input_file = self.get_file(file_name)
+        miller_arrays = input_file.file_server.miller_arrays
+        for array in miller_arrays :
+          symm = array.crystal_symmetry()
+          if symm is not None :
+            final_symm = symm
+            break
+    else :
+      hkl_file = self.get_file(file_name, file_param_name)
+      if hkl_file is not None :
+        miller_arrays = hkl_file.file_server.miller_arrays
+        if len(miller_arrays) > 0 :
+          final_symm = miller_arrays[0].crystal_symmetry()
+    return final_symm
+
+  def check_symmetry_consistency(self):
+    pass
+
+def extract_labels(miller_arrays):
+  return [ array.info().label_string() for array in miller_arrays ]
+
+def get_fp_fpp_from_sasaki(guess_ha,wavelength):
+  from cctbx.eltbx import sasaki
+  from decimal import Decimal, ROUND_HALF_UP
+  if wavelength is None or guess_ha is None :
+    return None, None
+  try:
+    table = sasaki.table(guess_ha)
+  except Exception as e :
+    return None, None
+  fp_fdp = table.at_angstrom(wavelength)
+  f_prime=fp_fdp.fp()
+  f_double_prime=fp_fdp.fdp()
+  fp = Decimal(f_prime).quantize(Decimal('0.01'), ROUND_HALF_UP)
+  fpp = Decimal(f_double_prime).quantize(Decimal('0.01'), ROUND_HALF_UP)
+  return fp, fpp
+
+def get_high_resolution(server):
+  d_min = None #999.99
+  for miller_array in server.miller_arrays :
+    try :
+      array_min = miller_array.d_min()
+      if d_min is None or array_min < d_min :
+        d_min = array_min
+    except Exception :
+      pass
+  return d_min
+
+def get_miller_array_symmetry(miller_array):
+  from cctbx import sgtbx
+  symm = miller_array.crystal_symmetry()
+  if symm is None :
+    return (None, None)
+  unit_cell = symm.unit_cell()
+  if (unit_cell is not None):
+    uc = unit_cell_as_str(unit_cell)
+  else :
+    uc = None
+  space_group = symm.space_group()
+  if (space_group is not None):
+    sg = str(sgtbx.space_group_info(group=space_group))
+  else :
+    sg = None
+  return (sg, uc)
+
+def get_array_description(miller_array):
+  from iotbx import reflection_file_utils
+  info = miller_array.info()
+  labels = info.label_string()
+  if labels in ["PHI", "PHIB", "PHIM", "PHIC"] :
+    return "Phases"
+  if labels in ["FOM", "FOMM"] :
+    return "Weights"
+  if ((miller_array.is_integer_array() or miller_array.is_bool_array()) and
+      reflection_file_utils.looks_like_r_free_flags_info(info)):
+    return "R-free flag"
+  methods_and_meanings = [ ("is_complex_array", "Map coeffs"),
+                           ("is_xray_amplitude_array", "Amplitude"),
+                           ("is_xray_reconstructed_amplitude_array", "Amplitude"),
+                           ("is_xray_intensity_array", "Intensity"),
+                           ("is_hendrickson_lattman_array", "HL coeffs"),
+                           ("is_bool_array", "Boolean"),
+                           ("is_integer_array", "Integer"),
+                           ("is_real_array", "Floating-point"),
+                           ("is_string_array", "String")
+                           ]
+  for method, desc in methods_and_meanings :
+    test = getattr(miller_array, method)
+    if test():
+      return desc
+  # resort to the name of the python data type if not matching any of the above
+  return type(miller_array.data()).__name__
+
+
+def get_mtz_label_prefix(input_file=None, file_name=None):
+  if input_file is None :
+    input_file = file_reader.any_file(file_name)
+  assert (input_file.file_type == "hkl" and
+          input_file.file_object.file_type() == "ccp4_mtz")
+  file_content = input_file.file_object.file_content()
+  last_crystal = file_content.crystals()[-1]
+  crystal = last_crystal.name()
+  dataset = last_crystal.datasets()[-1].name()
+  return "/%s/%s" % (crystal, dataset)
+
+def extract_map_coeffs(miller_arrays, f_lab, phi_lab, fom_lab):
+  f_array = None
+  phi_array = None
+  fom_array = None
+  #print f_lab, phi_lab, fom_lab
+  for miller_array in miller_arrays :
+    labels = miller_array.info().label_string()
+    if (labels == f_lab):
+      f_array = miller_array
+    elif (labels == phi_lab):
+      phi_array = miller_array
+    elif (labels == fom_lab):
+      fom_array = miller_array
+  return (f_array, phi_array, fom_array)
+
+def map_coeffs_from_mtz_file(mtz_file, f_label="FP", phi_label="PHIM",
+    fom_label="FOMM"):
+  if not os.path.isfile(mtz_file):
+    raise Sorry(
+      "No map coefficients are available for conversion.")
+  mtz_in = file_reader.any_file(mtz_file)
+  mtz_in.assert_file_type("hkl")
+  miller_arrays = mtz_in.file_server.miller_arrays
+  (f_array, phi_array, fom_array) = extract_map_coeffs(miller_arrays,
+    f_label, phi_label, fom_label)
+  if (f_array is not None) and (f_array.is_complex_array()):
+    map_coeffs = f_array
+  else :
+    if (f_array is None) or (phi_array is None):
+      raise Sorry("One or more of the columns %s and %s was not found." %
+        (f_label, phi_label))
+    if fom_array is not None :
+      weighted_f = f_array * fom_array
+    else :
+      weighted_f = f_array
+    map_coeffs = weighted_f.phase_transfer(phi_array, deg=True)
+  return map_coeffs
+
+def extract_phenix_refine_map_coeffs(mtz_file, limit_arrays=None):
+  assert (limit_arrays is None) or (isinstance(limit_arrays, list))
+  if not os.path.isfile(mtz_file):
+    raise Sorry("No map coefficients are available for conversion.")
+  mtz_in = file_reader.any_file(mtz_file)
+  mtz_in.assert_file_type("hkl")
+  miller_arrays = mtz_in.file_server.miller_arrays
+  assert len(miller_arrays) > 0
+  map_names = {"2FOFCWT" : "2mFo-DFc",
+               "FOFCWT" : "mFo-DFc",
+               "2FOFCWT_no_fill" : "2mFo-DFc_no_fill",
+               "FOFCWT_no_fill" : "mFo-DFc_no_fill"}
+  output_arrays = []
+  for miller_array in miller_arrays :
+    if miller_array.is_complex_array():
+      labels = miller_array.info().label_string()
+      if labels.startswith("F-model"):
+        continue
+      if (limit_arrays is not None) and (not labels in limit_arrays):
+        continue
+      f_label = miller_array.info().labels[0]
+      map_name = map_names.get(f_label)
+      if map_name is None :
+        map_name = f_label
+      output_arrays.append((miller_array, map_name))
+  return output_arrays
+
+def get_map_coeff_labels(server,
+    build_only=False,
+    include_fom=True,
+    exclude_anomalous=False,
+    exclude_fmodel=False,
+    keep_array_labels=False):
+  all_labels = []
+  phi_labels = []
+  fom_labels = []
+  for miller_array in server.miller_arrays :
+    label = miller_array.info().label_string()
+    if label.startswith("FOM") and include_fom :
+      fom_labels.append(label)
+  phase_arrays = server.get_phases_deg(None, None, False, None, None, None,
+                                       True, 3)
+  for miller_array in phase_arrays :
+    labels = miller_array.info().label_string()
+    if miller_array.is_hendrickson_lattman_array():
+      continue
+    elif miller_array.is_complex_array():
+      if ((labels.startswith("F-model") or labels.startswith("FMODEL") or
+           labels.startswith("FC")) and (exclude_fmodel)):
+        continue
+      elif (labels.upper().startswith("ANOM")) and (exclude_anomalous):
+        continue
+      if build_only :
+        if (not labels[0:4] in ["FOFC", "DELF", "ANOM"]):
+          # list these first
+          if (labels in ["FWT,PHWT", "2FOFCWT,PH2FOFCWT"]):
+            all_labels.insert(0, labels)
+          else :
+            all_labels.append(labels)
+      else :
+        all_labels.append(labels)
+    elif miller_array.info().labels[0].startswith("PHI"):
+      phi_labels.append(labels)
+  amp_arrays = server.get_amplitudes(
+    file_name               = None,
+    labels                  = None,
+    convert_to_amplitudes_if_necessary = False,
+    parameter_scope         = "",
+    parameter_name          = "",
+    return_all_valid_arrays = True,
+    minimum_score           = 2,
+    strict                  = True)
+  if keep_array_labels :
+    for miller_array in amp_arrays :
+      data_label = miller_array.info().label_string()
+      for phase_label in phi_labels :
+        hybrid_label = [data_label, phase_label]
+        if len(fom_labels) > 0 and include_fom :
+          for fom in fom_labels :
+            hybrid_label_ = hybrid_label + [ fom ]
+            all_labels.append(hybrid_label_)
+        else :
+          all_labels.append(hybrid_label)
+  else :
+    for miller_array in amp_arrays :
+      f_label = miller_array.info().labels[0]
+      if f_label[0] == "F" and f_label != "FC" :
+        for phase_label in phi_labels :
+          hybrid_label = "%s,%s" % (f_label, phase_label)
+          if len(fom_labels) > 0 and include_fom :
+            for fom in fom_labels :
+              final_label = hybrid_label + ",%s" % fom
+              all_labels.append(final_label)
+          else :
+            all_labels.append(hybrid_label)
+  return all_labels
+
+def get_map_coeffs_for_build(server):
+  return get_map_coeff_labels(server, build_only=True)
+
+def format_map_coeffs_for_resolve(f_label, phi_label, fom_label):
+  return "FP=%s PHIB=%s FOM=%s" % (f_label, phi_label, fom_label)
+
+def decode_resolve_map_coeffs(labels):
+  fields = labels.strip().split()
+  f_label = None
+  phi_label = None
+  fom_label = None
+  for field in fields :
+    resolve_label, array_label = field.split("=")
+    if resolve_label == "FP" :
+      f_label = array_label
+    elif resolve_label == "PHIB" :
+      phi_label = array_label
+    elif resolve_label == "FOM" :
+      fom_label = array_label
+  return (f_label, phi_label, fom_label)
+
+
+
+class ArrayInfo:
+  """
+  Extract information from a list of miller_array objects and format it for printing as a table
+  To be called in a loop like:
+
+  for i,array in enumerate(arrays):
+    arrayinfo = ArrayInfo(array)
+    info_fmt, headerstr, infostr = arrayinfo.get_selected_info_columns_from_phil()
+    if i==0:
+      print(headerstr)
+    print(infostr)
+
+  """
+  def __init__(self, millarr, wrap_labels=0):
+    from crys3d.hklviewer import display2
+    from cctbx.array_family import flex
+    from scitbx import graphics_utils
+    from libtbx.math_utils import roundoff
+    import math
+    nan = float("nan")
+    self.wrap_labels = wrap_labels
+    if millarr.space_group() is None :
+      self.spginf = "?"
+    else:
+      self.spginf = millarr.space_group_info().symbol_and_number()
+    if millarr.unit_cell() is None:
+      self.ucell = (nan, nan, nan, nan, nan, nan)
+    else:
+      self.ucell = millarr.unit_cell().parameters()
+    self.ucellinf = "({:.6g}Å, {:.6g}Å, {:.6g}Å, {:.6g}°, {:.6g}°, {:.6g}°)".format(*self.ucell)
+    data = millarr.deep_copy().data()
+    self.maxdata = self.mindata = self.maxsigmas = self.minsigmas = nan
+    self.minmaxdata = (nan, nan)
+    self.minmaxsigs = (nan, nan)
+    self.data_sigdata_max = nan
+    self.data_sigdata = nan
+    self.desc = ""
+    self.arrsize = data.size()
+    if not isinstance(data, flex.std_string):
+      if isinstance(data, flex.hendrickson_lattman):
+        data = graphics_utils.NoNansHL( data )
+        # estimate minmax values of HL coefficients as a simple sum
+        if self.arrsize:
+          self.maxdata = max([e[0]+e[1]+e[2]+e[3] for e in data ])
+          self.mindata = min([e[0]+e[1]+e[2]+e[3] for e in data ])
+          self.arrsize = len([42 for e in millarr.data() if not math.isnan(e[0]+e[1]+e[2]+e[3])])
+      elif isinstance(data, flex.vec3_double) or isinstance(data, flex.vec2_double):
+        # XDS produces 2D or 3D arrays in some of its files
+        if self.arrsize:
+          self.maxdata = max([max(e) for e in data ])
+          self.mindata = min([min(e) for e in data ])
+      else:
+        # Get a list of bools with True whenever there is a nan
+        selection = ~ graphics_utils.IsNans( flex.abs( millarr.data()).as_double() )
+        # count elements that are not nan values
+        self.arrsize = millarr.data().select(selection).size()
+        if (isinstance(data, flex.int)):
+          data = flex.double([e for e in data if e!= display2.inanval])
+        if millarr.is_complex_array():
+          data = flex.abs(data)
+        i=0
+        while math.isnan(data[i]):
+          i += 1 # go on until we find a data[i] that isn't NaN
+        data = graphics_utils.NoNansArray( data, data[i] ) # assuming data[0] isn't NaN
+        self.maxdata = flex.max( data )
+        self.mindata = flex.min( data )
+      if millarr.sigmas() is not None:
+        data = millarr.sigmas().deep_copy()
+        i=0
+        while math.isnan(data[i]):
+          i += 1 # go on until we find a data[i] that isn't NaN
+        data = graphics_utils.NoNansArray( data, data[i] )
+        self.maxsigmas = flex.max( data )
+        self.minsigmas = flex.min( data )
+        # Inspired by Diederichs doi:10.1107/S0907444910014836 I/SigI_asymptotic
+        data_over_sigdata = millarr.data()/millarr.sigmas()
+        self.data_sigdata = flex.sum(data_over_sigdata)/len(data_over_sigdata)
+        self.data_sigdata_max = flex.max( data_over_sigdata)
+      self.minmaxdata = (self.mindata, self.maxdata)
+      self.minmaxsigs = (self.minsigmas, self.maxsigmas)
+    self.labels = self.desc = self.wavelength = ""
+    if millarr.info():
+      self.labels = millarr.info().labels
+      self.desc = get_array_description(millarr)
+      self.wavelength = "{:.6g}".format(millarr.info().wavelength) if millarr.info().wavelength is not None else float("nan")
+    self.span = "(?,?,?), (?,?,?)"
+    self.dmin = nan
+    self.dmax = nan
+    if millarr.unit_cell() is not None:
+      self.span = str(millarr.index_span().min()) + ", "+ str(millarr.index_span().max())
+      self.dmin = millarr.d_max_min()[1]
+      self.dmax = millarr.d_max_min()[0]
+    self.dminmax = roundoff((self.dmin,self.dmax))
+    self.issymunique = "?"
+    self.isanomalous = "?"
+    self.n_sys_abs = 0
+    self.n_bijvoet = self.n_singletons = 0
+    self.ano_mean_diff = nan
+    self.ano_completeness = nan
+    self.data_compl_infty = nan
+    self.data_completeness = nan
+    self.n_centric = nan
+    # computations below done as in cctbx.miller.set.show_comprehensive_summary()
+    if self.spginf != "?":
+      self.issymunique = millarr.is_unique_set_under_symmetry()
+      self.isanomalous = millarr.anomalous_flag()
+      sys_absent_flags = millarr.sys_absent_flags().data()
+      self.n_sys_abs = sys_absent_flags.count(True)
+      if (self.n_sys_abs != 0):
+        millarr = millarr.select(selection=~sys_absent_flags)
+      self.n_centric = millarr.centric_flags().data().count(True)
+    if not math.isnan(self.ucell[0]):
+      if (self.spginf != "?"
+          and millarr.indices().size() > 0
+          and self.issymunique):
+        millarr.setup_binner(n_bins=1)
+        completeness_d_max_d_min = millarr.completeness(use_binning=True)
+        binner = completeness_d_max_d_min.binner
+        assert binner.counts_given()[0] == 0
+        assert binner.counts_given()[2] == 0
+        n_obs = binner.counts_given()[1]
+        n_complete = binner.counts_complete()[1]
+        if (n_complete != 0 and self.dmax != self.dmin):
+            self.data_completeness = n_obs/n_complete
+        n_complete += binner.counts_complete()[0]
+        if (n_complete != 0):
+            self.data_compl_infty = n_obs/n_complete
+        if (self.isanomalous) and (millarr.is_xray_intensity_array() or
+          millarr.is_xray_amplitude_array()):
+            self.ano_completeness = millarr.anomalous_completeness()
+    if (self.spginf != "?" and self.isanomalous and self.issymunique):
+      asu, matches = millarr.match_bijvoet_mates()
+      self.n_bijvoet = matches.pairs().size()
+      self.n_singletons = matches.n_singles() - self.n_centric
+      if millarr.is_real_array():
+        self.ano_mean_diff = millarr.anomalous_signal()
+    # break long label into list of shorter strings
+    self.labelstr = ",".join(self.labels)
+    if self.wrap_labels > 0:
+      tlabels = textwrap.wrap(self.labelstr, width= self.wrap_labels)
+      nlabl = len(tlabels)
+      self.labelsformat = "{0[0]:>%d} " %(1+self.wrap_labels)
+      if len(tlabels)>1:
+        for i in range((len(tlabels)-1)):
+          self.labelsformat += "\n{0[%d]:>%d} "%(i+1, self.wrap_labels+1)
+      blanks = self.wrap_labels-5
+    else:
+      self.labelsformat = "{:>16} "
+      if len(self.labelstr)>15:
+        self.labelsformat = "{}\n                 "
+      blanks= 10
+
+    self.info_format_dict = {
+      # the keys here must be verbatim copies of names of phil attributes in arrayinfo_phil_str below
+      "labels":            (" %s" %self.caption_dict["labels"][0] + " "*blanks,   self.labelstr,         "{}",                   self.labelsformat),
+      "description":       ("       %s      "%self.caption_dict["description"][0],self.desc,             "{}",                   "{:>16} "),
+      "wavelength":        ("   %s   "%self.caption_dict["wavelength"][0],        self.wavelength,       "{}",                   "{:>8} "),
+      "n_reflections":     ("  %s  " %self.caption_dict["n_reflections"][0],      self.arrsize,          "{}",                   "{:>8} "),
+      "span":              (" "*15 + self.caption_dict["span"][0] + " "*14,       self.span,             "{}",                   "{:>32} "),
+      "minmax_data":       ("     %s       " %self.caption_dict["minmax_data"][0],self.minmaxdata,       "{0[0]:.6}, {0[1]:.6}", "{0[0]:>11.5}, {0[1]:>11.5}"),
+      "minmax_sigmas":     ("     %s     " %self.caption_dict["minmax_sigmas"][0],self.minmaxsigs,       "{0[0]:.6}, {0[1]:.6}", "{0[0]:>11.5}, {0[1]:>11.5}"),
+      "data_sigdata":      (" %s" %self.caption_dict["data_sigdata"][0],          self.data_sigdata,     "{:.4g}",               "{:>9.4g} "),
+      "data_sigdata_max":  ("%s" %self.caption_dict["data_sigdata_max"][0],       self.data_sigdata_max, "{:.4g}",               "{:>11.4g} "),
+      "d_minmax":          ("  %s   " %self.caption_dict["d_minmax"][0],          self.dminmax,          "{0[0]:.6}, {0[1]:.6}", "{0[0]:>8.5}, {0[1]:>8.5}"),
+      "unit_cell":         ("     %s      " %self.caption_dict["unit_cell"][0],   self.ucell,            "{0[0]:>7.5g},{0[1]:>7.5g},{0[2]:>7.5g},{0[3]:>7.5g},{0[4]:>7.5g},{0[5]:>7.5g}",
+                                                                                              "{0[0]:>7.5g},{0[1]:>7.5g},{0[2]:>7.5g},{0[3]:>7.5g},{0[4]:>7.5g},{0[5]:>7.5g} "),
+      "space_group":       ("   %s      " %self.caption_dict["space_group"][0],   self.spginf,           "{}",                   "{:>19} "),
+      "n_centrics":        ("%s"%self.caption_dict["n_centrics"][0],              self.n_centric,        "{}",                   "{:>8} "),
+      "n_sys_abs":         ("%s"%self.caption_dict["n_sys_abs"][0],               self.n_sys_abs,        "{}",                   "{:>9} "),
+      "data_completeness": ("%s"%self.caption_dict["data_completeness"][0],       self.data_completeness,"{:.5g}",               "{:>10.5g} "),
+      "data_compl_infty":  ("%s"%self.caption_dict["data_compl_infty"][0],        self.data_compl_infty, "{:.5g}",               "{:>9.5g} "),
+      "is_anomalous":      ("%s"%self.caption_dict["is_anomalous"][0],            str(self.isanomalous), "{}",                   "{:>8} "),
+      "is_symmetry_unique":("%s"%self.caption_dict["is_symmetry_unique"][0],      str(self.issymunique), "{}",                   "{:>8} "),
+      "ano_completeness":  ("%s"%self.caption_dict["ano_completeness"][0],        self.ano_completeness, "{:.5g}",               "{:>11.5g} "),
+      "ano_mean_diff":     ("%s"%self.caption_dict["ano_mean_diff"][0],           self.ano_mean_diff,    "{:.5g}",               "{:>8.5g} "),
+      "n_bijvoet":         ("%s"%self.caption_dict["n_bijvoet"][0],               self.n_bijvoet,        "{}",                   "{:>8} "),
+      "n_singletons":      ("%s"%self.caption_dict["n_singletons"][0],            self.n_singletons,     "{}",                   "{:>10} "),
+    }
+
+  # govern whether or not a property of the ArrayInfo should be returned by get_selected_info_columns_from_phil()
+  arrayinfo_phil_str = """
+wrap_labels = 15
+  .type = int
+  .short_caption = Wrap width for labels
+  .help = Number of letters for wrapping long miller array labels. If less than 1 no wrapping is done
+delimiter = "|"
+  .type = str
+  .short_caption = "column delimiter when printing table to standard output"
+  .help = "column delimiter"
+selected_info
+  .help = "If values are set to True then tabulate respective properties of datasets in the reflection file."
+{
+    labels = True
+      .type = bool
+      .help = "Name of data array"
+      .short_caption = "Labels"
+    description = True
+      .type = bool
+      .help = "Type of data"
+      .short_caption = "Type"
+    wavelength = True
+      .type = bool
+      .help = "Recorded wavelength/Å"
+      .short_caption = "λ/Å"
+    n_reflections = True
+      .type = bool
+      .help = "Number of reflections"
+      .short_caption = "#HKLs"
+    span = True
+      .type = bool
+      .help = "Crude range of hkl indices"
+      .short_caption = "Span"
+    minmax_data = True
+      .type = bool
+      .help = "minimum, maximum values of data"
+      .short_caption = "min,max data"
+    minmax_sigmas = True
+      .type = bool
+      .help = "minimum, maximum values of sigmas"
+      .short_caption = "min,max sigmas"
+    data_sigdata = False
+      .type = bool
+      .help = "Average value of data/sigma"
+      .short_caption = "DatSigDat"
+    data_sigdata_max = False
+      .type = bool
+      .help = "maximum value of data/sigma"
+      .short_caption = "MaxDatSigDat"
+    d_minmax = True
+      .type = bool
+      .help = "d_min,d_max/Å"
+      .short_caption = "d_min,d_max/Å"
+    unit_cell = False
+      .type = bool
+      .help = "Unit cell parameters (a/Å, b/Å, c/Å, α°, β°, γ°)"
+      .short_caption = "unit cell (a/Å, b/Å, c/Å, α°, β°, γ°)"
+    space_group = False
+      .type = bool
+      .help = "Space group"
+      .short_caption = "space group"
+    n_centrics = False
+      .type = bool
+      .help = "Number of centric reflections"
+      .short_caption = "#centrics"
+    is_anomalous = True
+      .type = bool
+      .help = "Is data anomalous"
+      .short_caption = "Anomalous"
+    is_symmetry_unique = True
+      .type = bool
+      .help = "Is data symmetry unique"
+      .short_caption = "Sym.uniq."
+    n_sys_abs = False
+      .type = bool
+      .help = "Systematic absences"
+      .short_caption = "#Syst.abs."
+    data_completeness = True
+      .type = bool
+      .help = "Completeness in resolution range"
+      .short_caption = "Data compl."
+    data_compl_infty = False
+      .type = bool
+      .help = "Completeness with d_max=infinity"
+      .short_caption = "Compl.inf."
+    ano_completeness = False
+      .type = bool
+      .help = "Anomalous completeness in resolution range"
+      .short_caption = "Ano.complete"
+    ano_mean_diff = False
+      .type = bool
+      .help = "Mean anomalous difference."
+      .short_caption = "Ano.dif. "
+    n_bijvoet = False
+      .type = bool
+      .help = "Number of Bijvoet pairs"
+      .short_caption = "#Bijvoets"
+    n_singletons = False
+      .type = bool
+      .help = "Number of lone anomalous reflections"
+      .short_caption = "#Singletons"
+  }
+
+  """
+
+  philobj = parse(arrayinfo_phil_str)
+  # make a dictionary of user friendly captions for HKLviewer GUI displaying list of table headers
+  caption_dict = {}
+  for objs in philobj.objects:
+    if objs.name == "selected_info":
+      for obj in objs.objects:
+        caption_dict[obj.name] = (obj.short_caption, obj.help)
+
+
+  def get_selected_info_columns_from_phil(self,philxtr=None):
+    """
+    Returns
+    info_fmt: A list of selected property values from the miller_array object, together with their
+      respective format strings for presenting in a users table such as in HKLviewer.
+    headerstr: A formatted string of column names for printing a table to stdout.
+    infostr: A formatted string of selected property values from the miller_array object for printing
+      a table to stdout.
+
+    If printing a table to stdout this can be done like:
+
+    for i,array in enumerate(arrays):
+      arrayinfo = ArrayInfo(array)
+      info_fmt, headerstr, infostr = arrayinfo.get_selected_info_columns_from_phil()
+      if i==0:
+        print(headerstr)
+      print(infostr)
+
+    """
+    info_format_tpl = []
+    if not philxtr: # then use the default values in the arrayinfo_phil_str
+      philxtr = parse(self.arrayinfo_phil_str).extract()
+    delim = philxtr.delimiter
+    for colname,selected in list(philxtr.selected_info.__dict__.items()):
+      if not colname.startswith("__"):
+        if selected:
+          info_format_tpl.append( self.info_format_dict[colname] )
+    # transpose info_format_tpl to return a list of headers, a list of values, and two lists of format strings
+    info_fmt = list(zip(*info_format_tpl))
+    # make a line of array info formatted for a table as well as a table header
+    headerlst, infolst, dummy, fmtlst = info_fmt
+    headerstr = ""
+    for h in headerlst:
+      headerstr += h + delim
+    infostr = ""
+    for i,info in enumerate(infolst):
+      inf = info
+      if i==0 and self.wrap_labels>0:
+        inf = textwrap.wrap(info, width=self.wrap_labels)
+      infostr += fmtlst[i].format(inf)  + delim
+    return info_fmt, headerstr, infostr
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/gui_tools/tst.py
+from __future__ import absolute_import, division, print_function
+
+from iotbx.gui_tools import reflections, models
+from iotbx import file_reader
+import iotbx.pdb
+import libtbx.load_env
+from libtbx.test_utils import approx_equal, Exception_expected
+from libtbx.utils import Sorry
+import os
+
+def find_file(file_name):
+  full_path = libtbx.env.find_in_repositories(
+    relative_path=file_name,
+    test=os.path.isfile)
+  return full_path
+
+regression_dir = libtbx.env.find_in_repositories(
+  relative_path="phenix_regression",
+  test=os.path.isdir)
+
+phil_names = ["refinement.input.xray_data.file_name",
+              "refinement.input.xray_data.r_free_flags.file_name",
+              "refinement.input.neutron_data.file_name",
+              "refinement.input.neutron_data.r_free_flags.file_name",
+              "refinement.input.experimental_phases.file_name"]
+
+def exercise_reflections():
+  hkl_handler = reflections.reflections_handler(allowed_param_names=phil_names)
+  from cctbx import miller
+  from cctbx import crystal
+  from cctbx.array_family import flex
+  symm = crystal.symmetry(
+    unit_cell=(30,30,40,90,90,120),
+    space_group_symbol="P 61 2 2")
+  miller_set = miller.build_set(
+    crystal_symmetry=symm,
+    anomalous_flag=True,
+    d_min=1.5)
+  n_refl = miller_set.indices().size()
+  data = flex.random_double(n_refl)
+  sigmas = flex.random_double(n_refl)
+  f_obs = miller_set.array(data=data, sigmas=sigmas)
+  f_obs_merged = f_obs.average_bijvoet_mates()
+  flags = f_obs_merged.generate_r_free_flags()
+  # single dataset
+  mtz_dataset = f_obs_merged.as_mtz_dataset(
+    column_root_label="F-obs",
+    wavelength=1.54)
+  mtz_dataset.add_miller_array(flags,
+    column_root_label="R-free-flags")
+  file_name = "tst_iotbs_gui_tools.mtz"
+  mtz_dataset.mtz_object().write(file_name)
+  assert (hkl_handler.set_param_file(file_name=file_name,
+          file_param_name="refinement.input.xray_data.file_name") == True)
+  assert (hkl_handler.set_param_file(file_name=file_name,
+          file_param_name="refinement.input.xray_data.r_free_flags.file_name")
+          == False)
+  assert (hkl_handler.get_rfree_labels(
+    file_param_name="refinement.input.xray_data.r_free_flags.file_name") ==
+    hkl_handler.get_rfree_labels(file_name=file_name) == ['R-free-flags'])
+  assert (hkl_handler.get_rfree_labels(file_name=file_name, neutron=False) ==
+          hkl_handler.get_rfree_labels(file_name=file_name, neutron=True) ==
+          ['R-free-flags'])
+  assert approx_equal(1.54, hkl_handler.get_wavelength(file_name=file_name,
+                              labels="F-obs,SIGF-obs"))
+  # join X/N datasets
+  hkl_handler = reflections.reflections_handler(allowed_param_names=phil_names)
+  data_neutron = flex.random_double(n_refl)
+  sigmas_neutron = flex.random_double(n_refl)
+  f_obs_neutron = miller_set.array(data=data_neutron, sigmas=sigmas_neutron)
+  mtz_dataset = f_obs_merged.as_mtz_dataset(
+    column_root_label="F-obs-xray")
+  mtz_dataset.add_miller_array(f_obs_neutron,
+    column_root_label="F-obs-neutron")
+  mtz_dataset.add_miller_array(flags,
+    column_root_label="R-free-flags-xray")
+  mtz_dataset.add_miller_array(flags.deep_copy(),
+    column_root_label="R-free-flags-neutron")
+  file_name = "tst_iotbs_gui_tools.mtz"
+  mtz_dataset.mtz_object().write(file_name)
+  assert (hkl_handler.set_param_file(file_name=file_name,
+          file_param_name="refinement.input.xray_data.file_name") == True)
+  for i, phil_name in enumerate(phil_names[1:4]):
+    assert (hkl_handler.set_param_file(file_name=file_name,
+            file_param_name=phil_name) == False)
+  assert (hkl_handler.get_rfree_labels(
+    file_param_name="refinement.input.xray_data.r_free_flags.file_name") ==
+    hkl_handler.get_rfree_labels(file_name=file_name) ==
+    ['R-free-flags-xray', 'R-free-flags-neutron'])
+  assert (hkl_handler.get_rfree_labels(file_name=file_name, neutron=False) ==
+          ['R-free-flags-xray'])
+  assert (hkl_handler.get_rfree_labels(file_name=file_name, neutron=True) ==
+          ['R-free-flags-neutron'])
+  hkl_handler.check_symmetry(file_name=file_name)
+  assert (hkl_handler.get_data_labels(
+          file_param_name="refinement.input.xray_data.file_name") ==
+          hkl_handler.get_data_labels(file_name=file_name) ==
+          hkl_handler.get_amplitude_labels(file_name=file_name) ==
+          ["F-obs-xray,SIGF-obs-xray", "F-obs-neutron(+),SIGF-obs-neutron(+),"+
+                             "F-obs-neutron(-),SIGF-obs-neutron(-)"])
+  assert (hkl_handler.get_anomalous_data_labels(
+          file_param_name="refinement.input.xray_data.file_name") ==
+          ["F-obs-neutron(+),SIGF-obs-neutron(+)," +
+           "F-obs-neutron(-),SIGF-obs-neutron(-)"])
+  assert (hkl_handler.has_anomalous_data(
+          file_param_name="refinement.input.xray_data.file_name"))
+  assert (hkl_handler.get_rfree_flag_value(
+    array_name="F-obs-xray,SIGF-obs-xray",
+    file_param_name="refinement.input.xray_data.file_name") is None)
+  assert (hkl_handler.get_rfree_flag_value(array_name='R-free-flags-xray',
+    file_param_name="refinement.input.xray_data.r_free_flags.file_name") == 1)
+  (d_max, d_min) = hkl_handler.d_max_min()
+  assert approx_equal(d_max, 25.98, eps=0.01)
+  assert approx_equal(d_min, 1.5, eps=0.01)
+  assert hkl_handler.space_group_as_str() == "P 61 2 2"
+  assert (hkl_handler.unit_cell_as_str() ==
+          "30 30 40 90 90 120")
+  assert (hkl_handler.unit_cell_as_str(separator=",") ==
+          "30,30,40,90,90,120")
+
+  n_refl_merged = len(f_obs_merged.indices())
+  phi_array = f_obs_merged.random_phases_compatible_with_phase_restrictions(
+    deg=True)
+  fom_array = phi_array.array(data=flex.random_double(n_refl_merged))
+  hl_data = flex.hendrickson_lattman(n_refl_merged, (0,0,0,0))
+  hl_coeffs = phi_array.array(data=hl_data)
+  assert (hl_coeffs.is_hendrickson_lattman_array())
+  from iotbx.mtz import label_decorator
+  import iotbx.mtz
+  class resolve_label_decorator(label_decorator):
+    def phases(self, *args, **kwds):
+      return label_decorator.phases(self, *args, **kwds) + "M"
+    def hendrickson_lattman(self, *args, **kwds):
+      return label_decorator.hendrickson_lattman(self, *args, **kwds) + "M"
+  mtz_dataset = f_obs_merged.as_mtz_dataset(
+    column_root_label="FP")
+  mtz_dataset.add_miller_array(phi_array,
+    column_root_label="PHIM",
+    label_decorator=resolve_label_decorator(),
+    column_types="P")
+  mtz_dataset.add_miller_array(fom_array,
+    column_root_label="FOMM",
+    column_types="W")
+  mtz_dataset.add_miller_array(hl_coeffs,
+    column_root_label="HL",
+    label_decorator=resolve_label_decorator())
+  fwt_map = f_obs_merged.customized_copy(sigmas=None).phase_transfer(phi_array)
+  mtz_dataset.add_miller_array(fwt_map,
+    column_root_label="FWT",
+    label_decorator=iotbx.mtz.ccp4_label_decorator())
+  mtz_dataset.add_miller_array(flags,
+    column_root_label="FreeR_flag")
+  resolve_file = "tst_iotbx_gui_tools_resolve.mtz"
+  mtz_dataset.mtz_object().write(resolve_file)
+  hkl_handler = reflections.reflections_handler(
+    allowed_param_names=["map_coeffs"])
+  hkl_handler.set_param_file(
+    file_name=resolve_file,
+    file_param_name="map_coeffs")
+  assert hkl_handler.has_data(file_name=resolve_file)
+  l1 = hkl_handler.get_map_coeff_labels(file_name=resolve_file)
+  assert (l1 == ['FWT,PHWT', 'FP,PHIM,FOMM'])
+  l2 = hkl_handler.get_phase_deg_labels(file_name=resolve_file)
+  assert (l2 == ['HLAM,HLBM,HLCM,HLDM', 'FWT,PHWT', 'PHIM',]), l2
+  l3 = hkl_handler.get_experimental_phase_labels(file_name=resolve_file)
+  #print l3
+  l4 = hkl_handler.get_data_labels_for_wizard(file_name=resolve_file)
+  assert (l4 == ['FP SIGFP'])
+  l5 = hkl_handler.get_map_coeff_labels_for_build(file_name=resolve_file)
+  assert (l5 == ['FWT,PHWT', 'FP,PHIM,FOMM']), l5
+  hkl_in = hkl_handler.get_file(file_name=resolve_file)
+  assert (reflections.get_mtz_label_prefix(hkl_in) == "/crystal/dataset")
+  map_coeffs = reflections.map_coeffs_from_mtz_file(resolve_file,
+    f_label="FP,SIGFP")
+  assert map_coeffs.is_complex_array()
+  try :
+    map_coeffs = reflections.map_coeffs_from_mtz_file(resolve_file)
+  except Sorry :
+    pass
+  else :
+    raise Exception_expected
+  assert (hkl_handler.get_map_coeff_labels_for_fft(file_name=resolve_file) ==
+    ['FWT,PHWT', 'FP,SIGFP PHIM FOMM'])
+
+  # miscellaneous utilities
+  file_name = resolve_file
+  hkl_in = file_reader.any_file(file_name)
+  hkl_server = hkl_in.file_server
+  assert approx_equal(reflections.get_high_resolution(hkl_server), 1.5,
+    eps=0.001)
+  descriptions = []
+  for miller_array in hkl_server.miller_arrays :
+    (sg, uc) = reflections.get_miller_array_symmetry(miller_array)
+    assert (uc == "30 30 40 90 90 120")
+    assert (str(sg) == "P 61 2 2")
+    descriptions.append(reflections.get_array_description(miller_array))
+  assert (descriptions == [
+    'Amplitude', 'Phases', 'Weights', 'HL coeffs', 'Map coeffs',
+    'R-free flag']), descriptions
+  handler = reflections.reflections_handler()
+  handler.save_file(input_file=hkl_in)
+  assert (not handler.has_anomalous_data())
+  assert (handler.get_resolution_range(file_name=file_name)=="(25.981 - 1.500)"
+          or handler.get_resolution_range(file_name=file_name)=="(25.981 - 1.501)")
+  assert (handler.get_resolution_limits(file_name=file_name) == ('(25.981)', '(1.500)')
+          or handler.get_resolution_limits(file_name=file_name) == ('(25.981)', '(1.501)'))
+  fmodel = phi_array.array(data=flex.complex_double(n_refl_merged,
+    complex(0.5,0.8)))
+  m1 = phi_array.array(data=flex.complex_double(n_refl_merged, complex(1,0)))
+  m2 = phi_array.array(data=flex.complex_double(n_refl_merged, complex(0.5,0)))
+  m3 = phi_array.array(flex.complex_double(n_refl_merged, complex(1,1)))
+  dec = label_decorator(phases_prefix="PH")
+  mtz_dataset = fmodel.as_mtz_dataset(
+    column_root_label="F-model",
+    label_decorator=dec)
+  mtz_dataset.add_miller_array(m1,
+    column_root_label="2FOFCWT",
+    label_decorator=dec)
+  mtz_dataset.add_miller_array(m2,
+    column_root_label="FOFCWT",
+    label_decorator=dec)
+  mtz_dataset.add_miller_array(m3,
+    column_root_label="2FOFCWT_no_fill",
+    label_decorator=dec)
+  file_name = "tst_iotbx_gui_tools_map_coeffs.mtz"
+  mtz_dataset.mtz_object().write(file_name)
+  hkl_handler = reflections.reflections_handler(
+    allowed_param_names=["fmodel", "map_coeffs"])
+  hkl_handler.set_param_file(
+    file_name=file_name,
+    file_param_name="fmodel")
+  assert (hkl_handler.get_fmodel_labels(file_name=file_name) ==
+    ['F-model,PHF-model'])
+  assert (hkl_handler.get_amplitude_labels(file_name=file_name) == [])
+  phi_labels = hkl_handler.get_phase_deg_labels(file_name=file_name)
+  assert (len(phi_labels)  == 4)
+  phi_cols = hkl_handler.get_phase_column_labels(file_name=file_name)
+  assert (phi_cols == ['PHF-model','PH2FOFCWT','PHFOFCWT','PH2FOFCWT_no_fill'])
+  assert (len(hkl_handler.get_amplitude_column_labels(file_name=file_name,
+              allow_conversion=True)) == 0)
+  fc_cols = hkl_handler.get_fmodel_labels(file_name=file_name,
+    first_column_only=True)
+  assert (fc_cols == ['F-model'])
+  hkl_server = file_reader.any_file(file_name).file_server
+  map_labels = reflections.get_map_coeff_labels(hkl_server)
+  assert (map_labels == ['F-model,PHF-model', '2FOFCWT,PH2FOFCWT', 'FOFCWT,PHFOFCWT',
+    '2FOFCWT_no_fill,PH2FOFCWT_no_fill',]), map_labels
+  map_labels = reflections.get_map_coeffs_for_build(hkl_server)
+  assert map_labels == ['2FOFCWT,PH2FOFCWT', 'F-model,PHF-model', '2FOFCWT_no_fill,PH2FOFCWT_no_fill'], map_labels
+  map_coeffs = reflections.extract_phenix_refine_map_coeffs(file_name)
+  assert (len(map_coeffs) == 3)
+  hkl_file = file_reader.any_file(file_name)
+  assert reflections.get_mtz_label_prefix(hkl_file) == "/crystal/dataset"
+  # other stuff
+  (fp, fpp) = reflections.get_fp_fpp_from_sasaki("Se", 0.979)
+  assert fp is not None and fpp is not None
+
+def exercise_other_reflection_formats():
+  hkl_handler = reflections.reflections_handler(allowed_param_names=phil_names)
+  # test other file formats (requires phenix_regression)
+  if (regression_dir is None):
+    print("phenix_regression not found, skipping exercise_other_reflection_formats()")
+    return
+  cns_file = os.path.join(regression_dir, "reflection_files", "enk.hkl")
+  hkl_handler.save_file(file_name=cns_file)
+  try :
+    hkl_handler.check_symmetry(file_name=cns_file)
+  except Sorry :
+    pass
+  else :
+    raise Exception_expected
+  sca_file = os.path.join(regression_dir, "reflection_files", "merge.sca")
+  hkl_handler.save_file(file_name=sca_file)
+  assert (hkl_handler.get_intensity_labels(file_name=sca_file) ==
+          ['I(+),SIGI(+),I(-),SIGI(-)'])
+  assert (hkl_handler.get_amplitude_labels(file_name=sca_file) == [])
+  # test handling of reconstructed (anomalous) amplitudes
+  dano_file = os.path.join(regression_dir, "reflection_files", "dano.mtz")
+  hkl_handler = reflections.reflections_handler(
+    allowed_param_names=["labin"])
+  hkl_handler.set_param_file(file_name=dano_file,
+    file_param_name="labin")
+  labels = hkl_handler.get_anomalous_data_labels(file_param_name="labin")
+  assert (len(labels) == 3)
+  labels = hkl_handler.get_anomalous_data_labels(file_param_name="labin",
+    allow_reconstructed_amplitudes=False)
+  assert (len(labels) == 0)
+
+def exercise_model():
+  # FIXME should be possible to run this independently of phenix_regression
+  if (regression_dir is None):
+    print("phenix_regression not found, skipping exercise_model()")
+    return
+  model_handler = models.model_handler(
+    allowed_param_names=["refinement.input.pdb.file_name",
+      "refinement.reference_model.file"],
+    allowed_multiple_params=["refinement.input.pdb.file_name"],
+    cif_param_names=["refinement.input.monomers.file_name"],
+    multiple_cif_params=["refinement.input.monomers.file_name"],
+    tmp_dir=os.getcwd())
+  model_handler.set_viewable_params(["refinement.input.pdb.file_name"])
+  pdb_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/pdb/ur0013.pdb",
+    test=os.path.isfile)
+  cif_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/cif_files/elbow.ur0013_ent.all.001.cif",
+    test=os.path.isfile)
+  try :
+    pdb_all = model_handler.get_combined_pdb_input(
+      file_param_name="refinement.input.pdb.file_name")
+  except Sorry :
+    pass
+  else :
+    raise Exception_expected
+  model_handler.set_param_file(
+    file_name=pdb_file,
+    file_param_name="refinement.input.pdb.file_name")
+  assert (model_handler.get_file_type_label(file_name=pdb_file) == "PDB")
+  model_handler.set_param_cif_file(
+    file_name=cif_file,
+    file_param_name="refinement.input.monomers.file_name")
+  assert (len(model_handler.get_cif_objects()) == 1)
+  assert (model_handler.get_current_cif_file_names() == [cif_file])
+  hierarchy, xrs = model_handler.get_combined_pdb_input(
+      file_param_name="refinement.input.pdb.file_name")
+  assert (not None in [hierarchy, xrs])
+  pdb_file2 = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/pdb/1ywf.pdb",
+    test=os.path.isfile)
+  model_handler.set_param_file(
+    file_name=pdb_file2,
+    file_param_name="refinement.input.pdb.file_name")
+  assert (model_handler.get_current_file_names() == [pdb_file2, pdb_file])
+  assert (model_handler.get_file_params(pdb_file) ==
+          ["refinement.input.pdb.file_name"])
+  assert (model_handler.get_param_files("refinement.input.pdb.file_name") ==
+          [pdb_file, pdb_file2])
+  pdb_hierarchy = model_handler.get_pdb_hierarchy(pdb_file2)
+  xrs = model_handler.get_xray_structure(pdb_file2)
+  assert (pdb_hierarchy.atoms_size() == xrs.scatterers().size() == 2127)
+  model_handler.remove_file(pdb_file)
+  assert (model_handler.get_param_files("refinement.input.pdb.file_name") ==
+          [pdb_file2])
+  pdb_file3 = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/pdb/1ywf_h.pdb",
+    test=os.path.isfile)
+  model_handler.set_param_file(
+    file_name=pdb_file3,
+    file_param_name="refinement.reference_model.file")
+  assert (model_handler.get_files_for_viewing() == [pdb_file2])
+  atomic_bonds = model_handler.get_connectivity(pdb_file2)
+  assert (atomic_bonds.size() == 2127)
+  symm = model_handler.get_pdb_file_symmetry(pdb_file2)
+  assert (str(symm.space_group_info()) == "I 41")
+  assert (reflections.unit_cell_as_str(symm.unit_cell()) ==
+          "113.068 113.068 53.292 90 90 90")
+  f = model_handler.create_copy_with_fake_symmetry(pdb_file2,
+    tmp_dir=os.getcwd())
+  pdb_in = iotbx.pdb.input(f)
+  symm = pdb_in.crystal_symmetry()
+  assert (str(symm.space_group_info()) == "P 1")
+  assert (reflections.unit_cell_as_str(symm.unit_cell()) ==
+          "59.227 55.922 60.264 90 90 90")
+
+if (__name__ == "__main__"):
+  exercise_reflections()
+  exercise_other_reflection_formats()
+  exercise_model()
+  print("OK")
+
+
+ *******************************************************************************

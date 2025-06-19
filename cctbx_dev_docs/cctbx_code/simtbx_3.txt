@@ -1,0 +1,3785 @@
+
+
+ *******************************************************************************
+simtbx/nanoBragg/sim_data.py
+from __future__ import absolute_import, division, print_function
+
+try:
+    from collections.abc import Iterable
+except ModuleNotFoundError:
+    from collections import Iterable
+from simtbx.diffBragg import diffBragg
+from scitbx.array_family import flex
+import numpy as np
+from simtbx.nanoBragg.anisotropic_mosaicity import AnisoUmats
+from simtbx.nanoBragg import shapetype, nanoBragg
+from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
+from simtbx.nanoBragg.nanoBragg_beam import NBbeam
+from copy import deepcopy
+from scitbx.matrix import sqr, col
+import math
+
+
+def Amatrix_dials2nanoBragg(crystal):
+  """
+  returns the A matrix from a cctbx crystal object
+  in nanoBragg format
+  :param crystal: cctbx crystal
+  :return: Amatrix as a tuple
+  """
+  sgi = crystal.get_space_group().info()
+  cb_op = sgi.change_of_basis_op_to_primitive_setting()
+  dtrm = sqr(cb_op.c().r().as_double()).determinant()
+  if not dtrm == 1:
+    raise ValueError('You need to convert your crystal model to its primitive setting first')
+  Amatrix = sqr(crystal.get_A()).transpose()
+  return Amatrix
+
+
+def determine_spot_scale(beam_size_mm, crystal_thick_mm, mosaic_vol_mm3):
+  """
+  :param beam_size_mm:  diameter of beam focus (millimeter)
+  :param crystal_thick_mm: thickness of crystal (millimeter)
+  :param mosaic_vol_mm3:  volume of a mosaic block in crystal (cubic mm)
+  :return: roughly the number of exposed mosaic blocks
+  """
+  if beam_size_mm <= crystal_thick_mm:
+    illum_xtal_vol = crystal_thick_mm * beam_size_mm ** 2
+  else:
+    illum_xtal_vol = crystal_thick_mm ** 3
+  return illum_xtal_vol / mosaic_vol_mm3
+
+
+class SimData:
+  def __init__(self, use_default_crystal=False):
+    self.detector = SimData.simple_detector(180, 0.1, (512, 512))  # dxtbx detector model
+    self.seed = 1  # nanoBragg seed member
+    self.crystal = NBcrystal(use_default_crystal)
+    self.add_air = False  # whether to add air in the generate_simulated_image method
+    self.Umats_method = 0  # how to generate mosaic rotation umats (can be 0,1,2,3)
+    self.add_water = True  # whether to add water in the generate_simulated_image method
+    self.water_path_mm = 0.005  # path length through water
+    self.air_path_mm = 0  # path length through air
+    self._mosaicity_crystal = None  # a dxtbx crystal used for anisotropic mosaic spread model
+    self.using_diffBragg_spots = False  # whether to use diffBragg
+    nbBeam = NBbeam()
+    nbBeam.unit_s0 = (0, 0, -1)
+    self.beam = nbBeam  # nanoBragg_beam object
+    self.using_cuda = False  # whether to use giles mullen cuda acceleration
+    self.using_omp = False  # whether to use add_nanoBragg_spots_nks with open mp accel
+    self.rois = None  # a list of rois for simiuting rois only
+    self.readout_noise = 3  # detector readout noise
+    self.gain = 1  # detector gain
+    self.psf_fwhm = 0  # detector point spread width
+    self.include_noise = True  # include noise in the simulation if using generate_simulated_image method
+    self.background_raw_pixels = None  # background raw pixels, should be a 2D flex double array
+    self.backrground_scale = 1  # scale factor to apply to background raw pixels
+    self.mosaic_seeds = 777, 777  # two random seeds governing the legacy Umats method
+    self.D = None  # nanoBragg or diffBragg instance
+    self.panel_id = 0  # detector panel id
+    self.umat_maker = None  # an instance of AnisoUmats for generating ensembles of mosaic rotations
+    self.ucell_man = None   # place holder for a unit cell manager (used in hopper)
+    self.Nabc_params = None   # RangedParameter (refiners/parameters) objects used by hopper
+    self.RotXYZ_params = None  # RangedParameter (refiners/parameters) objects used by hopper
+    self.ucell_params = None  # RangedParameter (refiners/parameters) objects used by hopper
+    self.Scale_params = None  # RangedParameter (refiners/parameters) objects used by hopper
+    self.DetZ_params = None  # RangedParameter (refiners/parameters) objects used by hopper
+    self.num_xtals = 1  # number of xtals, used in the hopper script
+    self.dxtbx_spec = None  # spectrum object from dxtbx
+    self.functionals = []  # target functionals  container ?
+    self.use_psf = False  # flag to specify whether psf should be applied to the model
+    self.PSF = None   # place holder for the point-spread-function returned by diffBragg/psf.py method makeMoffat_integPSF
+    self.psf_args = None # place holder for a dictionary containing the 3 PSF arguments (see example in diffBragg/psf.py
+
+  @property
+  def background_raw_pixels(self):
+    return self._background_raw_pixels
+
+  @background_raw_pixels.setter
+  def background_raw_pixels(self, val):
+    self._background_raw_pixels = val
+
+  @property
+  def gain(self):
+    return self._gain
+
+  @gain.setter
+  def gain(self, val):
+    self._gain = val
+
+  @staticmethod
+  def default_panels_fast_slow(detector):
+    Npanel = len(detector)
+    nfast, nslow = detector[0].get_image_size()
+    slows, fasts = np.indices((nslow, nfast))
+    fasts = list(map(int, np.ravel(fasts)))
+    slows = list(map(int, np.ravel(slows)))
+    fasts = fasts*Npanel
+    slows = slows*Npanel
+    pids = []
+    for pid in range(Npanel):
+      pids += [pid]*(nfast*nslow)
+
+    npix = nslow*nfast*Npanel
+    panels_fasts_slows = np.zeros(npix*3, int)
+    panels_fasts_slows[0::3] = pids
+    panels_fasts_slows[1::3] = fasts
+    panels_fasts_slows[2::3] = slows
+    return flex.size_t(panels_fasts_slows)
+
+  @property
+  def air_path_mm(self):
+    return self._air_path_mm
+
+  @air_path_mm.setter
+  def air_path_mm(self, val):
+    self._air_path_mm = val
+
+  @property
+  def water_path_mm(self):
+    return self._water_path_mm
+
+  @water_path_mm.setter
+  def water_path_mm(self, val):
+    self._water_path_mm = val
+
+  @property
+  def crystal(self):
+    return self._crystal
+
+  @crystal.setter
+  def crystal(self, val):
+    self._crystal = val
+
+  @property
+  def beam(self):
+    return self._beam
+
+  @beam.setter
+  def beam(self, val):
+    self._beam = val
+
+  @property
+  def seed(self):
+    return self._seed
+
+  @seed.setter
+  def seed(self, val):
+    self._seed = val
+
+  @staticmethod
+  def Umats(mos_spread_deg, n_mos_doms, isotropic=True, seed=777, norm_dist_seed=777):
+    import scitbx
+    from scitbx.matrix import col
+    import scitbx.math
+    UMAT_nm = flex.mat3_double()
+    mersenne_twister = flex.mersenne_twister(seed=seed)
+    scitbx.random.set_random_seed(norm_dist_seed)
+    rand_norm = scitbx.random.normal_distribution(mean=0, sigma=(mos_spread_deg * math.pi / 180.0))
+    g = scitbx.random.variate(rand_norm)
+    mosaic_rotation = g(n_mos_doms)
+    for m in mosaic_rotation:
+      site = col(mersenne_twister.random_double_point_on_sphere())
+      if mos_spread_deg > 0:
+        UMAT_nm.append(col(scitbx.math.r3_rotation_axis_and_angle_as_matrix(site, m)))
+      else:
+        UMAT_nm.append(col(scitbx.math.r3_rotation_axis_and_angle_as_matrix(site, 0)))
+      if isotropic and mos_spread_deg > 0:
+        UMAT_nm.append(col(scitbx.math.r3_rotation_axis_and_angle_as_matrix(site, -m)))
+    return UMAT_nm
+
+  @staticmethod
+  def plot_isotropic_umats(UMAT_nm, mos_spread_deg):
+
+    # analysis of rotation angles
+    from simtbx.nanoBragg.tst_gaussian_mosaicity import check_distributions
+    angle_deg, rot_ax = check_distributions.get_angle_deg_and_axes(UMAT_nm) # in degrees
+    nm_rms_angle = math.sqrt(flex.mean(angle_deg*angle_deg))
+
+    from matplotlib import pyplot as plt
+    fig_angles,axis_angles = plt.subplots(1,1)
+    axis_angles.set_xlabel("rotation (°)")
+    axis_angles.hist(angle_deg,bins=int(math.sqrt(len(UMAT_nm))))
+    axis_angles.set_title(
+    "Histogram of rotation angles\nrms %.4f° expected %.4f°"%(nm_rms_angle, mos_spread_deg))
+
+    # analysis of rotation axes
+    fig, axes = plt.subplots(1, 3,figsize=(10,5))
+    axes[0].plot(rot_ax.parts()[0], rot_ax.parts()[1], "b,") # looking down from the pole
+    axes[0].set_aspect("equal")
+    axes[0].set_title("Rot_ax projected on z")
+    axes[0].set_xlim(-1.1,1.1)
+    axes[0].set_ylim(-1.1,1.1)
+
+    axes[1].plot(rot_ax.parts()[1], rot_ax.parts()[2], "b,") # looking at equator above prime meridian
+    axes[1].set_aspect("equal")
+    axes[1].set_title("Rot_ax projected on x")
+    axes[1].set_xlim(-1.1,1.1)
+    axes[1].set_ylim(-1.1,1.1)
+
+    axes[2].plot(rot_ax.parts()[2], rot_ax.parts()[0], "b,") # looking at equator above 90-deg meridian
+    axes[2].set_aspect("equal")
+    axes[2].set_title("Rot_ax projected on y")
+    axes[2].set_xlim(-1.1,1.1)
+    axes[2].set_ylim(-1.1,1.1)
+
+    # action on unit vectors
+    cube_diag = math.sqrt(1./3) # 0.57735
+    unit_vectors = [(1,0,0), (0,1,0), (0,0,1), (cube_diag, cube_diag, cube_diag)]
+    fig3,axes3 = plt.subplots(1,4,sharey=True,figsize=(15,7))
+    axes3[0].set_ylabel("unit projection")
+    for icol, RLP in enumerate(unit_vectors):
+          RLP = col(RLP)
+          axis = axes3[icol]
+          unit = RLP.normalize()
+          seed = col(unit_vectors[(icol+2)%(len(unit_vectors))])
+          perm2 = unit.cross(seed)
+          perm3 = unit.cross(perm2)
+          a2 = flex.double(); a3 = flex.double()
+          angles_deg = flex.double()
+          for u in UMAT_nm:
+            U = sqr(u)
+            newvec = U * unit
+            angles_deg.append((180./math.pi)*math.acos(newvec.dot(unit)))
+            a2.append(newvec.dot(perm2)); a3.append(newvec.dot(perm3))
+          rms_angle = math.sqrt(flex.mean(angles_deg*angles_deg))
+          axis.plot (a2,a3,'r,')[0]
+          axis.set_aspect("equal")
+          axis_str = "(%5.3f,%5.3f,%5.3f)"%(RLP.elems) if icol==3 else "(%.0f,%.0f,%.0f)"%(RLP.elems)
+          axis.set_title("Transformation of unit vector\n%s\nrms %.4f° expected %.4f°"%(
+            axis_str, rms_angle, math.sqrt(mos_spread_deg*mos_spread_deg*(2/3)))) # Pythagorean thm
+          axis.set_xlabel("unit projection")
+          axis.set_xlim(-0.0005,0.0005)
+          axis.set_ylim(-0.0005,0.0005)
+
+    plt.show()
+
+  @property
+  def Umats_method(self):
+    return self._Umats_method
+
+  @Umats_method.setter
+  def Umats_method(self, val):
+    permitted = [0, 2, 3, 5]
+    # 0 is double_random, used for exafel tests
+    # 2 is double_uniform, isotropic method
+    # 3 is double_uniform, anisotropic method
+    # 5 is the same as 2 and 5 is deprecated
+    if val not in permitted:
+      raise ValueError("Umats method needs to be in %s (4 not yet supported)"%permitted)
+    if val == 5:
+      print("WARNING: method 5 is really method 2, method 5 is deprecated!")
+      val = 2
+    self._Umats_method = val
+
+  @property
+  def psf_fwhm(self):
+    return self._psf_fwhm
+
+  @psf_fwhm.setter
+  def psf_fwhm(self, val):
+    self._psf_fwhm = val
+
+  @property
+  def readout_noise(self):
+    return self._readout_noise
+
+  @readout_noise.setter
+  def readout_noise(self, val):
+    self._readout_noise = val
+
+  @property
+  def add_air(self):
+    return self._add_air
+
+  @add_air.setter
+  def add_air(self, val):
+    self._add_air = val
+
+  @property
+  def add_water(self):
+    return self._add_water
+
+  @add_water.setter
+  def add_water(self, val):
+    self._add_water = val
+
+  @property
+  def detector(self):
+    return self._detector
+
+  @detector.setter
+  def detector(self, val):
+    self._detector = val
+
+  @property
+  def rois(self):
+    return self._rois
+
+  @rois.setter
+  def rois(self, val):
+    self._rois = val
+
+  @property
+  def using_omp(self):
+    return self._using_omp
+
+  @using_omp.setter
+  def using_omp(self, val):
+    assert val in (True, False)
+    self._using_omp = val
+
+  @property
+  def using_diffBragg_spots(self):
+    return self._using_diffBragg_spots
+
+  @using_diffBragg_spots.setter
+  def using_diffBragg_spots(self, val):
+    assert(val in [True, False])
+    self._using_diffBragg_spots = val
+
+  @property
+  def using_cuda(self):
+    return self._using_cuda
+
+  @using_cuda.setter
+  def using_cuda(self, val):
+    assert(val in [True, False])
+    self._using_cuda = val
+
+  @property
+  def include_noise(self):
+    return self._include_noise
+
+  @include_noise.setter
+  def include_noise(self, val):
+    self._include_noise = val
+
+  def get_detector_corner_res(self):
+    dmin = np.inf
+    for p in self.detector:
+      panel_corner_res = p.get_max_resolution_at_corners(self.beam.nanoBragg_constructor_beam.get_s0())
+      dmin = np.min([dmin, panel_corner_res])
+    return dmin
+
+  def update_Fhkl_tuple(self):
+    if self.crystal.miller_array is not None:
+      if np.all(self.crystal.miller_array.data().as_numpy_array()==0):
+        raise ValueError("Seems all miller indices are 0")
+      d_max, _ = self.crystal.miller_array.resolution_range()
+      d_min = self.get_detector_corner_res()
+      ma_on_detector = self.crystal.miller_array.resolution_filter(d_min=d_min, d_max=d_max)
+      if self.using_diffBragg_spots and self.crystal.miller_is_complex:
+        Freal, Fimag = zip(*[(val.real, val.imag) for val in ma_on_detector.data()])
+        Freal = flex.double(Freal)
+        Fimag = flex.double(Fimag)
+        self.D.Fhkl_tuple = ma_on_detector.indices(), Freal, Fimag
+      elif self.using_diffBragg_spots:
+        self.D.Fhkl_tuple = ma_on_detector.indices(), ma_on_detector.data(), None
+      else:
+        self.D.Fhkl_tuple = self.crystal.miller_array.indices(), self.crystal.miller_array.data(), None
+
+  def set_dspace_binning(self, nbins, verbose=False):
+    dsp = self.D.Fhkl.d_spacings().data().as_numpy_array()
+    dsp = np.sort(dsp[dsp >= self.get_detector_corner_res()])
+    bins = [vals[0] for vals in np.array_split(dsp, nbins)] + [dsp[-1]]
+    bins[0] = bins[0]-1e-4
+    bins[-1] = bins[-1]+1e-4
+    if verbose:
+      for d in bins:
+        print(d)
+    self.D.dspace_bins = bins
+
+  def _crystal_properties(self):
+    if self.crystal is None:
+      return
+
+    model_mosaic_spread = self.crystal.n_mos_domains > 1
+    if not model_mosaic_spread:
+      self.D.mosaic_spread_deg = 0
+      self.D.mosaic_domains = 1
+
+    self.D.xtal_shape = self.crystal.xtal_shape
+    self.D.hall_symbol = self.crystal.space_group_info.type().hall_symbol()
+    if hasattr(self.D, "laue_group_num"):
+      self.D.laue_group_num = 1
+
+    # TODO: am I unnecessary?
+    self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
+    if self.using_diffBragg_spots:
+      self.D.Omatrix = self.crystal.Omatrix
+      self.D.Bmatrix = self.crystal.dxtbx_crystal.get_B() #
+      self.D.Umatrix = self.crystal.dxtbx_crystal.get_U()
+    self.update_Fhkl_tuple()
+    self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
+
+    if self.using_diffBragg_spots:
+      # init mosaic domain size:
+      if self.crystal.isotropic_ncells:
+        self.D.Ncells_abc = self.crystal.Ncells_abc[0]
+      else:
+        self.D.Ncells_abc_aniso = tuple(self.crystal.Ncells_abc)
+      if self.crystal.Ncells_def is not None:
+        self.D.Ncells_def = self.crystal.Ncells_def
+
+      # init mosaicity
+      self._init_diffBragg_umats()
+
+    else:
+      self.D.xtal_shape = self.crystal.xtal_shape
+      self.update_Fhkl_tuple()
+      self.D.Amatrix = Amatrix_dials2nanoBragg(self.crystal.dxtbx_crystal)
+      Nabc = self.crystal.Ncells_abc
+      if len(Nabc) == 1:
+        Nabc = Nabc[0], Nabc[0], Nabc[0]
+      self.D.Ncells_abc = Nabc
+      self._init_nanoBragg_umats(model_mosaic_spread)
+
+  def _init_nanoBragg_umats(self, model_mosaic_spread):
+
+    # umat implementation for the exascale api
+    if model_mosaic_spread and self.umat_maker is None:
+      # initialize the parameterized distribution
+      assert self.crystal.n_mos_domains % 2 == 0
+      self.umat_maker = AnisoUmats(num_random_samples=2*self.crystal.n_mos_domains)
+
+    if self.crystal.anisotropic_mos_spread_deg is None:
+      # isotropic case
+      self.D.mosaic_spread_deg = self.crystal.mos_spread_deg
+      self.D.mosaic_domains = self.crystal.n_mos_domains
+
+      if self.Umats_method == 0: # double_random legacy method, exafel tests
+        Umats = SimData.Umats(self.crystal.mos_spread_deg,
+                              self.crystal.n_mos_domains,
+                              seed=self.mosaic_seeds[0],
+                              norm_dist_seed=self.mosaic_seeds[1])
+      elif self.Umats_method == 2: # double_uniform isotropic, NOTE: if Umats_method was set as 5, it was modified to be 2
+        Umats, _,_ = self.umat_maker.generate_Umats(
+          self.crystal.mos_spread_deg, compute_derivs=False, crystal=None, how=2)
+      else: raise ValueError("Invalid method for nanoBragg isotropic case")
+      #SimData.plot_isotropic_umats(Umats, self.crystal.mos_spread_deg)
+
+    else:
+      # anisotropic case with diagonal elements
+      Umats, _,_ = self.umat_maker.generate_Umats(
+        self.crystal.anisotropic_mos_spread_deg, compute_derivs=False, crystal=self.crystal.dxtbx_crystal, how=1)
+
+    self.exascale_mos_blocks = flex.mat3_double(Umats)
+    self.D.set_mosaic_blocks(self.exascale_mos_blocks)
+
+  def _init_diffBragg_umats(self):
+    """
+    Initializes the mosaic spread framework.
+    If the self.crystal.n_mos_domains >1 then a umat_maker is created
+    otherwise, no mosaic spread will be modeled
+    """
+    if self.crystal.anisotropic_mos_spread_deg is not None:
+      if tuple(self.crystal.anisotropic_mos_spread_deg) == (0,0,0) and self.crystal.n_mos_domains != 1:
+        raise ValueError("If more than 1 mosaic domain are passed, must set a positive value for anisotropic_mos_spread")
+      if len(set(self.crystal.anisotropic_mos_spread_deg))==1:
+        self.D.has_anisotropic_mosaic_spread = False
+        mosaicity = self.crystal.anisotropic_mos_spread_deg[0]
+      else:
+        self.D.has_anisotropic_mosaic_spread = True
+        mosaicity = self.crystal.anisotropic_mos_spread_deg
+    else:
+      self.D.has_anisotropic_mosaic_spread = False
+      mosaicity = self.crystal.mos_spread_deg
+
+    if self.crystal.n_mos_domains==1:
+      # we wont set/compute gradients in this case!
+      self.D.mosaic_domains = 1
+      Umats = [(1, 0, 0, 0, 1, 0, 0, 0, 1)]
+      Umats_prime = [(0, 0, 0, 0, 0, 0, 0, 0, 0)]
+      self.D.set_mosaic_blocks(Umats)
+      self.D.set_mosaic_blocks_prime(Umats_prime)
+      self.D.vectorize_umats()
+    else:
+      assert self.crystal.n_mos_domains % 2 == 0, "Need an even number of mosaic domains!"
+      self.D.mosaic_domains = self.crystal.n_mos_domains
+      if isinstance(mosaicity, Iterable):
+        self.Umats_method=3
+        self.D.mosaic_spread_deg = np.mean(mosaicity)
+        self._mosaicity_crystal = deepcopy(self.crystal.dxtbx_crystal)
+        assert self._mosaicity_crystal is not None
+
+      else:
+        self.Umats_method=2
+        self.D.mosaic_spread_deg = mosaicity
+
+      self.umat_maker = AnisoUmats(num_random_samples=self.crystal.n_mos_domains)
+      self.update_umats_for_refinement(mosaicity)
+
+  def update_umats_for_refinement(self, mos_spread):
+    """
+    Given the value of mosaic spread, update the umatrices and their derivatives
+    :param mos_spread: float (isotropic spread) or 3-tuple (anisotropic spread)
+    """
+    assert self.Umats_method in [2,3]
+    if not hasattr(self, "D"):
+      raise AttributeError("Cannot set umats if diffBragg is not yet instantiated")
+
+    if self.Umats_method == 2:
+      # isotropic case, mos_spread shuld be a float!
+      Umats, Umats_prime, Umats_dbl_prime = self.umat_maker.generate_Umats(mos_spread, self._mosaicity_crystal, how=2, compute_derivs=True)
+    else:
+      # anisotropic case, mos spread should be a 3-tuple of floats!
+      Umats, Umats_prime, Umats_dbl_prime = self.umat_maker.generate_Umats(mos_spread, self._mosaicity_crystal,how=1, transform_eta=True, compute_derivs=True)
+      Umats_prime = Umats_prime[0::3] + Umats_prime[1::3] + Umats_prime[2::3]
+      Umats_dbl_prime = Umats_dbl_prime[0::3] + Umats_dbl_prime[1::3] + Umats_dbl_prime[2::3]
+
+    self.D.set_mosaic_blocks(Umats)
+    self.D.set_mosaic_blocks_prime(Umats_prime)
+    self.D.set_mosaic_blocks_dbl_prime(Umats_dbl_prime)
+    # here we move the umats from the flex mat3 into vectors of Eigen:
+    self.D.vectorize_umats()
+
+  def _beam_properties(self):
+    self.D.xray_beams = self.beam.xray_beams
+    self.D.beamsize_mm = self.beam.size_mm
+
+  def _seedlings(self):
+    self.D.seed = self.seed
+    self.D.calib_seed = self.seed
+    self.D.mosaic_seed = self.seed
+
+  def determine_spot_scale(self):
+    if self.crystal is None:
+      return 1
+    if self.beam.size_mm <= self.crystal.thick_mm:
+      illum_xtal_vol = self.crystal.thick_mm * self.beam.size_mm**2
+    else:
+      illum_xtal_vol = self.crystal.thick_mm**3
+    mosaic_vol = self.D.xtal_size_mm[0]*self.D.xtal_size_mm[1]*self.D.xtal_size_mm[2]
+    return illum_xtal_vol / mosaic_vol
+
+  def update_nanoBragg_instance(self, parameter, value):
+    setattr(self.D, parameter, value)
+
+  @property
+  def panel_id(self):
+    return self._panel_id
+
+  @panel_id.setter
+  def panel_id(self, val):
+    if val >= len(self.detector):
+      raise ValueError("panel id cannot be larger than the number of panels in detector (%d)" % len(self.detector))
+    if val <0:
+      raise ValueError("panel id cannot be negative!")
+    if self.D is None:
+      self._panel_id = 0
+    else:
+      self.D.set_dxtbx_detector_panel(self.detector[int(val)], self.beam.nanoBragg_constructor_beam.get_s0())
+      self._panel_id = int(val)
+
+  def instantiate_nanoBragg(self, verbose=0, oversample=0, device_Id=0, adc_offset=0,
+                            default_F=1e3, interpolate=0):
+
+    self.instantiate_diffBragg(verbose=verbose, oversample=oversample, device_Id=device_Id,
+                               adc_offset=adc_offset, default_F=default_F, interpolate=interpolate,
+                               use_diffBragg=False)
+
+  def instantiate_diffBragg(self, verbose=0, oversample=0, device_Id=0,
+                            adc_offset=0, default_F=1e3, interpolate=0, use_diffBragg=True,
+                            auto_set_spotscale=False):
+
+    if not use_diffBragg:
+      self.D = nanoBragg(self.detector, self.beam.nanoBragg_constructor_beam,
+                         verbose=verbose, panel_id=int(self.panel_id))
+    else:
+      self.D = diffBragg(self.detector,
+                         self.beam.nanoBragg_constructor_beam,
+                         verbose)
+    self.using_diffBragg_spots = use_diffBragg
+    self._seedlings()
+    self.D.interpolate = interpolate
+    self._crystal_properties()
+    self._beam_properties()
+    if auto_set_spotscale:
+      self.D.spot_scale = self.determine_spot_scale()
+    self.D.adc_offset_adu = adc_offset
+    self.D.default_F = default_F
+
+    if oversample > 0:
+      self.D.oversample = int(oversample)
+
+    self.D.device_Id = device_Id
+    if not self.using_diffBragg_spots:
+      self._full_roi = self.D.region_of_interest
+    else:
+      self.D.vectorize_umats()
+
+  def generate_simulated_image(self, instantiate=False, use_diffBragg=True):
+    if instantiate:
+      self.instantiate_diffBragg(use_diffBragg=use_diffBragg)
+    self._add_nanoBragg_spots()
+    self._add_background()
+    if self.include_noise:
+      self._add_noise()
+    return self.D.raw_pixels.as_numpy_array()
+
+  def _add_nanoBragg_spots(self):
+    if self.using_diffBragg_spots:
+      self.D.add_diffBragg_spots()
+    else:
+      rois = self.rois
+      if rois is None:
+        rois = [self._full_roi]
+      _rawpix = None  # cuda_add_spots doesnt add spots, it resets each time.. hence we need this
+      for roi in rois:
+        if len(roi)==4:
+          roi = (roi[0], roi[1]), (roi[2],roi[3])
+        self.D.region_of_interest = roi
+        if self.using_cuda:
+          self.D.add_nanoBragg_spots_cuda()
+          if _rawpix is None and len(rois) > 1:
+            _rawpix = deepcopy(self.D.raw_pixels)
+          elif _rawpix is not None:
+            _rawpix += self.D.raw_pixels
+
+        elif self.using_omp:
+          from boost_adaptbx.boost.python import streambuf  # will deposit printout into dummy StringIO as side effect
+          from six.moves import StringIO
+          self.D.progress_meter = False
+          self.D.add_nanoBragg_spots_nks(streambuf(StringIO()))
+        else:
+          self.D.add_nanoBragg_spots()
+
+      if self.using_cuda and _rawpix is not None:
+        self.D.raw_pixels = _rawpix
+
+  def _add_background(self):
+    if self.background_raw_pixels is not None:
+      self.D.raw_pixels += self.background_raw_pixels
+    else:
+      if self.add_water:
+        print('add water %f mm' % self.water_path_mm)
+        water_scatter = flex.vec2_double([
+          (0, 2.57), (0.0365, 2.58), (0.07, 2.8), (0.12, 5), (0.162, 8), (0.18, 7.32), (0.2, 6.75),
+          (0.216, 6.75), (0.236, 6.5), (0.28, 4.5), (0.3, 4.3), (0.345, 4.36), (0.436, 3.77), (0.5, 3.17)])
+        self.D.Fbg_vs_stol = water_scatter
+        self.D.amorphous_sample_thick_mm = self.water_path_mm
+        self.D.amorphous_density_gcm3 = 1
+        self.D.amorphous_molecular_weight_Da = 18
+        self.D.add_background(1, 0)
+
+    if self.add_air:
+      print("add air %f mm" % self.air_path_mm)
+      air_scatter = flex.vec2_double([(0, 14.1), (0.045, 13.5), (0.174, 8.35), (0.35, 4.78), (0.5, 4.22)])
+      self.D.Fbg_vs_stol = air_scatter
+      self.D.amorphous_sample_thick_mm = self.air_path_mm
+      self.D.amorphous_density_gcm3 = 1.2e-3
+      self.D.amorphous_sample_molecular_weight_Da = 28  # nitrogen = N2
+      self.D.add_background(1, 0)
+
+  def _add_noise(self):
+    self.D.detector_psf_kernel_radius_pixels = 5
+    self.D.detector_psf_type = shapetype.Unknown
+    self.D.detector_psf_fwhm_mm = self.psf_fwhm
+    self.D.readout_noise = self.readout_noise
+    self.D.quantum_gain = self.gain
+    self.D.add_noise()
+
+  @staticmethod
+  def simple_detector(detector_distance_mm, pixelsize_mm, image_shape,
+                      fast=(1, 0, 0), slow=(0, -1, 0)):
+    from dxtbx.model.detector import DetectorFactory
+    import numpy as np
+    trusted_range = 0, 2e14
+    detsize_s = image_shape[0]*pixelsize_mm
+    detsize_f = image_shape[1]*pixelsize_mm
+    cent_s = (detsize_s + pixelsize_mm*2)/2.
+    cent_f = (detsize_f + pixelsize_mm*2)/2.
+    beam_axis = np.cross(fast, slow)
+    origin = -np.array(fast)*cent_f - np.array(slow)*cent_s + beam_axis*detector_distance_mm
+
+    return DetectorFactory.make_detector("", fast, slow, origin,
+                                         (pixelsize_mm, pixelsize_mm), image_shape, trusted_range)
+
+
+if __name__ == "__main__":
+  S = SimData(use_default_crystal=True)
+  img = S.generate_simulated_image(instantiate=True, use_diffBragg=False)
+  print ("Maximum pixel value: %.3g" % img.max())
+  print ("Minimum pixel value: %.3g" % img.min())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_anisotropic_mosaicity.py
+from __future__ import division
+import numpy as np
+from simtbx.nanoBragg.anisotropic_mosaicity import AnisoUmats
+from dxtbx.model import Crystal
+
+cryst_dict = dict([('__id__', 'crystal'),
+                   ('real_space_a', (-48.93914505851325, -61.4985726090971, 0.23980318971727585)),
+                   ('real_space_b', (-27.63556200961052, 72.26768337463876, 13.81410546001183)),
+                   ('real_space_c', (-42.92524538136074, 33.14788397044063, -259.2845460893375)),
+                   ('space_group_hall_symbol', '-P 6 2')])
+
+cryst = Crystal.from_dict(cryst_dict)
+
+# mosaicities in degrees
+eta_a, eta_b, eta_c = 0.02, 0.1, 0.03
+
+# Generate mosaic models with randomized sampling, no derivatives
+Nmos = 1000
+A = AnisoUmats(num_random_samples=Nmos)
+
+# spherical cap model
+U, Uprime, Udblprime = A.generate_Umats(eta=[eta_a,eta_a,eta_a], crystal=cryst,
+                                        how=2, verbose=True, compute_derivs=True)
+from simtbx.nanoBragg.tst_gaussian_mosaicity import plotter2
+U_by2, _,_ =A.generate_Umats(eta_a/2., crystal=cryst,
+                             how=2, verbose=True, compute_derivs=False)
+plotter2(U, U_by2, False)
+
+# isotropic case should not depend on the crystal model
+Unoxtal, _, _ =A.generate_Umats(eta_a, crystal=None, how=2, compute_derivs=False)
+for i in range(len(U)):
+    assert np.allclose(U[i].elems, Unoxtal[i].elems)
+
+eps = 0.00001  # degrees
+Ushift, _,_ = A.generate_Umats(eta_a+eps, how=2)
+Ushift_minus, _,_ =A.generate_Umats(eta_a-eps,how=2)
+from simtbx.nanoBragg.tst_gaussian_mosaicity2 import check_finite
+check_finite(U, Ushift, Uprime, eps)
+print("Finite differences check!")
+
+# anisotropic cap model
+U,_,_ =A.generate_Umats((eta_a,eta_b,eta_c), cryst,
+                 how=1, compute_derivs=False)
+Ucryst,_,_ =A.generate_Umats((eta_a,eta_b,eta_c), cryst, transform_eta=True,
+                        how=1, compute_derivs=False)
+from scitbx.matrix import col
+ABC = map(lambda x:col(x).normalize(), cryst.get_real_space_vectors() )
+sigs_xyz = []
+sigs_abc = []
+for v in ABC:
+    for ii, Umat_list in enumerate([U,Ucryst]):
+        angs = []
+        for u in Umat_list:
+            vrot = u*v
+            angs.append(np.arccos(vrot.dot(v)))
+        angs = np.array(angs)
+        sig = angs[~np.isnan(angs)].std()*180/np.pi*2
+        if ii==0:
+            sigs_xyz.append(sig)
+        else:
+            sigs_abc.append(sig)
+
+# in the anisotropic model, sigmas should inversely correlate with eta_abc
+from scipy.stats import pearsonr
+eta_abc = eta_a, eta_b, eta_c
+cor_abc = pearsonr(sigs_abc, eta_abc)[0]
+cor_xyz = pearsonr(sigs_xyz, eta_abc)[0]
+print("eta_abc", eta_abc)
+print("sigs_abc", sigs_abc, " Eta corr=", cor_abc)
+print("sigs_xyz", sigs_xyz, " Eta corr=", cor_xyz)
+assert cor_abc < cor_xyz
+assert cor_abc < -0.99
+print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_gauss_argchk.py
+"""
+Test the GAUSS_ARGCHK facility.  Basic idea:
+The GAUSS shapetype uses a call to exp() measuring RLP distance to Ewald sphere.
+Most pixels on a typical pattern are far from Bragg spots, so exp() evaluates to 0.
+On GPU (but not CPU) we can save lots of execution time by pretesting the argument,
+    for exp(-arg), evaluate to zero if arg >= 35
+Provide a backdoor to the Mullen-Holton kernel, by defining shapetype=GAUSS_ARGCHK
+
+This test exercises
+1) the standard C++ result, i.e., the simple monochromatic case
+2) the GPU implementation of the simple monochromatic case, if CUDA is enabled
+
+The test is derived from tst_nanoBragg_cbf_write.py
+Makes dxtbx models for detector, beam , crystal
+Verifies pixel intensities are reproduced
+"""
+from __future__ import absolute_import, division, print_function
+import numpy as np
+from scipy import constants
+from scitbx.array_family import flex
+from libtbx.test_utils import approx_equal
+
+from cctbx import sgtbx, miller
+from cctbx.crystal import symmetry
+
+from dxtbx.model.beam import BeamFactory
+from dxtbx.model.crystal import CrystalFactory
+from dxtbx.model.detector import DetectorFactory
+from scitbx.matrix import sqr, col
+from simtbx.nanoBragg import nanoBragg, shapetype
+
+# rough approximation to water: interpolation points for sin(theta/lambda) vs structure factor
+water = flex.vec2_double([(0,2.57),(0.0365,2.58),(0.07,2.8),(0.12,5),(0.162,8),(0.18,7.32),(0.2,6.75),(0.216,6.75),(0.236,6.5),(0.28,4.5),(0.3,4.3),(0.345,4.36),(0.436,3.77),(0.5,3.17)])
+
+def basic_crystal():
+  print("Make a randomly oriented xtal")
+  # make a randomly oriented crystal..
+  np.random.seed(3142019)
+  # make random rotation about principle axes
+  x = col((-1, 0, 0))
+  y = col((0, -1, 0))
+  z = col((0, 0, -1))
+  rx, ry, rz = np.random.uniform(-180, 180, 3)
+  RX = x.axis_and_angle_as_r3_rotation_matrix(rx, deg=True)
+  RY = y.axis_and_angle_as_r3_rotation_matrix(ry, deg=True)
+  RZ = z.axis_and_angle_as_r3_rotation_matrix(rz, deg=True)
+  M = RX*RY*RZ
+  real_a = M*col((79, 0, 0))
+  real_b = M*col((0, 79, 0))
+  real_c = M*col((0, 0, 38))
+  # dxtbx crystal description
+  cryst_descr = {'__id__': 'crystal',
+               'real_space_a': real_a.elems,
+               'real_space_b': real_b.elems,
+               'real_space_c': real_c.elems,
+               'space_group_hall_symbol': ' P 4nw 2abw'}
+  return CrystalFactory.from_dict(cryst_descr)
+
+def basic_beam():
+  print("Make a beam")
+  # make a beam
+  ENERGY = 9000
+  ENERGY_CONV = 1e10*constants.c*constants.h / constants.electron_volt
+  WAVELEN = ENERGY_CONV/ENERGY
+  # dxtbx beam model description
+  beam_descr = {'direction': (0.0, 0.0, 1.0),
+             'divergence': 0.0,
+             'flux': 1e11,
+             'polarization_fraction': 1.,
+             'polarization_normal': (0.0, 1.0, 0.0),
+             'sigma_divergence': 0.0,
+             'transmission': 1.0,
+             'wavelength': WAVELEN}
+  return BeamFactory.from_dict(beam_descr)
+
+def basic_detector():
+  # make a detector panel
+  # monolithic camera description
+  print("Make a dxtbx detector")
+  detdist = 100.
+  pixsize = 0.1
+  im_shape = 1536, 1536
+  det_descr = {'panels':
+               [{'fast_axis': (1.0, 0.0, 0.0),
+                 'slow_axis': (0.0, -1.0, 0.0),
+                 'gain': 1.0,
+                 'identifier': '',
+                 'image_size': im_shape,
+                 'mask': [],
+                 'material': '',
+                 'mu': 0.0,
+                 'name': 'Panel',
+                 'origin': (-im_shape[0]*pixsize/2., im_shape[1]*pixsize/2., -detdist),
+                 'pedestal': 0.0,
+                 'pixel_size': (pixsize, pixsize),
+                 'px_mm_strategy': {'type': 'SimplePxMmStrategy'},
+                 'raw_image_offset': (0, 0),
+                 'thickness': 0.0,
+                 'trusted_range': (-1e7, 1e7),
+                 'type': ''}]}
+  return DetectorFactory.from_dict(det_descr)
+
+class amplitudes:
+  def __init__(self, CRYSTAL):
+    # make a dummy HKL table with constant HKL intensity
+    # this is just to make spots
+    DEFAULT_F = 1e2
+    symbol = CRYSTAL.get_space_group().info().type().lookup_symbol()  # this is just P43212
+    assert symbol == "P 43 21 2" # test case, start with P43212, make P1 for nanoBragg
+    sgi = sgtbx.space_group_info(symbol)
+    symm = symmetry(unit_cell=CRYSTAL.get_unit_cell(), space_group_info=sgi)
+    miller_set = symm.build_miller_set(anomalous_flag=True, d_min=1.6, d_max=999)
+    Famp = flex.double(np.ones(len(miller_set.indices())) * DEFAULT_F)
+    self.Famp = miller.array(miller_set=miller_set, data=Famp).set_observation_type_xray_amplitude()
+
+  def random_structure(self,crystal):
+    """We're going to do some very approximate stuff here.  Given a unit
+     cell & SG, will put typical atomic contents in the unit cell & get
+     structure factors.
+    """
+    import random
+    random.seed(0)
+    from scitbx.array_family import flex
+    flex.set_random_seed(0)
+    from cctbx.development import random_structure
+
+    uc_volume = crystal.get_unit_cell().volume()
+    asu_volume = uc_volume / crystal.get_space_group().order_z()
+    target_number_scatterers = int(asu_volume)//128 # Very approximate rule of thumb for proteins with ~50% solvent content
+    element_unit = ['O']*19 + ['N']*18 + ['C']*62 + ['S']*1 + ['Fe']*1
+    element_pallet = element_unit * (1 + ( target_number_scatterers//len(element_unit) ))
+    assert len(element_pallet) >= target_number_scatterers
+    # Ersatz hard limit to prevent excessive execution time of xray_structure() below.
+    elements = element_pallet[:min(1000, target_number_scatterers)]
+
+    xs = random_structure.xray_structure(
+      space_group_info = crystal.get_space_group().info(), unit_cell = crystal.get_unit_cell(),
+      elements=elements, min_distance=1.2)
+    self.xs = xs
+
+  def ersatz_correct_to_P1(self):
+    primitive_xray_structure = self.xs.primitive_setting()
+    P1_primitive_xray_structure = primitive_xray_structure.expand_to_p1()
+    self.xs = P1_primitive_xray_structure
+
+  def get_amplitudes(self, at_angstrom):
+    # Since we are getting amplitudes for nanoBragg, let us assure they are in P1
+    symbol = self.xs.space_group().info().type().lookup_symbol()
+    assert symbol=="P 1", "Must be in P1 to accept amplitudes for ExaFEL GPU interface"
+    # take a detour to insist on calculating anomalous contribution of every atom
+    scatterers = self.xs.scatterers()
+    for sc in scatterers:
+      from cctbx.eltbx import henke
+      expected_henke = henke.table(sc.element_symbol()).at_angstrom(at_angstrom)
+      sc.fp = expected_henke.fp()
+      sc.fdp = expected_henke.fdp()
+
+    import mmtbx.programs.fmodel
+    phil2 = mmtbx.programs.fmodel.master_phil
+    params2 = phil2.extract()
+    params2.high_resolution = 1.6
+    params2.fmodel.k_sol = 0.35
+    params2.fmodel.b_sol = 46.
+    params2.structure_factors_accuracy.algorithm = "fft"
+    params2.output.type = "real"
+    import mmtbx
+    f_model = mmtbx.utils.fmodel_from_xray_structure(
+      xray_structure = self.xs,
+      f_obs          = None,
+      add_sigmas     = True,
+      params         = params2).f_model
+    #f_model.show_summary()
+    return f_model
+
+CPU_GPU_Lookup = dict(add_nanoBragg_spots="CPU", add_nanoBragg_spots_cuda="GPU")
+
+def simple_monochromatic_case(bragg_engine, BEAM, DETECTOR, CRYSTAL, SF_model, argchk=False):
+  Famp = SF_model.get_amplitudes(at_angstrom=BEAM.get_wavelength())
+
+  # do the simulation
+  SIM = nanoBragg(DETECTOR, BEAM, panel_id=0)
+  SIM.Ncells_abc = (20,20,20)
+  SIM.Fhkl = Famp
+  SIM.Amatrix = sqr(CRYSTAL.get_A()).transpose()
+  SIM.oversample = 2
+  if argchk:
+    print("\nmonochromatic case,",CPU_GPU_Lookup[bragg_engine.__name__],"argchk")
+    SIM.xtal_shape = shapetype.Gauss_argchk
+  else:
+    print("\nmonochromatic case,",CPU_GPU_Lookup[bragg_engine.__name__],"no argchk")
+    SIM.xtal_shape = shapetype.Gauss
+  bragg_engine(SIM) # appropriate add_nanoBragg_spots, either CPU or GPU
+  domains_per_crystal = 5.E10 # put Bragg spots on larger scale relative to background
+  SIM.raw_pixels*=domains_per_crystal
+  ref_max_bragg = flex.max(SIM.raw_pixels) # get the maximum pixel value for a Bragg spot
+
+  SIM.Fbg_vs_stol = water
+  SIM.amorphous_sample_thick_mm = 0.02
+  SIM.amorphous_density_gcm3 = 1
+  SIM.amorphous_molecular_weight_Da = 18
+  SIM.flux=1e12
+  SIM.beamsize_mm=0.003 # square (not user specified)
+  SIM.exposure_s=1.0 # multiplies flux x exposure
+  SIM.progress_meter=False
+  SIM.add_background()
+  ref_mean_with_background = flex.mean(SIM.raw_pixels)
+  print ("Ratio",ref_max_bragg/ref_mean_with_background)
+  assert ref_max_bragg > 10. * ref_mean_with_background # data must be sensible, Bragg >> solvent
+  return SIM
+
+if __name__=="__main__":
+  # make the dxtbx objects
+  BEAM = basic_beam()
+  DETECTOR = basic_detector()
+  CRYSTAL = basic_crystal()
+  SF_model = amplitudes(CRYSTAL)
+  # Famp = SF_model.Famp # simple uniform amplitudes
+  SF_model.random_structure(CRYSTAL)
+  SF_model.ersatz_correct_to_P1()
+  import sys
+  runmode = sys.argv[1]
+  assert runmode in ["CPU","GPU"]
+
+  # Use case 1.  Simple monochromatic X-rays
+  bragg_engine = nanoBragg.add_nanoBragg_spots
+  SIM = simple_monochromatic_case(bragg_engine, BEAM, DETECTOR, CRYSTAL, SF_model, argchk=False)
+  SIM2 = simple_monochromatic_case(bragg_engine, BEAM, DETECTOR, CRYSTAL, SF_model, argchk=True)
+  output_scale = SIM.get_intfile_scale(intfile_scale=0)
+  #print("The output scale is",output_scale)
+  SIM.adc_offset_adu=0
+  SIM.to_smv_format(fileout="test_full_001.img", intfile_scale=output_scale)
+  assert approx_equal(SIM.raw_pixels, SIM2.raw_pixels)
+  SIM.to_cbf("test_full_001.cbf", intfile_scale=output_scale)
+  SIM.to_nexus_nxmx("test_full_001.h5", intfile_scale=output_scale)
+
+  if runmode=="GPU":
+    bragg_engine = nanoBragg.add_nanoBragg_spots_cuda
+    SIM3 = simple_monochromatic_case(bragg_engine, BEAM, DETECTOR, CRYSTAL, SF_model, argchk=False)
+    SIM3.to_cbf("test_full_003.cbf", intfile_scale=output_scale)
+    SIM4 = simple_monochromatic_case(bragg_engine, BEAM, DETECTOR, CRYSTAL, SF_model, argchk=True)
+    assert approx_equal(SIM.raw_pixels, SIM3.raw_pixels)
+    assert approx_equal(SIM.raw_pixels, SIM4.raw_pixels)
+
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_gaussian_mosaicity.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.matrix import sqr,col
+from simtbx.nanoBragg import nanoBragg
+import libtbx.load_env # possibly implicit
+import math
+from libtbx.test_utils import approx_equal
+from six.moves import range
+
+class plotter:
+  def __init__(self, tophat, normal):
+    # take U-mats from two different distributions, apply them to unit vectors, and plot
+    from matplotlib import pyplot as plt
+    fig, axes = plt.subplots(2, 3,figsize=(12,7))
+
+    # columns plot the transformation of x, y, and z unit vectors
+    rows = [tophat,normal]
+    for irow,dist in enumerate(rows):
+      iaxes = axes[irow];
+      for icol, permutation in enumerate([(0,1,2), (2,0,1), (1,2,0)]):
+        axis = iaxes[icol]
+        unit = self.permute_vector(vector=(1,0,0), perm = permutation)
+        perm_y = self.permute_vector(vector=(0,1,0), perm = permutation).index(1)
+        perm_z = self.permute_vector(vector=(0,0,1), perm = permutation).index(1)
+        a2 = flex.double(); a3 = flex.double()
+        for u in dist:
+          U = sqr(u)
+          newvec = U * unit
+          #print newvec.elems
+          a2.append(newvec[perm_y]); a3.append(newvec[perm_z])
+        axis.plot (a2,a3,'r,')
+        axis.set_aspect("equal")
+        axis.set_title("Transformation of unit vector %s"%(str(unit)))
+        axis.set_xlim(-0.05,0.05)
+        axis.set_ylim(-0.05,0.05)
+
+    plt.show()
+
+  def permute_vector(self, vector, perm):
+    return (vector[perm[0]], vector[perm[1]], vector[perm[2]],)
+
+class plotter2:  # compare the transformation of 001 with that of .57735,.57735,.57735
+  def __init__(self, tophat, normal, plot, eps=1e-4):
+    # take U-mats from two different distributions, apply them to unit vectors, and plot
+    self.eps = eps
+    if plot:
+      from matplotlib import pyplot as plt
+      fig, axes = plt.subplots(2, 2,figsize=(8,7))
+    else:
+      axes = ((1,2),(3,4)) #dummy
+
+    # columns plot the transformation of x, y, and z unit vectors
+    rows = [tophat,normal]
+    differences = []
+    for irow,dist in enumerate(rows):
+      iaxes = axes[irow];
+      cube_diag = math.sqrt(1./3) # 0.57735
+      for icol, RLP in enumerate([(0,0,1), (cube_diag, cube_diag, cube_diag)]):
+        RLP = col(RLP)
+        print("(%7.5f %7.5f %7.5f)"%(RLP.elems),"Vector length:%8.6f"%(RLP.length()), end=' ')
+        axis = iaxes[icol]
+        unit = RLP.normalize()
+        seed = col((1,0,0))
+        perm2 = unit.cross(seed)
+        perm3 = unit.cross(perm2)
+        a2 = flex.double(); a3 = flex.double()
+        difference_vectors = flex.vec3_double()
+        for u in dist:
+          U = sqr(u)
+          newvec = U * RLP
+          difference_vectors.append( newvec-RLP )
+          a2.append(newvec.dot(perm2)); a3.append(newvec.dot(perm3))
+        rms = math.sqrt( flex.mean ( difference_vectors.dot(difference_vectors) ) )
+        print("The rms difference is", rms)
+        differences.append(rms)
+        if plot:
+          axis.plot (a2,a3,'r,')
+          axis.set_aspect("equal")
+          axis.set_title("Transformation of v=%s"%("(%5.3f,%5.3f,%5.3f)"%(RLP.elems)))
+          axis.set_xlim(-0.05,0.05)
+          axis.set_ylim(-0.05,0.05)
+
+      assert approx_equal(differences[0],differences[1], eps=self.eps), \
+      "RMS mosaic distribution for axis vector and diagonal vector should be similar, as proposed by J Holton"
+
+    if plot: plt.show()
+
+class check_distributions:
+  @staticmethod
+  def get_angular_rotation(dist):
+    angle_deg = flex.double()
+    for umat in dist:
+      angle,axis = sqr(
+        umat).r3_rotation_matrix_as_unit_quaternion().unit_quaternion_as_axis_and_angle(deg=True)
+      angle_deg.append(angle)
+    return angle_deg
+  @staticmethod
+  def get_angle_deg_and_axes(dist):
+    angle_deg = flex.double()
+    rot_ax = flex.vec3_double()
+    for umat in dist:
+      angle,axis = sqr(
+        umat).r3_rotation_matrix_as_unit_quaternion().unit_quaternion_as_axis_and_angle(deg=True)
+      angle_deg.append(angle)
+      rot_ax.append(axis)
+    return angle_deg, rot_ax
+
+
+MOSAIC_SPREAD = 2.0 # top hat half width rotation in degrees
+SAMPLE_SIZE = 100000
+
+def run_sim2smv(fileout):
+  SIM = nanoBragg(detpixels_slowfast=(1000,1000),pixel_size_mm=0.1,Ncells_abc=(5,5,5),verbose=0)
+  SIM.mosaic_spread_deg = MOSAIC_SPREAD # apparently this is half width
+  SIM.mosaic_domains = SAMPLE_SIZE
+  SIM.distance_mm=100 # this triggers the generation of mosaic distribution
+  UMAT_th = SIM.get_mosaic_blocks() # extract top-hat distributed U-mats
+
+  #sanity checks on the top hat distribution
+  th_angles = check_distributions.get_angular_rotation(UMAT_th)
+  max_angle = flex.max(th_angles)
+  assert max_angle <= MOSAIC_SPREAD + 0.0000001 # need to allow a small epsilon
+  assert max_angle > 0.99 * MOSAIC_SPREAD # insist that max angle is near the limit we gave it
+  rms_angle = math.sqrt(flex.mean(th_angles*th_angles))
+  print(rms_angle)
+  assert rms_angle < MOSAIC_SPREAD
+
+  import scitbx # compute an array of normally-distributed U-mats into the simulator
+  UMAT_nm = flex.mat3_double()
+  mersenne_twister = flex.mersenne_twister(seed=0) # set seed, get reproducible results
+  scitbx.random.set_random_seed(4321) # set seed, get reproducibe results
+  rand_norm = scitbx.random.normal_distribution(mean=0, sigma=rms_angle*math.pi/180.)
+  g = scitbx.random.variate(rand_norm)
+  mosaic_rotation = g(SAMPLE_SIZE)
+  for m in mosaic_rotation:
+    site = col(mersenne_twister.random_double_point_on_sphere())
+    UMAT_nm.append( site.axis_and_angle_as_r3_rotation_matrix(m,deg=False) )
+
+  # set the normally-distributed U-mats into the simulator:
+  SIM.set_mosaic_blocks(UMAT_nm)
+
+  # get them back
+  new_UMAT_nm = SIM.get_mosaic_blocks()
+
+  #double check that simulator does not alter the UMATs
+  for iumat in range(0,SAMPLE_SIZE,100):
+
+
+
+
+    assert UMAT_nm[iumat]==new_UMAT_nm[iumat]
+
+  #sanity check on the gaussian distribution
+  nm_angles = check_distributions.get_angular_rotation(new_UMAT_nm)
+  nm_rms_angle = math.sqrt(flex.mean(nm_angles*nm_angles))
+  print(nm_rms_angle)
+  assert approx_equal(rms_angle,nm_rms_angle,eps=1e-03), \
+  "The top hat and gaussian models should have similar standard deviations"
+
+  return UMAT_th, new_UMAT_nm
+
+def tst_all(make_plots):
+  fileout = "dummy_file.cbf"
+  UM_th, UM_nm = run_sim2smv(fileout)
+  if make_plots:
+    P = plotter(UM_th,UM_nm)
+  Q = plotter2(UM_th,UM_nm,make_plots) # suggested by Holton:
+  """apply all the UMATs to a particular starting unit vector and take the rms of the resulting end points.
+    You should not see a difference between starting with a vector with x,y,z = 0,0,1 vs
+    x,y,z = 0.57735,0.57735,0.57735.  But if the implementation is wrong and the UMATs are being made by
+    generating Gaussian-random rotations about the three principle axes, then the variance of
+    0,0,1 will be significantly smaller than that of 0.57735,0.57735,0.57735."""
+
+if __name__=="__main__":
+  import sys
+  make_plots = "--plot" in sys.argv
+  tst_all(make_plots)
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_gaussian_mosaicity2.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.matrix import sqr,col
+from simtbx.nanoBragg import nanoBragg
+import libtbx.load_env # possibly implicit
+import math
+from libtbx.test_utils import approx_equal
+from six.moves import range
+from scipy import special
+import numpy as np
+from simtbx.nanoBragg.tst_gaussian_mosaicity import plotter, plotter2, check_distributions
+
+"""Nick Sauter 6/21/2020
+The purpose of function run_uniform() is to provide UMAT and d_UMAT_d_eta with the following
+1. Large (scalable) ensemble of UMATs for use by nanoBragg.
+2. UMATs are parameterized by eta, the half-angle of mosaic rotation (degrees) assuming Gaussian distribution
+3. eta is the standard deviation of the Gaussian
+4. The UMATs and d_UMAT_d_eta are completely determined by eta.
+5. The UMATs are implemented using the axis & angle approach.
+6. Unit axes are drawn randomly from the unit sphere by scitbx.
+7. The angle theta is applied, as well as -theta; therefore the number of UMATs is always even.
+8. Theta is uniformly chosen over the CDF of the Normal distribution.
+9. Therefore the UMAT derivative with respect to eta requires the inverse erf function, supplied by SciPy.
+"""
+
+MOSAIC_SPREAD = 2.0 # top hat half width rotation in degrees
+
+def run_uniform(eta_angle, sample_size=20000, verbose=True):
+
+  UMAT = flex.mat3_double()
+  d_UMAT_d_eta = flex.mat3_double()
+  # the axis is sampled randomly on a sphere.
+  # Alternately it could have been calculated on a regular hemispheric grid
+  # but regular grid is not needed; the only goal is to have the ability to compute gradient
+  mersenne_twister = flex.mersenne_twister(seed=0) # set seed, get reproducible results
+
+  # for each axis, sample both the + and - angle
+  assert sample_size%2==0
+  # the angle is sampled uniformly from its distribution
+
+  mosaic_rotation0 = np.array(range(sample_size//2))
+  mosaic_rotation1 = special.erfinv(mosaic_rotation0/(sample_size//2))
+  d_theta_d_eta = math.sqrt(2.0)*flex.double(mosaic_rotation1)
+  mosaic_rotation = (math.pi/180.)*eta_angle*d_theta_d_eta
+
+  for m, d in zip(mosaic_rotation, d_theta_d_eta):
+    site = col(mersenne_twister.random_double_point_on_sphere())
+    UMAT.append( site.axis_and_angle_as_r3_rotation_matrix(m,deg=False) )
+    UMAT.append( site.axis_and_angle_as_r3_rotation_matrix(-m,deg=False) )
+    d_umat = site.axis_and_angle_as_r3_derivative_wrt_angle(m, deg=False)
+    d_UMAT_d_eta.append( (math.pi/180.) * d * d_umat )
+    d_umat = site.axis_and_angle_as_r3_derivative_wrt_angle(-m, deg=False)
+    d_UMAT_d_eta.append( (math.pi/180.) * -d * d_umat )
+
+  #sanity check on the gaussian distribution
+  if verbose:
+    nm_angles = check_distributions.get_angular_rotation(UMAT)
+    nm_rms_angle = math.sqrt(flex.mean(nm_angles*nm_angles))
+    print("Normal rms angle is ",nm_rms_angle)
+
+  return UMAT, d_UMAT_d_eta
+
+def check_finite(mat1, mat2, dmat1, eps):
+  # confirms d_Umat_d_eta by finite difference
+  for im in range(len(mat1)):
+    m1 = sqr(mat1[im])
+    m2 = sqr(mat2[im])
+    f_diff = (m2 - m1)/eps
+    deriv = sqr(dmat1[im])
+    assert approx_equal(f_diff.elems, deriv.elems)
+
+def tst_all(make_plots):
+  eps =0.00001 # degrees
+  UM , d_UM = run_uniform(eta_angle=MOSAIC_SPREAD)
+  UMp , d_UMp = run_uniform(eta_angle=MOSAIC_SPREAD+eps)
+  UMm , d_UMm = run_uniform(eta_angle=MOSAIC_SPREAD-eps)
+  check_finite (UM, UMp, d_UM, eps)
+  check_finite (UM, UMm, d_UM, -eps)
+
+  UM_2 , d_UM2 = run_uniform(eta_angle=MOSAIC_SPREAD/2.)
+  if make_plots:
+    P = plotter(UM,UM_2)
+  Q = plotter2(UM,UM_2,make_plots) # suggested by Holton:
+  """apply all the UMATs to a particular starting unit vector and take the rms of the resulting end points.
+    You should not see a difference between starting with a vector with x,y,z = 0,0,1 vs
+    x,y,z = 0.57735,0.57735,0.57735.  But if the implementation is wrong and the UMATs are being made by
+    generating Gaussian-random rotations about the three principle axes, then the variance of
+    0,0,1 will be significantly smaller than that of 0.57735,0.57735,0.57735."""
+
+if __name__=="__main__":
+  import sys
+  make_plots = "--plot" in sys.argv
+  tst_all(make_plots)
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_multisource_background.py
+from __future__ import absolute_import, division, print_function
+from simtbx.nanoBragg import nanoBragg, nanoBragg_beam
+from dials.array_family import flex
+import numpy as np
+"""Purpose of the test:  compare nanoBragg background two ways:
+1) single channel
+2) multiple channels
+Overall photon fluence is the same in both simulations.
+Results will be nearly identical if the multiple channel bandpass is small,
+and if the spectrum is even (tophat), not irregular (random).
+"""
+
+water = flex.vec2_double([(0,2.57),(0.0365,2.58),(0.07,2.8),(0.12,5),(0.162,8),(0.18,7.32),(0.2,6.75),(0.216,6.75),(0.236,6.5),(0.28,4.5),(0.3,4.3),(0.345,4.36),(0.436,3.77),(0.5,3.17)])
+
+def gaussian(x, mu, sig):
+    return np.exp(-np.power(x - mu, 2.) / (2 * np.power(sig, 2.)))
+
+class run_background_simulation:
+  def __init__(self):
+    self.SIM = nanoBragg()
+    self.SIM.progress_meter = False
+    self.SIM.Fbg_vs_stol = water
+    self.SIM.amorphous_sample_thick_mm = 0.1
+    self.SIM.amorphous_density_gcm3 = 1
+    self.SIM.amorphous_molecular_weight_Da = 18
+    self.total_flux = self.SIM.flux = 1e12
+    self.verbose_beams = False
+
+  def make_multichannel_beam_simulation(self,
+      n_chan=5, wave_interval=(0.998, 1.002), spectrum='tophat'):
+    assert spectrum in ['tophat','random','gaussian']
+    beam = nanoBragg_beam.NBbeam()
+    waves = np.linspace(wave_interval[0], wave_interval[1], n_chan)
+    if spectrum=='tophat': fluences = np.ones(n_chan)
+    elif spectrum=='random': fluences = np.random.random(n_chan)
+    else: mu=(n_chan-1)/2.; sig=(n_chan-1)/6.; fluences = np.array([
+      gaussian(i,mu,sig) for i in range(n_chan)])
+    fluences /= fluences.sum() # sum of values is 1.
+    fluences *= self.total_flux # sum of values is SIM.flux
+    assert np.allclose(fluences.sum(), self.total_flux)
+    beam.spectrum = list(zip(waves, fluences))
+    return beam
+
+  def set_beam(self,beam):
+    self.SIM.verbose= 10 if self.verbose_beams else 0
+    self.SIM.xray_beams = beam.xray_beams
+    self.SIM.verbose=0
+    if beam._undo_nanoBragg_norm_by_nbeams:
+      assert np.allclose(self.SIM.flux, self.total_flux / len(beam.xray_beams))
+    else:
+      assert np.allclose(self.SIM.flux, self.total_flux)
+
+  def cpu_background(self,override_source=2):
+    self.SIM.raw_pixels *= 0
+    self.SIM.add_background()
+    self.bg_multi = self.SIM.raw_pixels.as_numpy_array()
+
+    self.SIM.raw_pixels *= 0
+    self.SIM.add_background(oversample=1, override_source=override_source)
+    self.bg_single = self.SIM.raw_pixels.as_numpy_array()
+
+def validate(multi,single): # range of sources or single source
+  mean_single = single.mean()
+  mean_multi = multi.mean()
+  print("single source mean: %1.5g" % mean_single)
+  print("multi source mean: %1.5g" % mean_multi)
+  if np.allclose(mean_single, mean_multi): return True
+  else:
+    frac = mean_multi / mean_multi
+    print("Means are off by a factor of %.6f" % frac)
+    return False
+
+def plot_one_and_multi(multi,single):
+  from matplotlib import pyplot as plt
+  fig,ax = plt.subplots(1,3)
+  scale = multi.max()
+  im = ax[0].imshow(multi, vmin=-scale, vmax=scale); ax[0].set_title("All sources")
+  ax[1].imshow(single, vmin=-scale, vmax=scale); ax[1].set_title("Single source")
+  ax[2].imshow(multi-single, vmin=-scale, vmax=scale); ax[2].set_title("Difference")
+  fig.subplots_adjust(right=0.88)
+  cbar = fig.add_axes([0.90,0.2,0.04,0.6]) # left, bottom, width, height
+  fig.colorbar(im, cax=cbar)
+  plt.show()
+
+if __name__=="__main__":
+  import sys
+  run1 = run_background_simulation()
+  nbeam_norm_check = [] # all test cases should give approx equal background as flux is constant
+
+  print("test with thin bandpass and tophat spectrum")
+  beam = run1.make_multichannel_beam_simulation(n_chan=5)
+  run1.set_beam(beam)
+  run1.cpu_background()
+  nbeam_norm_check.append(run1.bg_multi.mean())
+  assert validate(run1.bg_multi, run1.bg_single)
+  if "plot" in sys.argv: plot_one_and_multi(run1.bg_multi, run1.bg_single)
+
+  print("test with thin bandpass and tophat spectrum, more channels -- should fail")
+  beam = run1.make_multichannel_beam_simulation(n_chan=10)
+  run1.set_beam(beam)
+  run1.cpu_background()
+  nbeam_norm_check.append(run1.bg_multi.mean())
+  assert not validate(run1.bg_multi, run1.bg_single) # fail since single-source isn't central
+  if "plot" in sys.argv: plot_one_and_multi(run1.bg_multi, run1.bg_single)
+
+  print("test with wider bandpass and tophat spectrum -- should fail")
+  beam = run1.make_multichannel_beam_simulation(wave_interval=(0.98, 1.02))
+  run1.set_beam(beam)
+  run1.cpu_background()
+  nbeam_norm_check.append(run1.bg_multi.mean())
+  assert not validate(run1.bg_multi, run1.bg_single)
+  if "plot" in sys.argv: plot_one_and_multi(run1.bg_multi, run1.bg_single)
+
+  print("test with thin bandpass and gaussian spectrum -- it works")
+  beam = run1.make_multichannel_beam_simulation(n_chan=15, spectrum='gaussian')
+  run1.set_beam(beam)
+  run1.cpu_background(override_source=7)
+  nbeam_norm_check.append(run1.bg_multi.mean())
+  assert validate(run1.bg_multi, run1.bg_single)
+
+  print("compare mean background between tests: should be approx equal",nbeam_norm_check)
+  assert np.allclose(nbeam_norm_check, nbeam_norm_check[0], atol=1.0)
+
+  print("OK")
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_nanoBragg_basic.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from simtbx.nanoBragg import testuple
+from simtbx.nanoBragg import shapetype
+from simtbx.nanoBragg import convention
+from simtbx.nanoBragg import nanoBragg
+import libtbx.load_env # possibly implicit
+from cctbx import crystal
+from cctbx import miller
+assert miller
+
+pdb_lines = """HEADER TEST
+CRYST1   50.000   60.000   70.000  90.00  90.00  90.00 P 1
+ATOM      1  O   HOH A   1      56.829   2.920  55.702  1.00 20.00           O
+ATOM      2  O   HOH A   2      49.515  35.149  37.665  1.00 20.00           O
+ATOM      3  O   HOH A   3      52.667  17.794  69.925  1.00 20.00           O
+ATOM      4  O   HOH A   4      40.986  20.409  18.309  1.00 20.00           O
+ATOM      5  O   HOH A   5      46.896  37.790  41.629  1.00 20.00           O
+ATOM      6 SED  MSE A   6       1.000   2.000   3.000  1.00 20.00          SE
+END
+"""
+
+def fcalc_from_pdb(resolution,algorithm=None,wavelength=0.9):
+  from iotbx import pdb
+  pdb_inp = pdb.input(source_info=None,lines = pdb_lines)
+  xray_structure = pdb_inp.xray_structure_simple()
+  #
+  # take a detour to insist on calculating anomalous contribution of every atom
+  scatterers = xray_structure.scatterers()
+  for sc in scatterers:
+    from cctbx.eltbx import sasaki, henke
+    #expected_sasaki = sasaki.table(sc.element_symbol()).at_angstrom(wavelength)
+    expected_henke = henke.table(sc.element_symbol()).at_angstrom(wavelength)
+    sc.fp = expected_henke.fp()
+    sc.fdp = expected_henke.fdp()
+  # how do we do bulk solvent?
+  primitive_xray_structure = xray_structure.primitive_setting()
+  P1_primitive_xray_structure = primitive_xray_structure.expand_to_p1()
+  fcalc = P1_primitive_xray_structure.structure_factors(
+    d_min=resolution, anomalous_flag=True, algorithm=algorithm).f_calc()
+  return fcalc.amplitudes()
+
+
+def run_sim2smv(fileout):
+  SIM = nanoBragg(detpixels_slowfast=(1000,1000),pixel_size_mm=0.1,Ncells_abc=(5,5,5),verbose=9)
+  import sys
+  if len(sys.argv)>2:
+    SIM.seed = -int(sys.argv[2])
+    print("GOTHERE seed=",SIM.seed)
+  if len(sys.argv)>1:
+    if sys.argv[1]=="random" : SIM.randomize_orientation()
+  SIM.distance_mm=100
+  #SIM = nanoBragg(detpixels_slowfast=(2527,2463),pixel_size_mm=0.172,Ncells_abc=(5,5,5),verbose=9)
+  #SIM.distance_mm=200
+  # get same noise each time this test is run
+  SIM.seed = 1
+  SIM.oversample=1
+  SIM.wavelength_A=1
+  SIM.polarization=1
+  #SIM.unit_cell_tuple=(50,50,50,90,90,90)
+  print("unit_cell_Adeg=",SIM.unit_cell_Adeg)
+  print("unit_cell_tuple=",SIM.unit_cell_tuple)
+  # this will become F000, marking the beam center
+  SIM.F000=200
+  SIM.default_F=0
+  #SIM.missets_deg= (10,20,30)
+  print("mosaic_seed=",SIM.mosaic_seed)
+  print("seed=",SIM.seed)
+  print("calib_seed=",SIM.calib_seed)
+  print("missets_deg =", SIM.missets_deg)
+  sfall = fcalc_from_pdb(resolution=1.6,algorithm="direct",wavelength=SIM.wavelength_A)
+  # use crystal structure to initialize Fhkl array
+  SIM.Fhkl=sfall
+  # fastest option, least realistic
+  SIM.xtal_shape=shapetype.Tophat
+  # only really useful for long runs
+  SIM.progress_meter=False
+  # prints out value of one pixel only.  will not render full image!
+  #SIM.printout_pixel_fastslow=(500,500)
+  #SIM.printout=True
+  SIM.show_params()
+  # flux is always in photons/s
+  SIM.flux=1e12
+  # assumes round beam
+  SIM.beamsize_mm=0.1
+  SIM.exposure_s=0.1
+  temp=SIM.Ncells_abc
+  print("Ncells_abc=",SIM.Ncells_abc)
+  SIM.Ncells_abc=temp
+  print("Ncells_abc=",SIM.Ncells_abc)
+  print("xtal_size_mm=",SIM.xtal_size_mm)
+  print("unit_cell_Adeg=",SIM.unit_cell_Adeg)
+  print("unit_cell_tuple=",SIM.unit_cell_tuple)
+  print("missets_deg=",SIM.missets_deg)
+  print("Amatrix=",SIM.Amatrix)
+  #SIM.beamcenter_convention=convention.ADXV
+  #SIM.beam_center_mm=(45,47)
+  print("beam_center_mm=",SIM.beam_center_mm)
+  print("XDS_ORGXY=",SIM.XDS_ORGXY)
+  print("detector_pivot=",SIM.detector_pivot)
+  print("xtal_shape=",SIM.xtal_shape)
+  print("beamcenter_convention=",SIM.beamcenter_convention)
+  print("fdet_vector=",SIM.fdet_vector)
+  print("sdet_vector=",SIM.sdet_vector)
+  print("odet_vector=",SIM.odet_vector)
+  print("beam_vector=",SIM.beam_vector)
+  print("polar_vector=",SIM.polar_vector)
+  print("spindle_axis=",SIM.spindle_axis)
+  print("twotheta_axis=",SIM.twotheta_axis)
+  print("distance_meters=",SIM.distance_meters)
+  print("distance_mm=",SIM.distance_mm)
+  print("close_distance_mm=",SIM.close_distance_mm)
+  print("detector_twotheta_deg=",SIM.detector_twotheta_deg)
+  print("detsize_fastslow_mm=",SIM.detsize_fastslow_mm)
+  print("detpixels_fastslow=",SIM.detpixels_fastslow)
+  print("detector_rot_deg=",SIM.detector_rot_deg)
+  print("curved_detector=",SIM.curved_detector)
+  print("pixel_size_mm=",SIM.pixel_size_mm)
+  print("point_pixel=",SIM.point_pixel)
+  print("polarization=",SIM.polarization)
+  print("nopolar=",SIM.nopolar)
+  print("oversample=",SIM.oversample)
+  print("region_of_interest=",SIM.region_of_interest)
+  print("wavelength_A=",SIM.wavelength_A)
+  print("energy_eV=",SIM.energy_eV)
+  print("fluence=",SIM.fluence)
+  print("flux=",SIM.flux)
+  print("exposure_s=",SIM.exposure_s)
+  print("beamsize_mm=",SIM.beamsize_mm)
+  print("dispersion_pct=",SIM.dispersion_pct)
+  print("dispsteps=",SIM.dispsteps)
+  print("divergence_hv_mrad=",SIM.divergence_hv_mrad)
+  print("divsteps_hv=",SIM.divsteps_hv)
+  print("divstep_hv_mrad=",SIM.divstep_hv_mrad)
+  print("round_div=",SIM.round_div)
+  print("phi_deg=",SIM.phi_deg)
+  print("osc_deg=",SIM.osc_deg)
+  print("phisteps=",SIM.phisteps)
+  print("phistep_deg=",SIM.phistep_deg)
+  print("detector_thick_mm=",SIM.detector_thick_mm)
+  print("detector_thicksteps=",SIM.detector_thicksteps)
+  print("detector_thickstep_mm=",SIM.detector_thickstep_mm)
+  print("mosaic_spread_deg=",SIM.mosaic_spread_deg)
+  print("mosaic_domains=",SIM.mosaic_domains)
+  print("indices=",SIM.indices)
+  print("amplitudes=",SIM.amplitudes)
+  print("Fhkl_tuple=",SIM.Fhkl_tuple)
+  print("default_F=",SIM.default_F)
+  print("interpolate=",SIM.interpolate)
+  print("integral_form=",SIM.integral_form)
+  # now actually burn up some CPU
+  SIM.add_nanoBragg_spots()
+  # simulated crystal is only 125 unit cells (25 nm wide)
+  # amplify spot signal to simulate physical crystal of 4000x larger: 100 um (64e9 x the volume)
+  SIM.raw_pixels *= 64e9;
+  SIM.to_smv_format(fileout="intimage_001.img")
+  # rough approximation to water: interpolation points for sin(theta/lambda) vs structure factor
+  bg = flex.vec2_double([(0,2.57),(0.0365,2.58),(0.07,2.8),(0.12,5),(0.162,8),(0.2,6.75),(0.18,7.32),(0.216,6.75),(0.236,6.5),(0.28,4.5),(0.3,4.3),(0.345,4.36),(0.436,3.77),(0.5,3.17)])
+  SIM.Fbg_vs_stol = bg
+  SIM.amorphous_sample_thick_mm = 0.1
+  SIM.amorphous_density_gcm3 = 1
+  SIM.amorphous_molecular_weight_Da = 18
+  SIM.flux=1e12
+  SIM.beamsize_mm=0.1
+  SIM.exposure_s=0.1
+  SIM.add_background()
+  SIM.to_smv_format(fileout="intimage_002.img")
+  # rough approximation to air
+  bg = flex.vec2_double([(0,14.1),(0.045,13.5),(0.174,8.35),(0.35,4.78),(0.5,4.22)])
+  SIM.Fbg_vs_stol = bg
+  SIM.amorphous_sample_thick_mm = 35 # between beamstop and collimator
+  SIM.amorphous_density_gcm3 = 1.2e-3
+  SIM.amorphous_sample_molecular_weight_Da = 28 # nitrogen = N2
+  print("amorphous_sample_size_mm=",SIM.amorphous_sample_size_mm)
+  print("amorphous_sample_thick_mm=",SIM.amorphous_sample_thick_mm)
+  print("amorphous_density_gcm3=",SIM.amorphous_density_gcm3)
+  print("amorphous_molecular_weight_Da=",SIM.amorphous_molecular_weight_Da)
+  SIM.add_background()
+  # set this to 0 or -1 to trigger automatic radius.  could be very slow with bright images
+  SIM.detector_psf_kernel_radius_pixels=5;
+  SIM.detector_psf_fwhm_mm=0.08;
+  SIM.detector_psf_type=shapetype.Fiber
+  #SIM.apply_psf()
+  print(SIM.raw_pixels[500000])
+  SIM.to_smv_format(fileout="intimage_003.img")
+  #SIM.detector_psf_fwhm_mm=0
+  print("quantum_gain=",SIM.quantum_gain)
+  print("adc_offset_adu=",SIM.adc_offset_adu)
+  print("detector_calibration_noise_pct=",SIM.detector_calibration_noise_pct)
+  print("flicker_noise_pct=",SIM.flicker_noise_pct)
+  print("readout_noise_adu=",SIM.readout_noise_adu)
+  print("detector_psf_type=",SIM.detector_psf_type)
+  print("detector_psf_fwhm_mm=",SIM.detector_psf_fwhm_mm)
+  print("detector_psf_kernel_radius_pixels=",SIM.detector_psf_kernel_radius_pixels)
+  SIM.add_noise()
+
+  #fileout = "intimage_001.img"
+  print("raw_pixels=",SIM.raw_pixels)
+  SIM.to_smv_format(fileout="noiseimage_001.img",intfile_scale=1)
+
+  # try to write as CBF
+  import dxtbx
+  from dxtbx.format.FormatCBFMini import FormatCBFMini
+  img = dxtbx.load("noiseimage_001.img")
+  print(img)
+  FormatCBFMini.as_file(
+    detector=img.get_detector(),beam=img.get_beam(),gonio=img.get_goniometer(),scan=img.get_scan(),
+    data=img.get_raw_data(),path=fileout)
+  SIM.free_all()
+
+
+#run_sim2smv("intimage_001.img")
+
+
+def tst_all():
+  F = testuple()
+  assert F == (1,2,3,4)
+  #
+  fileout = "noiseimage_001.cbf"
+  run_sim2smv(fileout)
+  import os
+  assert os.path.isfile(fileout)
+
+  exit()
+  #simulation is complete, now we'll autoindex the image fragment and verify
+  # that the indexed cell is similar to the input cell.
+
+
+if __name__=="__main__":
+  tst_all()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_nanoBragg_cbf_write.py
+"""
+Makes dxtbx models for detector, beam , crystal
+
+Uses models to instantiate nanoBragg and compute Bragg spots
+
+Writes results to a full CBF using new nanoBragg method to_cbf (in nanoBragg/__init__.py)
+
+Loads CBF with dxtbx, and uses the loaded detector and beam to recompute the Bragg spots
+
+Verifies pixel intensities are reproduced
+"""
+from __future__ import absolute_import, division, print_function
+import numpy as np
+from scipy import constants
+
+from cctbx import sgtbx, miller
+from cctbx.crystal import symmetry
+import dxtbx
+from dxtbx.model.beam import BeamFactory
+from dxtbx.model.crystal import CrystalFactory
+from dxtbx.model.detector import DetectorFactory
+from scitbx.array_family import flex
+from scitbx.matrix import sqr, col
+from simtbx.nanoBragg import nanoBragg, shapetype
+
+print("Make a randomly oriented xtal")
+# make a randomly oriented crystal..
+np.random.seed(3142019)
+# make random rotation about principle axes
+x = col((-1, 0, 0))
+y = col((0, -1, 0))
+z = col((0, 0, -1))
+rx, ry, rz = np.random.uniform(-180, 180, 3)
+RX = x.axis_and_angle_as_r3_rotation_matrix(rx, deg=True)
+RY = y.axis_and_angle_as_r3_rotation_matrix(ry, deg=True)
+RZ = z.axis_and_angle_as_r3_rotation_matrix(rz, deg=True)
+M = RX*RY*RZ
+real_a = M*col((79, 0, 0))
+real_b = M*col((0, 79, 0))
+real_c = M*col((0, 0, 38))
+# dxtbx crystal description
+cryst_descr = {'__id__': 'crystal',
+               'real_space_a': real_a.elems,
+               'real_space_b': real_b.elems,
+               'real_space_c': real_c.elems,
+               'space_group_hall_symbol': ' P 4nw 2abw'}
+
+print("Make a beam")
+# make a beam
+ENERGY = 9000
+ENERGY_CONV = 1e10*constants.c*constants.h / constants.electron_volt
+WAVELEN = ENERGY_CONV/ENERGY
+# dxtbx beam model description
+beam_descr = {'direction': (0.0, 0.0, 1.0),
+             'divergence': 0.0,
+             'flux': 1e11,
+             'polarization_fraction': 1.,
+             'polarization_normal': (0.0, 1.0, 0.0),
+             'sigma_divergence': 0.0,
+             'transmission': 1.0,
+             'wavelength': WAVELEN}
+
+# make a detector panel
+# monolithic camera description
+print("Make a dxtbx detector")
+detdist = 100.
+pixsize = 0.1
+im_shape = 1536, 1536
+det_descr = {'panels':
+               [{'fast_axis': (1.0, 0.0, 0.0),
+                 'slow_axis': (0.0, -1.0, 0.0),
+                 'gain': 1.0,
+                 'identifier': '',
+                 'image_size': im_shape,
+                 'mask': [],
+                 'material': '',
+                 'mu': 0.0,
+                 'name': 'Panel',
+                 'origin': (-im_shape[0]*pixsize/2., im_shape[1]*pixsize/2., -detdist),
+                 'pedestal': 0.0,
+                 'pixel_size': (pixsize, pixsize),
+                 'px_mm_strategy': {'type': 'SimplePxMmStrategy'},
+                 'raw_image_offset': (0, 0),
+                 'thickness': 0.0,
+                 'trusted_range': (-1e7, 1e7),
+                 'type': ''}]}
+
+# make the dxtbx objects
+BEAM = BeamFactory.from_dict(beam_descr)
+DETECTOR = DetectorFactory.from_dict(det_descr)
+CRYSTAL = CrystalFactory.from_dict(cryst_descr)
+
+# make a dummie HKL table with constant HKL intensity
+# this is just to make spots
+DEFAULT_F = 1e2
+symbol = CRYSTAL.get_space_group().info().type().lookup_symbol()  # this is just P43212
+sgi = sgtbx.space_group_info(symbol)
+symm = symmetry(unit_cell=CRYSTAL.get_unit_cell(), space_group_info=sgi)
+miller_set = symm.build_miller_set(anomalous_flag=True, d_min=1.6, d_max=999)
+Famp = flex.double(np.ones(len(miller_set.indices())) * DEFAULT_F)
+Famp = miller.array(miller_set=miller_set, data=Famp).set_observation_type_xray_amplitude()
+
+Ncells_abc = 20, 20, 20
+oversmaple = 2
+
+# do the simulation
+print("Do the initial simulation")
+SIM = nanoBragg(DETECTOR, BEAM, panel_id=0)
+SIM.Ncells_abc = Ncells_abc
+SIM.Fhkl = Famp
+SIM.Amatrix = sqr(CRYSTAL.get_A()).transpose()
+SIM.oversample = oversmaple
+SIM.xtal_shape = shapetype.Gauss
+SIM.add_nanoBragg_spots()
+
+# Take note that the CBF writer and SMV writer handle spot scale differently
+output_scale=1.E9
+SIM.adc_offset_adu=0
+smv_filename = "test_full_100.img"
+SIM.to_smv_format(fileout=smv_filename, intfile_scale=output_scale)
+
+# write the simulation to disk using cbf writer
+cbf_filename = "test_full_100.cbf"
+print("write simulation to disk (%s)" % cbf_filename)
+SIM.to_cbf(cbf_filename, intfile_scale=output_scale)
+
+# load the CBF from disk
+print("Open file %s using dxtbx" % cbf_filename)
+loader = dxtbx.load(cbf_filename)
+
+print("Perform second simulation using dxtbx loaded detector and beam")
+test_cbf = nanoBragg(loader.get_detector(), loader.get_beam(), panel_id=0)
+test_cbf.Ncells_abc = Ncells_abc
+test_cbf.Fhkl = Famp
+# FIXME: for some reason cbf_writer converts the beam polarization fraction to 0.999,
+# which would break this test hence we must set it back to 1..
+test_cbf.polarization = 1
+test_cbf.Amatrix = sqr(CRYSTAL.get_A()).transpose()
+test_cbf.oversample = oversmaple
+test_cbf.xtal_shape = shapetype.Gauss
+test_cbf.add_nanoBragg_spots()
+
+# verify test_cbf and SIM produce the same Bragg spot image
+print("Check the intensities haven't changed, and that  cbf writing preserved geometry")
+assert np.allclose(SIM.raw_pixels.as_numpy_array(), test_cbf.raw_pixels.as_numpy_array())
+
+# verify cbf (double) and smv (int) produce the same image to within an ADU
+loader_smv = dxtbx.load(smv_filename)
+assert np.allclose(loader.get_raw_data().as_numpy_array(), loader_smv.get_raw_data().as_numpy_array(), atol=1.1)
+
+print("OK!")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_nanoBragg_minimal.py
+from __future__ import absolute_import, division, print_function
+# absolute bare-minimum diffraction image simulation
+
+from simtbx.nanoBragg import nanoBragg
+
+# create the simulation object, all parameters have sensible defaults
+SIM = nanoBragg()
+
+# dont bother with importing a structure, we just want spots
+SIM.default_F = 1
+SIM.F000 = 10
+
+# default is one unit cell, lets to 125
+SIM.Ncells_abc = (5,5,5)
+
+# default orientation is with a axis down the beam, lets pick a random one
+SIM.randomize_orientation()
+# display randomly-picked missetting angles
+print(SIM.missets_deg)
+# or an Arndt-Wonacott A matrix (U*B), same as used by mosflm
+print(SIM.Amatrix)
+
+# show all parameters
+SIM.show_params()
+
+# now actually run the simulation
+SIM.add_nanoBragg_spots()
+
+# write out a file on arbitrary scale, header contains beam center in various conventions
+SIM.to_smv_format(fileout="intimage_001.img")
+
+# now apply a scale to get more than 1 photon/pixel and add noise
+SIM.raw_pixels*=2000
+SIM.add_noise()
+
+SIM.to_smv_format(fileout="noiseimage_001.img")
+
+
+if __name__=="__main__":
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_nanoBragg_mosaic.py
+from __future__ import absolute_import, division, print_function
+# test that mosaic spread is working
+#from scitbx.array_family import flex
+from simtbx.nanoBragg import shapetype
+#from simtbx.nanoBragg import convention
+from simtbx.nanoBragg import nanoBragg
+
+# create the simulation object, all parameters have sensible defaults
+SIM = nanoBragg(detpixels_slowfast=(150,150),pixel_size_mm=0.1,verbose=0)
+
+# fairly big cell
+SIM.unit_cell_tuple = (100,100,100,90,90,90)
+
+# nice, sharp spots
+SIM.Ncells_abc = (50,50,50)
+SIM.xtal_shape=shapetype.Tophat
+
+# dont bother with importing a structure, we just want spots
+SIM.default_F = 1
+SIM.F000 = 0.03
+
+# the usual wavelength
+SIM.wavelength_A = 1.0
+
+# detector far away
+SIM.distance_mm = 1000
+
+# beam center near one edge
+SIM.beam_center_mm = (1,7)
+#print SIM.XDS_ORGXY
+#print SIM.dials_origin_mm
+print(SIM.beamcenter_convention)
+
+# default orientation is with a axis down the beam, lets rotate it a bit
+# tilt to Bragg angle
+SIM.phi_deg = 89.7
+
+# specify a broad enough mosaicity so we can measure it
+SIM.mosaic_spread_deg = 10
+# display randomly-picked missetting angles
+SIM.mosaic_domains = 1000
+
+# no need to over-do realism
+SIM.interpolate = 0
+SIM.oversample = 1
+
+# show all parameters
+#SIM.show_params()
+
+# now actually run the simulation
+SIM.add_nanoBragg_spots()
+
+# check test points
+test1 = (           SIM.raw_pixels[9,70] > 0 )
+test1 = ( test1 or  SIM.raw_pixels[10,70] > 0 )
+test1 = ( test1 or  SIM.raw_pixels[11,70] > 0 )
+test1 = ( test1 or  SIM.raw_pixels[10,69] > 0 )
+test1 = ( test1 or  SIM.raw_pixels[10,71] > 0 )
+test1 = ( test1 and SIM.raw_pixels[8,70] == 0 )
+test1 = ( test1 and SIM.raw_pixels[12,70] == 0 )
+test1 = ( test1 and SIM.raw_pixels[10,68] == 0 )
+test1 = ( test1 and SIM.raw_pixels[10,72] == 0 )
+
+# left edge
+test2 = (           SIM.raw_pixels[108,52] > 0 )
+test2 = ( test2 or  SIM.raw_pixels[109,52] > 0 )
+test2 = ( test2 and SIM.raw_pixels[108,50] == 0 )
+test2 = ( test2 and SIM.raw_pixels[109,50] == 0 )
+
+# right edge
+test3 = (          SIM.raw_pixels[108,88] > 0 )
+test3 = ( test3 or SIM.raw_pixels[109,88] > 0 )
+test3 = ( test3 and SIM.raw_pixels[108,90] == 0 )
+test3 = ( test3 and SIM.raw_pixels[109,90] == 0 )
+
+# all together now
+test = ( test1 and test2 and test3 )
+
+# write out a file on arbitrary scale, header contains beam center in various conventions
+#SIM.to_smv_format(fileout="10deg_mosaic_spread.img")
+
+if not test:
+  print("test failed")
+
+if test:
+  print("OK")
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_nanoBragg_multipanel.py
+"""
+Simple test of multi-panel
+detector simulation
+"""
+from __future__ import absolute_import, division, print_function
+import numpy as np
+import copy
+
+import simtbx.nanoBragg
+from scitbx.matrix import sqr
+from dxtbx.model.beam import BeamFactory
+from dxtbx.model.crystal import CrystalFactory
+from dxtbx.model.detector import DetectorFactory, Detector, Panel
+from six.moves import range
+
+
+# dxtbx beam model description
+beam_descr = {'direction': (0.0, 0.0, 1.0),
+             'divergence': 0.0,
+             'flux': 1e12,
+             'polarization_fraction': 1.,
+             'polarization_normal': (0.0, 1.0, 0.0),
+             'sigma_divergence': 0.0,
+             'transmission': 1.0,
+             'wavelength': 1.4}
+
+# dxtbx crystal description
+cryst_descr = {'__id__': 'crystal',
+              'real_space_a': (79, 0, 0),
+              'real_space_b': (0, 79, 0),
+              'real_space_c': (0, 0, 38),
+              'space_group_hall_symbol': '-P 4 2'}
+
+# monolithic camera description
+det_descr = {'panels':
+               [{'fast_axis': (-1.0, 0.0, 0.0),
+                 'gain': 1.0,
+                 'identifier': '',
+                 'image_size': (512, 256),
+                 'mask': [],
+                 'material': '',
+                 'mu': 0.0,
+                 'name': 'Panel',
+                 'origin': (25.6, -12.8, -100),
+                 'pedestal': 0.0,
+                 'pixel_size': (0.1, 0.1),
+                 'px_mm_strategy': {'type': 'SimplePxMmStrategy'},
+                 'raw_image_offset': (0, 0),
+                 'slow_axis': (0.0, 1.0, 0.0),
+                 'thickness': 0.0,
+                 'trusted_range': (0.0, 65536.0),
+                 'type': ''}]}
+
+
+beam = BeamFactory.from_dict(beam_descr)
+whole_det = DetectorFactory.from_dict(det_descr)
+cryst = CrystalFactory.from_dict(cryst_descr)
+
+
+def main():
+
+  # ---------
+
+  SIM = simtbx.nanoBragg.nanoBragg( whole_det, beam)
+  SIM.Amatrix = sqr(cryst.get_A()).transpose().elems
+  SIM.default_F = 1
+  SIM.F000 = 10
+  SIM.oversample=2
+  SIM.Ncells_abc = (5,5,5)
+  SIM.show_params()
+  SIM.add_nanoBragg_spots()
+  SIM.raw_pixels *= 2000
+  wholepix = SIM.raw_pixels.as_numpy_array()
+
+  # ---------
+
+  # now make 2 smaller detectors
+  # that equal the whole detector above
+  # then append them as a dials multi panel
+  origin0 = (25.6, -12.8, -100)
+  origin1 = (25.6, 0, -100)
+  panel_size =(512, 128)
+
+  pan0 = {'fast_axis': (-1.0, 0.0, 0.0),
+          'gain': 1.0,
+          'identifier': '',
+          'image_size': (512, 128),
+          'mask': [],
+          'material': '',
+          'mu': 0.0,
+          'name': 'panel1',
+          'origin': origin0,
+          'pedestal': 0.0,
+          'pixel_size': (0.1, 0.1),
+          'px_mm_strategy': {'type': 'SimplePxMmStrategy'},
+          'raw_image_offset': (0, 0),
+          'slow_axis': (0.0, 1.0, 0.0),
+          'thickness': 0.0,
+          'trusted_range': (0.0, 65536.0),
+          'type': ''}
+
+  pan1 = copy.deepcopy(pan0)
+  pan1["origin"] = origin1
+
+  # combine the panels into a multi-panel detector
+  parts_det = Detector()
+  parts_det.add_panel( Panel.from_dict(pan0))
+  parts_det.add_panel( Panel.from_dict(pan1))
+
+  SIMs = {}
+  for i_pan in range(2):
+    SIM = simtbx.nanoBragg.nanoBragg( parts_det, beam, panel_id=i_pan)
+    SIM.Amatrix = sqr(cryst.get_A()).transpose().elems
+    SIM.default_F = 1
+    SIM.F000 = 10
+    SIM.oversample=2
+    SIM.Ncells_abc = (5,5,5)
+    SIM.add_nanoBragg_spots()
+    SIM.raw_pixels *= 2000
+    SIMs[i_pan] = SIM
+
+  # check comparison with whole camera
+  # ----------------------------------
+  # combine the two panels:
+  pix0 = SIMs[0].raw_pixels.as_numpy_array()
+  pix1 = SIMs[1].raw_pixels.as_numpy_array()
+
+  # FIXME: not sure why but in this case the first pixel in memory is off by 0.05
+  # but the others are all close..
+  pix1[0,0] = wholepix[128,0]   # pix1[0,0] = 1.217 and pix[128,0] = 1.264
+  pix01 = np.vstack((pix0,pix1))
+
+  assert( np.allclose(wholepix, pix01))
+
+
+if __name__=="__main__":
+  main()
+  print("OK")
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/tst_nanoBragg_pilatus.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from simtbx.nanoBragg import nanoBragg, shapetype, convention, pivot, testuple
+#from simtbx.nanoBragg import shapetype
+#from simtbx.nanoBragg import pivot
+#from simtbx.nanoBragg import convention
+#from simtbx.nanoBragg import nanoBragg
+import dxtbx
+from dxtbx.format.FormatCBFMiniPilatus import FormatCBFMiniPilatus
+from dxtbx.format.FormatCBFMiniPilatus import FormatCBFMiniPilatus
+import libtbx.load_env # possibly implicit
+from cctbx import crystal
+from cctbx import miller
+from six.moves import range
+assert miller
+
+pdb_lines = """HEADER TEST
+CRYST1   50.000   60.000   70.000  90.00  90.00  90.00 P 21 21 21
+ATOM      1  O   HOH A   1      56.829   2.920  55.702  1.00 20.00           O
+ATOM      2  O   HOH A   2      49.515  35.149  37.665  1.00 20.00           O
+ATOM      3  O   HOH A   3      52.667  17.794  69.925  1.00 20.00           O
+ATOM      4  O   HOH A   4      40.986  20.409  18.309  1.00 20.00           O
+ATOM      5  O   HOH A   5      46.896  37.790  41.629  1.00 20.00           O
+ATOM      6 SED  MSE A   6       1.000   2.000   3.000  1.00 20.00          SE
+END
+"""
+
+# traces of F vs sin(theta)/lambda for various materials
+# rough approximation to water: interpolation points for sin(theta/lambda) vs structure factor
+Fbg_water = flex.vec2_double([(0,2.57),(0.0365,2.58),(0.07,2.8),(0.12,5),(0.162,8),(0.2,6.75),(0.18,7.32),(0.216,6.75),(0.236,6.5),(0.28,4.5),(0.3,4.3),(0.345,4.36),(0.436,3.77),(0.5,3.17)])
+# rough approximation to air
+Fbg_air = flex.vec2_double([(0,14.1),(0.045,13.5),(0.174,8.35),(0.35,4.78),(0.5,4.22)])
+# structure factors of nanocrystalline ice Ic
+Fbg_nanoice = flex.vec2_double([(0.0,0.677252),(0.0707968,1.43379),(0.0981619,2.3679),(0.114124,3.75888),(0.120588,5.12927),(0.127821,9.97093),(0.129198,11.9564),(0.132627,21.7772),(0.134056,27.7952),(0.13532,31.3918),(0.137142,30.3891),(0.138649,24.5024),(0.142137,13.6271),(0.144115,10.6367),(0.146059,8.67322),(0.147749,7.72956),(0.156921,5.57316),(0.166321,4.98756),(0.189445,4.45263),(0.210479,5.46593),(0.212578,5.78441),(0.220728,12.9117),(0.221969,15.9529),(0.224001,13.2016),(0.225279,10.8369),(0.226852,9.07622),(0.232851,7.00939),(0.242413,6.05003),(0.250842,5.50808),(0.257907,7.96463),(0.259429,10.0142),(0.262963,6.37791),(0.269814,3.89966),(0.271936,3.76553),(0.326095,3.71447),(0.328613,3.77097),(0.340562,4.56185),(0.343282,5.10066),(0.347891,4.34943),(0.349662,4.39573),(0.450378,2.30382),(0.5,1.31048)])
+
+def fcalc_from_pdb(resolution,algorithm=None,wavelength=0.9):
+  from iotbx import pdb
+  pdb_inp = pdb.input(source_info=None,lines = pdb_lines)
+  xray_structure = pdb_inp.xray_structure_simple()
+  #
+  # take a detour to insist on calculating anomalous contribution of every atom
+  scatterers = xray_structure.scatterers()
+  for sc in scatterers:
+    from cctbx.eltbx import sasaki, henke
+    #expected_sasaki = sasaki.table(sc.element_symbol()).at_angstrom(wavelength)
+    expected_henke = henke.table(sc.element_symbol()).at_angstrom(wavelength)
+    sc.fp = expected_henke.fp()
+    sc.fdp = expected_henke.fdp()
+  # how do we do bulk solvent?
+  primitive_xray_structure = xray_structure.primitive_setting()
+  P1_primitive_xray_structure = primitive_xray_structure.expand_to_p1()
+  fcalc = P1_primitive_xray_structure.structure_factors(
+    d_min=resolution, anomalous_flag=True, algorithm=algorithm).f_calc()
+  return fcalc.amplitudes()
+
+
+def run_sim(seed=1,wavelength=0.9,distance=500,random_orientation=False,phi=0,osc=0):
+  SIM = nanoBragg(detpixels_slowfast=(2527,2463),pixel_size_mm=0.172,Ncells_abc=(15,15,15),verbose=0)
+  # get same noise each time this test is run
+  SIM.seed = seed
+  # user may select random orientation
+  if random_orientation :
+    SIM.randomize_orientation()
+  else:
+    # fixed orientation, for doing rotation data sets
+    SIM.missets_deg= (10,20,30)
+  SIM.distance_mm = distance
+  SIM.wavelength_A = wavelength
+  # option to render a phi swell
+  SIM.phi_deg = phi
+  SIM.osc_deg = osc
+  if osc >= 0 :
+    # need quite a few steps/deg for decent Rmeas
+    SIM.phistep_deg = 0.001
+  SIM.oversample = 1
+  SIM.polarization = 1
+  # this will become F000, marking the beam center
+  SIM.F000 = 100
+  print("mosaic_seed=",SIM.mosaic_seed)
+  print("seed=",SIM.seed)
+  print("calib_seed=",SIM.calib_seed)
+  print("missets_deg =", SIM.missets_deg)
+  # re-set the detector to be in
+  SIM.beamcenter_convention=convention.DIALS
+  SIM.beam_center_mm=(211,214)
+  sfall = fcalc_from_pdb(resolution=1.6,algorithm="direct",wavelength=SIM.wavelength_A)
+  # use crystal structure to initialize Fhkl array
+  SIM.Fhkl=sfall
+  # fastest option, least realistic
+  SIM.xtal_shape=shapetype.Tophat
+  # only really useful for long runs
+  SIM.progress_meter=False
+  # prints out value of one pixel only.  will not render full image!
+  #SIM.printout_pixel_fastslow=(500,500)
+  #SIM.printout=True
+  # flux is always in photons/s
+  SIM.flux=1e12
+  # assumes round beam
+  SIM.beamsize_mm=0.1
+  SIM.exposure_s=0.1
+  # Pilatus detector is thick
+  SIM.detector_thick_mm=0.450
+  # get attenuation depth in mm
+  from cctbx.eltbx import attenuation_coefficient
+  table = attenuation_coefficient.get_table("Si")
+  SIM.detector_attenuation_length_mm = 10.0/(table.mu_at_angstrom(SIM.wavelength_A))
+  print("detector_attenuation_length =",SIM.detector_attenuation_length_mm)
+  #SIM.detector_thick_mm=0
+  SIM.detector_thicksteps=3
+  #
+  # will simulate module mis-alignment by adjusting beam center of each module
+  beam_center0 = SIM.beam_center_mm
+  # simulated crystal is only 3375 unit cells (42 nm wide)
+  # amplify spot signal to simulate physical crystal of 100 um
+  # this is equivalent to adding up 28e9 mosaic domains in exactly the same orientation, but a lot faster
+  aggregate_xtal_volume_mm3 = 0.1*0.1*0.1
+  mosaic_domain_volume_mm3 = SIM.xtal_size_mm[0]*SIM.xtal_size_mm[1]*SIM.xtal_size_mm[2]
+  SIM.spot_scale = aggregate_xtal_volume_mm3/mosaic_domain_volume_mm3
+  #
+  # option for detector rotations to be about beam center or sample position
+  #SIM.detector_pivot=pivot.Sample
+  SIM.detector_pivot=pivot.Beam
+  print("pivoting detector about",SIM.detector_pivot)
+  # make the module roi list
+  # and also make up per-module mis-alignments shifts and rotations
+  import random
+  # make sure shifts are the same from image to image
+  random.seed(12345)
+  module_size = (487, 195)
+  gap_size = (7, 17)
+  modules = []
+  for mx in range(0,5):
+   for my in range(0,12):
+    # define region of interest for this module
+    fmin = mx*(module_size[0]+gap_size[0])
+    fmax = fmin+module_size[0]
+    smin = my*(module_size[1]+gap_size[1])
+    smax = smin+module_size[1]
+    # assume misalignments are uniform
+    # up to ~0.5 pixel and 0.0 deg in each direction
+    dx = 0.07*(random.random()-0.5)*2
+    dy = 0.07*(random.random()-0.5)*2
+    rotx = 0.0*(random.random()-0.5)*2;
+    roty = 0.0*(random.random()-0.5)*2;
+    rotz = 0.0*(random.random()-0.5)*2;
+    modules.append((((fmin,fmax),(smin,smax)),(dx,dy),(rotx,roty,rotz)))
+  #
+  # defeat module-by-module rendering by uncommenting next 3 lines
+  #dim=SIM.detpixels_fastslow
+  #modules = [(( ((0,dim[0]),(0,dim[1])) ),(0,0),(0,0,0))]
+  #print modules
+  i=-1
+  for roi,(dx,dy),drot in modules:
+    i=i+1
+    print("rendering module:",i,"roi=",roi)
+    SIM.region_of_interest = roi
+    # shift the beam center
+    x = beam_center0[0]+dx
+    y = beam_center0[1]+dy
+    SIM.beam_center_mm = (x,y)
+    # also tilt the module by up to 0.05 deg in all directions
+    SIM.detector_rotation_deg = drot
+    print("beam center: ",SIM.beam_center_mm,"rotations:",drot)
+    # now actually burn up some CPU
+    SIM.add_nanoBragg_spots()
+    # add water contribution
+    SIM.Fbg_vs_stol = Fbg_water
+    SIM.amorphous_sample_thick_mm = 0.1
+    SIM.amorphous_density_gcm3 = 1
+    SIM.amorphous_molecular_weight_Da = 18
+    SIM.add_background()
+    # add air contribution
+    SIM.Fbg_vs_stol = Fbg_air
+    SIM.amorphous_sample_thick_mm = 35 # between beamstop and collimator
+    SIM.amorphous_density_gcm3 = 1.2e-3
+    SIM.amorphous_sample_molecular_weight_Da = 28 # nitrogen = N2
+    SIM.add_background()
+    # add nanocrystalline cubic ice contribution (unscaled)
+    SIM.Fbg_vs_stol = Fbg_nanoice
+    SIM.amorphous_sample_thick_mm = 0.05 # between beamstop and collimator
+    SIM.amorphous_density_gcm3 = 0.95
+    SIM.amorphous_sample_molecular_weight_Da = 18 # H2O
+    SIM.add_background()
+  #
+  # set this to 0 or -1 to trigger automatic radius.  could be very slow with bright images
+  SIM.detector_psf_kernel_radius_pixels=5;
+  # turn off the point spread function for Pilatus
+  SIM.detector_psf_fwhm_mm=0.0;
+  SIM.detector_psf_type=shapetype.Gauss
+  SIM.adc_offset_adu=0
+  SIM.readout_noise_adu=0
+  dim=SIM.detpixels_fastslow
+  SIM.region_of_interest = ( (0,dim[0]),(0,dim[1]) )
+  SIM.add_noise()
+  return SIM
+
+
+# function for setting bad pixels
+def mask_pixels(raw_pixels):
+  # randomly select bad pixels
+  import random
+  # make sure bad pixel mask is always the same
+  random.seed(12345)
+  maxy,maxx = raw_pixels.all()
+  for i in range(1,600):
+    # assume any pixel is equally likely to be bad
+    x,y = maxx,maxy
+    x *= random.random()
+    y *= random.random()
+    # use relative position on pixel below
+    ix,rx = int(x),x%1
+    iy,ry = int(y),y%1
+    # avoid out-of-range errors
+    ix = ( ix if ix<=maxx-2 else maxx-2 )
+    iy = ( iy if iy<=maxy-2 else maxy-2 )
+    # do not put -2 in the missing-pixels areas
+    if raw_pixels[iy,ix] == -1 :
+      continue
+    # flag selected pixel as bad
+    raw_pixels[iy,ix]=-2
+    # allow for sets of up to four baddies in a bunch
+    if rx>0.5 :
+      raw_pixels[iy,ix+1]=-2
+    if ry>0.5 :
+      raw_pixels[iy+1,ix]=-2
+    if ( rx*ry > 0.25 ):
+      raw_pixels[iy+1,ix+1]=-2
+  #
+  # define the mask (f0, f1, s0, s1)
+  from dxtbx.format.FormatPilatusHelpers import pilatus_6M_mask
+  for pane in pilatus_6M_mask():
+    print("negating pane:",pane)
+    fs=pane[0]-1
+    fe=pane[1]
+    ss=pane[2]-1
+    se=pane[3]
+    # default code for missing pixel is -1, will overwrite anything else
+    for y in range(ss,se):
+      for x in range(fs,fe):
+        raw_pixels[y,x]=-1
+  # return the whole sim object
+  return raw_pixels
+
+def write_cbf(SIM,fileout="noiseimage_00001.cbf"):
+  # first and foremost, convert the pixel data to integers
+  dxData = SIM.raw_pixels.iround()
+  # now get the image writing goodies
+  import dxtbx
+  from dxtbx.format.FormatCBFMiniPilatus import FormatCBFMiniPilatus
+  # apparently, cant initialize a detector witout doing a panel first
+  dxPanel = dxtbx.model.Panel()
+  dxPanel.set_name('Panel')
+  dxPanel.set_type('SENSOR_PAD')
+  dxPanel.set_image_size(SIM.detpixels_fastslow)
+  dxPanel.set_pixel_size((SIM.pixel_size_mm,SIM.pixel_size_mm))
+  dxPanel.set_gain(SIM.quantum_gain)
+  dxPanel.set_trusted_range((-1,1.3e6))
+  dxPanel.set_frame(SIM.fdet_vector,SIM.sdet_vector,SIM.dials_origin_mm)
+  dxPanel.set_material('Si')
+  dxPanel.set_thickness(SIM.detector_thick_mm)
+  dxPanel.set_mu(SIM.detector_attenuation_length_mm*10)
+  # use this panel to create a detector
+  dxDet = dxtbx.model.Detector(dxPanel)
+  # now create a beam from nothing
+  dxBeam = dxtbx.model.Beam()
+  #dxBeam.set_direction(tuple(flex.double(SIM.beam_vector)*-1))
+  dxBeam.set_s0(SIM.beam_vector)
+  dxBeam.set_wavelength(SIM.wavelength_A)
+  dxBeam.set_flux(SIM.flux)
+  dxBeam.set_divergence(SIM.divergence_hv_mrad[0])
+  dxBeam.set_polarization_normal(tuple(flex.double(SIM.polar_Bvector)*-1))
+  dxBeam.set_polarization_fraction(SIM.polarization)
+  # or cheat and choose first internal sub-beam
+  #dxBeam = SIM.xray_beams[0]
+  # create a goniomater from nothing
+  dxGoni = dxtbx.model.Goniometer()
+  dxGoni.set_rotation_axis(SIM.spindle_axis)
+  # define the scan from nothing
+  dxScan = dxtbx.model.Scan()
+  dxScan.set_image_range((1,1));
+  dxScan.set_oscillation([SIM.phi_deg,SIM.osc_deg]);
+  dxScan.set_exposure_times([SIM.exposure_s]);
+  # now, finally, do the image write
+  FormatCBFMiniPilatus.as_file(
+    detector=dxDet,beam=dxBeam,gonio=dxGoni,scan=dxScan,
+    data=dxData,path=fileout)
+
+
+def tst_all():
+  # make sure NAN stuff is working
+  F = testuple()
+  assert F == (1,2,3,4)
+  #
+  # image number
+  img_num = 1
+  # check for any command-line options
+  import sys
+  if len(sys.argv)>1:
+    img_num = int(sys.argv[1])
+  num = format(img_num,"05d")
+  fileout = "noiseimage_"+num+".cbf"
+  SIM=run_sim(seed=img_num,phi=(img_num-1)/10,osc=0.1)
+  # mark the window panes
+  mask_pixels(SIM.raw_pixels)
+  # output the file
+  write_cbf(SIM,fileout)
+
+  # how do you do a destructor in Python?
+  SIM.free_all()
+  import os
+  assert os.path.isfile(fileout)
+
+  exit()
+  #simulation is complete, now we'll autoindex the image fragment and verify
+  # that the indexed cell is similar to the input cell.
+
+
+if __name__=="__main__":
+  tst_all()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/nanoBragg/utils.py
+from __future__ import absolute_import, division, print_function
+import json, h5py, numpy as np
+from scipy.stats import binned_statistic
+from scipy import signal
+from scipy import constants
+from scipy.signal import argrelmax, argrelmin, savgol_filter
+import time
+from scitbx.array_family import flex
+from simtbx.nanoBragg import nanoBragg
+from simtbx.nanoBragg.nanoBragg_beam import NBbeam
+from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
+from simtbx.nanoBragg.sim_data import SimData
+from scitbx.matrix import sqr
+
+ENERGY_CONV = 10000000000.0 * constants.c * constants.h / constants.electron_volt
+
+
+def ensure_p1(Crystal, Famp):
+  high_symm_symbol = Famp.space_group_info().type().lookup_symbol()
+  cb_op = Famp.space_group_info().change_of_basis_op_to_primitive_setting()
+  dtrm = sqr(cb_op.c().r().as_double()).determinant()
+  if not dtrm == 1:
+    Crystal = Crystal.change_basis(cb_op)
+    Famp = Famp.change_basis(cb_op)
+  return Crystal, Famp
+
+
+def flexBeam_sim_colors(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
+                        pids=None, cuda=False, oversample=0, Ncells_abc=(50, 50, 50),
+                        mos_dom=1, mos_spread=0, beamsize_mm=0.001, device_Id=0, omp=False,
+                        show_params=True, crystal_size_mm=0.01, printout_pix=None, time_panels=True,
+                        verbose=0, default_F=0, interpolate=0, recenter=True, profile="gauss",
+                        spot_scale_override=None, background_raw_pixels=None, include_noise=False,
+                        add_water = False, add_air=False, water_path_mm=0.005, air_path_mm=0, rois_perpanel=None,
+                        adc_offset=0, readout_noise=3, psf_fwhm=0, gain=1, mosaicity_random_seeds=None, nopolar=False):
+  """
+  :param CRYSTAL: dxtbx Crystal model
+  :param DETECTOR: dxtbx detector model
+  :param BEAM: dxtbx beam model
+  :param Famp: cctbx miller array (amplitudes)
+  :param energies: list of energies to simulate the scattering
+  :param fluxes:  list of pulse fluences per energy (same length as energies)
+  :param pids: panel ids to simulate on (None means all panels)
+  :param cuda: whether to use GPU (only works for nvidia builds)
+  :param oversample: pixel oversample factor (0 means nanoBragg will decide)
+  :param Ncells_abc: number of unit cells along each crystal direction in the mosaic block
+  :param mos_dom: number of mosaic domains in used to sample mosaic spread (texture)
+  :param mos_spread: mosaicity in degrees (spherical cap width)
+  :param beamsize_mm: focal size of the beam
+  :param device_Id: cuda device id (ignore if cuda=False)
+  :param omp: whether to use open mp (required open MP build configuration)
+  :param show_params: show the nanoBragg parameters
+  :param crystal_size_mm: size of the crystal (increases the intensity of the spots)
+  :param printout_pix: debug pixel position : tuple of (pixel_fast_coord, pixel_slow_coord)
+  :param time_panels: show timing info
+  :param verbose: verbosity level for nanoBragg (0-10), 0 is quiet
+  :param default_F: default amplitude value for nanoBragg
+  :param interpolate: whether to interpolate for small mosaic domains
+  :param recenter: recenter for tilted cameras, deprecated
+  :param profile: profile shape, can be : gauss, round, square, or tophat
+  :param spot_scale_override: scale the simulated scattering bythis amounth (overrides value based on crystal thickness)
+  :param background_raw_pixels: dictionary of {panel_id: raw_pixels}, add these background pixels to the simulated Bragg
+  :param include_noise: add noise to simulated pattern
+  :param add_water: add water to similated pattern
+  :param add_air: add ait to simulated pattern
+  :param water_path_mm: length of water the beam travels through
+  :param air_path_mm: length of air the beam travels through
+  :param rois_perpanel: regions of intererest on each panel
+  :param adc_offset: add this value to each pixel in simulated pattern
+  :param readout_noise: readout noise level (usually 3-5 ADU)
+  :param psf_fwhm: point spread kernel FWHM
+  :param gain: photon gain
+  :param mosaicity_random_seeds: random seeds to simulating mosaic texture
+  :param nopolar: switch of polarization
+  :return: list of [(panel_id0,simulated pattern0), (panel_id1, simulated_pattern1), ...]
+  """
+
+  CRYSTAL, Famp = ensure_p1(CRYSTAL, Famp)
+
+  if pids is None:
+    pids = range(len(DETECTOR))
+
+  if background_raw_pixels is None:
+    background_raw_pixels = {pid: None for pid in pids}
+
+  if rois_perpanel is None:
+    rois_perpanel = {pid: None for pid in pids}
+
+  nbBeam = NBbeam()
+  nbBeam.size_mm = beamsize_mm
+  nbBeam.unit_s0 = BEAM.get_unit_s0()
+  wavelengths = ENERGY_CONV / np.array(energies)
+  nbBeam.spectrum = list(zip(wavelengths, fluxes))
+
+  nbCrystal = NBcrystal()
+  nbCrystal.dxtbx_crystal = CRYSTAL
+  nbCrystal.miller_array = Famp
+  nbCrystal.Ncells_abc = Ncells_abc
+  nbCrystal.symbol = CRYSTAL.get_space_group().info().type().lookup_symbol()
+  nbCrystal.thick_mm = crystal_size_mm
+  nbCrystal.xtal_shape = profile
+  nbCrystal.n_mos_domains = mos_dom
+  nbCrystal.mos_spread_deg = mos_spread
+
+  panel_images = []
+
+  tinit = time.time()
+  S = SimData()
+  S.detector = DETECTOR
+  S.beam = nbBeam
+  S.crystal = nbCrystal
+  S.using_cuda = cuda
+  S.using_omp = omp
+  S.add_air = add_air
+  S.air_path_mm = air_path_mm
+  S.add_water = add_water
+  S.water_path_mm = water_path_mm
+  S.readout_noise = readout_noise
+  S.gain = gain
+  S.psf_fwhm = psf_fwhm
+  S.include_noise = include_noise
+
+  if mosaicity_random_seeds is not None:
+    S.mosaic_seeds = mosaicity_random_seeds
+
+  S.instantiate_nanoBragg(verbose=verbose, oversample=oversample, interpolate=interpolate, device_Id=device_Id,
+                            default_F=default_F, adc_offset=adc_offset)
+
+  if printout_pix is not None:
+    S.update_nanoBragg_instance("printout_pixel_fastslow", printout_pix)
+  if spot_scale_override is not None:
+    S.update_nanoBragg_instance("spot_scale", spot_scale_override)
+  S.update_nanoBragg_instance("nopolar", nopolar)
+
+  if show_params:
+    S.D.show_params()
+
+  for pid in pids:
+    t_panel = time.time()
+    S.background_raw_pixels = background_raw_pixels[pid]
+    S.panel_id = pid
+    S.rois = rois_perpanel[pid]
+
+    S.generate_simulated_image()
+
+    if show_params:
+      S.D.show_params()
+      print('spot scale: %2.7g' % S.D.spot_scale)
+    panel_image = S.D.raw_pixels.as_numpy_array()
+    panel_images.append([pid, panel_image])
+    S.D.raw_pixels*=0
+    if time_panels:
+      tdone = time.time() - tinit
+      t_panel = time.time() - t_panel
+      print('Panel %d took %.4f seconds (Total sim time = %.4f seconds)' % (pid,t_panel, tdone))
+
+  S.D.free_all()
+
+  return panel_images
+
+
+def sim_background(DETECTOR, BEAM, wavelengths, wavelength_weights, total_flux, pidx=0, beam_size_mm=0.001,
+                   Fbg_vs_stol=None, sample_thick_mm=100, density_gcm3=1, molecular_weight=18, roi=None):
+  """
+  :param DETECTOR:
+  :param BEAM: see sim_spots
+  :param wavelengths: see sim_spots
+  :param wavelength_weights: see sim_spots
+  :param total_flux: see sim_spots
+  :param pidx: see sim_spots
+  :param beam_size_mm: see sim_spots
+  :param Fbg_vs_stol: list of tuples where each tuple is (Fbg, sin theta over lambda)
+  :param sample_thick_mm: path length of background that is exposed by the beam
+  :param density_gcm3: density of background  (defaults to water)
+  :param molecular_weight: molecular weight of background (defaults to water)
+  :param roi: region of interst on detector ((fast_min, fast_max), (slow_min, slow_max)),
+              e.g., ((10,20), (30,35)) would simulate in the 10x5 pixel region of interest
+              starting at pixel 10,30 (fast, slow). See also region_of_interest in nanoBragg_ext.cpp
+  :return: raw_pixels as flex array, these can be passed to sim_spots function below
+  """
+  wavelength_weights = np.array(wavelength_weights)
+  weights = wavelength_weights / wavelength_weights.sum() * total_flux
+  spectrum = list(zip(wavelengths, weights))
+  xray_beams = get_xray_beams(spectrum, BEAM)
+  SIM = nanoBragg(DETECTOR, BEAM, panel_id=(int(pidx)))
+  SIM.beamsize_mm = beam_size_mm
+  SIM.xray_beams = xray_beams
+  if Fbg_vs_stol is None:
+    Fbg_vs_stol = flex.vec2_double([
+      (0, 2.57), (0.0365, 2.58), (0.07, 2.8), (0.12, 5), (0.162, 8), (0.18, 7.32), (0.2, 6.75),
+      (0.216, 6.75), (0.236, 6.5), (0.28, 4.5), (0.3, 4.3), (0.345, 4.36), (0.436, 3.77), (0.5, 3.17)])
+  SIM.flux = sum(weights)
+  SIM.Fbg_vs_stol = Fbg_vs_stol
+  SIM.amorphous_sample_thick_mm = sample_thick_mm
+  SIM.amorphous_density_gcm3 = density_gcm3
+  SIM.amorphous_molecular_weight_Da = molecular_weight
+  SIM.progress_meter = False
+  if roi is not None:
+    SIM.region_of_interest=roi
+  SIM.add_background()
+  background_raw_pixels = SIM.raw_pixels.deep_copy()
+  SIM.free_all()
+  del SIM
+  return background_raw_pixels
+
+
+def get_xray_beams(spectrum, beam):
+  """
+  :param spectrum:  list of tuples where one tuple is (wavelength_Angstrom, flux)
+  :param beam: beam where we derive the s0 vector and polarization and divergence
+  :return: flex_Beam array to be set as a nanoBragg property
+  """
+  nb = NBbeam()
+  nb.spectrum = spectrum
+  nb.polarization_fraction = beam.get_polarization_fraction()
+  nb.divergence = beam.get_divergence()
+  nb.unit_s0 = beam.get_unit_s0()
+  return nb.xray_beams
+
+
+class H5AttributeGeomWriter:
+
+  def __init__(self, filename, image_shape, num_images, detector, beam, dtype=None, compression_args=None, detector_and_beam_are_dicts=False):
+    """
+    Simple class for writing dxtbx compatible HDF5 files
+
+    :param filename:  input file path
+    :param image_shape: shape of a single image (Npanel x Nfast x Nslow)
+    :param num_images: how many images will you be writing to the file
+    :param detector: dxtbx detector model
+    :param beam: dxtbx beam model
+    :param dtype: datatype for storage
+    :param compression_args: compression arguments for h5py, lzf is performant and simple
+        if you only plan to read file in python
+        Examples:
+          compression_args={"compression": "lzf"}  # Python only
+          comression_args = {"compression": "gzip", "compression_opts":9}
+    :param detector_and_beam_are_dicts:
+    """
+    if compression_args is None:
+      compression_args = {}
+    self.file_handle = h5py.File(filename, 'w')
+    self.beam = beam
+    self.detector = detector
+    self.detector_and_beam_are_dicts = detector_and_beam_are_dicts
+    if dtype is None:
+      dtype = np.float64
+    dset_shape = (
+                   num_images,) + tuple(image_shape)
+    self.image_dset = (self.file_handle.create_dataset)('images', shape=dset_shape, dtype=dtype, **compression_args)
+    self._write_geom()
+    self._counter = 0
+
+  def add_image(self, image):
+    """
+    :param image: a single image as numpy image, same shape as used to instantiate the class
+    """
+    if self._counter >= self.image_dset.shape[0]:
+      raise IndexError('Maximum number of images is %d' % self.image_dset.shape[0])
+    self.image_dset[self._counter] = image
+    self._counter += 1
+
+  def _write_geom(self):
+    beam = self.beam
+    det = self.detector
+    if not self.detector_and_beam_are_dicts:
+      beam = beam.to_dict()
+      det = det.to_dict()
+    self.image_dset.attrs['dxtbx_beam_string'] = json.dumps(beam)
+    self.image_dset.attrs['dxtbx_detector_string'] = json.dumps(det)
+
+  def __exit__(self, exc_type, exc_val, exc_tb):
+    self.file_handle.close()
+
+  def __enter__(self):
+    return self
+
+  def close_file(self):
+    """
+    close the file handle (if instantiated using `with`, then this is done automatically)
+    """
+    self.file_handle.close()
+
+
+def fcalc_from_pdb(resolution, algorithm=None, wavelength=0.9, anom=True, ucell=None, symbol=None, as_amplitudes=True):
+  pdb_lines = 'HEADER TEST\nCRYST1   50.000   60.000   70.000  90.00  90.00  90.00 P 1\nATOM      1  O   HOH A   1      56.829   2.920  55.702  1.00 20.00           O\nATOM      2  O   HOH A   2      49.515  35.149  37.665  1.00 20.00           O\nATOM      3  O   HOH A   3      52.667  17.794  69.925  1.00 20.00           O\nATOM      4  O   HOH A   4      40.986  20.409  18.309  1.00 20.00           O\nATOM      5  O   HOH A   5      46.896  37.790  41.629  1.00 20.00           O\nATOM      6 SED  MSE A   6       1.000   2.000   3.000  1.00 20.00          SE\nEND\n'
+  from iotbx import pdb
+  pdb_inp = pdb.input(source_info=None, lines=pdb_lines)
+  xray_structure = pdb_inp.xray_structure_simple()
+  if ucell is not None:
+    assert symbol is not None
+    from cctbx.xray import structure
+    from cctbx import crystal
+    crystal_sym = crystal.symmetry(unit_cell=ucell, space_group_symbol=symbol)
+    xray_structure = structure(scatterers=(xray_structure.scatterers()), crystal_symmetry=crystal_sym)
+  scatterers = xray_structure.scatterers()
+  if anom:
+    from cctbx.eltbx import henke
+    for sc in scatterers:
+      expected_henke = henke.table(sc.element_symbol()).at_angstrom(wavelength)
+      sc.fp = expected_henke.fp()
+      sc.fdp = expected_henke.fdp()
+
+  primitive_xray_structure = xray_structure.primitive_setting()
+  P1_primitive_xray_structure = primitive_xray_structure.expand_to_p1()
+  fcalc = P1_primitive_xray_structure.structure_factors(d_min=resolution,
+                                                        anomalous_flag=anom,
+                                                        algorithm=algorithm).f_calc()
+  if as_amplitudes:
+    fcalc = fcalc.amplitudes().set_observation_type_xray_amplitude()
+  return fcalc
+
+
+def downsample_spectrum(energies, fluences, total_flux=1e12, nbins=100, method=0, ev_width=1.5, baseline_sigma=3.5,
+                        method2_param=None):
+  """
+  :param energies:
+  :param fluences:
+  :param total_flux:
+  :param nbins:
+  :param method:
+  :param ev_width:
+  :param baseline_sigma:
+  :return:
+  """
+  if method2_param is None:
+    method2_param = {"filt_freq": 0.07, "filt_order": 3, "tail": 50, "delta_en": 1}
+  if method == 0:
+    energy_bins = np.linspace(energies.min() - 1e-6, energies.max() + 1e-6, nbins + 1)
+    fluences = np.histogram(energies, bins=energy_bins, weights=fluences)[0]
+    energies = .5 * (energy_bins[:-1] + energy_bins[1:])
+
+    # only simulate if significantly above the baselein (TODO make more accurate)
+    cutoff = np.median(fluences) * 0.8
+    is_finite = fluences > cutoff
+    fluences = fluences[is_finite]
+    energies = energies[is_finite]
+  elif method==1:
+    w = fluences
+    med = np.median(np.hstack((w[:100] ,w[-100:])))
+    sigma = np.std(np.hstack((w[:100] ,w[-100:])))
+    baseline = med + baseline_sigma*sigma
+    width = ev_width/((energies[-1] - energies[0]) / len(energies))
+    idx_min = argrelmin(savgol_filter(w,21, 11),order=int(width/3.))[0]
+    idx_max = argrelmax(savgol_filter(w,21, 11),order=int(width/3.))[0]
+    idx = sorted(np.hstack((idx_min, idx_max)))
+    kept_idx = [i for i in idx if w[i] > baseline]
+    energies = energies[kept_idx]
+    fluences = fluences[kept_idx]
+  elif method==2:
+    delta_en = method2_param["delta_en"]
+    tail = method2_param["tail"]
+    filt_order = method2_param["filt_order"]
+    filt_freq = method2_param["filt_freq"]
+    xdata = np.hstack((energies[:tail], energies[-tail:]))
+    ydata = np.hstack((fluences[:tail], fluences[-tail:]))
+    pfit = np.polyfit(xdata, ydata, deg=1)
+    baseline = np.polyval(pfit, energies)
+    denz = signal.filtfilt(*signal.butter(filt_order, filt_freq,'low'), x=fluences-baseline)
+    enbin = np.arange(energies.min(), energies.max(), delta_en)
+    fluences, _, _ = binned_statistic(energies, denz, bins=enbin)
+    energies = (enbin[1:] + enbin[:-1])*0.5
+    fluences[fluences < 0] = 0  # probably ok
+
+  fluences /= fluences.sum()
+  fluences *= total_flux
+  return energies, fluences
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/pixel/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+import cctbx.uctbx # possibly implicit
+ext = bp.import_ext("simtbx_pixel_ext")
+from simtbx_pixel_ext import *
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+import sys
+from libtbx import test_utils
+import libtbx.load_env
+
+nb_tst_list = [
+    "$D/nanoBragg/tst_nanoBragg_minimal.py",
+    "$D/nanoBragg/tst_nanoBragg_mosaic.py",
+    "$D/nanoBragg/tst_gaussian_mosaicity.py",
+    "$D/nanoBragg/tst_gaussian_mosaicity2.py",
+    "$D/nanoBragg/tst_nanoBragg_cbf_write.py",
+    "$D/nanoBragg/tst_multisource_background.py",
+    "$D/nanoBragg/tst_anisotropic_mosaicity.py"]
+
+db_tst_list_nonCuda = ["$D/diffBragg/tests/tst_diffBragg_utils.py",
+                       "$D/diffBragg/tests/tst_diffBragg_structure_factors.py"]
+db_tst_list_onlyCuda =[["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb eta --kokkos"]]
+
+db_tst_list = [
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine_Fhkl.py", "--scale .2"],
+    "$D/diffBragg/tests/tst_diffBragg_Fhkl_complex.py",
+    "$D/diffBragg/tests/tst_hopper_usecase.py",
+    "$D/diffBragg/tests/tst_diffBragg_change_of_basis.py",
+    "$D/diffBragg/tests/tst_diffBragg_update_dxtbx_geoms.py",
+    "$D/diffBragg/tests/tst_diffBragg_deriv_rois.py",
+    "$D/diffBragg/tests/tst_diffBragg_detdist_derivatives.py",
+    "$D/diffBragg/tests/tst_diffBragg_nanoBragg_congruency.py",
+    "$D/diffBragg/tests/tst_diffBragg_ncells_property.py",
+    "$D/diffBragg/tests/tst_diffBragg_ncells_offdiag_property.py",
+    ["$D/diffBragg/tests/tst_diffBragg_ncells_offdiag_property.py", "--idx 1"],
+    ["$D/diffBragg/tests/tst_diffBragg_ncells_offdiag_property.py", "--idx 2"],
+    ["$D/diffBragg/tests/tst_diffBragg_ncells_property_anisotropic.py", "--idx 0"],
+    ["$D/diffBragg/tests/tst_diffBragg_ncells_property_anisotropic.py", "--idx 1"],
+    ["$D/diffBragg/tests/tst_diffBragg_ncells_property_anisotropic.py", "--idx 2"],
+    ["$D/diffBragg/tests/tst_diffBragg_unitcell_property.py", "--crystalsystem tetragonal" ],
+    ["$D/diffBragg/tests/tst_diffBragg_unitcell_property.py", "--crystalsystem hexagonal" ],
+    ["$D/diffBragg/tests/tst_diffBragg_unitcell_property.py", "--crystalsystem monoclinic" ],
+    ["$D/diffBragg/tests/tst_diffBragg_lambda_coefficients.py", "--idx 0"],
+    ["$D/diffBragg/tests/tst_diffBragg_lambda_coefficients.py", "--idx 1"],
+    "$D/diffBragg/tests/tst_diffBragg_regions_of_interest.py",
+    "$D/diffBragg/tests/tst_diffBragg_rotXYZ.py",
+    ["$D/diffBragg/tests/tst_diffBragg_rotXYZ_deriv.py", "--curvatures --rotidx 0"],
+    ["$D/diffBragg/tests/tst_diffBragg_rotXYZ_deriv.py", "--curvatures --rotidx 1"],
+    ["$D/diffBragg/tests/tst_diffBragg_rotXYZ_deriv.py", "--curvatures --rotidx 2"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb crystal"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb Nabc"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb G"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb detz_shift"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb crystal Nabc G"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb crystal Nabc G detz_shift"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb Nabc G"],
+    ["$D/diffBragg/tests/tst_diffBragg_hopper_refine.py", "--perturb spec"],
+    ["$D/diffBragg/tests/tst_diffBragg_Fcell_deriv.py", "--curvatures"],
+    ["$D/diffBragg/tests/tst_diffBragg_eta_derivs.py", "--curvatures"],
+    "$D/diffBragg/tests/tst_diffBragg_eta_derivs.py",
+    ["$D/diffBragg/tests/tst_diffBragg_eta_derivs.py", "--aniso 0"],
+    ["$D/diffBragg/tests/tst_diffBragg_eta_derivs.py", "--aniso 1"],
+    ["$D/diffBragg/tests/tst_diffBragg_eta_derivs.py", "--aniso 2"],
+    ["$D/diffBragg/tests/tst_diffBragg_panelXY_derivs.py", "--panel x"],
+    ["$D/diffBragg/tests/tst_diffBragg_panelXY_derivs.py", "--panel y"],
+    ["$D/diffBragg/tests/tst_diffBragg_panelXY_derivs.py", "--panel z"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 0 --gamma 100 125 150"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 0 --gamma 100 125 150 --orientation 1"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 1 --gamma 100 125 150"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 2 --gamma 100 125 150"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 0 --gamma 100 125 150 --grad sigma --sigma 1 2 3"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 0 --gamma 100 125 150 --grad sigma --sigma 1 2 3 --orientation 1"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 1 --gamma 100 125 150 --grad sigma --sigma 1 2 3"],
+    ["$D/diffBragg/tests/tst_diffBragg_diffuse_properties.py", "--idx 2 --gamma 100 125 150 --grad sigma --sigma 1 2 3"]
+    ]
+
+OPT = libtbx.env.build_options
+tst_list_parallel = []
+
+tst_list = nb_tst_list
+if OPT.enable_cxx11 and sys.platform != 'win32':
+  tst_list += db_tst_list+db_tst_list_nonCuda
+
+if OPT.enable_cuda:
+  tst_list_parallel += [
+    ["$D/nanoBragg/tst_gauss_argchk.py","GPU"], # tests CPU+GPU, argchk optimization
+    ["$D/gpu/tst_gpu_multisource_background.py","context=cuda"], # CPU / GPU background comparison
+    ["$D/gpu/tst_exafel_api.py","context=cuda"],# CPU / GPU, polychromatic beam, monolithic detector
+    ["$D/tests/tst_unified.py","context=cuda"],   # GPU, exaFEL full API
+    ["$D/gpu/tst_shoeboxes.py","context=cuda"],   # GPU, test whitelist API
+  ]
+else:
+  tst_list.append(
+    ["$D/nanoBragg/tst_gauss_argchk.py","CPU"], # tests CPU argchk optimization
+  )
+if OPT.enable_kokkos and sys.platform.startswith('linux'):
+  tst_list_parallel += [
+    ["$D/gpu/tst_gpu_multisource_background.py","context=kokkos_gpu"],# CPU / GPU background comparison
+    ["$D/gpu/tst_exafel_api.py","context=kokkos_gpu"],# GPU in kokkos
+    ["$D/tests/tst_unified.py","context=kokkos_gpu"],# GPU, exaFEL full API
+    ["$D/gpu/tst_shoeboxes.py","context=kokkos_gpu"],# GPU, test whitelist API
+  ]
+if OPT.enable_kokkos and sys.platform.startswith('linux') and OPT.enable_cuda and libtbx.env.has_module('dials'):
+  tst_list_parallel += [
+    ["$D/tests/tst_memory_policy.py","context=kokkos_gpu"],
+  ]
+if OPT.enable_kokkos:
+  if OPT.enable_cxx11 and sys.platform != 'win32':
+    for tst in db_tst_list:
+      if isinstance(tst, str):
+        par_tst = [tst, "--kokkos"]
+      else:
+        par_tst = tst + ["--kokkos"]
+      tst_list_parallel.append(par_tst)
+
+    tst_list_parallel += db_tst_list_onlyCuda
+
+def run():
+  build_dir = libtbx.env.under_build("simtbx")
+  dist_dir = libtbx.env.dist_path("simtbx")
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/tests/test_utils.py
+from __future__ import absolute_import, division, print_function
+import sys
+
+def parse_input():
+  from iotbx.phil import parse
+  master_phil="""
+    context = kokkos_gpu *cuda
+      .type = choice
+      .optional = False
+      .help = backend for parallel execution
+  """
+  phil_scope = parse(master_phil)
+  # The script usage
+  import libtbx.load_env # implicit import
+  from dials.util.options import ArgumentParser
+  # Create the parser
+  parser = ArgumentParser(
+        usage="\n libtbx.python %s context=[kokkos_gpu|cuda]"%(sys.argv[0]),
+        phil=phil_scope,
+        epilog="test exafel API, cuda vs. kokkos")
+  # Parse the command line. quick_parse is required for MPI compatibility
+  params, options = parser.parse_args(show_diff_phil=True,quick_parse=True)
+  return params,options
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/tests/tst_memory_policy.py
+"""
+Extend the previous tests in tst_unified
+New tests question if there is a difference between all-pixel vs. shoebox-only calculation
+Old style (policy == "large_array"): all-pixel and shoebox-only have identical GPU memory footprint
+New style (policy == "small_whitelist"): all-pixel and shoebox-only have very different GPU memory footprint
+
+Explanation of function:
+  representation of pixels on GPU:
+    simulation_kernels.h:
+      kokkosSpotsKernel: vector_float_t floatimage
+      debranch_maskall_Kernel: vector_float_t floatimage
+
+  calling pattern for the kernels:
+    simulation.cpp:  add_energy_channel_from_gpu_amplitudes calls kokkosSpotsKernel (not a target)
+    simulation.cpp:  add_energy_channel_mask_allpanel calls debranch_maskall_Kernel, tested by tst_shoeboxes
+    simulation.cpp:  add_energy_multichannel_mask_allpanel calls debranch_maskall_Kernel, tested by tst_unified
+    each of these calls takes GPU::m_accumulate_floatimage += GPU::m_floatimage
+
+  python calls in gpu_detector that interact with data:
+    .def("scale_in_place", "Multiply by a scale factor on the GPU")
+    .def("write_raw_pixels", "Update CPU raw_pixels on host with array from GPU::m_accumulate_floatimage")
+    .def("get_raw_pixels", "return multipanel detector pixels from GPU::m_accumulate_floatimage as a flex array")
+    .def("get_whitelist_raw_pixels", "return only the raw pixels of the whitelist selection, as a 1D flex array, from first memory positions in GPU::m_accumulate_floatimage")
+
+Brief synopsis of this test suite:
+1) simple whole-image simulation using add_energy_channel_from_gpu_amplitudes()
+2) comparison whole-image simulation using add_energy_multichannel_mask_allpanel()
+   also includes instrumentation to show CPU & GPU memory consumption
+3) repeat step 2, but only using a whitelist of a few thousand pixels
+"""
+from __future__ import absolute_import, division, print_function
+import numpy as np
+import dxtbx
+from scitbx.array_family import flex
+from scitbx.matrix import sqr
+from simtbx.nanoBragg import nanoBragg, shapetype
+from simtbx.nanoBragg.tst_gauss_argchk import basic_crystal, basic_beam, basic_detector, amplitudes
+from simtbx import get_exascale
+from simtbx.tests.tst_unified import several_wavelength_case as several_wavelength_case_unified
+
+import subprocess as sp
+import os
+
+def get_gpu_memory():
+    command = "nvidia-smi --query-gpu=memory.free --format=csv"
+    memory_free_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    return memory_free_values
+
+def parse_input():
+  from iotbx.phil import parse
+  master_phil="""
+    context = *kokkos_gpu
+      .type = choice
+      .optional = False
+      .help = backend for parallel execution
+  """
+  phil_scope = parse(master_phil)
+  # The script usage
+  import libtbx.load_env # implicit import
+  from dials.util.options import ArgumentParser
+  # Create the parser
+  parser = ArgumentParser(
+        usage="\n libtbx.python tst_policy",
+        phil=phil_scope,
+        epilog="test GPU memory policies large_array vs small_whitelist")
+  # Parse the command line. quick_parse is required for MPI compatibility
+  params, options = parser.parse_args(show_diff_phil=True,quick_parse=True)
+  return params,options
+
+class several_wavelength_case_policy (several_wavelength_case_unified):
+
+  def modularized_exafel_api_for_GPU(self, params, argchk=False, sources=False, scale=None):
+    """similar to parent class method, but no background, no diffuse, use self.*"""
+    gpu_channels_type = get_exascale("gpu_energy_channels",params.context)
+    gpu_channels_singleton = gpu_channels_type (deviceId = 0)
+
+    self.SIM = nanoBragg(self.DETECTOR, self.BEAM, panel_id=0)
+    self.SIM.adc_offset_adu=0
+    self.SIM.device_Id = 0
+
+    assert gpu_channels_singleton.get_deviceID()==self.SIM.device_Id # API test
+    assert gpu_channels_singleton.get_nchannels() == 0 # uninitialized
+    for x in range(len(self.flux)):
+          gpu_channels_singleton.structure_factors_to_GPU_direct(
+           x, self.sfall_channels[x].indices(), self.sfall_channels[x].data())
+    assert gpu_channels_singleton.get_nchannels() == len(self.flux) #API test
+    self.SIM.Ncells_abc = (20,20,20)
+    self.SIM.Amatrix = sqr(self.CRYSTAL.get_A()).transpose()
+    self.SIM.oversample = 2
+    self.SIM.xtal_shape = shapetype.Gauss
+    self.SIM.interpolate = 0
+    # allocate GPU arrays
+    self.gpu_simulation = get_exascale("exascale_api",params.context)(nanoBragg = self.SIM)
+    self.gpu_simulation.allocate()
+    self.gpu_detector = get_exascale("gpu_detector",params.context)(
+                 deviceId=self.SIM.device_Id, detector=self.DETECTOR, beam=self.BEAM)
+    self.gpu_detector.each_image_allocate()
+    # self.gpu_detector.show_summary()
+
+    # two completely independent interfaces to loop over energies
+    if sources is False: # original exascale API, explicit energy loop in Python
+      for x in range(len(self.flux)):
+        self.SIM.wavelength_A = self.wavlen[x]
+        print("USE_EXASCALE_API+++++++++++++ Wavelength %d=%.6f, Flux %.6e, Fluence %.6e"%(
+            x, self.SIM.wavelength_A, self.SIM.flux, self.SIM.fluence))
+        self.gpu_simulation.add_energy_channel_from_gpu_amplitudes(
+            x, gpu_channels_singleton, self.gpu_detector,
+            weight = self.frac[x])
+    else: # loop in C++; precludes using sources for divergence; uses sources from nanoBragg table
+      self.set_pythony_beams(self.SIM)
+      NN = 0 # compute the number of pixels
+      for panel in self.DETECTOR:
+          sz = panel.get_image_size()
+          NN += sz[0]*sz[1]
+
+      #print("GPU detector summary",self.DETECTOR)
+      from simtbx.diffBragg.utils import memory_report; print(memory_report())
+      print(get_gpu_memory())
+      self.gpu_simulation.add_energy_multichannel_mask_allpanel(
+            ichannels = flex.int(range(len(self.flux))),
+            gpu_amplitudes = gpu_channels_singleton,
+            gpu_detector = self.gpu_detector,
+            pixel_active_list_ints = flex.size_t(range(NN)),
+            weights = self.frac/len(self.frac)
+      )
+
+    per_image_scale_factor = self.domains_per_crystal # 1.0
+    self.gpu_detector.scale_in_place(per_image_scale_factor) # apply scale directly on GPU
+    if sources is False:
+      self.SIM.wavelength_A = self.BEAM.get_wavelength() # return to canonical energy for subsequent background
+    else:
+      self.reset_pythony_beams(self.SIM)
+
+    self.gpu_detector.write_raw_pixels(self.SIM)  # updates SIM.raw_pixels from GPU
+    if self.special == 1: #special test breaks encapsulation
+      self.special_test_case_1(self.SIM,self.gpu_detector,scale)
+      # testing no garbage collect gpu_detector.each_image_free()
+      return
+    self.data_array = self.gpu_detector.get_raw_pixels()
+    assert self.data_array.focus()[0] == len(self.DETECTOR) # number of panels
+    if len(self.DETECTOR) == 1: # if one panel, we can assert data are the same both ways
+      single_size = self.data_array.focus()[1:3]
+      self.data_array.reshape(flex.grid((single_size[0],single_size[1])))
+      assert np.allclose(self.SIM.raw_pixels, self.data_array)
+    # deallocate GPU arrays afterward
+    # testing no garbage collect gpu_detector.each_image_free()
+    return
+
+  def specialized_api_for_whitelist(self, params, whitelist_pixels, argchk=False, sources=True, scale=None):
+    gpu_channels_type = get_exascale("gpu_energy_channels",params.context)
+    gpu_channels_singleton = gpu_channels_type (deviceId = 0)
+
+    self.SIM = nanoBragg(self.DETECTOR, self.BEAM, panel_id=0)
+    self.SIM.adc_offset_adu=0
+    self.SIM.device_Id = 0
+
+    assert gpu_channels_singleton.get_deviceID()==self.SIM.device_Id # API test
+    assert gpu_channels_singleton.get_nchannels() == 0 # uninitialized
+    for x in range(len(self.flux)):
+          gpu_channels_singleton.structure_factors_to_GPU_direct(
+           x, self.sfall_channels[x].indices(), self.sfall_channels[x].data())
+    assert gpu_channels_singleton.get_nchannels() == len(self.flux) #API test
+    self.SIM.Ncells_abc = (20,20,20)
+    self.SIM.Amatrix = sqr(self.CRYSTAL.get_A()).transpose()
+    self.SIM.oversample = 2
+    self.SIM.xtal_shape = shapetype.Gauss
+    self.SIM.interpolate = 0
+    # allocate GPU arrays
+    self.gpu_simulation = get_exascale("exascale_api",params.context)(nanoBragg = self.SIM)
+    self.gpu_simulation.allocate()
+    self.gpu_detector = get_exascale("gpu_detector",params.context)(
+                 deviceId=self.SIM.device_Id, detector=self.DETECTOR, beam=self.BEAM)
+    self.gpu_detector.each_image_allocate()
+    # self.gpu_detector.show_summary()
+
+    assert sources
+    self.set_pythony_beams(self.SIM)
+    from simtbx.diffBragg.utils import memory_report; print(memory_report())
+    print(get_gpu_memory())
+    self.gpu_simulation.add_energy_multichannel_mask_allpanel(
+            ichannels = flex.int(range(len(self.flux))),
+            gpu_amplitudes = gpu_channels_singleton,
+            gpu_detector = self.gpu_detector,
+            pixel_active_list_ints = whitelist_pixels,
+            weights = self.frac/len(self.frac)
+    )
+
+    per_image_scale_factor = self.domains_per_crystal # 1.0
+    self.gpu_detector.scale_in_place(per_image_scale_factor) # apply scale directly on GPU
+    self.reset_pythony_beams(self.SIM)
+    self.whitelist_values = self.gpu_detector.get_whitelist_raw_pixels(whitelist_pixels)
+
+  def specialized_api_for_whitelist_low_memory(self, params, whitelist_pixels, argchk=False, sources=True, scale=None):
+    gpu_channels_type = get_exascale("gpu_energy_channels",params.context)
+    gpu_channels_singleton = gpu_channels_type (deviceId = 0)
+
+    self.SIM = nanoBragg(self.DETECTOR, self.BEAM, panel_id=0)
+    self.SIM.adc_offset_adu=0
+    self.SIM.device_Id = 0
+
+    assert gpu_channels_singleton.get_deviceID()==self.SIM.device_Id # API test
+    assert gpu_channels_singleton.get_nchannels() == 0 # uninitialized
+    for x in range(len(self.flux)):
+          gpu_channels_singleton.structure_factors_to_GPU_direct(
+           x, self.sfall_channels[x].indices(), self.sfall_channels[x].data())
+    assert gpu_channels_singleton.get_nchannels() == len(self.flux) #API test
+    self.SIM.Ncells_abc = (20,20,20)
+    self.SIM.Amatrix = sqr(self.CRYSTAL.get_A()).transpose()
+    self.SIM.oversample = 2
+    self.SIM.xtal_shape = shapetype.Gauss
+    self.SIM.interpolate = 0
+    # allocate GPU arrays
+    self.gpu_simulation = get_exascale("exascale_api",params.context)(nanoBragg = self.SIM)
+    self.gpu_simulation.allocate()
+    self.gpu_detector = get_exascale("gpu_detector",params.context)(
+                 deviceId=self.SIM.device_Id, detector=self.DETECTOR, beam=self.BEAM)
+    self.gpu_detector.each_image_allocate()
+    # self.gpu_detector.show_summary()
+
+    assert sources
+    self.set_pythony_beams(self.SIM)
+    from simtbx.diffBragg.utils import memory_report; print(memory_report())
+    print(get_gpu_memory())
+    self.gpu_simulation.add_energy_multichannel_mask_allpanel(
+            ichannels = flex.int(range(len(self.flux))),
+            gpu_amplitudes = gpu_channels_singleton,
+            gpu_detector = self.gpu_detector,
+            pixel_active_list_ints = whitelist_pixels,
+            weights = self.frac/len(self.frac)
+    )
+
+    per_image_scale_factor = self.domains_per_crystal # 1.0
+    self.gpu_detector.scale_in_place(per_image_scale_factor) # apply scale directly on GPU
+    self.reset_pythony_beams(self.SIM)
+    self.whitelist_values = self.gpu_detector.get_whitelist_raw_pixels(whitelist_pixels)
+
+def get_whitelist_from_refls(prefix,SIM):
+    image_size = len(SIM.raw_pixels)
+    from dials.array_family import flex
+    from dxtbx.model.experiment_list import ExperimentListFactory
+    experiments = ExperimentListFactory.from_json_file("%s_imported.expt"%prefix, check_format = False)
+    reflections = flex.reflection_table.from_file("%s_strong.refl"%prefix)
+    assert len(experiments)==1
+    assert len(experiments[0].detector)==1
+    panel = experiments[0].detector[0]
+    jslow = panel.get_image_size()[0]
+    shoebox_pixels = flex.size_t()
+    for iitem in range(len(reflections)):
+      item = reflections[iitem]
+      box = item['bbox']
+      for islow in range(box[2], box[3]):
+        for ifast in range(box[0], box[1]):
+          idx = islow * jslow + ifast
+          shoebox_pixels.append(idx)
+    return shoebox_pixels
+
+def get_refls_from_dials(data,prefix):
+  os.system(
+  "dials.import output.experiments=%s_imported.expt output.log=%s_imported.log %s"%(prefix,prefix,data))
+  os.system(
+  "dials.find_spots output.reflections=%s_strong.refl output.log=%s_strong.log %s"%(prefix,prefix,data))
+
+def run_all(params):
+  # make the dxtbx objects
+  BEAM = basic_beam()
+  DETECTOR = basic_detector()
+  CRYSTAL = basic_crystal()
+  SF_model = amplitudes(CRYSTAL)
+  # Famp = SF_model.Famp # simple uniform amplitudes
+  SF_model.random_structure(CRYSTAL)
+  SF_model.ersatz_correct_to_P1()
+
+  # determine overall scale factor
+  print("\n# Use case 1 (%s). Monochromatic source"%params.context)
+  SWC1 = several_wavelength_case_unified(BEAM, DETECTOR, CRYSTAL, SF_model, weights=flex.double([1.]))
+  SIM1 = SWC1.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  scale = SIM1.get_intfile_scale() # case 1 is the overall scale factor to write all result files
+  SIM1.to_cbf("test_policy_%s_001.cbf"%(params.context), intfile_scale=scale)
+  print("Scale is:",scale)
+
+  # compute and save background pixels
+  print("\n# Use case 0 (%s). Background only"%params.context)
+  SWC = several_wavelength_case_unified(BEAM, DETECTOR, CRYSTAL, SF_model, weights=flex.double([0.]))
+  SIM0 = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  SIM0.to_cbf("test_policy_%s_000.cbf"%(params.context), intfile_scale=scale)
+  save_background = SIM0.raw_pixels
+  print(save_background.focus())
+
+  # treat the case of multichannel API
+  print("\n# Use case 2 (%s). Monochromatic source using multichannel API"%params.context)
+  SIM2=SWC1.modularized_exafel_api_for_GPU(params=params,argchk=False,gpu_background=False,sources=True)
+  # combine Bragg + background
+  SIM2.raw_pixels = SWC1.data_array + save_background
+  SIM2.to_cbf("test_policy_%s_002.cbf"%(params.context), intfile_scale=scale)
+  # Bragg spot intensity should scale exactly with weight, using multichannel API
+  assert np.allclose(SIM1.raw_pixels, SIM2.raw_pixels) # equate monochromatic, comparing two interfaces
+
+  # Now try to reproduce whole-image sims with persistent and accumulating memory
+  NTRIALS = 5
+  SWCs=[]
+  for x in range(NTRIALS):
+    print("All-pixel iteration",x)
+    SWCs.append(several_wavelength_case_policy(BEAM,DETECTOR,CRYSTAL,SF_model,weights=flex.double([1.])))
+    SWCs[-1].modularized_exafel_api_for_GPU(params=params,argchk=False,sources=True)
+    SWCs[-1].SIM.raw_pixels = SWCs[-1].data_array + save_background
+    SWCs[-1].SIM.to_cbf("test_policy_trials_%03d.cbf"%(x), intfile_scale=scale)
+    # Bragg spot intensity should scale exactly with weight, using multichannel API
+    assert np.allclose(SWCs[-1].SIM.raw_pixels, SIM2.raw_pixels)
+
+  free_gpu_before = get_gpu_memory()[0]
+  del SWCs
+  free_gpu_after = get_gpu_memory()[0]
+  print((free_gpu_after - free_gpu_before)/NTRIALS,"free")
+  assert (free_gpu_after - free_gpu_before)/NTRIALS >= 72 # old policy uses at least 72 MB per sim., actual value 76.8 MB
+
+  get_refls_from_dials(data="test_policy_%s_002.cbf"%(params.context),
+                      prefix="test_policy_%s"%(params.context))
+  whitelist_pixels = get_whitelist_from_refls(SIM=SIM2,
+                                              prefix="test_policy_%s"%(params.context))
+  print(whitelist_pixels.focus())
+
+  # simulate the bright spots only with the whitelist mechanism
+  print("\n# Use case 3 (%s). Whitelist mechanism, old style with large arrays"%params.context)
+  SWC3 = several_wavelength_case_policy(BEAM,DETECTOR,CRYSTAL,SF_model,weights=flex.double([1.]))
+  SWC3.specialized_api_for_whitelist(whitelist_pixels=whitelist_pixels,
+                                      params=params,argchk=False,sources=True)
+  SIM3 = SWC3.SIM
+  # combine Bragg + background
+  image_size = len(SIM3.raw_pixels)
+  working_raw_pixels = flex.double(image_size) # blank array
+  working_raw_pixels.set_selected(whitelist_pixels, SWC3.whitelist_values)
+  working_raw_pixels.reshape(flex.grid(SIM3.raw_pixels.focus()))
+  SIM3.raw_pixels = working_raw_pixels + save_background
+  SIM3.to_cbf("test_policy_%s_003.cbf"%(params.context), intfile_scale=scale)
+
+  # get some quantitative assertion saying that whitelist is a reasonable image
+  difference_image = SIM2.raw_pixels - SIM3.raw_pixels
+  assert flex.sum(difference_image) > 0.
+  print("difference",flex.sum(difference_image))
+  large_diffs = (difference_image > 1.).count(True)
+  print("number of large pixel differences",large_diffs)
+  assert (large_diffs < 15000) # actual value 10471
+
+  # Now reproduce whitelist sims showing accumulation of large persistent memory
+  SWCs=[]
+  for x in range(NTRIALS):
+    print("Whitelist-only iteration",x)
+    SWCs.append(several_wavelength_case_policy(BEAM,DETECTOR,CRYSTAL,SF_model,weights=flex.double([1.])))
+    SWCs[-1].specialized_api_for_whitelist(whitelist_pixels=whitelist_pixels,params=params,argchk=False,sources=True)
+
+  reference_whitelist_values = SWCs[-1].whitelist_values
+  free_gpu_before = get_gpu_memory()[0]
+  del SWCs
+  free_gpu_after = get_gpu_memory()[0]
+  print((free_gpu_after - free_gpu_before)/NTRIALS,"free")
+  assert (free_gpu_after - free_gpu_before)/NTRIALS >= 50 # old policy uses at least 50 MB per sim., actual value 57.6 MB
+
+  #figure out the minimum change needed to reduce memory consumption by factor of image_size/whitelist_size
+  #accomplish the same with compile-time polymorphism
+  #have side-by-side test in same python script
+  # Reproduce whitelist sims with small-memory mechanism
+  SWCs=[]
+  for x in range(NTRIALS):
+    print("Whitelist-only iteration with small memory",x)
+    SWCs.append(several_wavelength_case_policy(BEAM,DETECTOR,CRYSTAL,SF_model,weights=flex.double([1.])))
+    SWCs[-1].specialized_api_for_whitelist_low_memory(whitelist_pixels=whitelist_pixels,params=params,argchk=False,sources=True)
+  #produce an output image file for intermediate debugging
+  working_raw_pixels = flex.double(image_size) # blank array
+  working_raw_pixels.set_selected(whitelist_pixels, SWCs[-1].whitelist_values)
+  working_raw_pixels.reshape(flex.grid(SWCs[-1].SIM.raw_pixels.focus()))
+  SWCs[-1].SIM.raw_pixels = working_raw_pixels + save_background
+  SWCs[-1].SIM.to_cbf("test_policy_%s_004.cbf"%(params.context), intfile_scale=scale)
+
+  #assert that the two methods give the same answer (whitelist with large memory vs. whitelist with small memory)
+  assert np.allclose(reference_whitelist_values, SWCs[-1].whitelist_values)
+
+  free_gpu_before = get_gpu_memory()[0]
+  del SWCs
+  free_gpu_after = get_gpu_memory()[0]
+  print((free_gpu_after - free_gpu_before)/NTRIALS,"free")
+  assert (free_gpu_after - free_gpu_before)/NTRIALS >= 50 # old policy uses at least 50 MB per sim., actual value 57.6 MB
+
+  return
+
+if __name__=="__main__":
+  params,options = parse_input()
+  # Initialize based on GPU context
+  gpu_instance_type = get_exascale("gpu_instance", params.context)
+  gpu_instance = gpu_instance_type(deviceId = 0)
+
+  run_all(params)
+print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+simtbx/tests/tst_unified.py
+"""
+Extend the previous tests in tst_gauss_argchk, tst_exafel_api, tst_kokkos_lib
+New tests provide a context flag to exercise either cuda or kokkos_gpu
+New tests implement a multipanel detector, not monolithic
+Test 0) use monochromatic interface to generate a background-only pattern as reference
+     1) exafel api interface, GPU background, monochromatic, use add_energy_channel_from_gpu_amplitudes
+     2) exafel api interface, GPU background, monochromatic, use add_energy_multichannel_mask_allpanel (equate 1,2)
+     3) exafel api interface, GPU background,  3-wavelength, use add_energy_channel_from_gpu_amplitudes
+     4) exafel api interface, GPU background,  3-wavelength, use add_energy_multichannel_mask_allpanel (equate 3,4)
+     5-6) verify the get_whitelist_raw_pixels API
+Moved to tst_shoeboxes:
+     7) implement shoebox masks and resulting mask
+     8) 3-wavelength, use add_energy_channel_mask_allpanel, use all-pixel int mask (equate 3,8)
+     9) 3-wavelength, use add_energy_channel_mask_allpanel, use all-pixel bool mask (equate 3,9)
+Not implemented yet: multipanel detector, write to .h5 file
+                     also implement with 3-color, not just mono, thus forcing weights
+     10) 3-wavelength, use add_energy_multichannel_mask_allpanel, use all-pixel int mask (equate 3,10)
+     11) 3-wavelength, use add_energy_multichannel_mask_allpanel, use whitelist
+"""
+from __future__ import absolute_import, division, print_function
+import numpy as np
+import dxtbx
+from scitbx.array_family import flex
+from dxtbx_model_ext import flex_Beam
+from scitbx.matrix import sqr
+from simtbx.nanoBragg import nanoBragg, shapetype
+from simtbx.nanoBragg.tst_gauss_argchk import water, basic_crystal, basic_beam, basic_detector, amplitudes
+from simtbx import get_exascale
+from dxtbx.model.beam import BeamFactory
+import math
+from scitbx.math import five_number_summary
+
+def parse_input():
+  from iotbx.phil import parse
+  master_phil="""
+    context = kokkos_gpu *cuda
+      .type = choice
+      .optional = False
+      .help = backend for parallel execution
+  """
+  phil_scope = parse(master_phil)
+  # The script usage
+  import libtbx.load_env # implicit import
+  from dials.util.options import ArgumentParser
+  # Create the parser
+  parser = ArgumentParser(
+        usage="\n libtbx.python tst_unified_api context=[kokkos_gpu|cuda]",
+        phil=phil_scope,
+        epilog="test monolithic detector, three-energy beam, cuda vs. kokkos")
+  # Parse the command line. quick_parse is required for MPI compatibility
+  params, options = parser.parse_args(show_diff_phil=True,quick_parse=True)
+  return params,options
+
+class several_wavelength_case:
+  def __init__(self, BEAM, DETECTOR, CRYSTAL, SF_model, weights, special=0):
+    SIM = nanoBragg(DETECTOR, BEAM, panel_id=0)
+    nchannels = len(weights)
+    assert nchannels in [1,3]
+    if nchannels==1:
+      print("\nassume monochromatic")
+      self.wavlen = flex.double([BEAM.get_wavelength()])
+    else:
+      print("\nassume three energy channels")
+      self.wavlen = flex.double([BEAM.get_wavelength()-0.02, BEAM.get_wavelength(), BEAM.get_wavelength()+0.02])
+    self.frac = weights
+    self.flux = self.frac*SIM.flux
+
+    self.sfall_channels = {}
+    for x in range(len(self.wavlen)):
+      self.sfall_channels[x] = SF_model.get_amplitudes(at_angstrom = self.wavlen[x])
+    self.DETECTOR = DETECTOR
+    self.BEAM = BEAM
+    self.CRYSTAL = CRYSTAL
+    self.domains_per_crystal = 5.E10 # put Bragg spots on larger scale relative to background
+    self.special = special # flag one-time special test cases
+
+  def set_pythony_beams(self,SIM): # for the multiwavelength case with use of multiple nanoBragg sources
+    pythony_beams = flex_Beam()
+    for x in range(len(self.flux)):
+      beam_descr = {'direction': (0.0, 0.0, 1.0),
+             'divergence': 0.0,
+             'flux': 1e11,
+             'polarization_fraction': 1.,
+             'polarization_normal': (0.0, 1.0, 0.0),
+             'sigma_divergence': 0.0,
+             'transmission': 1.0,
+             'wavelength': self.wavlen[x]/1.e10} # not sure why this has to be in meters
+      pythony_beams.append(BeamFactory.from_dict(beam_descr))
+    SIM.xray_beams = pythony_beams
+
+  def reset_pythony_beams(self,SIM): # for mono-wavelength addition of background
+    pythony_beams = flex_Beam()
+    beam_descr = {'direction': (0.0, 0.0, 1.0),
+             'divergence': 0.0,
+             'flux': 1e12,
+             'polarization_fraction': 1.,
+             'polarization_normal': (0.0, 1.0, 0.0),
+             'sigma_divergence': 0.0,
+             'transmission': 1.0,
+             'wavelength': basic_beam().get_wavelength()/1.e10} # not sure why this has to be in meters
+    pythony_beams.append(BeamFactory.from_dict(beam_descr))
+    SIM.xray_beams = pythony_beams
+
+  def modularized_exafel_api_for_GPU(self, params, argchk=False, gpu_background=True, sources=False, diffuse=None):
+    gpu_channels_type = get_exascale("gpu_energy_channels",params.context)
+    gpu_channels_singleton = gpu_channels_type (deviceId = 0)
+
+    SIM = nanoBragg(self.DETECTOR, self.BEAM, panel_id=0)
+    SIM.adc_offset_adu=0
+    SIM.device_Id = 0
+
+    assert gpu_channels_singleton.get_deviceID()==SIM.device_Id # API test
+    assert gpu_channels_singleton.get_nchannels() == 0 # uninitialized
+    for x in range(len(self.flux)):
+          gpu_channels_singleton.structure_factors_to_GPU_direct(
+           x, self.sfall_channels[x].indices(), self.sfall_channels[x].data())
+    assert gpu_channels_singleton.get_nchannels() == len(self.flux) #API test
+    SIM.Ncells_abc = (20,20,20)
+    SIM.Amatrix = sqr(self.CRYSTAL.get_A()).transpose()
+    SIM.oversample = 2
+    SIM.xtal_shape = shapetype.Gauss
+    SIM.interpolate = 0
+    # allocate GPU arrays
+    gpu_simulation = get_exascale("exascale_api",params.context)(nanoBragg = SIM)
+    assert hasattr(gpu_simulation, "diffuse")==(params.context=="kokkos_gpu") # diffuse halo only implemented in kokkos
+    gpu_simulation.allocate()
+    gpu_detector = get_exascale("gpu_detector",params.context)(
+                 deviceId=SIM.device_Id, detector=self.DETECTOR, beam=self.BEAM)
+    gpu_detector.each_image_allocate()
+    # gpu_detector.show_summary()
+
+    # two completely independent interfaces to loop over energies
+    if sources is False: # original exascale API, explicit energy loop in Python
+      for x in range(len(self.flux)):
+        SIM.wavelength_A = self.wavlen[x]
+        print("USE_EXASCALE_API+++++++++++++ Wavelength %d=%.6f, Flux %.6e, Fluence %.6e"%(
+            x, SIM.wavelength_A, SIM.flux, SIM.fluence))
+        gpu_simulation.add_energy_channel_from_gpu_amplitudes(
+            x, gpu_channels_singleton, gpu_detector,
+            weight = self.frac[x])
+    else: # loop in C++; precludes using sources for divergence; uses sources from nanoBragg table
+      self.set_pythony_beams(SIM)
+      NN = 0 # compute the number of pixels
+      for panel in self.DETECTOR:
+          sz = panel.get_image_size()
+          NN += sz[0]*sz[1]
+      if diffuse:
+        diffuse_param = gpu_simulation.diffuse # makes a copy of diffuse parameters for local editing
+        diffuse_param.enable=True
+        diffuse_param.stencil_size=1
+        diffuse_param.symmetrize_diffuse=True
+        diffuse_param.anisoG=[300.,100.,300.]
+        diffuse_param.anisoU=[0.48,0.16,0.16]
+        diffuse_param.rotate_principal_axes="a,b,c"
+        gpu_simulation.diffuse = diffuse_param
+        print("enable", gpu_simulation.diffuse.enable)
+        print("stencil_size", gpu_simulation.diffuse.stencil_size)
+        print("symmetrize_diffuse", gpu_simulation.diffuse.symmetrize_diffuse)
+        print("laue_group_num", gpu_simulation.diffuse.laue_group_num)
+        print("anisoG", gpu_simulation.diffuse.anisoG)
+        print("anisoU", gpu_simulation.diffuse.anisoU)
+        print("rotate_principal_axes", gpu_simulation.diffuse.rotate_principal_axes)
+      gpu_simulation.add_energy_multichannel_mask_allpanel(
+            ichannels = flex.int(range(len(self.flux))),
+            gpu_amplitudes = gpu_channels_singleton,
+            gpu_detector = gpu_detector,
+            pixel_active_list_ints = flex.size_t(range(NN)),
+            weights = self.frac/len(self.frac)
+      )
+      if diffuse:
+        diffuse_param.enable = False # disable so the next test isn't affected
+        gpu_simulation.diffuse = diffuse_param
+
+    per_image_scale_factor = self.domains_per_crystal # 1.0
+    gpu_detector.scale_in_place(per_image_scale_factor) # apply scale directly on GPU
+    if sources is False:
+      SIM.wavelength_A = self.BEAM.get_wavelength() # return to canonical energy for subsequent background
+    else:
+      self.reset_pythony_beams(SIM)
+    SIM.Fbg_vs_stol = water
+    SIM.amorphous_sample_thick_mm = 0.02
+    SIM.amorphous_density_gcm3 = 1
+    SIM.amorphous_molecular_weight_Da = 18
+    SIM.flux=1e12
+    SIM.beamsize_mm=0.003 # square (not user specified)
+    SIM.exposure_s=1.0 # multiplies flux x exposure
+    if gpu_background:
+      gpu_simulation.add_background(gpu_detector)
+
+    gpu_detector.write_raw_pixels(SIM)  # updates SIM.raw_pixels from GPU
+    if self.special == 1: #special test breaks encapsulation
+      self.special_test_case_1(SIM,gpu_detector)
+      gpu_detector.each_image_free()
+      return SIM
+    self.data_array = gpu_detector.get_raw_pixels()
+    assert self.data_array.focus()[0] == len(self.DETECTOR) # number of panels
+    if len(self.DETECTOR) == 1: # if one panel, we can assert data are the same both ways
+      single_size = self.data_array.focus()[1:3]
+      self.data_array.reshape(flex.grid((single_size[0],single_size[1])))
+      assert np.allclose(SIM.raw_pixels, self.data_array)
+    # deallocate GPU arrays afterward
+    gpu_detector.each_image_free()
+    return SIM
+
+  def special_test_case_1(self,SIM,gpu_detector):
+    reference_raw_pixels = SIM.raw_pixels
+    image_size = len(SIM.raw_pixels)
+    even_pixels = flex.size_t(range(0,image_size,2))
+    odd_pixels = flex.size_t(range(1,image_size,2))
+    assert image_size == len(even_pixels) + len(odd_pixels)
+    even_values = gpu_detector.get_whitelist_raw_pixels(even_pixels)
+    odd_values = gpu_detector.get_whitelist_raw_pixels(odd_pixels)
+    assert (len(even_values) == len(even_pixels)) and (len(odd_values) == len(odd_pixels))
+
+    working_raw_pixels = flex.double(image_size) # blank array
+    working_raw_pixels.set_selected(even_pixels, even_values)
+    working_raw_pixels.set_selected(odd_pixels, odd_values)
+    working_raw_pixels.reshape(flex.grid(SIM.raw_pixels.focus()))
+    SIM.raw_pixels = working_raw_pixels
+    SIM.to_cbf("test_unified_%s_005.cbf"%(params.context), intfile_scale=scale) # straight image; scale seems to come from global scope
+    assert np.allclose(SIM.raw_pixels, reference_raw_pixels) # reassembly equates with original image
+
+    workin2_raw_pixels = flex.double(image_size) # blank array
+    workin2_raw_pixels.set_selected(even_pixels, odd_values) #assemble the image from two half-selections
+    workin2_raw_pixels.set_selected(odd_pixels, even_values) #but in the wrong order
+    workin2_raw_pixels.reshape(flex.grid(SIM.raw_pixels.focus()))
+    SIM.raw_pixels = workin2_raw_pixels
+    SIM.to_cbf("test_unified_%s_006.cbf"%(params.context), intfile_scale=scale) # mixed up checkerboard
+    assert not np.allclose(SIM.raw_pixels, reference_raw_pixels) # wrong-order distorts image
+
+if __name__=="__main__":
+  params,options = parse_input()
+  # make the dxtbx objects
+  BEAM = basic_beam()
+  DETECTOR = basic_detector()
+  CRYSTAL = basic_crystal()
+  SF_model = amplitudes(CRYSTAL)
+  # Famp = SF_model.Famp # simple uniform amplitudes
+  SF_model.random_structure(CRYSTAL)
+  SF_model.ersatz_correct_to_P1()
+
+  # Initialize based on GPU context
+  gpu_instance_type = get_exascale("gpu_instance", params.context)
+  gpu_instance = gpu_instance_type(deviceId = 0)
+
+  print("\n# Use case 0 (%s). Background only"%params.context)
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=flex.double([0.]))
+  SIM0 = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+
+  print("\n# Use case 1 (%s). Monochromatic source"%params.context)
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=flex.double([1.]))
+  SIM1 = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  scale = SIM1.get_intfile_scale() # case 1 is the overall scale factor to write all result files
+  SIM1.to_cbf("test_unified_%s_001.cbf"%(params.context), intfile_scale=scale)
+  SIM0.to_cbf("test_unified_%s_000.cbf"%(params.context), intfile_scale=scale)
+
+  background_pixels = scale * SIM0.raw_pixels.as_1d()
+  mean_background_pixel = flex.mean(background_pixels)
+  print("mean",mean_background_pixel,"on",len(background_pixels))
+  print("five number summary",five_number_summary(background_pixels))
+
+  bragg_pixels_whole_image = (scale * (SIM1.raw_pixels - SIM0.raw_pixels).as_1d())
+  bragg_pixels_only = bragg_pixels_whole_image.select(bragg_pixels_whole_image > 1.)
+  print("mean",flex.mean(bragg_pixels_only),"on",len(bragg_pixels_only))
+  print("five number summary",five_number_summary(bragg_pixels_only))
+  # require the max Bragg peak to be 100x greater than the mean background
+  assert flex.max(bragg_pixels_only) > 100. * mean_background_pixel
+
+  multiple = 8.
+  SWC_mult = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=flex.double([multiple]))
+  SIM1_mult = SWC_mult.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  # Bragg spot intensity should scale exactly with weight, using add_energy_channel_from_gpu_amplitudes
+  assert np.allclose( (SIM1_mult.raw_pixels - SIM0.raw_pixels), multiple*(SIM1.raw_pixels - SIM0.raw_pixels) )
+
+  if "kokkos" in params.context:
+    print("\n# Use case 2 (%s). Monochromatic source"%params.context)#"sources=True": use multichannel API
+    SIM2 = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True, sources=True, diffuse=False)
+    SIM2.to_cbf("test_unified_%s_002.cbf"%(params.context), intfile_scale=scale)
+  # Bragg spot intensity should scale exactly with weight, using multichannel API
+    assert np.allclose(SIM1.raw_pixels, SIM2.raw_pixels) # equate monochromatic, two Bragg interfaces
+    print("\n# Use case diffuse 2 (%s). Monochromatic source"%params.context)
+    SIM2D = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True, sources=True, diffuse=True)
+    SIM2D.to_cbf("test_unified_%s_diffuse_002.cbf"%(params.context), intfile_scale=scale)
+    #assert that the diffuse scattering simulation always adds photons to pixels
+    assert np.all(  (SIM2D.raw_pixels.as_1d() >= SIM2.raw_pixels.as_1d()).as_numpy_array()  )
+    print("Diffuse signal confirmed >= 0 for all pixels")
+
+  if "kokkos" in params.context: # same thing but with no background
+    print("\n# Use case 2 with no background (%s). Monochromatic source"%params.context)#"sources=True": use multichannel API
+    SIM2NB = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=False, sources=True, diffuse=False)
+    SIM2NB.to_cbf("test_unified_%s_nb_002.cbf"%(params.context), intfile_scale=scale)
+    print("\n# Use case diffuse 2 with no background (%s). Monochromatic source"%params.context)
+    SIM2DNB = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=False, sources=True, diffuse=True)
+    SIM2DNB.to_cbf("test_unified_%s_diffuse_nb_002.cbf"%(params.context), intfile_scale=scale)
+    #assert that the diffuse scattering simulation always adds photons to pixels
+    assert np.all(  (SIM2DNB.raw_pixels.as_1d() >= SIM2NB.raw_pixels.as_1d()).as_numpy_array()  )
+    print("Diffuse signal confirmed >= 0 for all pixels")
+
+  # Use explicitly 3-color code and equate with explicitly 1-color:
+  print ("\n Equate background")
+  weights = flex.double([(0./6.), (0./6.), (0./6.)]) # background only shot
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=weights)
+  SIM_ctrl_py = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  assert np.allclose(SIM_ctrl_py.raw_pixels, SIM0.raw_pixels) # equate background
+  if "kokkos" in params.context:
+    SIM_ctrl_nb = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True, sources=True)
+    assert np.allclose(SIM_ctrl_nb.raw_pixels, SIM0.raw_pixels) # equate background
+
+  print ("\n Equate 1-color")
+  weights = flex.double([(0./6.), (6./6.), (0./6.)]) # implicitly one color
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=weights)
+  SIM_ctrl_py = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  assert np.allclose(SIM_ctrl_py.raw_pixels, SIM1.raw_pixels) # equate one color
+  if "kokkos" in params.context:
+    SIM_ctrl_nb = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True, sources=True)
+    assert np.allclose(SIM_ctrl_nb.raw_pixels, SIM1.raw_pixels) # equate one color
+
+  print ("\n Equate 2-color")
+  weights = flex.double([(3./6.), (0./6.), (3./6.)]) # two color simulation with 3 explicit channels
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=weights)
+  SIM_ctrl_py = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  SIM_ctrl_py.to_cbf("test_unified_%s_ctrl2_002.cbf"%(params.context), intfile_scale=scale)
+  if "kokkos" in params.context:
+    SIM_ctrl_nb = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True, sources=True)
+    assert np.allclose(SIM_ctrl_nb.raw_pixels, SIM_ctrl_py.raw_pixels) # equate two color with 2 different APIs
+
+  # Controls
+  # flux in 1:3:2 ratio
+  # flux in 2:3:1 ratio
+  print("\n# Use case 3 (%s). 3-Color"%params.context)
+  weights = flex.double([(1./6.), (3./6.), (2./6.)]) # three color simulation slightly biased toward lower energy
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=weights)
+  SIM3 = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  SIM3.to_cbf("test_unified_%s_003.cbf"%(params.context), intfile_scale=scale)
+  if "kokkos" in params.context:
+    print("\n# Use case 4 (%s). 3-Color"%params.context)
+    SIM4 = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True, sources=True)
+    SIM4.to_cbf("test_unified_%s_004.cbf"%(params.context), intfile_scale=scale)
+    assert np.allclose(SIM3.raw_pixels, SIM4.raw_pixels) # equate three color with 2 different APIs
+
+  print("\n# Use case 3a (%s). 3-Color with bias toward high energy"%params.context)
+  weights = flex.double([(2./6.), (3./6.), (1./6.)]) # three color simulation slightly biased toward higher energy
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=weights)
+  SIM3a = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+  SIM3a.to_cbf("test_unified_%s_103.cbf"%(params.context), intfile_scale=scale)
+
+  # Now evaluate Bragg spots' radius of gyration (lower energy should be higher radius)
+  low_energy_px = (scale*(SIM3.raw_pixels-SIM0.raw_pixels)).as_numpy_array()
+  hi_energy_px = (scale*(SIM3a.raw_pixels-SIM0.raw_pixels)).as_numpy_array()
+  xpts = np.array(range(low_energy_px.shape[0]))
+  ypts = np.array(range(low_energy_px.shape[1]))
+  X2D, Y2D = np.meshgrid(xpts,ypts)
+  # center of mass = sum(mass * position) / sum(mass)
+  center_of_mass_xy = (low_energy_px.shape[0]/2., low_energy_px.shape[1]/2.)
+  # radius of gyration sq = sum(mass * (r_sq from com)) / sum(mass)
+  lo_rg_sq = ( np.sum(low_energy_px * ((X2D-center_of_mass_xy[0])**2 + (Y2D-center_of_mass_xy[1])**2))/np.sum(low_energy_px)  )
+  hi_rg_sq = ( np.sum(hi_energy_px * ((X2D-center_of_mass_xy[0])**2 + (Y2D-center_of_mass_xy[1])**2))/np.sum(hi_energy_px)  )
+  print("low energy radius of gyration",math.sqrt(lo_rg_sq))
+  print("hi energy radius of gyration",math.sqrt(hi_rg_sq))
+  assert lo_rg_sq > hi_rg_sq
+
+  print ("\n Use cases 5-6. Test the whitelist concept")
+  # perform with 1-color image, same image as SIM1
+  # recalculate the several_wavelength_case instance:
+  reference = SIM1.raw_pixels
+  SWC = several_wavelength_case(BEAM, DETECTOR, CRYSTAL, SF_model, weights=flex.double([1.]), special=1)
+  SIM_working = SWC.modularized_exafel_api_for_GPU(params=params, argchk=False, gpu_background=True)
+
+print("OK")
+
+
+ *******************************************************************************

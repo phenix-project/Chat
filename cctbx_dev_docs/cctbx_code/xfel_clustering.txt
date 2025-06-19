@@ -1,0 +1,2083 @@
+
+
+ *******************************************************************************
+xfel/clustering/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("sx_clustering_ext")
+from sx_clustering_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/api.py
+from __future__ import absolute_import, division, print_function
+from abc import ABCMeta, abstractmethod
+import cctbx
+import scitbx_array_family_flex_ext
+import cctbx_orientation_ext
+
+class InputFrame():
+  """ Wrapper class for describing single images to be refined, created from an input dictionary of schema:
+        - `miller_array`: the cctbx.miller miller array of spot intensities.
+        - `mapped_predictions`: the mapped_predictions locations
+        - `orientation`: cctbx crystal_orientation object
+        - `xbeam`: x-location of beam centre
+        - `ybeam`: y-location of beam centre
+        - `wavelength`: the wavelength in Angstroms
+
+  Child classes must simply have these attributes, and will be modified in place. See xfel.cluster.singleframe.SingleFrame for example.
+  """
+  def __init__(self, frame_dict):
+    self.__dict__.update(frame_dict)
+
+  def check_prime_input(self):
+    """ Check attribute names and types to ensure that the object is valid. """
+    required = {'miller_array': cctbx.miller.array,
+                'mapped_predictions': scitbx_array_family_flex_ext.vec2_double,
+                'orientation': cctbx_orientation_ext.crystal_orientationa,
+                'xbeam': float,
+                'ybeam': float,
+                'wavelength': float}
+    for key in required:
+      assert isinstance(getattr(self, key), required[key])
+
+
+def refine_many(frame_lst, input_file):
+  """ Perform a full run on Prime, using the parameters specified in the `input_file`. Merging of fully-corrected intensities is not performed.
+
+  :param frame_lst: list of InputFrame objects describing integration results.
+  :param input_file: Prime .inp file. See XXXXXX for full description.
+  :return: A list of `miller_array` objects, containing the partiality-corrected (full-intensity equivalent) intensities, and associated errors for each of the images specified in the frame_lst.
+
+  .. note::
+     This will also update the InputFrame objects in place.
+  """
+  for frame in frame_lst:
+    frame.check_prime_input()
+
+  pass
+
+class CustomMicrocycle():
+  """ Abstract class for using the Prime microcycle algorithm to refine a single frame. Implement `func` to specify a target function."""
+
+  __metaclass__ = ABCMeta
+
+  def __init__(self, frame, input_file):
+    """
+    :param frame: an InputFrame-like object.
+    :param input_file: Prime .inp file. Only uses micro-cycle parameters.
+
+    .. note::
+       This will also update the InputFrame objects in place.
+    """
+    frame.check_prime_input()
+    pass  # Maybe create internal prime input class here?
+
+  def __call__(self):
+    """ perform post-refinement on the single frame.
+    :return: a `miller_array` object containing the partiality-corrected (full-intensity equivalent) intensities, and associated errors.
+    """
+    pass
+
+  @abstractmethod
+  def func(self, corr_miller):
+    """ Penalty function for refinement, an abstract class that must be implemented.
+
+    :param corr_miller: miller array of correction factors (such that I_full = corr_miller * I_obs).
+    :return: penalty score that should be minimized.
+
+    """
+    pass
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/cluster.py
+""" This module is designed to provide tools to deal with groups of serial
+crystallography images.
+
+The class Cluster allows the creation, storage and manipulation of these sets
+of frames. Methods exist to create sub-clusters (new cluster objects) or to act
+on an existing cluster, e.g. to plot the unit cell distributions.
+
+**Author:**   Oliver Zeldin <zeldin@stanford.edu>
+"""
+
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+import os
+import math
+import logging
+from six.moves import range
+from six.moves import zip
+logger = logging.getLogger(__name__)
+from xfel.clustering.singleframe import SingleFrame, SingleDialsFrame, SingleDialsFrameFromFiles
+from xfel.clustering.singleframe import SingleDialsFrameFromJson
+from cctbx.uctbx.determine_unit_cell import NCDist
+import numpy as np
+
+class SingleMiller():
+  """ Class for representing multiple measurements of a single miller index. """
+  def __init__(self, index, resolution):
+    self.index = index
+    self.resolution = resolution
+    self.intensities = []
+    self.sigmas = []
+
+  def add_obs(self, intensity, sigma):
+    """ Add an observation of the miller index """
+    self.intensities.append(intensity)
+    self.sigmas.append(sigma)
+
+  def weighted_mean_and_std(self):
+    """ return the mean of the observations, weighted by 1/sigmas.
+    :return: [weighted_mean, weighted_std_dev]
+    """
+    intensities = np.array(self.intensities)
+    weights = 1/np.array(self.sigmas)
+    w_mean = np.average(intensities, weights=weights)
+    w_std = np.sqrt(np.average((intensities - w_mean)**2, weights=weights))
+    return w_mean, w_std
+
+  def nobs(self):
+    """ return how many observations of index exist """
+    return len(self.intensities)
+
+
+
+class Cluster:
+  """Class for operation on groups of single XFEL images (here described by
+  SingleFrame objects) as cluster objects.
+
+  Objects can be created directily using the __init__ method, or by using a
+  classmethod e.g. to create an object from a folder full of integration
+  pickles. Whenever a method can plot, there is the option of
+  passing it an appropriate number of matplotlib axes objects, which will then
+  get returned for use in composite plots. See cluster.42 for an example.
+  If no axes are passed, the methods will just plot the result to the screen.
+  Clustering filters can act on these to break them up into cluster objects with
+  different members. A 'filter' is just a clustering procedure that puts the
+  passes and fails into different clusters. This is acheived through the
+  make_sub_cluster() method. This also keeps track of a sub-clusters heritage
+  through the .info string, which is appended to. The idea is to be able to
+  write filter scripts for each data.
+  e.g ::
+
+      >>> test_cluster = Cluster.from_directories(["~/test_data"],
+      ...                                        'test_script')
+      >>> P3_only = test_cluster.point_group_filer('P3')
+      >>> sub_clusters = P3_only.ab_cluster(1200)
+      >>> big_cluster = max(sub_clusters, key=lambda x: len(x.members))
+      >>> best_data = big_cluster.total_intensity_filter(res=6.5,
+      ...                                               completeness_threshold=0.1,
+      ...                                               plot=False)
+      >>> print best_data.info
+
+  Subsequent postrefinenment/merging programs can be called on an output
+  cluster.lst file::
+      >>> prime.postrefine params.phil $(cat cluster.lst)
+  """
+
+  def __init__(self, data, cname="cluster", info=""):
+    """
+    Builds a cluster from a list of SingleFrame objects, as well as information
+    about these as a cluster (e.g. mean unit cell).
+
+    :param data: a list of SingleFrame objects
+    :param cname: the name of the cluster, as a string.
+    :param info: an info-string for the cluster.
+    """
+
+    self.cname = cname
+    self.members = data
+    self.info = info
+
+    # Calculate medians and stdevs.  Explanation:
+    # When clustering cells together, median and standard deviation parameters should always
+    # be calculated on the Niggli setting, not the input cell. Admittedly, this does not cover
+    # corner cases where the relationship between two Niggli cells crosses a polytope boundary,
+    # but for most cases the Niggli settings are the appropriate cells to be averaged.
+    # Fixes cctbx issue #97.
+    # Prior to 20171121, try the member.orientation.unit_cell(), then
+    # member.crystal_symmetry.unit_cell().  After 20171121, use member.uc, which is
+    # supposedly always constructed to be the niggli cell.
+    unit_cells = np.zeros([len(self.members), 6])
+    self.pg_composition = {}
+    for i, member in enumerate(self.members):
+      unit_cells[i, :] = member.uc # supposed to be the Niggli setting cell parameters tuple
+      # Calculate point group composition
+      if member.pg in self.pg_composition:
+        self.pg_composition[member.pg] += 1
+      else:
+        self.pg_composition[member.pg] = 1
+
+    self.medians = np.median(unit_cells, 0).tolist()
+    self.stdevs = np.std(unit_cells, 0).tolist()
+    #ToDo
+    self.res = None
+
+  @classmethod
+  def from_directories(cls, path_to_integration_dir,
+                       _prefix='cluster_from_dir',
+                       n_images=None,
+                       dials=False,
+                       **kwargs):
+    """Constructor to get a cluster from pickle files, from the recursively
+    walked paths. Can take more than one argument for multiple folders.
+    usage: Cluster.from_directories(..)
+    :param path_to_integration_dir: list of directories containing pickle files.
+    Will be searched recursively.
+    :param n_images: find at most this number of images.
+    :param use_b: Boolean. If True, intialise Scale and B. If False, use only
+    mean intensity scalling.
+    """
+    if dials:
+      dials_refls = []
+      dials_expts = []
+      pickles = None
+      for arg in path_to_integration_dir:
+        for (dirpath, dirnames, filenames) in os.walk(arg):
+          for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            if path.endswith((".refl")):
+              dials_refls.append(path)
+            elif path.endswith((".expt")):
+              dials_expts.append(path)
+
+    else:
+      pickles = []
+      dials_refls = None
+      dials_expts = None
+      for arg in path_to_integration_dir:
+        for (dirpath, dirnames, filenames) in os.walk(arg):
+          for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            if path.endswith((".pickle", ".refl")):
+              print(path, "ends with .pickle or .refl")
+              pickles.append(path)
+
+    return Cluster.from_files(pickle_list=pickles, dials_refls=dials_refls,
+      dials_expts=dials_expts, _prefix=_prefix,
+      _message='Made from files in {}'.format(path_to_integration_dir[:]),
+      dials=dials, n_images=n_images, **kwargs)
+
+  @classmethod
+  def from_crystal_symmetries(cls, crystal_symmetries,
+                              lattice_ids=None,
+                              _prefix='cluster_from_crystal_symmetries',
+                              _message='Made from list of individual cells',
+                              n_images=None,
+                              dials=False,
+                              **kwargs):
+    """Constructor to get a cluster from a list of crystal symmetries.
+    """
+
+    data = []
+
+    from xfel.clustering.singleframe import CellOnlyFrame
+    if lattice_ids is not None:
+      assert len(lattice_ids) == len(crystal_symmetries)
+    for j, cs in enumerate(crystal_symmetries):
+      name = "lattice%07d"%j
+      lattice_id = None
+      if lattice_ids is not None:
+        lattice_id = lattice_ids[j]
+      this_frame = CellOnlyFrame(
+        crystal_symmetry=cs, path=name, name=name, lattice_id=lattice_id)
+      if hasattr(this_frame, 'crystal_symmetry'):
+          data.append(this_frame)
+      else:
+          logger.info('skipping item {}'.format(item))
+    logger.info("%d lattices will be analyzed"%(len(data)))
+
+    return cls(data, _prefix, _message)
+
+  @classmethod
+  def from_list( cls,file_name,
+                 raw_input=None,
+                 pickle_list=[],
+                 dials_refls=[],
+                 dials_expts=[],
+                 _prefix='cluster_from_file',
+                 _message='Made from list of individual cells',
+                 n_images=None,
+                 dials=False,
+                 **kwargs):
+    """Constructor to get a cluster from a single file.  The file must list unit cell a,b,c,alpha,beta,gamma
+    and space_group_type, each as a single token.
+    :param file_name: pathname of the file
+    """
+
+    data = []
+
+    from xfel.clustering.singleframe import CellOnlyFrame
+    stream = open(file_name,"r").readlines()
+    print("There are %d lines in the input file"%(len(stream)))
+    for j,item in enumerate(stream):
+      tokens = item.strip().split()
+      assert len(tokens) == 7, tokens
+      unit_cell_params = tuple([float(t) for t in tokens[0:5]])
+      space_group_type = tokens[6]
+      from cctbx.uctbx import unit_cell
+      uc_init = unit_cell(unit_cell_params)
+      from cctbx.sgtbx import space_group_info
+      sgi = space_group_info(space_group_type)
+      from cctbx import crystal
+      crystal_symmetry = crystal.symmetry(unit_cell=uc_init, space_group_info=sgi)
+      name = "lattice%07d"%j
+      this_frame = CellOnlyFrame(crystal_symmetry, path=name, name=name)
+      if hasattr(this_frame, 'crystal_symmetry'):
+          data.append(this_frame)
+      else:
+          logger.info('skipping item {}'.format(item))
+    print("%d lattices will be analyzed"%(len(data)))
+
+    return cls(data, _prefix, _message)
+
+  @classmethod
+  def from_iterable( cls,iterable,
+                     _prefix='cluster_from_iterable',
+                     _message='Made from list of individual cells',
+                     **kwargs):
+    """Constructor to get a cluster from an iterable (a list or tuple).  The
+    file must list unit cell a,b,c,alpha,beta,gamma and space_group_type,
+    each as a single token.
+    :param iterable: a list or a tuple
+    """
+
+    data = []
+    from xfel.clustering.singleframe import CellOnlyFrame
+    from cctbx.uctbx import unit_cell
+    from cctbx.sgtbx import space_group_info
+    from cctbx import crystal
+
+    for j,item in enumerate(iterable):
+      try:
+        assert len(item) == 7
+        unit_cell_params = tuple([float(t) for t in item[0:6]])
+        space_group_type = item[6]
+        uc_init = unit_cell(unit_cell_params)
+        sgi = space_group_info(space_group_type)
+        crystal_symmetry = crystal.symmetry(unit_cell=uc_init, space_group_info=sgi)
+        name = "lattice%07d"%j
+        this_frame = CellOnlyFrame(crystal_symmetry, path=name, name=name)
+        if hasattr(this_frame, 'crystal_symmetry'):
+            data.append(this_frame)
+      except Exception as e:
+        pass
+
+    return cls(data, _prefix, _message)
+
+  @classmethod
+  def from_files(cls,
+                 raw_input=None,
+                 pickle_list=[],
+                 dials_refls=[],
+                 dials_expts=[],
+                 _prefix='cluster_from_file',
+                 _message='Made from list of individual files',
+                 n_images=None,
+                 dials=False,
+                 json=False,
+                 **kwargs):
+    """Constructor to get a cluster from a list of individual files.
+    :param pickle_list: list of pickle files
+    :param dials_refls: list of DIALS integrated reflections
+    :param dials_expts: list of DIALS experiment jsons
+    :param n_images: find at most this number of images
+    :param dials: use the dials_refls and dials_expts arguments to construct the clusters (default: False)
+    :param use_b: Boolean. If True, intialise Scale and B. If False, use only
+    mean intensity scalling.
+    """
+
+    data = []
+
+    def sort_dials_raw_input(raw):
+      expts = []
+      refls = []
+      for path in raw:
+        if path.endswith((".pickle", ".refl")):
+          refls.append(path)
+        elif path.endswith((".json", ".expt")):
+          expts.append(path)
+      return (refls, expts)
+
+    def done():
+      if n_images is None:
+        return False
+      return len(data) >= n_images
+
+    if dials:
+      if raw_input is not None:
+        r, e = sort_dials_raw_input(raw_input)
+        dials_refls.extend(r)
+        dials_expts.extend(e)
+      for r, e in zip(dials_refls, dials_expts):
+        this_frame = SingleDialsFrameFromFiles(refls_path=r, expts_path=e, **kwargs)
+        if hasattr(this_frame, 'miller_array'):
+          data.append(this_frame)
+          if done():
+            break
+        else:
+          logger.info('skipping reflections {} and experiments {}'.format(r, e))
+    elif json:
+      if raw_input is not None:
+        r, e = sort_dials_raw_input(raw_input)
+        dials_expts.extend(e)
+      dials_expts_ids = [os.path.join(os.path.dirname(e), os.path.basename(e).split("_")[0])
+                         for e in dials_expts]
+      for e in dials_expts:
+        name = os.path.join(os.path.dirname(e), os.path.basename(e).split("_")[0])
+        this_frame = SingleDialsFrameFromJson(expts_path=e,  **kwargs)
+        this_frame.name=name
+        data.append(this_frame)
+        if done():
+            break
+    else:
+      if raw_input is not None:
+        pickle_list.extend(raw_input)
+      print("There are %d input files"%(len(pickle_list)))
+      from xfel.command_line.print_pickle import generate_data_from_streams
+      for data_dict in generate_data_from_streams(pickle_list):
+        this_frame = SingleFrame(dicti=data_dict, **kwargs)
+        if hasattr(this_frame, 'miller_array'):
+          data.append(this_frame)
+          if done():
+            break
+        else:
+          logger.info('skipping file {}'.format(os.path.basename(path)))
+      print("%d lattices will be analyzed"%(len(data)))
+
+    return cls(data, _prefix, _message)
+
+  @classmethod
+  def from_expts(cls,
+                 refl_table=None,
+                 expts_list=None,
+                 _prefix='cluster_from_file',
+                 _message='Made from experiment objects',
+                 n_images=None,
+                 **kwargs):
+    """Constructor to get a cluster from experiment and reflection list objects
+    :param refl_table: DIALS integrated reflection table
+    :param expts_list: DIALS experiment list
+    :param n_images: find at most this number of images
+    """
+
+    data = []
+
+    def done():
+      if n_images is None:
+        return False
+      return len(data) >= n_images
+
+    for i, expt in enumerate(expts_list):
+      sel = refl_table['id'] == i
+      refls_sel = refl_table.select(sel)
+      this_frame = SingleDialsFrame(refl=refls_sel, expt=expt, id=i, **kwargs)
+      if hasattr(this_frame, 'miller_array'):
+        data.append(this_frame)
+        if done():
+          break
+      else:
+        logger.info('skipping invalid experiment #{}'.format(i))
+
+    return cls(data, _prefix, _message)
+
+
+  def make_sub_cluster(self, new_members, new_prefix, new_info):
+    """ Make a sub-cluster from a list of SingleFrame objects from the old
+    SingleFrame array.
+
+    :param new_members: a new set of SingleFrame objects, typically a subset of
+    the current cluster.
+    :param new_prefix: prefix to be passed directly to __init__
+    :param new_info: new information about this cluster. This is inteligently
+    appended to the old info string so that the history of sub-clusters is
+    tracted.
+    """
+    return Cluster(new_members, new_prefix,
+                   ('{}\n{} Next filter {}\n{}\n{} of {} images passed'
+                    'on to this cluster').format(
+                     self.info, '#' * 30, '#' * 30, new_info,
+                     len(new_members), len(self.members)))
+
+  def best_by_CC(self, other, assert_is_similar_symmetry=False):
+    """ Return the SingleFrame object with the highest CC to a reference miller array.
+    :param other: miller array object to be correlated against
+    :return: a SingleFrame object.
+    """
+    max = 0
+    for sf in self.members:
+      corr =  sf.miller_array.correlation(other,
+                      assert_is_similar_symmetry=assert_is_similar_symmetry)
+      if corr > max:
+        best = sf
+    return best
+
+
+  def print_ucs(self):
+    """ Prints a list of all the unit cells in the cluster to CSV."""
+    outfile = "{}_niggli_ucs".format(self.cname)
+    out_str = ["File name, Point group, a, b, c, alpha, beta, gamma"]
+    for image in self.members:
+      out_str.append("{}, {}, {}, {}, {}, {}, {}, {}".format(
+        image.name, image.pg,
+        image.uc[0], image.uc[1],
+        image.uc[2], image.uc[3],
+        image.uc[4], image.uc[5]))
+    with open("{}.csv".format(outfile), 'w') as _outfile:
+      _outfile.write("\n".join(out_str))
+
+  def point_group_filter(self, point_group):
+    """ Return all the SingleFrames that have a given pointgroup. """
+    new_prefix = '{}_only'.format(point_group)
+    new_info = 'Cluster filtered by for point group {}.'.format(point_group)
+    return self.make_sub_cluster([image
+                                  for image
+                                  in self.members
+                                  if image.pg == point_group],
+                                 new_prefix,
+                                 new_info)
+
+  def total_intensity_filter(self, res='',
+                             completeness_threshold=0.95,
+                             plot=False):
+    """
+    .. note::
+      This is still in development, use at own risk!
+
+    Creates an optimal sub-cluster using the fewest images that fulfil the
+    criteria defined by:
+    :param res: desired resolution. Defaults to that of the dataset.
+    :param completeness: the desired completeness of the subset
+    :param multiplicity: the desired multiplicity of the subset
+    """
+    logger.info(("Performing intensity filtering, aiming for {}% overall "
+                  "completenes at {} A resolution").format(
+      completeness_threshold * 100, res))
+
+    # 0. Check that the cluster has consistent point_group (completness doesn't
+    #  mean much otherwise...
+    assert all(i.pg == self.members[0].pg for i in self.members)
+
+    # 1. Sort SingleFrames by total intensity
+    sorted_cluster = sorted(self.members, key=lambda y: -1 * y.total_i)
+
+    if plot:
+      import matplotlib.pyplot as plt
+      plt.plot([x.total_i for x in sorted_cluster])
+      plt.show()
+
+    if res == '':
+      res = sorted_cluster[0].d_min()  # Use the high-res limit from the
+      # brightest image. ToDo: make this better
+      logger.warning(("no resolution limit specified, using the res limit of"
+                       "the top-rankeed image: {} A").format(res))
+
+    # 2. Incrementally merge frames until criterion are matched
+
+    temp_miller_indicies = sorted_cluster[0].miller_array
+    for idx, image in enumerate(x.miller_array for x in sorted_cluster[1:]):
+      temp_miller_indicies = temp_miller_indicies. \
+        concatenate(image, assert_is_similar_symmetry=False)
+      current_completeness = temp_miller_indicies.merge_equivalents() \
+                                                .array() \
+                                                .completeness()
+      logger.debug(
+        "{} images: {:.2f}% complete".format(idx, current_completeness * 100))
+      if current_completeness <= completeness_threshold:
+        temp_miller_indicies.concatenate(image,
+                                         assert_is_similar_symmetry=False)
+        if idx + 1 == len(sorted_cluster[1:]):
+          logger.warning("Desired completeness could not be acheived, sorry.")
+          file_threshold = idx
+          break
+      else:
+        file_threshold = idx
+        break
+
+    return self.make_sub_cluster(sorted_cluster[:file_threshold],
+                                 'I_threshold_d{}_{}comp'.format(res,
+                                                        completeness_threshold),
+                                 ("Subset cluster made using "
+                                  "total_intensity_filter() with"
+                                  "\nRes={}\ncompleteness_threshold={}").format(
+                                   res,
+                                   completeness_threshold))
+
+  def ab_cluster(self, threshold=10000, method='distance',
+                 linkage_method='single', log=False,
+                 ax=None, write_file_lists=True, schnell=False, doplot=True,
+                 labels='default'):
+    """
+    Hierarchical clustering using the unit cell dimentions.
+
+    :param threshold: the threshold to use for prunning the tree into clusters.
+    :param method: which clustering method from scipy to use when creating the tree (see scipy.cluster.hierarchy)
+    :param linkage_method: which linkage method from scipy to use when creating the linkages. x (see scipy.cluster.hierarchy)
+    :param log: if True, use log scale on y axis.
+    :param ax: if a matplotlib axes object is provided, plot to this. Otherwise, create a new axes object and display on screen.
+    :param write_file_lists: if True, write out the files that make up each cluster.
+    :param schnell: if True, use simple euclidian distance, otherwise, use Andrews-Berstein distance from Andrews & Bernstein J Appl Cryst 47:346 (2014) on the Niggli cells.
+    :param doplot: Boolean flag for if the plotting should be done at all.
+    Runs faster if switched off.
+    :param labels: 'default' will not display any labels for more than 100 images, but will display file names for fewer. This can be manually overidden with a boolean flag.
+    :return: A list of Clusters ordered by largest Cluster to smallest
+
+    .. note::
+      Use 'schnell' option with caution, since it can cause strange behaviour
+      around symmetry boundaries.
+    """
+
+    logger.info("Hierarchical clustering of unit cells")
+    import scipy.spatial.distance as dist
+    import scipy.cluster.hierarchy as hcluster
+
+    # 1. Create a numpy array of G6 cells
+    g6_cells = np.array([SingleFrame.make_g6(image.uc)
+                         for image in self.members])
+
+    # 2. Do hierarchichal clustering, using the find_distance method above.
+    if schnell:
+      logger.info("Using Euclidean distance")
+      pair_distances = dist.pdist(g6_cells, metric='euclidean')
+      metric = 'euclidean'
+    else:
+      logger.info("Using Andrews-Bernstein distance from Andrews & Bernstein "
+                   "J Appl Cryst 47:346 (2014)")
+      pair_distances = dist.pdist(g6_cells,
+                                metric=lambda a, b: NCDist(a, b))
+      metric = lambda a, b: NCDist(a, b)
+    if len(pair_distances) > 0:
+      logger.info("Distances have been calculated")
+      this_linkage = hcluster.linkage(pair_distances,
+                                      method=linkage_method,
+                                      metric=metric)
+      cluster_ids = hcluster.fcluster(this_linkage,
+                                      threshold,
+                                      criterion=method)
+      logger.debug("Clusters have been calculated")
+    else:
+      logger.debug("No distances were calculated. Aborting clustering.")
+      return [], None
+
+    # 3. Create an array of sub-cluster objects from the clustering
+    sub_clusters = []
+    for cluster in range(max(cluster_ids)):
+      info_string = ('Made using ab_cluster with t={},'
+                     ' {} method, and {} linkage').format(threshold,
+                                                          method,
+                                                          linkage_method)
+      sub_clusters.append(self.make_sub_cluster([self.members[i]
+                                                 for i in
+                                                 range(len(self.members))
+                                                 if
+                                                 cluster_ids[i] == cluster + 1],
+                                                'cluster_{}'.format(
+                                                  cluster + 1),
+                                                info_string))
+
+    sub_clusters = sorted(sub_clusters, key=lambda x: len(x.members))
+    # Rename to order by size
+    for num, cluster in enumerate(sub_clusters):
+      cluster.cname = 'cluster_{}'.format(num + 1)
+
+    # 3.5 optionally write out the clusters to files.
+    if write_file_lists:
+      for cluster in sub_clusters:
+        if len(cluster.members) > 1:
+          cluster.dump_file_list(out_file_name="{}.lst".format(cluster.cname))
+
+    if doplot:
+      import matplotlib.pyplot as plt
+      if labels is True:
+        labels = [image.name for image in self.members]
+      elif labels is False:
+        labels = ['' for _ in self.members]
+      elif labels == 'default':
+        if len(self.members) > 100:
+          labels = ['' for _ in self.members]
+        else:
+          labels = [image.name for image in self.members]
+      else:
+         labels = [getattr(v, labels, '') for v in self.members]
+
+      # 4. Plot a dendogram to the axes if no axis is passed, otherwise just
+      #    return the axes object
+      if ax is None:
+        fig = plt.figure("Distance Dendogram")
+        ax = fig.gca()
+        direct_visualisation = True
+      else:
+        direct_visualisation = False
+
+      hcluster.dendrogram(this_linkage,
+                          labels=labels,
+                          p=200,
+                          truncate_mode='lastp', # show only the last p merged clusters
+                          leaf_font_size=8, leaf_rotation=90.0,
+                          color_threshold=threshold, ax=ax)
+
+      if log:
+        ax.set_yscale("symlog", linthreshx=(-1,1))
+      else:
+        ax.set_ylim(-ax.get_ylim()[1] / 100, ax.get_ylim()[1])
+
+      if direct_visualisation:
+        fig.savefig("{}_dendogram.pdf".format(self.cname))
+        plt.show()
+
+    return sub_clusters, ax
+
+  def dump_file_list(self, out_file_name=None):
+    """ Dumps a list of paths to inegration pickle files to a file. One
+    line per image. Provides easy input into post-refinement programs.
+
+    :param out_file_name: the output file name.
+    """
+    if out_file_name is None:
+      out_file_name = self.cname
+
+    with open(out_file_name, 'w') as outfile:
+      for i in self.members:
+        outfile.write(i.path + "\n")
+
+  def visualise_orientational_distribution(self, axes_to_return=None,
+                                           cbar=True):
+
+    """ Creates a plot of the orientational distribution of the unit cells.
+
+    :param axes_to_return: if None, print to screen, otherwise, requires 3 axes objects, and will return them.
+    :param cbar: boolean to specify if a color bar should be used.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patheffects as patheffects
+    from mpl_toolkits.basemap import Basemap
+    import scipy.ndimage as ndi
+
+    def cart2sph(x, y, z):
+      # cctbx (+z to source, y to ceiling) to
+      # lab frame (+x to source, z to ceiling)
+      z, x, y = x, y, z
+      dxy = np.sqrt(x ** 2 + y ** 2)
+      r = np.sqrt(dxy ** 2 + z ** 2)
+      theta = np.arctan2(y, x)
+      phi = np.arctan2(z, dxy)  # angle of the z axis relative to xy plane
+      theta, phi = np.rad2deg([theta, phi])
+      return theta % 360, phi, r
+
+    def xy_lat_lon_from_orientation(orientation_array, axis_id):
+      logger.debug("axis_id: {}".format(axis_id))
+      dist = math.sqrt(orientation_array[axis_id][0] ** 2 +
+                       orientation_array[axis_id][1] ** 2 +
+                       orientation_array[axis_id][2] ** 2)
+      flon, flat, bla = cart2sph(orientation_array[axis_id][0] / dist,
+                                 orientation_array[axis_id][1] / dist,
+                                 orientation_array[axis_id][2] / dist)
+      x, y = euler_map(flon, flat)
+      return x, y, flon, flat
+
+    orientations = [flex.vec3_double(flex.double(
+      image.orientation.direct_matrix()))
+      for image in self.members]
+
+    space_groups = [image.orientation.unit_cell().lattice_symmetry_group()
+                    for image in self.members]
+
+    # Now do all the plotting
+    if axes_to_return is None:
+      plt.figure(figsize=(10, 14))
+      axes_to_return = [plt.subplot2grid((3, 1), (0, 0)),
+                        plt.subplot2grid((3, 1), (1, 0)),
+                        plt.subplot2grid((3, 1), (2, 0))]
+      show_image = True
+    else:
+      assert len(axes_to_return) == 3, "If using axes option, must hand" \
+                                       " 3 axes to function."
+      show_image = False
+
+    axis_ids = [0, 1, 2]
+    labels = ["a",
+              "b",
+              "c"]
+
+    for ax, axis_id, label in zip(axes_to_return, axis_ids, labels):
+
+      # Lists of x,y,lat,long for the master orientation, and for all
+      # symmetry mates.
+      x_coords = []
+      y_coords = []
+      lon = []
+      lat = []
+      sym_x_coords = []
+      sym_y_coords = []
+      sym_lon = []
+      sym_lat = []
+      euler_map = Basemap(projection='eck4', lon_0=0, ax=ax)
+
+      for orientation, point_group_type in zip(orientations, space_groups):
+
+        # Get position of main spots.
+        main_x, main_y, main_lon, main_lat \
+          = xy_lat_lon_from_orientation(list(orientation), axis_id)
+        x_coords.append(main_x)
+        y_coords.append(main_y)
+        lon.append(main_lon)
+        lat.append(main_lat)
+
+        # Get position of symetry mates
+        symmetry_operations = list(point_group_type.smx())[1:]
+        for mx in symmetry_operations:
+          rotated_orientation = list(mx.r().as_double() * orientation)  # <--
+          # should make sense if orientation was a vector, not clear what is
+          # going on since orientation is a matrix. Or, make some test cases
+          # with 'orientation' and see if the behave as desired.
+          sym_x, sym_y, sym_lo, sym_la \
+            = xy_lat_lon_from_orientation(rotated_orientation, axis_id)
+          #assert (sym_x, sym_y) != (main_x, main_y)
+          sym_x_coords.append(sym_x)
+          sym_y_coords.append(sym_y)
+          sym_lon.append(sym_lo)
+          sym_lat.append(sym_la)
+
+      # Plot each image as a yellow sphere
+      logger.debug(len(x_coords))
+      euler_map.plot(x_coords, y_coords, 'oy',
+                     markersize=4,
+                     markeredgewidth=0.5)
+
+      # Plot the symetry mates as black crosses
+      #euler_map.plot(sym_x_coords, sym_y_coords, 'kx')
+
+      # Use a histogram to bin the data in lattitude/longitude space, smooth it,
+      # then plot this as a contourmap. This is for all the symetry-related
+      # copies
+      #density_hist = np.histogram2d(lat + sym_lat, lon + sym_lon,
+      #                                    bins=[range(-90, 91), range(0, 361)])
+      # No symmetry mates until we can verify what the cctbx libs are doing
+      density_hist = np.histogram2d(lat, lon,
+                                    bins=[list(range(-90, 91)), list(range(0, 361))])
+      smoothed = ndi.gaussian_filter(density_hist[0], (15, 15), mode='wrap')
+      local_intensity = []
+      x_for_plot = []
+      y_for_plot = []
+      for _lat in range(0, 180):
+        for _lon in range(0, 360):
+          _x, _y = euler_map(density_hist[2][_lon], density_hist[1][_lat])
+          x_for_plot.append(_x)
+          y_for_plot.append(_y)
+          local_intensity.append(smoothed[_lat, _lon])
+      cs = euler_map.contourf(np.array(x_for_plot),
+                              np.array(y_for_plot),
+                              np.array(local_intensity), tri=True)
+
+      #  Pretty up graph
+      if cbar:
+        _cbar = plt.colorbar(cs, ax=ax)
+        _cbar.ax.set_ylabel('spot density [AU]')
+      middle = euler_map(0, 0)
+      path_effect = [patheffects.withStroke(linewidth=3, foreground="w")]
+      euler_map.plot(middle[0], middle[1], 'o', markersize=10, mfc='none')
+      euler_map.plot(middle[0], middle[1], 'x', markersize=8)
+      ax.annotate("beam", xy=(0.52, 0.52), xycoords='axes fraction',
+                  size='medium', path_effects=path_effect)
+      euler_map.drawmeridians(np.arange(0, 360, 60),
+                              labels=[0, 0, 1, 0],
+                              fontsize=10)
+      euler_map.drawparallels(np.arange(-90, 90, 30),
+                              labels=[1, 0, 0, 0],
+                              fontsize=10)
+      ax.annotate(label, xy=(-0.05, 0.9), xycoords='axes fraction',
+                  size='x-large', weight='demi')
+
+    if show_image:
+      plt.show()
+
+    return axes_to_return
+
+  def intensity_statistics(self, ax=None):
+    """
+    Uses the per-frame B and G fits (gradient and intercept of the ln(i) vs
+    (sin(theta)/lambda)**2 plot) to create three agregate plots:
+    1) histogram of standard errors on the per-frame fits
+    2) histogram of B factors
+    3) scatter  plot of intercept vs. gradient (G vs. B)
+
+    :param ax: optionally hand the method three matplotlib axes objects to plot onto. If not specified, will plot the data.
+    :return: the three axes, with the data plotted onto them.
+    """
+    import matplotlib.pyplot as plt
+    if ax is None:
+      plt.figure(figsize=(10, 14))
+      axes_to_return = [plt.subplot2grid((3, 1), (0, 0)),
+                        plt.subplot2grid((3, 1), (1, 0)),
+                        plt.subplot2grid((3, 1), (2, 0))]
+      show_image = True
+    else:
+      assert len(ax) == 3, "If using axes option, must hand" \
+                                       " 3 axes to function."
+      axes_to_return = ax
+      show_image = False
+
+    errors = [i.wilson_err['Standard Error'] for i in self.members]
+    axes_to_return[0].hist(errors, 50, range=[0, 200])
+    axes_to_return[0].set_title("Standard Errors on Wilson fit")
+    axes_to_return[0].set_ylabel("Count")
+    axes_to_return[0].set_xlabel(r"Standard Error [$\AA^2$]")
+
+    rs = [-1 * i.minus_2B / 2 for i in self.members]
+    axes_to_return[1].hist(rs, 50, range=[-50, 200])
+    axes_to_return[1].set_title("B values for Wilson plot")
+    axes_to_return[1].set_ylabel("Count")
+    axes_to_return[1].set_xlabel(r"B [$\AA^2$]")
+
+    axes_to_return[2].plot([i.G for i in self.members],
+             [-1 * i.minus_2B / 2 for i in self.members], 'x')
+    axes_to_return[2].set_xlabel("G [AU]")
+    axes_to_return[2].set_ylabel(r"B [$\AA^2$]")
+    axes_to_return[2].set_title("G and B for all members")
+
+    plt.tight_layout()
+
+    if show_image:
+      plt.show()
+
+    return axes_to_return
+
+  def all_frames_intensity_stats(self, ax=None, smoothing_width=2000):
+    """
+    Goes through all frames in the cluster, and plots all the partial intensites.
+    Then does a linear fit and rolling average on these.
+
+    :param smoothing_width: the width of the smoothing window.
+    :param ax: Optional matplotlib axes object to plot to. Otherwise, plot to screen.
+    :return: the axis, with the data plotted onto it.
+    """
+    from scipy.stats import linregress
+    from xfel.clustering.singleframe import SingleFrame as Sf
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+      fig = plt.figure("All images intensity statistics")
+      ax = fig.gca()
+      direct_visualisation = True
+    else:
+      direct_visualisation = False
+
+
+    all_logi = []
+    all_one_over_d_squared = []
+
+    for frame in self.members:
+      all_logi.append(frame.log_i)
+      all_one_over_d_squared.append(frame.sinsqtheta_over_lambda_sq)
+
+    all_logi = np.concatenate(all_logi)
+    all_one_over_d_squared = np.concatenate(all_one_over_d_squared)
+
+    plotting_data = sorted(zip(all_logi, all_one_over_d_squared),
+                           key = lambda x: x[1])
+
+    log_i, one_over_d_square = zip(*[i for i in plotting_data
+                                     if i[0] >=0])
+    minus_2B, G, r_val, _, std_err = linregress(one_over_d_square, log_i)
+    fit_info = "G: {:.2f}, -2B: {:.2f}, r: {:.2f}, std_err: {:.2f}".format(G, minus_2B,
+                                                            r_val, std_err)
+    smooth = Sf._moving_average(log_i, n=smoothing_width)
+    ax.plot(one_over_d_square, log_i, 'bo', ms=1)
+    ax.plot(one_over_d_square[smoothing_width - 1:], smooth,'--r', lw=2)
+    plt.xlim([0, max(one_over_d_square)])
+    ax.plot([0, -1 * G / minus_2B], [G, 0], 'y-', lw=2)
+    plt.xlabel(r"$(sin(\theta)/\lambda)^2 [\AA^{-2}]$")
+    plt.ylabel("ln(I)")
+    plt.title("Simple Wilson fit\n{}".format(fit_info))
+    plt.tight_layout()
+
+    if direct_visualisation:
+      fig.savefig("{}_dendogram.pdf".format(self.cname))
+      plt.show()
+
+    return ax
+
+  def merge_dict(self, use_fullies=False):
+    """ Make a dict of Miller indices with  ([list of intensities], resolution)
+    value tuples for each miller index.
+    """
+
+    miller_dict = {}
+    for m in self.members:
+      # Use fullies if requested
+      if use_fullies:
+        if m.miller_fullies:
+          miller_array = m.miller_fullies
+        else:
+          logger.warning("Fully recorded array has not been calculated")
+      else:
+        miller_array = m.miller_array
+
+      # Create a dictionairy if SingleMiller observations
+      d_spacings = list(miller_array.d_spacings().data())
+      miller_indeces = list(miller_array.indices())
+      miller_intensities = list(miller_array.data())
+      miller_sigmas = list(miller_array.sigmas())
+
+      for observation in zip(miller_indeces,
+                             miller_intensities,
+                             miller_sigmas,
+                             d_spacings):
+        try:
+          miller_dict[observation[0]].add_obs(observation[1],
+                                              observation[2])
+        except KeyError:
+          miller_dict[observation[0]] = SingleMiller(observation[0],
+                                                     observation[3])
+          miller_dict[observation[0]].add_obs(observation[1],
+                                              observation[2])
+    return miller_dict
+
+  def __len__(self):
+    """ Number of images in the cluster """
+    return len(self.members)
+
+  def dump_as_mtz(self, mtz_name, use_fullies=False):
+    """ Merge using weighted mean and standard deviation if all miller arrays """
+    from cctbx.crystal import symmetry
+    from cctbx import miller
+
+    assert all((str(m.miller_array.space_group_info())  \
+                == str(self.members[0].miller_array.space_group_info())
+                for m in self.members)),  \
+                "All images must be in the same point group!"
+
+    final_sym = symmetry(unit_cell=self.medians,
+              space_group_info=self.members[0].miller_array.space_group_info())
+    # Find mean_Iobs
+    mil_dict = self.merge_dict(use_fullies=use_fullies)
+    single_millers = list(mil_dict.values())
+    indices = [md.index for md in single_millers]
+    iobs, sig_iobs = zip(*[md.weighted_mean_and_std() for md in single_millers])
+    all_obs = miller.array(miller_set=self.members[0] \
+                                          .miller_array \
+                                          .customized_copy(
+                                            crystal_symmetry=final_sym,
+                                            indices=flex.miller_index(indices),
+                                            unit_cell=self.medians),
+                                            data = flex.double(iobs),
+                                            sigmas = flex.double(sig_iobs))
+    all_obs = all_obs.set_observation_type_xray_intensity() \
+                     .average_bijvoet_mates()
+
+    all_obs = all_obs.select(all_obs.data() > 0)
+    mtz_out = all_obs.as_mtz_dataset(column_root_label="Iobs",
+                                         title=self.cname,
+                                         wavelength=np.median(
+                                           [m.wavelength for m in self.members]))
+    mtz_out.add_miller_array(miller_array=all_obs,
+                                 column_root_label="IMEAN")
+    mtz_obj = mtz_out.mtz_object()
+    mtz_obj.write(mtz_name)
+
+    logger.info("MTZ file written to {}".format(mtz_name))
+
+  def to_pandas(self):
+    import pandas as pd
+    return pd.DataFrame({s['name']: s
+                         for s
+                         in [m.to_panda() for m in self.members]}).T
+
+  def uc_feature_vector(self):
+    """ Return a len(cluster) * 6 numpy array of features for use in ML algos"""
+    ucs = [c.uc for c in self.members]
+    return  np.array(zip(*ucs))
+
+
+  def prime_postrefine(self, inputfile):
+    """ Run postrefinement from Prime on a cluster. Implements the prime API, and updates the SingleFrame objects with the attribute `miller_fullies`.
+    :param cluster: a cluster object.
+    :param inputfile: a Prime .inp file.
+    """
+    from .api import refine_many
+    miller_fullies = refine_many(self.members, inputfile)
+    for mil, sf in zip(miller_fullies, self.members):
+      sf.miller_fullies = mil
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/cluster_groups.py
+""" Utilitites for dealing with lists of clusters. """
+from __future__ import absolute_import, division, print_function
+__author__ = 'zeldin'
+
+def unit_cell_info(sub_clusters):
+  """
+  Print unit cell information for a list of clusters.
+
+  :param sub_clusters: a list of cluster objects
+  :return: a string containing median unit cells, standard deviations and
+   point group composition of each cluster.
+  """
+  from libtbx.utils import plural_s
+  # 3. print out some information that is useful.
+  out_str = "\n\n{:<16} {:<8} {:<13} {:<13} {:<13} {:<12} {:<12} {:<12}{:<8}\n".format(
+    "Cluster_id",
+    "N_xtals",
+    "Med_a", "Med_b", "Med_c",
+    "Med_alpha", "Med_beta", "Med_gamma","Delta(deg)")
+  singletons = []
+  for cluster in sub_clusters:
+    if len(cluster.members) != 1:
+      # New approach, takes niggli setting of the cluster median and converts
+      # back to reference setting for cluster report. Fixes cctbx#97.
+      from cctbx import crystal
+      from cctbx.uctbx import unit_cell
+      from cctbx.sgtbx.lattice_symmetry import metric_subgroups
+
+      input_symmetry = crystal.symmetry(
+          unit_cell=unit_cell(cluster.medians[0:6]),
+          space_group_symbol="P 1")
+      groups = metric_subgroups(input_symmetry, 3.00,
+        enforce_max_delta_for_generated_two_folds=True)
+      group = groups.result_groups[0]
+      print("                       Unit cell:", group['best_subsym'].unit_cell())
+      uc_params_conv = group['best_subsym'].unit_cell().parameters()
+
+      sorted_pg_comp = sorted(list(cluster.pg_composition.items()),
+                              key=lambda x: -1 * x[1])
+      pg_strings = ["{} in {}".format(pg[1], pg[0])
+                    for pg in sorted_pg_comp]
+      point_group_string = ", ".join(pg_strings) + "."
+      out_str += point_group_string
+      out_str += ("\n{:<16} {:<8} {:<6.2f}({:<5.2f}) {:<6.2f}({:<5.2f})"
+                  " {:<6.2f}({:<5.2f}) {:<6.2f}({:<4.2f}) {:<6.2f}"
+                  "({:<4.2f}) {:<6.2f}({:<4.2f})").format(
+        cluster.cname,
+        len(cluster.members),
+        cluster.medians[0], cluster.stdevs[0],
+        cluster.medians[1], cluster.stdevs[1],
+        cluster.medians[2], cluster.stdevs[2],
+        cluster.medians[3], cluster.stdevs[3],
+        cluster.medians[4], cluster.stdevs[4],
+        cluster.medians[5], cluster.stdevs[5])
+      out_str += ("\n{:>24}  {:<6.2f}{:<7} {:<6.2f}{:<7}"
+                  " {:<6.2f}{:<7} {:<6.2f}{:<6} {:<6.2f}"
+                  "{:<6} {:<6.2f}{:<6}  {:<6.2}").format(
+        group['best_subsym'].space_group_info().symbol_and_number(),
+        uc_params_conv[0], "",
+        uc_params_conv[1], "",
+        uc_params_conv[2], "",
+        uc_params_conv[3], "",
+        uc_params_conv[4], "",
+        uc_params_conv[5], "",
+        group["max_angular_difference"]) + "\n\n"
+
+    else:
+      singletons.append("".join([("{:<14} {:<11.2f} {:<11.2f} {:<11.2f}"
+                                  "{:<12.1f} {:<12.1f} {:<12.1f}").format(
+        list(cluster.pg_composition.keys())[0],
+        cluster.members[0].uc[0], cluster.members[0].uc[1],
+        cluster.members[0].uc[2], cluster.members[0].uc[3],
+        cluster.members[0].uc[4], cluster.members[0].uc[5]),
+                                 '\n']))
+  out_str += "\nStandard deviations are in brackets."
+  explanation = """\nEach cluster:
+Input lattice count, with integration Bravais setting space group.
+Cluster median with Niggli cell parameters (std dev in brackets).
+Highest possible metric symmetry and unit cell using LePage (J Appl Cryst 1982, 15:255) method, maximum delta 3deg."""
+  out_str += explanation
+  singleton_str = "\n%i singleton%s:" %plural_s(len(singletons))
+  singleton_str += "\n\n{:<14} {:<11} {:<11} {:<11}{:<12} {:<12} {:<12}\n".format(
+    "Point group",
+    "a", "b", "c",      "alpha", "beta", "gamma")
+  singleton_str += "".join(singletons)
+  n_clusters = len(sub_clusters) - len(singletons)
+  out_str = "\n%i cluster%s:" %plural_s(n_clusters) + out_str
+  return singleton_str + out_str
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/command_line/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/command_line/cluster_42.py
+# LIBTBX_SET_DISPATCHER_NAME cluster.42
+from __future__ import absolute_import, division, print_function
+__author__ = 'zeldin'
+
+import logging
+from xfel.clustering.cluster import Cluster
+from xfel.clustering.cluster_groups import unit_cell_info
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+
+FORMAT = '%(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT)
+
+def run(_args):
+  if _args < 2:
+    raise IOError("Must give at least one path to folder of pickles")
+
+  ucs = Cluster.from_directories(_args.folders, "cluster_42")
+  logging.info("Data imported.")
+
+  #  Set up mega-plot
+  plt.figure(figsize=(22, 15))
+  gs = gridspec.GridSpec(3, 3, height_ratios=[1, 1, 3])
+  orr_axes = [plt.subplot(gs[0, 0]),
+              plt.subplot(gs[0, 1]),
+              plt.subplot(gs[0, 2])]
+  inten_axes = [plt.subplot(gs[1, 0]),
+                plt.subplot(gs[1, 1]),
+                plt.subplot(gs[1, 2])]
+  clust_ax = plt.subplot(gs[2, :])
+
+
+  orr_axes = ucs.visualise_orientational_distribution(orr_axes, cbar=True)
+  inten_axes = ucs.intensity_statistics(inten_axes)
+  clusters, cluster_ax = ucs.ab_cluster(_args.t, log=_args.log, ax=clust_ax,
+                                        schnell=_args.fast, write_file_lists=False)
+
+  #plt.text("cluster.42 Plot Everything!")
+  plt.tight_layout()
+
+  print(unit_cell_info(clusters))
+  plt.show()
+
+if __name__ == "__main__":
+  import argparse
+  parser = argparse.ArgumentParser(description=('Create a smorgasboard mega-'
+                                                'plot for visualising a set of'
+                                                ' integration results.'))
+  parser.add_argument('folders', type=str, nargs='+',
+                      help='One or more folers containing integration pickles.')
+  parser.add_argument('-t', type=float, default=5000,
+                      help='threshold value for the unit cell clustering. '
+                           'Default = 5000')
+  parser.add_argument('--log', action='store_true',
+                      help="Display the dendrogram with a log scale")
+  parser.add_argument('--fast', action='store_true',
+                      help="Use Euclidean distance for dendogram. Faster but "
+                           "less accurate")
+  args = parser.parse_args()
+  run(args)
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/command_line/cluster_intensity_statistics.py
+# LIBTBX_SET_DISPATCHER_NAME cluster.intensity_statistics
+from __future__ import absolute_import, division, print_function
+__author__ = 'zeldin'
+
+import logging
+from xfel.clustering.cluster import Cluster
+from matplotlib import pyplot as plt
+import matplotlib.gridspec as gridspec
+FORMAT = '%(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT)
+
+
+def run(_args):
+  if _args < 2:
+    raise IOError("Must give at least one path to folder of pickles")
+
+  ucs = Cluster.from_directories(_args.folders, "cluster_intensity_stats")
+  logging.info("Data imported.")
+  plt.figure(figsize=(20,10))
+  gs = gridspec.GridSpec(3, 2, width_ratios=[1, 3])
+  inten_axes = [plt.subplot(gs[0,0]),
+                plt.subplot(gs[1,0]),
+                plt.subplot(gs[2,0])]
+  big_axes = plt.subplot(gs[:,1])
+
+  ucs.intensity_statistics(ax=inten_axes)
+  ucs.all_frames_intensity_stats(ax=big_axes)
+  plt.tight_layout()
+  plt.show()
+
+
+if __name__ == "__main__":
+  import argparse
+  parser = argparse.ArgumentParser(description=('Shows overall unmerged I vs. 1'
+                                                '/d**2 statistics'))
+  parser.add_argument('folders', type=str, nargs='+',
+                      help='One or more folers containing integration pickles.')
+  args = parser.parse_args()
+  run(args)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/command_line/cluster_per_frame_wilson.py
+# LIBTBX_SET_DISPATCHER_NAME cluster.individual_frame_intensity
+from __future__ import absolute_import, division, print_function
+__author__ = 'zeldin'
+
+import logging
+from xfel.clustering.cluster import Cluster
+import matplotlib.pyplot as plt
+
+FORMAT = '%(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT)
+
+class Key_event:
+  def __init__(self, ax, members, fig):
+    self.image_index = 0
+    self.ax = ax
+    self.members = members
+    self.fig = fig
+
+  def key_event(self, e):
+    if e.key == "right":
+      self.image_index += 1
+    elif e.key == "left":
+      self.image_index -= 1
+    else:
+      return
+    self.ax.cla()
+    self.image_index %= len(self.members)
+    self.ax = self.members[self.image_index].plot_wilson(ax=self.ax)
+    self.fig.canvas.draw()
+
+def run(_args):
+  if _args < 2:
+    raise IOError("Must give at least one path to folder of pickles")
+
+  ucs = Cluster.from_directories(_args.folders, "Per-frame-Wilson")
+  logging.info("Data imported.")
+
+
+  fig = plt.figure(figsize=(10,10))
+  ax = plt.gca()
+  ucs.members[0].plot_wilson(ax=ax)
+
+  browser = Key_event(ax, ucs.members, fig)
+
+  fig.canvas.mpl_connect('key_press_event', browser.key_event)
+  plt.show()
+
+if __name__ == "__main__":
+  import argparse
+  parser = argparse.ArgumentParser(description="Create image-by-image Wilson "
+               "plots that can be clicked through using left and right arrows.")
+  parser.add_argument('folders', type=str, nargs='+',
+                      help='One or more folers containing integration pickles.')
+  args = parser.parse_args()
+  run(args)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/command_line/cluster_unit_cell.py
+# LIBTBX_SET_DISPATCHER_NAME cluster.unit_cell
+from __future__ import absolute_import, division, print_function
+import logging
+from xfel.clustering.cluster import Cluster
+from xfel.clustering.cluster_groups import unit_cell_info
+import matplotlib.pyplot as plt
+
+FORMAT = '%(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT)
+
+def run(_args):
+  if _args.paths:
+    ucs = Cluster.from_files(raw_input=_args.dirs, n_images=_args.n, dials=_args.dials, json=_args.json)
+  elif _args.text:
+    assert len(_args.dirs)==1 # one file
+    one_file = _args.dirs[0]
+    ucs = Cluster.from_list(one_file)
+  else:
+    ucs = Cluster.from_directories(_args.dirs, n_images=_args.n, dials=_args.dials)
+
+  if not _args.noplot:
+    clusters, _ = ucs.ab_cluster(_args.t, log=_args.log,
+                               write_file_lists=_args.nofiles,
+                               schnell=_args.schnell,
+                               doplot=_args.noplot)
+    print(unit_cell_info(clusters))
+  else:
+    plt.figure("Andrews-Bernstein distance dendogram", figsize=(12, 8))
+    ax = plt.gca()
+    clusters, cluster_axes = ucs.ab_cluster(_args.t, log=_args.log, ax=ax,
+                                            write_file_lists=_args.nofiles,
+                                            schnell=_args.schnell,
+                                            doplot=_args.noplot)
+    print(unit_cell_info(clusters))
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+  import argparse
+  parser = argparse.ArgumentParser(description=('Find the best target cell from'
+                                                'a set of indexing pickles.'))
+  parser.add_argument('dirs', type=str, nargs='+',
+                      help='One or more paths to directories, integration pickles or DIALS experiment lists.')
+  parser.add_argument('--text', action='store_true',
+                      help='Interpret the argument as a text file containing unit cells and space group type.')
+  parser.add_argument('--paths', action='store_true',
+                      help='Interpret the arguments as complete paths to pickles or tarred pickles, not directories.')
+  parser.add_argument('--dials', action='store_true',
+                      help='Interpret the arguments as DIALS-format pickles and jsons.')
+  parser.add_argument('--json', action='store_true',
+                      help='Interpret the arguments as DIALS-format jsons only, no reflection tables.'
+                           "specifically implemented for unit cell clustering without reflections.")
+  parser.add_argument('-t', type=float, default=5000,
+                      help='threshold value for the clustering. Default = 5000')
+  parser.add_argument('--noplot', action='store_false',
+                      help="Do not display plots")
+  parser.add_argument('--log', action='store_true',
+                    help="Display the dendrogram with a log scale")
+  parser.add_argument('--schnell', action='store_true',
+                    help="Use euclidian distance only for increased speed."\
+                    "Risky!")
+  parser.add_argument('--nofiles', action='store_false',
+                      help="Write files with lists of the images making up "
+                           "each cluster")
+  parser.add_argument('-n', type=int, default=None, help="Maximum number of files to use")
+  args = parser.parse_args()
+  run(args)
+  #import cProfile
+  #cProfile.run('run(args)')
+#  parser.add_argument('-m', type=str, default='distance',
+#                      help='Clustering method for numpy clustering.')
+#  parser.add_argument('-l', type=str, default='single',
+#                      help='Linkage method for clustering. Default single.')
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/command_line/cluster_visualise_orientations.py
+# LIBTBX_SET_DISPATCHER_NAME cluster.visualize_orientations
+from __future__ import absolute_import, division, print_function
+__author__ = 'zeldin'
+#from libtbx.utils import multi_out
+
+
+def run(_args):
+  import logging
+  from xfel.clustering.cluster import Cluster
+  FORMAT = '%(message)s'
+  logging.basicConfig(level=logging.WARNING, format=FORMAT)
+
+  if _args.paths:
+    cluster = Cluster.from_files(raw_input=_args.folders, dials=_args.dials)
+  else:
+    cluster = Cluster.from_directories(_args.folders, 'Command line visualisation', dials=_args.dials)
+
+  logging.info("data imported")
+  cluster.visualise_orientational_distribution()
+
+if __name__ == "__main__":
+  import argparse
+
+  parser = argparse.ArgumentParser(description=('''Visualise the orientational
+  distribution of a set of integration pickles'''))
+  parser.add_argument('folders', type=str, nargs='+',
+                      help='One or more folers containing integration pickles.')
+  parser.add_argument('--dials', action='store_true',
+                      help='Interpret the arguments as DIALS-format pickles and jsons.')
+  parser.add_argument('--paths', action='store_true',
+                      help='Interpret the arguments as complete paths to pickles or tarred pickles, not directories.')
+  args = parser.parse_args()
+  result = run(args)
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/simulate_partial_data.py
+# LIBTBX_SET_DISPATCHER_NAME cluster.simulate_partial_data
+"""
+This module contains tools for simulating partial integration data. In
+particular, it is intended to help test XFEL data merging tools.
+"""
+from __future__ import absolute_import, division, print_function
+
+from iotbx import mtz
+import cctbx.miller
+from cctbx.crystal_orientation import crystal_orientation, basis_type
+from scitbx.matrix import sqr, col
+#from xfel.Toy_Network.generate_toy_data import ImageNode
+from xfel.clustering.singleframe import ImageNode
+from dials.array_family import flex
+from dxtbx.model import DetectorFactory
+
+import random
+from six.moves import cPickle as pickle
+import logging
+from six.moves import range
+
+eps = 0.001  # Tolerance for assertions
+p_threshold = 0.1  # Partiality threshold for inclusion
+
+def process_mtz(filename):
+  mtzfile = mtz.object(filename)
+  miller_dict = mtzfile.as_miller_arrays_dict()
+  if ('crystal', 'dataset', 'F(ake)obs') in miller_dict:
+    return miller_dict[('crystal', 'dataset', 'F(ake)obs')]
+
+def get_pix_coords(wavelength, A, mill_arr, detector, delta_i=0.02):
+    """ Code copied from sim.py courtesy of Aaron and Tara """
+    s0=col((0,0,-1/wavelength))
+    q=flex.vec3_double([A*col(idx) for idx in  mill_arr.indices().as_vec3_double()])
+    s0_hat=flex.vec3_double([s0.normalize()]*len(q))
+    q_hat=q.each_normalize()
+    #q_hat.cross(flex.vec3_double([s0_hat]*len(q_hat)))
+    e1_hat = q_hat.cross(s0_hat)
+    c0_hat = s0_hat.cross(e1_hat)
+    q_len_sq = flex.double([col(v).length_sq() for v in q])
+    a_side=q_len_sq*wavelength/2
+    b_side=flex.sqrt(q_len_sq)-a_side**2
+    #flex.vec3_double([sqrt(q.length_sq()-a_side**2 for idx in mill_arr)])
+    r_vec=flex.vec3_double(-a_side*s0_hat+b_side*c0_hat)
+    s1=r_vec+s0
+
+    EQ=q+s0
+    len_EQ=flex.double([col(v).length() for v in EQ])
+    ratio=len_EQ*wavelength
+
+    indices = flex.miller_index()
+    coords =flex.vec2_double()
+    for i in range(len(s1)):
+        if ratio[i] > 1 - delta_i and ratio[i] < 1 + delta_i:
+            indices.append(mill_arr.indices()[i])
+            pix = detector[0].get_ray_intersection_px(s1[i])
+            if detector[0].is_coord_valid(pix):
+                coords.append(pix)
+
+    return coords, indices
+
+def run(args):
+
+  distance = 125
+  centre = (97.075, 97.075)
+  pix_size = (0.11, 0.11)
+  image_size = (1765, 1765)
+  wavelength = args.w or 1.0
+  # 1. Make a dummy detector
+  detector = DetectorFactory.simple('SENSOR_UNKNOWN', # Sensor
+                                          distance,
+                                          centre,
+                                          '+x','-y', # fast/slow direction
+                                          pix_size,
+                                          image_size)
+
+  # 2. Get the miller array!
+  mill_array = process_mtz(args.mtzfile[0]).as_intensity_array()
+  ortho = sqr(mill_array.crystal_symmetry().unit_cell().reciprocal() \
+            .orthogonalization_matrix())
+
+  # 3.Create some image_pickle dictionairies that contain 'full' intensities,
+  # but are otherwise complete.
+  im = 0
+  while im < args.n:
+    im += 1
+    A = sqr(flex.random_double_r3_rotation_matrix()) * ortho
+    orientation = crystal_orientation(A, basis_type.reciprocal)
+    pix_coords, miller_set = get_pix_coords(wavelength, A, mill_array, detector)
+    if len(miller_set) > 10:  # at least 10 reflections
+        miller_set = cctbx.miller.set(mill_array.crystal_symmetry(), miller_set,
+                anomalous_flag=False)
+        obs = mill_array.common_set(miller_set)
+        temp_dict = {'observations': [obs],
+                     'mapped_predictions': [pix_coords],
+                     'pointgroup': None,
+                     'current_orientation': [orientation],
+                     'xbeam': centre[0],
+                     'ybeam': centre[1],
+                     'wavelength': wavelength}
+        old_node = ImageNode(dicti=temp_dict, scale=False)
+        # Remove all reflection that are not at least p partial
+        partial_sel = (old_node.partialities > p_threshold)
+
+        temp_dict['full_observations'] = [obs.select(partial_sel)]
+        temp_dict['observations'] = [obs.select(partial_sel)
+                            * old_node.partialities.select(partial_sel)]
+        temp_dict['mapped_predictions'] = \
+                    [temp_dict['mapped_predictions'][0].select(partial_sel)]
+
+        if logging.Logger.root.level <= logging.DEBUG:  # debug!
+          before = temp_dict['full_observations'][0]
+          after = temp_dict['observations'][0] / old_node.partialities
+          assert sum(abs(before.data() - after.data())) < eps
+
+        if args.r:
+          partials = list(temp_dict['observations'][0].data())
+          jiggled_partials = flex.double([random.gauss(obs, args.r * obs)
+                                          for obs in partials])
+          temp_dict['observations'][0] = temp_dict['observations'][0] \
+                                      .customized_copy(data=jiggled_partials)
+
+        pkl_name = "simulated_data_{0:04d}.pickle".format(im)
+        with(open(pkl_name, 'wb')) as pkl:
+          pickle.dump(temp_dict, pkl)
+
+        ''' Only works with no noise:
+        if logging.Logger.root.level <= logging.DEBUG:  # debug!
+          new_node = ImageNode(pkl_name, scale=False)
+          assert sum(old_node.partialities != new_node.partialities) == 0
+          new_node.G = 1
+          assert sum(new_node.miller_array.indices() !=
+                     old_node.miller_array.indices()) == 0
+
+          old_arr = old_node.miller_array
+          new_arr = new_node.miller_array / (new_node.partialities *
+                                                    new_node.scales)
+          assert sum(old_arr.indices() != new_arr.indices()) == 0
+          assert sum(abs(old_arr.data() - new_arr.data())) < eps, \
+            "delta is {}".format(sum(abs(old_arr.data() - new_arr.data())) )
+          assert new_node.G == 1
+          assert new_node.minus_2B == 0
+          assert len(set(list(new_node.scales))) == 1, "Scales: {}"\
+                      .format(new_node.scales)
+          assert old_node.G == 1
+          assert old_node.minus_2B == 0
+          assert len(set(list(old_node.scales))) == 1
+          # Testing more:
+          d_spacings = list(new_node.miller_array.d_spacings().data())
+          miller_indeces = list(new_node.miller_array.indices())
+          miller_intensities = list(new_node.miller_array.data()
+                                    / (new_node.partialities * new_node.scales))
+
+          for observation in zip(miller_indeces, miller_intensities):
+            try:
+              test_dict[observation[0]].append(observation[1])
+            except KeyError:
+              test_dict[observation[0]] = [observation[1]]
+
+  if logging.Logger.root.level <= logging.DEBUG:  # debug!
+    for miller in test_dict:
+      assert max(test_dict[miller]) - min(test_dict[miller]) < eps,  \
+        "Miller index {} were not all equal: {}".format(miller,
+                                                        test_dict[miller])
+        '''
+
+
+  # 5. Optional: add some random scale to the images.
+
+  # Optional. Perturb the orientation matrices a bit. (Gaussian, s.d. 0.05deg?)
+
+  # 6. Make a Graph. :D
+
+
+if __name__ == '__main__':
+  import argparse
+  parser = argparse.ArgumentParser(description=('Generate still image data from'
+                                                ' an mtz file made by '
+                                                'phenix.fake_f_obs.'))
+  parser.add_argument('mtzfile', type=str, nargs=1,
+                      help='MTZ filename.')
+  parser.add_argument('-n', type=int, default=500,
+                      help='Number of pickles to generate')
+  parser.add_argument('-w', type=float, default=1,
+                      help='wavelength of simulated data.')
+  parser.add_argument('-r', type=float, default=None,
+                      help='Random noise to be applied to partials. Parameter '
+                      'is the standard deviation of normally distributed'
+                      'noise as a fraction of the partial intensity.')
+  args = parser.parse_args()
+  run(args)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/clustering/singleframe.py
+""" Module for working with single images in a serial crystallography
+dataset"""
+from __future__ import absolute_import, division, print_function
+from libtbx import easy_pickle
+import numpy as np
+import math
+import logging
+from cctbx.array_family import flex
+from six.moves import cPickle as pickle
+from .api import InputFrame
+from six.moves import zip
+logger = logging.getLogger('sf')
+
+class SingleFrame(InputFrame):
+  """ Class that creates single-image agregate metrics/scoring that can then be
+  used in downstream clustering or filtering procedures.
+  """
+  ANGSTROMS_TO_EV = 12398.425
+
+  def __init__(self, path=None, filename=None, crystal_num=0,
+               remove_negative=False, use_b=True, scale=True, dicti=None,
+               pixel_size=None):
+    """
+    Constructor for SingleFrame object, using a cctbx.xfel integration pickle.
+
+    :param path: path to integration pickle
+    :param filename: the file name alone (used as a label)
+    :param crystal_num: if multiple lattices present, the latice number.
+    :param remove_negative: Boolean for removal of negative intensities
+    :param use_b: if True, initialise scale and B, if false, use only mean-intensity scaling.
+    :param dicti: optional. If a dictionairy is supplied here, will create object from that rather than attempting to read the file specified in path, filename.
+    :param pixel_size: the size of pixels in mm. Defaults to a MAR detector with a warning at debug level of logging.
+    :param scale: if False, will intialise scales to G=1, B=0.
+
+
+    :return: a SingleFrame object, with the following Object attributes:
+
+
+    Object attributes are:
+        - `is_polarization_corrected`: Boolean flag indicatinf if polarization correction has been applied
+        - `miller_array`: the cctbx.miller miller array of spot intensities.
+        - `mapped_predictions`: the mapped_predictions locations
+        - `path`: full path to the original file
+        - `name`: file-name, used as an identifier
+        - `crystal_system:
+        - `pg`: point group of pickle
+        - `uc`: Niggli unit cell as a tuple
+        - `orientation`: cctbx crystal_orientation object
+        - `total_i`: the total integrated intensity for this frame
+        - `xbeam`: x-location of beam centre
+        - `ybeam`: y-location of beam centre
+        - `wavelength:
+        - `spot_offset`: the mean offset between observed spots and predicted centroids. Only created if integration was performed using verbose_cv=True. Otherwise None.
+        - `minus_2B`: the gradient of the ln(i) vs. sinsqtheta_over_lambda_sq plot
+        - `G`: intercept of the of the ln(i) vs. sinsqtheta_over_lambda_sq plot
+        - `log_i`: list of log_i intensities
+        - `sinsqtheta_over_lambda_sq`: list of sinsqtheta_over_lambda_sq
+        - `wilson_err`: standard error on the fit of ln(i) vs. sinsqtheta_over_lambda_sq
+        - `miller_fullies`: a cctbx.miller array of fully recorded intensites.
+    """
+    if dicti is not None:
+      d = dicti
+    else:
+      try:
+        d = easy_pickle.load(path)
+      except (pickle.UnpicklingError, ValueError, EOFError, IOError):
+        d = {}
+        logger.warning("Could not read %s. It may not be a pickle file." % path)
+    if 'observations' not in d or len(d['observations'][crystal_num].data()) == 0:
+      return
+    try:
+      if pixel_size:
+        self.pixel_size = pixel_size
+      else:
+        logger.debug("No pixel size specified, defaulting to MAR (0.079346). "
+                        "Bad times if this is not the correct detector!")
+        self.pixel_size = 0.079346
+      # Warn on error, but continue directory traversal.
+      self.is_polarization_corrected = False
+      # Miller arrays
+      self.miller_array = d['observations'][crystal_num]
+      self.mapped_predictions = d['mapped_predictions'][crystal_num]
+      # Image pickle info
+      self.path = path or d['path']
+      self.name = filename
+      # Unit cell info
+      self.crystal_system = self.miller_array.crystal_symmetry()\
+        .space_group().crystal_system()
+      self.pg = d['pointgroup'].replace(' ', '')  # enforce consistency
+      # XXX major bug here??? niggli cell not produced with knowledge of the centring symbol???
+      self.uc = d['current_orientation'][crystal_num].unit_cell() \
+        .niggli_cell() \
+        .parameters()
+      self.orientation = d['current_orientation'][crystal_num]
+      # Agregate info
+      self.total_i = d['observations'][crystal_num].sum()
+      self.xbeam = d['xbeam']
+      self.ybeam = d['ybeam']
+      self.wavelength = d['wavelength']
+      self.distance = d['distance']
+      if 'correction_vectors' in d:
+        all_corrections = []
+        for spot in d['correction_vectors'][crystal_num]:
+          dta = np.sqrt((spot['refinedcenter'][0] - spot['obscenter'][0]) ** 2
+                      + (spot['refinedcenter'][1] - spot['obscenter'][1]) ** 2)
+          all_corrections.append(dta)
+        self.spot_offset = np.mean(all_corrections)
+      else:
+        self.spot_offset = None
+
+      if remove_negative:
+        self.filter_negative_intensities()
+
+      # Do polarization correction
+      self.polarization_correction()
+      self.minus_2B, self.G, self.log_i, \
+          self.sinsqtheta_over_lambda_sq, \
+          self.wilson_err = self.init_calc_wilson(use_b)
+      if not scale:
+        self.minus_2B = 0
+        self.G = 1
+      if logger.root.level < logging.DEBUG:  # Extreme debug!
+        self.plot_wilson()
+      logger.debug("Extracted image {}".format(filename))
+    except KeyError:
+      logger.warning("Could not extract point group and unit cell from %s" % path)
+
+    self.miller_fullies = None
+
+  def trim_res_limit(self, d_min=None, d_max=None):
+    """
+    Remove all miller indicies outside the range of _d_min, _d_max.
+    Changes the object in place.
+
+    :param d_min: min res of new miller array. Defaults to current value.
+    :param d_max: max res of new miller array. Defaults to current value.
+    """
+    if d_min is None:
+      d_min = self.miller_array.d_min()
+    if d_max is None:
+      d_max = self.miller_array.d_max_min()[0]
+    self.miller_array = self.miller_array.resolution_filter(d_max, d_min).sort()
+
+  def filter_negative_intensities(self):
+    """
+    Filters negative intensities from the Miller array. Acts in place.
+    :return: acts in place.
+    """
+    i_I_positive = (self.miller_array.data() > 0)
+    self.miller_array = self.miller_array.select(i_I_positive).sort()
+    self.mapped_predictions = self.mapped_predictions.select(i_I_positive)
+
+  def n_reflections_by_sigi(self, sig_i_cuttoff):
+    """
+    Currently a placeholder that returns None.
+
+    This method should return the number of reflection in the frame that have an
+    I/sig(I) > sig_i_cuttoff
+    """
+    reflections_above_cuttoff = None
+    return len(reflections_above_cuttoff)
+
+  def init_calc_wilson(self, use_b_factor, i_corrections=None):
+    """ If use_b_factor is
+    :param i_corrections: allows flex array of correction factors (e.g. partialities) to be specified
+    :param use_b_factor: if True, do a linear regression to fit G and B and returns the coeficients minus_2B, G, the transformed data log_i, and one_over_d_sqare. Also returns fit_stats, which is a dictionairy. If use_b_factor is False, then B is 0, and G is the mean intensity of the image. The r_value is then 0 (by definition), and the std_err is the standard error on the mean.
+
+    :return minus_2B, G, log_i, on_over_d_square: `minus_2B`: gradient of fit; `G`: intercept of fit; `log_i`: dependent variable of fit; `one_over_d_square`: independent variable of fit.
+    """
+    if i_corrections:
+      inten = (self.miller_array.sort().data() * i_corrections).as_numpy_array()
+    else:
+      inten = self.miller_array.sort().data().as_numpy_array()
+    sinsqtheta_over_labmdasq = self.miller_array.sort()\
+      .sin_theta_over_lambda_sq().data().as_numpy_array()
+
+     # then plot them as negative in the linear fit.
+    inten, sinsqtheta_over_labmdasq = zip(*[i for i
+                                            in zip(inten,
+                                                   sinsqtheta_over_labmdasq)
+                                            if i[0] >= 0])
+
+    if use_b_factor:
+      from scipy.stats import linregress
+      minus_2B, G, r_val, _, std_err = linregress(sinsqtheta_over_labmdasq,
+                                                  np.log(inten))
+    else:
+      # If the model is a constant value, r_val = 0, and
+      from scipy.stats import sem
+      minus_2B, G, r_val, std_err = 0, np.mean(inten), 0, sem(inten)
+
+    # ignore p_val since this will be insanely small
+    logger.debug("G: {}, -2B: {}, r: {}, std_err: {}".
+      format(G, minus_2B, r_val, std_err))
+    return minus_2B, G, np.log(inten), sinsqtheta_over_labmdasq, {"R": r_val,
+                                                   "Standard Error": std_err}
+
+  def plot_wilson(self, width=30, ax=None):
+    """ Makes a log(I) vs 1/d**2 plot, displaying the raw partial data, a
+    rolling average of the data, and the Wilson model fit to the data.
+
+    :param: width: smoothing window size
+    :param: ax: optional axes object to ve used for plotting
+    """
+
+    import matplotlib.pyplot as plt
+    if ax is None:
+      fig = plt.figure()
+      ax = fig.gca()
+      direct_visualisation = True
+    else:
+      direct_visualisation = False
+
+    smooth = self._moving_average(self.log_i, n=width)
+    ax.plot(self.sinsqtheta_over_lambda_sq[width - 1:], smooth,
+          '--r', lw=3)
+    ax.plot(self.sinsqtheta_over_lambda_sq, self.log_i, 'bo', ms=2)
+    ax.plot([0, -1 * self.G / self.minus_2B], [self.G, 0], 'y-', lw=2)
+    plt.xlim(0, max(self.sinsqtheta_over_lambda_sq))
+    plt.xlabel("(sin(theta)/lambda)^2")
+    plt.ylabel("ln(I)")
+    plt.title("Single frame Wilson fit\n{}\nG: {}, B: {}, r: {}, std_err: {}".
+              format(self.name, self.G, -1 * self.minus_2B / 2,
+                     self.wilson_err['R'], self.wilson_err['Standard Error']))
+
+    if direct_visualisation:
+      plt.show()
+    return ax
+
+    """ Spline method removed because it will be v.slow
+    from scipy.interpolate import UnivariateSpline as Spline
+    from numpy import linspace
+    xs = linspace(min(self.one_over_d_square), max(self.one_over_d_square), 100)
+    spl = Spline(self.one_over_d_square, self.log_i, s=10000)
+    ys = spl(xs)
+    plt.plot(xs, ys, '--g', lw=3)
+    """
+    """ idiomatic CCTBX method removed because I want more fine-grained detail
+     _d_star_p = 1.618034  # Golden ratio distribution for d-spacings
+     binner = self.miller_array.setup_binner(n_bins=nbins)
+     #logger.debug(str("{}".format(binner.show_summary())))
+     bin_selections = [binner.selection(i) for i in binner.range_used()]
+     means = [self.miller_array.select(sel).mean() for sel in bin_selections]
+     log_means = [math.log(mil) if mil > 0 else 0 for mil in means]
+     centers = binner.bin_centers(_d_star_p)
+     d_centers = centers ** (-1 / _d_star_p)
+     plt.plot(1/(d_centers**2), log_means)
+     plt.show()
+     """
+
+  def polarization_correction(self):
+    """ Perform basic polarization correction in place, and change the
+    is_polarization_corrected flag to True.
+
+    I_corrected = 2*I_uncorrected/(1 + cos(two_theta)**2)
+    """
+    two_theta = self.miller_array.two_theta(wavelength=self.wavelength).data()
+    one_over_P = 2/(1 + (flex.cos(two_theta) ** 2))
+    self.miller_array = self.miller_array.customized_copy(
+      data=self.miller_array.data() * one_over_P)
+    self.is_polarization_corrected = True
+
+  def distance_from(self, other_uc):
+    """
+    Calculates distance using NCDist from Andrews and Bernstein J. Appl.
+    Cryst. 2014 between this frame and some other unit cell.
+    :param:other_uc: a 6-tuple of a, b, c, alpha, beta, gamma for some unit cell
+    :return: the NCDist in A^2 to other_uc
+    """
+    from cctbx.uctbx.determine_unit_cell import NCDist
+    self_g6 = self.make_g6(self.uc)
+    other_g6 = self.make_g6(other_uc)
+    return NCDist(self_g6, other_g6)
+
+  def to_panda(self):
+    """ Returns the object attributes as a pandas series """
+    import pandas as pd
+    return pd.Series({'path': self.path,
+                      'name': self.name,
+                      'crystal_system': self.crystal_system,
+                      'point group': self.pg,
+                      'a': self.uc[0],
+                      'b': self.uc[1],
+                      'c': self.uc[2],
+                      'alpha': self.uc[3],
+                      'beta': self.uc[4],
+                      'gamma': self.uc[5],
+                      'total_i': self.total_i,
+                      'wavelength': self.wavelength,
+                      'spot_offset': self.spot_offset,
+                      'minus_2B': self.minus_2B,
+                      'G': self.G,
+                      'willson_err': self.wilson_err})
+
+
+  @staticmethod
+  def _moving_average(array, n=50):
+    """ quick method for moving average, needed for smoothing plots. Implements
+    a summer area table approach."""
+    tmp = np.cumsum(array, dtype=float)
+    tmp[n:] = tmp[n:] - tmp[:-n]
+    return tmp[n - 1:] / n
+
+  @staticmethod
+  def make_g6(uc):
+      """ Take a reduced Niggli Cell, and turn it into the G6 representation. This is
+          similar but not identical to the metrical matrix.  See
+          doi:10.1107/S0567739473001063 Gruber (1973)
+          doi:10.1107/S0108767388006427 Andrews and Bernstein (1988)
+          doi:10.1107/S1600576713031002 Andrews and Bernstein (2014)
+      """
+      a = uc[0] ** 2
+      b = uc[1] ** 2
+      c = uc[2] ** 2
+      d = 2 * uc[1] * uc[2] * math.cos(math.radians(uc[3]))
+      e = 2 * uc[0] * uc[2] * math.cos(math.radians(uc[4]))
+      f = 2 * uc[0] * uc[1] * math.cos(math.radians(uc[5]))
+      return [a, b, c, d, e, f]
+
+class SingleDialsFrame(SingleFrame):
+  def __init__(self, refl=None, expt=None, id=None, **kwargs):
+    from serialtbx.util.construct_frame import ConstructFrame
+    frame = ConstructFrame(refl, expt).make_frame()
+    SingleFrame.__init__(self, dicti=frame, path=str(id), **kwargs)
+    self.experiment = expt
+    self.reflections = refl
+
+class SingleDialsFrameFromFiles(SingleFrame):
+  def __init__(self, refls_path=None, expts_path=None, **kwargs):
+    from xfel.command_line.frame_extractor import ConstructFrameFromFiles
+    frame = ConstructFrameFromFiles(refls_path, expts_path).make_frame()
+    SingleFrame.__init__(self, dicti=frame, path=" ".join((refls_path, expts_path)), **kwargs)
+
+class CellOnlyFrame(SingleFrame):
+  def __init__(self, crystal_symmetry, path=None, name=None, lattice_id=None):
+    self.crystal_symmetry = crystal_symmetry
+    self.niggli_cell = self.crystal_symmetry.niggli_cell()
+    logger.info(str(self.crystal_symmetry))
+    logger.info(self.niggli_cell.as_str(prefix="   niggli-->"))
+    self.uc = self.niggli_cell.unit_cell().parameters()
+    self.mm = self.niggli_cell.unit_cell().metrical_matrix()
+    self.pg = "".join(self.crystal_symmetry.space_group().type().lookup_symbol().split())
+    self.path = path
+    self.name = name
+    self.lattice_id = lattice_id
+
+class SingleDialsFrameFromJson(SingleFrame):
+  def __init__(self, expts_path=None, **kwargs):
+    from dials.util.options import Importer, flatten_experiments
+    importer = Importer([expts_path], read_experiments=True, read_reflections=False, check_format=False)
+    if importer.unhandled:
+      # in python 2: raise Exception("unable to process:"), importer.unhandled
+      raise Exception("unable to process:")
+    experiments_l = flatten_experiments(importer.experiments)
+    assert len(experiments_l)==1, "Sorry, only supports one experiment per json at present."
+    tcrystal = experiments_l[0].crystal
+    from cctbx import crystal
+    group = tcrystal.get_space_group()
+    self.crystal_symmetry = crystal.symmetry(unit_cell=tcrystal.get_unit_cell(),
+                                             space_group=group)
+    self.crystal_symmetry.show_summary()
+    self.niggli_cell = self.crystal_symmetry.niggli_cell()
+    self.niggli_cell.show_summary(prefix="   niggli-->")
+    self.uc = self.niggli_cell.unit_cell().parameters()
+    self.mm = self.niggli_cell.unit_cell().metrical_matrix()
+    self.pg = "".join(group.type().lookup_symbol().split())
+    self.path = expts_path
+
+
+ *******************************************************************************

@@ -1,0 +1,1701 @@
+
+
+ *******************************************************************************
+mmtbx/dynamics/__init__.py
+from __future__ import absolute_import, division, print_function
+import cctbx.array_family.flex # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("mmtbx_dynamics_ext")
+from mmtbx_dynamics_ext import *
+
+def kinetic_energy_as_temperature(dof, e):
+  from mmtbx.dynamics.constants import boltzmann_constant_akma as k
+  return e / (0.5 * k * dof)
+
+def temperature_as_kinetic_energy(dof, t):
+  from mmtbx.dynamics.constants import boltzmann_constant_akma as k
+  return t * (0.5 * k * dof)
+
+class kinetic_energy_and_temperature(object):
+
+  def __init__(O, velocities, masses):
+    O.kinetic_energy = kinetic_energy(velocities=velocities, masses=masses)
+    dof = 3 * velocities.size()
+    if (dof == 0):
+      O.temperature = 0
+    else:
+      O.temperature = kinetic_energy_as_temperature(
+        dof=dof, e=O.kinetic_energy)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/dynamics/cartesian_dynamics.py
+from __future__ import absolute_import, division, print_function
+from mmtbx import dynamics
+from mmtbx.dynamics.constants import \
+  boltzmann_constant_akma, \
+  akma_time_as_pico_seconds
+from cctbx import xray
+from cctbx.array_family import flex
+import scitbx.lbfgs
+from libtbx import adopt_init_args
+import random
+import time
+import math
+import iotbx.phil
+from cctbx import maptbx
+from six.moves import range
+
+def random_velocities(
+      masses,
+      target_temperature,
+      zero_fraction=0,
+      random_gauss=None,
+      random_random=None,
+      seed = None):
+  result = flex.vec3_double()
+  result.reserve(masses.size())
+  if seed is not None:
+    random.seed(seed)
+  if (random_gauss is None): random_gauss = random.gauss
+  if (random_random is None): random_random = random.random
+  kt = boltzmann_constant_akma * target_temperature
+  for mass in masses:
+    assert mass > 0
+    if (zero_fraction == 0 or random_random() >= zero_fraction):
+      sigma = (kt / mass)**0.5
+      result.append([random_gauss(0, sigma) for i in (1,2,3)])
+    else:
+      result.append([0,0,0])
+  return result
+
+class interleaved_lbfgs_minimization(object):
+
+  def __init__(self,
+        restraints_manager,
+        sites_cart,
+        max_iterations):
+    self.restraints_manager = restraints_manager
+    self.x = sites_cart.as_double()
+    self.minimizer = scitbx.lbfgs.run(
+      target_evaluator=self,
+      termination_params=scitbx.lbfgs.termination_parameters(
+        max_iterations=max_iterations),
+      exception_handling_params=scitbx.lbfgs.exception_handling_parameters(
+        ignore_line_search_failed_rounding_errors=True,
+        ignore_line_search_failed_step_at_lower_bound=True,
+        ignore_line_search_failed_maxfev=True))
+    sites_cart.clear()
+    sites_cart.extend(flex.vec3_double(self.x))
+
+  def compute_functional_and_gradients(self):
+    sites_cart = flex.vec3_double(self.x)
+    tmp = self.restraints_manager.energies_sites(sites_cart = sites_cart,
+      compute_gradients=True)
+    f = tmp.target
+    g = tmp.gradients
+    return f, g.as_double()
+
+master_params = iotbx.phil.parse("""\
+  temperature = 300
+    .type = int
+  number_of_steps = 200
+    .type = int
+  time_step = 0.0005
+    .type = float
+  initial_velocities_zero_fraction = 0
+    .type = float
+  n_print = 100
+    .type = int
+  verbose = -1
+    .type = int
+  random_seed = None
+    .type = int
+  n_collect = 10
+    .type = int
+  stop_cm_motion = True
+    .type = bool
+""")
+
+class gradients_calculator_geometry_restraints(object):
+  def __init__(self, restraints_manager = None):
+    adopt_init_args(self, locals())
+    self.gc = 0, 0
+
+  def gradients(self, xray_structure, force_update_mask=False):
+    factor = 1.0
+    sites_cart = xray_structure.sites_cart()
+    c = self.restraints_manager.energies_sites(sites_cart = sites_cart,
+      compute_gradients=True)
+    if(c.normalization_factor is not None): factor *= c.normalization_factor
+    result = c.gradients
+    #factor = 0.0001
+    if(factor != 1.0): result *= 1.0 / factor
+    #print flex.min(result.as_double()), flex.max(result.as_double()), \
+    #  flex.mean(result.as_double()), result.norm()
+    return result
+
+class gradients_calculator_reciprocal_space(object):
+  def __init__(self,
+               restraints_manager        = None,
+               fmodel                    = None,
+               sites_cart                = None,
+               wx                        = None,
+               wc                        = None,
+               update_gradient_threshold = 0):
+    adopt_init_args(self, locals())
+    assert [self.fmodel,             self.wx].count(None) in [0,2]
+    assert [self.restraints_manager, self.wc].count(None) in [0,2]
+    self.gx, self.gc = 0, 0
+    if(self.fmodel is not None):
+      self.x_target_functor = self.fmodel.target_functor()
+      xray.set_scatterer_grad_flags(
+        scatterers = self.fmodel.xray_structure.scatterers(),
+        site       = True)
+      self.gx = flex.vec3_double(self.x_target_functor(compute_gradients=True).\
+        gradients_wrt_atomic_parameters(site=True).packed())
+
+  def gradients(self, xray_structure, force_update_mask=False):
+    factor = 1.0
+    sites_cart = xray_structure.sites_cart()
+    if(self.fmodel is not None):
+      max_shift = flex.max(flex.sqrt((self.sites_cart - sites_cart).dot()))
+      if(max_shift > self.update_gradient_threshold):
+        self.fmodel.update_xray_structure(
+          xray_structure = xray_structure,
+          update_f_calc  = True,
+          update_f_mask  = False)
+        self.gx = flex.vec3_double(self.x_target_functor(compute_gradients=True).\
+          gradients_wrt_atomic_parameters(site=True).packed())
+        self.sites_cart = sites_cart
+    if(self.restraints_manager is not None):
+      c = self.restraints_manager.energies_sites(sites_cart = sites_cart,
+        compute_gradients=True)
+      self.gc = c.gradients
+      factor *= self.wc
+      if(c.normalization_factor is not None): factor *= c.normalization_factor
+    result = None
+    if(self.wx is not None):
+      result = self.wx * self.gx
+    if(self.wc is not None):
+      gcw = self.wc * self.gc
+      if(result is None): result = gcw
+      else: result = result + gcw
+    if(factor != 1.0): result *= 1.0 / factor
+    #print "norms:", self.gc.norm(), self.gx.norm(), result.norm()
+    return result
+
+class gradients_calculator_real_space_simple(object):
+  def __init__(self,
+               restraints_manager        = None,
+               real_space_gradients_delta= 1./4,
+               unit_cell                 = None,
+               target_map                = None,
+               sites_cart                = None,
+               wx                        = None,
+               wc                        = None,
+               update_gradient_threshold = 0):
+    adopt_init_args(self, locals())
+    assert [self.target_map,         self.wx].count(None) in [0,2]
+    assert [self.restraints_manager, self.wc].count(None) in [0,2]
+    self.gx, self.gc = 0, 0
+    if(self.target_map is not None):
+      self.gx = self._compute_gradients()
+
+  def _compute_gradients(self):
+    return -1.*maptbx.real_space_gradients_simple(
+      unit_cell   = self.unit_cell,
+      density_map = self.target_map,
+      sites_cart  = self.sites_cart,
+      delta       = self.real_space_gradients_delta,
+      selection   = flex.bool(self.sites_cart.size(), True))
+
+  def gradients(self, xray_structure, force_update_mask=False):
+    factor = 1.0
+    sites_cart = xray_structure.sites_cart()
+    if(self.target_map is not None):
+      max_shift = flex.max(flex.sqrt((self.sites_cart - sites_cart).dot()))
+      if(max_shift > self.update_gradient_threshold):
+        self.sites_cart = sites_cart
+        self.gx = self._compute_gradients()
+    if(self.restraints_manager is not None):
+      c = self.restraints_manager.energies_sites(sites_cart = sites_cart,
+        compute_gradients=True)
+      self.gc = c.gradients
+      factor *= self.wc
+      if(c.normalization_factor is not None): factor *= c.normalization_factor
+    result = None
+    if(self.wx is not None):
+      result = self.wx * self.gx
+    if(self.wc is not None):
+      gcw = self.wc * self.gc
+      if(result is None): result = gcw
+      else: result = result + gcw
+    if(factor != 1.0): result *= 1.0 / factor
+    #print "norms:", self.gc.norm(), self.gx.norm(), result.norm()
+    return result
+
+class run(object):
+  def __init__(self,
+               xray_structure,
+               gradients_calculator,
+               temperature                      = 300,
+               n_steps                          = 200,
+               time_step                        = 0.0005,
+               initial_velocities_zero_fraction = 0,
+               vxyz                             = None,
+               n_print                          = 20,
+               n_collect                        = 10,
+               interleaved_minimization         = False,
+               reset_velocities                 = True,
+               stop_cm_motion                   = False,
+               log                              = None,
+               stop_at_diff                     = None,
+               random_seed                      = None,
+               states_collector                 = None,
+               verbose                          = -1):
+    adopt_init_args(self, locals())
+    assert self.n_print > 0
+    assert self.temperature >= 0.0
+    assert self.n_steps >= 0
+    assert self.time_step >= 0.0
+    assert self.log is not None or self.verbose < 1
+    self.sites_cart_start = self.xray_structure.sites_cart()
+    if(self.states_collector is not None):
+      self.states_collector.add(sites_cart = self.sites_cart_start)
+    self.k_boltz = boltzmann_constant_akma
+    self.current_temperature = 0.0
+    self.ekin = 0.0
+    self.ekcm = 0.0
+    self.timfac = akma_time_as_pico_seconds
+    self.atomic_weights = self.xray_structure.atomic_weights()
+    if(vxyz is None):
+      self.vxyz = flex.vec3_double(self.atomic_weights.size(),(0,0,0))
+    else:
+      self.vxyz = vxyz
+    #
+    self.tstep = self.time_step / self.timfac
+    self()
+
+  def __call__(self):
+    self.center_of_mass_info()
+    #print "0:",self.temperature, self.current_temperature
+    kt = dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+    self.current_temperature = kt.temperature
+    #print "1:",self.temperature, self.current_temperature
+    self.ekin = kt.kinetic_energy
+    if(self.verbose >= 1):
+      self.print_dynamics_stat(text="restrained dynamics start")
+    if(self.reset_velocities):
+       self.set_velocities()
+       self.center_of_mass_info()
+       kt=dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+       self.current_temperature = kt.temperature
+       self.ekin = kt.kinetic_energy
+       if(self.verbose >= 1):
+         self.print_dynamics_stat(text="set velocities")
+    if(self.stop_cm_motion):
+      self.stop_global_motion()
+    self.center_of_mass_info()
+    kt = dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+    self.current_temperature = kt.temperature
+    self.ekin = kt.kinetic_energy
+    if(self.verbose >= 1):
+      self.print_dynamics_stat(text="center of mass motion removed")
+    self.velocity_rescaling()
+    self.center_of_mass_info()
+    kt = dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+    self.current_temperature = kt.temperature
+    #print "2:",self.temperature, self.current_temperature
+    self.ekin = kt.kinetic_energy
+    if(self.verbose >= 1):
+      self.print_dynamics_stat(text="velocities rescaled")
+    if(self.verbose >= 1):
+      print("integration starts", file=self.log)
+    self.verlet_leapfrog_integration()
+    self.center_of_mass_info()
+    kt = dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+    self.current_temperature = kt.temperature
+    self.ekin = kt.kinetic_energy
+    if(self.verbose >= 1):
+      self.print_dynamics_stat(text="after final integration step")
+
+  def run_interleaved_minimization(self):
+    geo_manager = self.gradients_calculator.restraints_manager.geometry
+    sites_cart = self.xray_structure.sites_cart()
+    interleaved_lbfgs_minimization(
+      restraints_manager = self.gradients_calculator.restraints_manager,
+      sites_cart=sites_cart,
+      max_iterations=5)
+    self.xray_structure.set_sites_cart(sites_cart=sites_cart)
+    self.xray_structure.apply_symmetry_sites()
+
+  def set_velocities(self):
+    self.vxyz.clear()
+    self.vxyz.extend(random_velocities(
+      masses=self.atomic_weights,
+      target_temperature=self.temperature,
+      zero_fraction=self.initial_velocities_zero_fraction,
+      seed = self.random_seed))
+
+  def accelerations(self):
+    return self.gradients_calculator.gradients(xray_structure=self.xray_structure)
+
+  def center_of_mass_info(self):
+    self.rcm = self.xray_structure.center_of_mass()
+    result = dynamics.center_of_mass_info(
+      self.rcm,
+      self.xray_structure.sites_cart(),
+      self.vxyz,
+      self.atomic_weights)
+    self.vcm = flex.vec3_double()
+    self.acm = flex.vec3_double()
+    self.vcm.append(result.vcm())
+    self.acm.append(result.acm())
+    self.ekcm = result.ekcm()
+
+  def stop_global_motion(self):
+    self.rcm = self.xray_structure.center_of_mass()
+    self.vxyz = dynamics.stop_center_of_mass_motion(
+      self.rcm,
+      self.acm[0],
+      self.vcm[0],
+      self.xray_structure.sites_cart(),
+      self.vxyz,
+      self.atomic_weights)
+
+  def velocity_rescaling(self):
+    if(self.current_temperature <= 1.e-10):
+      factor = 1.0
+    else:
+      factor = math.sqrt(self.temperature/self.current_temperature)
+    self.vxyz = self.vxyz * factor
+
+  def verlet_leapfrog_integration(self):
+    # start verlet_leapfrog_integration loop
+    for cycle in range(1,self.n_steps+1,1):
+      sites_cart = None
+      if([self.stop_at_diff,self.states_collector].count(None) != 2):
+        sites_cart = self.xray_structure.sites_cart()
+      if(self.stop_at_diff is not None):
+        dist = flex.mean(flex.sqrt((self.sites_cart_start - sites_cart).dot()))
+        if(dist >= self.stop_at_diff): return
+      accelerations = self.accelerations()
+      print_flag = 0
+      switch = math.modf(float(cycle)/self.n_print)[0]
+      if((switch==0 or cycle==1 or cycle==self.n_steps) and self.verbose >= 1):
+        print_flag = 1
+      if(self.states_collector is not None):
+        switch2 = math.modf(float(cycle)/self.n_collect)[0]
+        if(switch2==0 or cycle==1 or cycle==self.n_steps):
+          self.states_collector.add(sites_cart = sites_cart)
+      if(print_flag == 1):
+        text = "integration step number = %5d"%cycle
+        self.center_of_mass_info()
+        kt=dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+        self.current_temperature = kt.temperature
+        self.ekin = kt.kinetic_energy
+        self.print_dynamics_stat(text)
+      if(self.stop_cm_motion):
+        self.center_of_mass_info()
+        self.stop_global_motion()
+      # calculate velocities at t+dt/2
+      dynamics.vxyz_at_t_plus_dt_over_2(
+        self.vxyz, self.atomic_weights, accelerations, self.tstep)
+      # calculate the temperature and kinetic energy from new velocities
+      kt=dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+      self.current_temperature = kt.temperature
+      self.ekin = kt.kinetic_energy
+      self.velocity_rescaling()
+      if(print_flag == 1 and 0):
+        self.center_of_mass_info()
+        self.print_dynamics_stat(text)
+      # do the verlet_leapfrog_integration to get coordinates at t+dt
+      self.xray_structure.set_sites_cart(
+        sites_cart=self.xray_structure.sites_cart() + self.vxyz * self.tstep)
+      self.xray_structure.apply_symmetry_sites()
+      # prevent explosions by doing very quick model geometry regularization
+      if(self.interleaved_minimization and cycle==self.n_steps):
+        self.run_interleaved_minimization()
+      kt=dynamics.kinetic_energy_and_temperature(self.vxyz,self.atomic_weights)
+      self.current_temperature = kt.temperature
+      self.ekin = kt.kinetic_energy
+      if(print_flag == 1 and 0):
+        self.center_of_mass_info()
+        self.print_dynamics_stat(text)
+      self.accelerations()
+
+  def print_dynamics_stat(self, text):
+    timfac = akma_time_as_pico_seconds
+    line_len = len("| "+text+"|")
+    fill_len = 80 - line_len-1
+    print("| "+text+"-"*(fill_len)+"|", file=self.log)
+    print("| kin.energy = %10.3f            " \
+      "| information about center of free masses|"%(self.ekin), file=self.log)
+    print("| start temperature = %7.3f        " \
+      "| position=%8.3f%8.3f%8.3f      |"% (
+      self.temperature,self.rcm[0],self.rcm[1],self.rcm[2]), file=self.log)
+    print("| curr. temperature = %7.3f        " \
+      "| velocity=%8.4f%8.4f%8.4f      |"% (self.current_temperature,
+      self.vcm[0][0]/timfac,self.vcm[0][1]/timfac,self.vcm[0][2]/timfac), file=self.log)
+    print("| number of integration steps = %4d " \
+      "| ang.mom.=%10.2f%10.2f%10.2f|"% (self.n_steps,
+      self.acm[0][0]/timfac,self.acm[0][1]/timfac,self.acm[0][2]/timfac), file=self.log)
+    print("| time step = %6.4f                 | kin.ener.=%8.3f                     |"% (
+      self.time_step,self.ekcm), file=self.log)
+    print("|"+"-"*77+"|", file=self.log)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/dynamics/constants.py
+from __future__ import absolute_import, division, print_function
+from libtbx import metric_prefixes
+
+boltzmann_constant_j_per_k = 1.3806504e-23 # 1.3806504(24) 2006 CODATA value
+avogadro_constant_per_mol = 6.022045e23 # 6.02214179(30) 2006 CODATA value
+kcal_j = 4184.0 # exact value
+amu_kg = 1.660538782e-27 # 1.660538782(83) 2006 CODATA value
+angstroms_m = 1e-10 # exact value
+
+akma_system_of_units = """\
+AKMA = Angstroms, Kilocalories/Mol, Atomic mass units (as used e.g. by
+CHARMM). Distances are measured in Angstroms, energies in kcal/mol,
+mass in atomic mass units."""
+
+boltzmann_constant_akma = avogadro_constant_per_mol \
+                        * boltzmann_constant_j_per_k / kcal_j
+akma_time_as_pico_seconds = ( \
+  angstroms_m**2 * amu_kg * avogadro_constant_per_mol / kcal_j)**0.5 \
+    / metric_prefixes.pico
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/dynamics/ensemble_cd.py
+from __future__ import absolute_import, division, print_function
+from mmtbx import dynamics
+from mmtbx.dynamics.constants import \
+  boltzmann_constant_akma, \
+  akma_time_as_pico_seconds
+from cctbx import geometry_restraints
+from cctbx import xray
+from cctbx.array_family import flex
+import scitbx.lbfgs
+import scitbx.math
+from libtbx.utils import Sorry
+from libtbx import adopt_init_args
+import random
+import math
+import sys
+import iotbx.phil
+from six.moves import range
+
+def random_velocities(
+      masses,
+      target_temperature,
+      zero_fraction=0,
+      random_gauss=None,
+      random_random=None,
+      seed = None):
+  result = flex.vec3_double()
+  result.reserve(masses.size())
+  if seed is not None:
+    random.seed(seed)
+  if (random_gauss is None): random_gauss = random.gauss
+  if (random_random is None): random_random = random.random
+  kt = boltzmann_constant_akma * target_temperature
+  for mass in masses:
+    assert mass > 0
+    if (zero_fraction == 0 or random_random() >= zero_fraction):
+      sigma = (kt / mass)**0.5
+      result.append([random_gauss(0, sigma) for i in (1,2,3)])
+    else:
+      result.append([0,0,0])
+  return result
+
+class interleaved_lbfgs_minimization(object):
+
+  def __init__(self,
+        conservative_pair_proxies,
+        sites_cart,
+        max_iterations):
+    self.conservative_pair_proxies = conservative_pair_proxies
+    self.x = sites_cart.as_double()
+    self.minimizer = scitbx.lbfgs.run(
+      target_evaluator=self,
+      termination_params=scitbx.lbfgs.termination_parameters(
+        max_iterations=max_iterations),
+      exception_handling_params=scitbx.lbfgs.exception_handling_parameters(
+        ignore_line_search_failed_rounding_errors=True,
+        ignore_line_search_failed_step_at_lower_bound=True,
+        ignore_line_search_failed_maxfev=True))
+    sites_cart.clear()
+    sites_cart.extend(flex.vec3_double(self.x))
+
+  def compute_functional_and_gradients(self):
+    sites_cart = flex.vec3_double(self.x)
+    f = 0
+    g = flex.vec3_double(sites_cart.size(), (0,0,0))
+    for sorted_asu_proxies in [self.conservative_pair_proxies.bond,
+                               self.conservative_pair_proxies.angle]:
+      if (sorted_asu_proxies is None): continue
+      f += geometry_restraints.bond_residual_sum(
+        sites_cart=sites_cart,
+        sorted_asu_proxies=sorted_asu_proxies,
+        gradient_array=g)
+    return f, g.as_double()
+
+master_params = iotbx.phil.parse("""\
+  temperature = 300
+    .type = int
+  number_of_steps = 200
+    .type = int
+  time_step = 0.0005
+    .type = float
+  initial_velocities_zero_fraction = 0
+    .type = float
+  n_print = 100
+    .type = int
+  verbose = -1
+    .type = int
+""")
+
+class cartesian_dynamics(object):
+  def __init__(self,
+               structure,
+               restraints_manager,
+               temperature                        = 300,
+               protein_thermostat                 = False,
+               n_steps                            = 200,
+               time_step                          = 0.0005,
+               initial_velocities_zero_fraction   = 0,
+               vxyz                               = None,
+               interleaved_minimization_params    = None,
+               n_print                            = 20,
+               fmodel                             = None,
+               xray_target_weight                 = None,
+               chem_target_weight                 = None,
+               shift_update                       = 0.0,
+               xray_structure_last_updated        = None,
+               xray_gradient                      = None,
+               reset_velocities                   = True,
+               stop_cm_motion                     = False,
+               update_f_calc                      = True,
+               er_data                            = None,
+               log                                = None,
+               stop_at_diff                       = None,
+               verbose                            = -1):
+    adopt_init_args(self, locals())
+    assert self.n_print > 0
+    assert self.temperature >= 0.0
+    assert self.n_steps >= 0
+    assert self.time_step >= 0.0
+    assert self.log is not None or self.verbose < 1
+    xray.set_scatterer_grad_flags(scatterers = self.structure.scatterers(),
+                                  site       = True)
+    self.structure_start = self.structure.deep_copy_scatterers()
+    self.k_boltz = boltzmann_constant_akma
+    self.ekcm = 0.0
+    self.timfac = akma_time_as_pico_seconds
+    self.weights = self.structure.atomic_weights()
+    if(vxyz is None):
+      self.vxyz = flex.vec3_double(self.weights.size(),(0,0,0))
+    else:
+      self.vxyz = vxyz
+    if(self.er_data is not None and
+       self.er_data.velocities is not None):
+      self.vxyz = self.er_data.velocities
+
+    if self.er_data is not None:
+      self.er_data.geo_grad_rms = 0
+      self.er_data.xray_grad_rms = 0
+
+    if(self.fmodel is not None):
+      if self.er_data is None:
+        self.fmodel_copy = self.fmodel.deep_copy()
+      else:
+        self.fmodel_copy = self.fmodel
+        if self.er_data.fix_scale_factor is not None:
+          self.fmodel_copy.set_scale_switch = self.er_data.fix_scale_factor
+    #
+      self.target_functor = self.fmodel_copy.target_functor()
+      assert self.chem_target_weight is not None
+      assert self.xray_target_weight is not None
+      if(self.xray_gradient is None):
+        self.xray_gradient = self.xray_grads()
+    #
+    imp = self.interleaved_minimization_params
+    self.interleaved_minimization_flag = (
+      imp is not None and imp.number_of_iterations > 0)
+    if (self.interleaved_minimization_flag):
+      assert imp.time_step_factor > 0
+      self.time_step *= imp.time_step_factor
+      if ("bonds" not in imp.restraints):
+        raise Sorry(
+          'Invalid choice: %s.restraints: "bonds" must always be included.'
+            % imp.__phil_path__())
+      self.interleaved_minimization_angles = "angles" in imp.restraints
+    else:
+      self.interleaved_minimization_angles = False
+    #
+    self.tstep = self.time_step / self.timfac
+    self.show_gradient_rms = False # XXX debug option
+    #
+    self()
+
+  def __call__(self):
+    self.center_of_mass_info()
+    if self.reset_velocities:
+       self.set_velocities()
+       self.center_of_mass_info()
+
+    self.non_solvent_vxyz    = self.vxyz.select(~self.er_data.solvent_sel)
+    self.non_solvent_weights = self.weights.select(~self.er_data.solvent_sel)
+    self.solvent_vxyz        = self.vxyz.select(self.er_data.solvent_sel)
+    self.solvent_weights     = self.weights.select(self.er_data.solvent_sel)
+        #
+    self.non_solvent_kt      = dynamics.kinetic_energy_and_temperature(self.non_solvent_vxyz, self.non_solvent_weights)
+    self.solvent_kt          = dynamics.kinetic_energy_and_temperature(self.solvent_vxyz, self.solvent_weights)
+    self.kt                  = dynamics.kinetic_energy_and_temperature(self.vxyz,self.weights)
+
+    if self.stop_cm_motion:
+      self.stop_global_motion()
+
+    self.velocity_rescaling()
+
+    self.verlet_leapfrog_integration()
+    if self.verbose >= 1.0:
+      self.print_detailed_dynamics_stats()
+
+  def set_velocities(self):
+    self.vxyz.clear()
+    if self.er_data is not None:
+      seed = self.er_data.seed
+    else: seed = None
+    self.vxyz.extend(random_velocities(
+      masses=self.weights,
+      target_temperature=self.temperature,
+      zero_fraction=self.initial_velocities_zero_fraction,
+      seed = seed))
+
+  def accelerations(self):
+    self.stereochemistry_residuals = self.restraints_manager.energies_sites(
+      sites_cart=self.structure.sites_cart(),
+      compute_gradients=True)
+
+    # Harmonic restraints
+    if self.er_data is not None:
+      if self.er_data.er_harmonic_restraints_info is not None:
+        harmonic_grads = self.restraints_manager.geometry.ta_harmonic_restraints(
+                                sites_cart = self.structure.sites_cart(),
+                                ta_harmonic_restraint_info = self.er_data.er_harmonic_restraints_info,
+                                weight = self.er_data.er_harmonic_restraints_weight,
+                                slack = self.er_data.er_harmonic_restraints_slack)
+        assert self.stereochemistry_residuals.gradients.size() == harmonic_grads.size()
+        self.stereochemistry_residuals.gradients += harmonic_grads
+    result = self.stereochemistry_residuals.gradients
+
+    d_max = None
+    if(self.xray_structure_last_updated is not None and self.shift_update > 0):
+      array_of_distances_between_each_atom = \
+        flex.sqrt(self.structure.difference_vectors_cart(
+           self.xray_structure_last_updated).dot())
+      d_max = flex.max(array_of_distances_between_each_atom)
+
+    if(self.fmodel is not None):
+      if(d_max is not None):
+        if(d_max > self.shift_update):
+          self.xray_structure_last_updated = self.structure.deep_copy_scatterers()
+          self.xray_gradient = self.xray_grads()
+      else:
+        self.xray_gradient = self.xray_grads()
+      result = self.xray_gradient * self.xray_target_weight \
+             + self.stereochemistry_residuals.gradients * self.chem_target_weight
+
+    factor = 1.0
+    if (self.chem_target_weight is not None):
+      factor *= self.chem_target_weight
+    if (self.stereochemistry_residuals.normalization_factor is not None):
+      factor *= self.stereochemistry_residuals.normalization_factor
+
+
+    if (factor != 1.0):
+      result *= 1.0 / factor
+
+    #Store RMS non-solvent atom gradients for Xray and Geo
+    if self.er_data is not None:
+      self.wc = self.chem_target_weight / factor
+      self.wx = self.xray_target_weight / factor
+      self.gg = self.stereochemistry_residuals.gradients * self.wc
+      self.xg = self.xray_gradient * self.wx
+      gg_pro = self.gg.select( ~self.er_data.solvent_sel )
+      xg_pro = self.xg.select( ~self.er_data.solvent_sel )
+      self.er_data.geo_grad_rms  += (flex.mean_sq(gg_pro.as_double())**0.5) / self.n_steps
+      self.er_data.xray_grad_rms += (flex.mean_sq(xg_pro.as_double())**0.5) / self.n_steps
+
+    return result
+
+  def xray_grads(self):
+    self.fmodel_copy.update_xray_structure(
+      xray_structure           = self.structure,
+      update_f_calc            = self.update_f_calc,
+      update_f_mask            = False)
+    sf = self.target_functor(
+        compute_gradients=True).gradients_wrt_atomic_parameters(site=True)
+    return flex.vec3_double(sf.packed())
+
+  def center_of_mass_info(self):
+    self.rcm = self.structure.center_of_mass()
+    result = dynamics.center_of_mass_info(
+      self.rcm,
+      self.structure.sites_cart(),
+      self.vxyz,
+      self.weights)
+    self.vcm = flex.vec3_double()
+    self.acm = flex.vec3_double()
+    self.vcm.append(result.vcm())
+    self.acm.append(result.acm())
+    self.ekcm = result.ekcm()
+
+  def stop_global_motion(self):
+    self.rcm = self.structure.center_of_mass()
+    self.vxyz = dynamics.stop_center_of_mass_motion(
+      self.rcm,
+      self.acm[0],
+      self.vcm[0],
+      self.structure.sites_cart(),
+      self.vxyz,
+      self.weights)
+
+  def velocity_rescaling(self):
+    if self.protein_thermostat and self.er_data is not None:
+      if (self.kt.temperature <= 1.e-10):
+        self.v_factor = 1.0
+      else:
+        self.v_factor = math.sqrt(self.temperature/self.non_solvent_kt.temperature)
+    else:
+      if (self.kt.temperature <= 1.e-10):
+        self.v_factor = 1.0
+      else:
+        self.v_factor = math.sqrt(self.temperature/self.kt.temperature)
+
+    self.vyz_vscale_remove = self.vxyz * (1.0 - self.v_factor)
+    self.kt_vscale_remove = dynamics.kinetic_energy_and_temperature(self.vyz_vscale_remove, self.weights)
+    self.vxyz = self.vxyz * self.v_factor
+
+  def interleaved_minimization(self):
+    geo_manager = self.restraints_manager.geometry
+    assert geo_manager.shell_sym_tables is not None
+    assert len(geo_manager.shell_sym_tables) > 0
+    conservative_pair_proxies = self.structure.conservative_pair_proxies(
+      bond_sym_table=geo_manager.shell_sym_tables[0],
+      conserve_angles=self.interleaved_minimization_angles)
+    sites_cart = self.structure.sites_cart()
+    interleaved_lbfgs_minimization(
+      sites_cart=sites_cart,
+      conservative_pair_proxies=conservative_pair_proxies,
+      max_iterations=self.interleaved_minimization_params.number_of_iterations)
+    self.structure.set_sites_cart(sites_cart=sites_cart)
+    self.structure.apply_symmetry_sites()
+
+  def verlet_leapfrog_integration(self):
+    # start verlet_leapfrog_integration loop
+    for self.cycle in range(1,self.n_steps+1,1):
+      if(self.stop_at_diff is not None):
+        diff = flex.mean(self.structure_start.distances(other = self.structure))
+        if(diff >= self.stop_at_diff): return
+      accelerations = self.accelerations()
+      if(self.stop_cm_motion):
+        self.center_of_mass_info()
+        self.stop_global_motion()
+
+      # calculate velocities at t+dt/2
+      dynamics.vxyz_at_t_plus_dt_over_2(
+        self.vxyz, self.weights, accelerations, self.tstep)
+
+      # calculate the temperature and kinetic energy from new velocities
+      self.non_solvent_vxyz    = self.vxyz.select(~self.er_data.solvent_sel)
+      self.non_solvent_weights = self.weights.select(~self.er_data.solvent_sel)
+      self.solvent_vxyz        = self.vxyz.select(self.er_data.solvent_sel)
+      self.solvent_weights     = self.weights.select(self.er_data.solvent_sel)
+      #
+      self.kt                  = dynamics.kinetic_energy_and_temperature(self.vxyz, self.weights)
+      self.non_solvent_kt      = dynamics.kinetic_energy_and_temperature(self.non_solvent_vxyz, self.non_solvent_weights)
+      self.solvent_kt          = dynamics.kinetic_energy_and_temperature(self.solvent_vxyz, self.solvent_weights)
+      #Store sys, solvent, nonsolvet temperatures
+      if self.er_data is not None:
+        self.store_temperatures()
+      self.velocity_rescaling()
+      if self.verbose >= 1.0:
+        print('Scale factor : ', self.v_factor, file=self.log)
+        self.vxyz_length_sq = flex.sqrt(self.vxyz.dot())
+        print('vxyz_length_sq pst scale', file=self.log)
+        self.vxyz_length_sq.min_max_mean().show(out=self.log)
+      # do the verlet_leapfrog_integration to get coordinates at t+dt
+      self.structure.set_sites_cart(
+        sites_cart=self.structure.sites_cart() + self.vxyz * self.tstep)
+      self.structure.apply_symmetry_sites()
+      if (self.interleaved_minimization_flag):
+        self.interleaved_minimization()
+      self.kt = dynamics.kinetic_energy_and_temperature(self.vxyz, self.weights)
+      if(self.er_data is None):
+        self.accelerations()
+      else:
+        self.er_data.velocities = self.vxyz
+
+  def store_temperatures(self):
+    if self.cycle == 1:
+      self.er_data.non_solvent_temp = 0
+      self.er_data.solvent_temp = 0
+      self.er_data.system_temp  = 0
+    self.er_data.non_solvent_temp += (self.non_solvent_kt.temperature / self.n_steps)
+    self.er_data.solvent_temp += (self.solvent_kt.temperature /self.n_steps)
+    self.er_data.system_temp  += (self.kt.temperature /self.n_steps)
+
+    ### Extra dynamics stats
+  def print_detailed_dynamics_stats(self):
+    # Overall data
+    print('\n', file=self.log)
+    print('         MC |    Temperature (K)   |   Vscale   | Etot = Ekin + Echem + wxExray', file=self.log)
+    print('            |  (sys)  (pro)  (sol) |  Fac  T(K) |   Ekin  Echem     wx  Exray', file=self.log)
+    print('  ~E~ {0:5d} | {1:6.1f} {2:6.1f} {3:6.1f} | {4:4.1f} {5:5.1f} | {6:6.1f} {7:6.1f} {8:6.1f} {9:6.1f}'.format(
+        self.er_data.macro_cycle,
+        self.kt.temperature,
+        self.non_solvent_kt.temperature,
+        self.solvent_kt.temperature,
+        self.v_factor,
+        self.kt_vscale_remove.temperature,
+        self.kt.kinetic_energy,
+        self.stereochemistry_residuals.residual_sum,
+        self.xray_target_weight,
+        self.target_functor(compute_gradients=False).target_work() * self.fmodel_copy.f_calc_w().data().size(),
+        ), file=self.log)
+    print('\n', file=self.log)
+
+    # Atomistic histrograms
+    # - Kinetic energy
+    # - Xray grads
+    # - Geo grads
+    self.atomic_ke = 0.5 * self.weights * self.vxyz.dot()
+    self.atomic_wxray_g = self.xray_gradient * self.xray_target_weight
+    self.atomic_wchem_g = self.stereochemistry_residuals.gradients * self.chem_target_weight
+
+    def show_histogram(data,
+                       n_slots = 50,
+                       out     = None,
+                       prefix  = ""):
+      if (out is None): out = sys.stdout
+      print('\n' + prefix, file=out)
+
+      # Stats
+      data_basic_stats = scitbx.math.basic_statistics(data)
+      print('\n  Number  : %7.4f ' % (data_basic_stats.n), file=out)
+      print('  Min     : %7.4f ' % (data_basic_stats.min), file=out)
+      print('  Max     : %7.4f ' % (data_basic_stats.max), file=out)
+      print('  Mean    : %7.4f ' % (data_basic_stats.mean), file=out)
+      print('  Stdev   : %7.4f ' % (data_basic_stats.biased_standard_deviation), file=out)
+      print('  Skew    : %7.4f ' % (data_basic_stats.skew), file=out)
+      print('  Sum     : %7.4f ' % (data_basic_stats.sum), file=out)
+
+      # Histo
+      histogram = flex.histogram(data    = data,
+                                 n_slots = n_slots)
+      low_cutoff = histogram.data_min()
+      for i,n in enumerate(histogram.slots()):
+        high_cutoff = histogram.data_min() + histogram.slot_width() * (i+1)
+        print("%7.3f - %7.3f: %d" % (low_cutoff, high_cutoff, n), file=out)
+        low_cutoff = high_cutoff
+      out.flush()
+      return histogram
+
+    # Select
+    for selection_type in ['System', 'Non_solvent', 'Solvent']:
+      print('\n\n', file=self.log)
+      if selection_type == 'System':
+        selection = self.er_data.all_sel
+      elif selection_type == 'Non_solvent':
+        selection = ~self.er_data.solvent_sel
+      elif selection_type == 'Solvent':
+        selection = self.er_data.solvent_sel
+      else:
+        break
+      # Data
+      for histogram_type in ['Kinetic_energy', 'Xray_grad', 'Chem_grad']:
+        if histogram_type == 'Kinetic_energy':
+          data = self.atomic_ke.select(selection)
+        elif histogram_type == 'Xray_grad':
+          data = flex.sqrt(self.atomic_wxray_g.select(selection).dot())
+        elif histogram_type == 'Chem_grad':
+          data = flex.sqrt(self.atomic_wchem_g.select(selection).dot())
+        else:
+          break
+        # Histrogram
+        show_histogram(data    = data,
+                       out     = self.log,
+                       prefix  = str(self.er_data.macro_cycle) + '_' + selection_type + '_' + histogram_type)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/dynamics/simulated_annealing.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from mmtbx.refinement import print_statistics
+from mmtbx.dynamics import cartesian_dynamics
+import mmtbx.refinement.minimization
+from scitbx.array_family import flex
+import iotbx.phil
+import sys
+from libtbx import adopt_init_args
+
+main_params_str = """\
+start_temperature = 5000
+  .type = float
+final_temperature = 300
+  .type = float
+cool_rate = 100
+  .type = float
+number_of_steps = 50
+  .type = int
+time_step = 0.0005
+  .type = float
+  .expert_level=2
+initial_velocities_zero_fraction = 0
+  .type = float
+  .expert_level=2
+interleave_minimization = False
+  .type = bool
+verbose = -1
+  .type = int
+  .short_caption = Verbosity level
+n_print = 100
+  .type = int
+  .short_caption = Steps between log output
+  .expert_level=2
+update_grads_shift = 0.3
+  .type = float
+  .short_caption = Update gradient shifts
+  .expert_level=2
+random_seed = None
+  .type = int
+"""
+
+master_params_str = """\
+%s
+refine_sites = True
+  .caption = "lbfgs refinement of atomic coordinates before sa"
+  .short_caption=Refine sites first
+  .type = bool
+refine_adp = False
+  .caption = "lbfgs refinement of adp before sa"
+  .short_caption=Refine ADPs first
+  .type = bool
+max_number_of_iterations = 25
+  .type = int
+mode = every_macro_cycle *second_and_before_last once first first_half
+  .type = choice
+"""%main_params_str
+
+def master_params():
+  return iotbx.phil.parse(master_params_str, process_includes=False)
+
+def manager(params,
+            target_weights,
+            all_params,
+            macro_cycle,
+            h_params,
+            fmodels,
+            model,
+            out = None,
+            states_collector=None,
+            callback=None):
+  if(out is None): out = sys.stdout
+  if (states_collector is not None):
+    assert hasattr(states_collector, "add")
+  print_statistics.make_header("simulated annealing refinement", out = out)
+  model.set_refine_individual_sites()
+  fmodel = fmodels.fmodel_xray() # XXX use only xray data
+  fmodel.xray_structure = model.get_xray_structure() # XXX use only xray data
+  if (params.max_number_of_iterations >= 0):
+    print_statistics.make_sub_header(
+      "lbfgs minimization: before simulated annealing", out = out)
+    is_neutron_scat_table = False
+    if(all_params.main.scattering_table == "neutron"):
+      is_neutron_scat_table = True
+    import scitbx.lbfgs
+    minimized = mmtbx.refinement.minimization.lbfgs(
+      restraints_manager       = model.restraints_manager,
+      refine_xyz               = True,
+      fmodels                  = fmodels,
+      is_neutron_scat_table    = is_neutron_scat_table,
+      model                    = model,
+      lbfgs_termination_params = scitbx.lbfgs.termination_parameters(
+        max_iterations = params.max_number_of_iterations),
+      target_weights           = target_weights,
+      h_params                 = h_params,
+      verbose                  = 0)
+  fmodel.update_xray_structure(xray_structure = model.get_xray_structure(),
+                               update_f_calc  = True,
+                               update_f_mask  = True)
+  print_statistics.make_header("simulated annealing", out = out)
+  wx = target_weights.xyz_weights_result.wx * \
+    target_weights.xyz_weights_result.wx_scale
+  run(
+    params = params,
+    restraints_manager = model.restraints_manager,
+    fmodel             = fmodel,
+    wx                 = wx,
+    wc                 = target_weights.xyz_weights_result.w,
+    states_collector   = states_collector,
+    callback           = callback,
+    log                = out)
+
+class run(object):
+  def __init__(self,
+               params,
+               restraints_manager,
+               xray_structure = None,
+               wx = None,
+               wc = None,
+               fmodel = None,
+               target_map = None,
+               real_space = False,
+               log = None,
+               states_collector = None,
+               callback = None,
+               verbose=True):
+    adopt_init_args(self, locals())
+    assert (callback is None) or hasattr(callback, "__call__")
+    if(self.params is None): self.params = master_params().extract()
+    if(log is None): self.log = sys.stdout
+    if(self.fmodel is not None):
+      self.xray_structure = self.fmodel.xray_structure
+    self.sites_cart_start = self.xray_structure.sites_cart()
+    self.curr_temp = params.start_temperature
+    verbose = params.verbose
+    reset_velocities = True
+    vxyz = None
+    den_manager = restraints_manager.geometry.den_manager
+    cartesian_den_restraints = False
+    if(den_manager is not None):
+      if("cartesian" in den_manager.params.annealing_type):
+        # restraints_manager.geometry.generic_restraints_manager.flags.den = True
+        cartesian_den_restraints = True
+        verbose = False
+    while params.final_temperature <= self.curr_temp:
+      #if(self.curr_temp == params.start_temperature):
+      #  cmremove=True
+      #else: cmremove=False
+      cmremove=True
+      cd_manager = cartesian_dynamics.run(
+        xray_structure           = self.xray_structure,
+        gradients_calculator     = self.gradients_calculator(),
+        temperature              = self.curr_temp,
+        interleaved_minimization = self.params.interleave_minimization,
+        vxyz                 = vxyz,
+        n_steps              = self.params.number_of_steps,
+        time_step            = self.params.time_step,
+        n_print              = self.params.n_print,
+        random_seed          = self.params.random_seed,
+        stop_cm_motion       = cmremove,
+        reset_velocities     = reset_velocities,
+        log                  = self.log,
+        verbose              = verbose)
+      reset_velocities = False
+      vxyz = cd_manager.vxyz
+      self.xray_structure = cd_manager.xray_structure
+      if(self.fmodel is not None):
+        self.fmodel.update_xray_structure(
+          xray_structure = self.xray_structure,
+          update_f_calc  = True,
+          update_f_mask  = True)
+      if(states_collector is not None):
+        self.states_collector.add(sites_cart = cd_manager.xray_structure.sites_cart())
+      if (callback is not None):
+        callback(fmodel=self.fmodel)
+      self.show(curr_temp = self.curr_temp)
+      self.curr_temp -= params.cool_rate
+      if(cartesian_den_restraints):
+        print("update DEN eq distances at temp=%.1f" % self.curr_temp, file=self.log)
+        den_manager.update_eq_distances(
+          sites_cart=fmodel.xray_structure.sites_cart())
+    # if(den_manager is not None):
+    #   restraints_manager.geometry.generic_restraints_manager.flags.den = False
+
+  def show(self, curr_temp):
+    if(self.verbose):
+      sites_cart = self.xray_structure.sites_cart()
+      es=self.restraints_manager.geometry.energies_sites(sites_cart=sites_cart)
+      a,b = es.bond_deviations()[2], es.angle_deviations()[2]
+      dist = flex.mean(flex.sqrt((self.sites_cart_start - sites_cart).dot()))
+      if(self.fmodel is not None):
+        fmt="  temp=%7.1f r_work=%6.4f r_free=%6.4f dist_moved=%6.2f angles=%6.2f bonds=%6.3f"
+        print(fmt%(curr_temp, self.fmodel.r_work(),
+          self.fmodel.r_free(), dist, b, a), file=self.log)
+      else:
+        fmt="  temp=%7.1f dist_moved=%6.2f angles=%6.2f bonds=%6.3f"
+        print(fmt%(curr_temp, dist, b, a), file=self.log)
+
+  def gradients_calculator(self):
+    if(not self.real_space):
+      if(self.fmodel is not None):
+        grad_calc = cartesian_dynamics.gradients_calculator_reciprocal_space(
+          restraints_manager        = self.restraints_manager, # XXX WHY?
+          fmodel                    = self.fmodel,
+          sites_cart                = self.fmodel.xray_structure.sites_cart(),
+          wx                        = self.wx,
+          wc                        = self.wc,
+          update_gradient_threshold = self.params.update_grads_shift)
+      else:
+        grad_calc = cartesian_dynamics.gradients_calculator_geometry_restraints(
+          restraints_manager = self.restraints_manager)
+    else:
+      grad_calc = cartesian_dynamics.gradients_calculator_real_space_simple(
+        restraints_manager        = self.restraints_manager.geometry, # XXX WHY?
+        target_map                = self.target_map,
+        unit_cell                 = self.xray_structure.unit_cell(),
+        sites_cart                = self.xray_structure.sites_cart(),
+        wx                        = self.wx,
+        wc                        = self.wc,
+        update_gradient_threshold = 0)
+    return grad_calc
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/dynamics/tst_cartesian_dynamics.py
+from __future__ import absolute_import, division, print_function
+import mmtbx.dynamics
+from mmtbx.dynamics import constants
+from mmtbx.dynamics import cartesian_dynamics
+import mmtbx.restraints
+import mmtbx.monomer_library.pdb_interpretation
+import mmtbx.monomer_library.server
+from cctbx.array_family import flex
+from libtbx.test_utils import approx_equal
+from libtbx.utils import format_cpu_times
+import libtbx.load_env
+from six.moves import cStringIO as StringIO
+import random
+#from mmtbx import utils
+import sys, os
+from six.moves import zip
+from six.moves import range
+
+if (1): # fixed random seed to avoid rare failures
+  random.seed(0)
+  flex.set_random_seed(0)
+
+def exercise_basic(verbose):
+  assert abs(constants.boltzmann_constant_akma-0.001987) < 1e-6
+  assert abs(constants.akma_time_as_pico_seconds-0.04889) < 1e-5
+  t = mmtbx.dynamics.kinetic_energy_as_temperature(dof=5, e=1.3)
+  assert approx_equal(t, 261.678053105)
+  e = mmtbx.dynamics.temperature_as_kinetic_energy(dof=5, t=t)
+  assert approx_equal(e, 1.3)
+  #
+  masses = flex.random_double(size=10) * 4 + 1
+  temps = flex.double()
+  for i_pass in range(100):
+    for i in range(100):
+      velocities = cartesian_dynamics.random_velocities(
+        masses=masses, target_temperature=300)
+      kt = mmtbx.dynamics.kinetic_energy_and_temperature(velocities, masses)
+      temps.append(kt.temperature)
+    mmm = temps.min_max_mean()
+    if (verbose): mmm.show()
+    if (295 < mmm.mean < 305):
+      break
+  else:
+    raise AssertionError("Failure reaching target_temperature.")
+
+class get_inputs(object):
+
+  def __init__(self, mon_lib_srv, ener_lib, verbose):
+    pdb_file = libtbx.env.find_in_repositories(
+      relative_path="phenix_regression/pdb/phe.pdb", test=os.path.isfile)
+    if (pdb_file is None):
+      self.xray_structure = None
+      self.restraints_manager = None
+      return
+    if (verbose): log = sys.stdout
+    else:         log = StringIO()
+    params = mmtbx.monomer_library.pdb_interpretation.master_params.extract()
+    params.nonbonded_weight = 16
+    processed_pdb = mmtbx.monomer_library.pdb_interpretation.process(
+      mon_lib_srv=mon_lib_srv,
+      params=params,
+      ener_lib=ener_lib,
+      file_name=pdb_file,
+      log=log)
+    xray_structure = processed_pdb.xray_structure()
+    assert xray_structure.scatterers().size() == 15
+    restraints_manager = mmtbx.restraints.manager(
+      geometry=processed_pdb.geometry_restraints_manager())
+    self.xray_structure = xray_structure
+    self.restraints_manager = restraints_manager
+
+def exercise_00(inputs, verbose=0):
+  #
+  # normal run
+  #
+  if (inputs.xray_structure is None):
+    print("Skipping exercise_00(): input file not available")
+    return
+  structure_ = inputs.xray_structure.deep_copy_scatterers()
+  if (verbose): log = sys.stdout
+  else:         log = StringIO()
+  gradients_calculator=cartesian_dynamics.gradients_calculator_reciprocal_space(
+    restraints_manager = inputs.restraints_manager,
+    sites_cart         = structure_.sites_cart(),
+    wc                 = 1)
+  cartesian_dynamics.run(
+    gradients_calculator=gradients_calculator,
+    xray_structure = structure_,
+    temperature = 300,
+    n_steps = 200,
+    time_step = 0.0005,
+    log = log,
+    verbose = 1)
+  rms1 = inputs.xray_structure.rms_difference(structure_)
+  rms2 = structure_.rms_difference(inputs.xray_structure)
+  assert rms1 == rms2
+  rms = rms1
+  if(verbose):
+    print("rms between structures before and after dynamics = ", rms)
+  array_of_distances_between_each_atom = \
+       flex.sqrt(structure_.difference_vectors_cart(
+         inputs.xray_structure).dot())
+  if(verbose):
+    print()
+    for d in array_of_distances_between_each_atom:
+      print(d)
+  n_rms = 4.0
+  selected_by_rms = (array_of_distances_between_each_atom > n_rms * rms)
+  if(n_rms > 1.0):
+    assert selected_by_rms.count(True) == 0
+  if(verbose):
+    print("number of outliers = ", selected_by_rms.count(True))
+  selected = array_of_distances_between_each_atom.select(selected_by_rms)
+  if(verbose):
+    print("list of outliers : ")
+    for s in selected:
+      print(s)
+
+def exercise_01(inputs, verbose=0):
+  #
+  # run at T = 0K
+  #
+  if (inputs.xray_structure is None):
+    print("Skipping exercise_01(): input file not available")
+    return
+  if (verbose): log = sys.stdout
+  else:         log = StringIO()
+  for l,v in [(None,-1), (log, verbose)]:
+    structure_ = inputs.xray_structure.deep_copy_scatterers()
+    gradients_calculator=cartesian_dynamics.gradients_calculator_reciprocal_space(
+      restraints_manager = inputs.restraints_manager,
+      sites_cart         = structure_.sites_cart(),
+      wc                 = 1)
+    inst = cartesian_dynamics.run(
+      xray_structure = structure_,
+      gradients_calculator = gradients_calculator,
+      temperature = 0,
+      n_steps = 200,
+      time_step = 0.0005,
+      log = l,
+      verbose = v)
+    assert inputs.xray_structure.rms_difference(structure_) \
+        == structure_.rms_difference(inputs.xray_structure)
+    assert approx_equal(
+      structure_.rms_difference(inputs.xray_structure), 0.0, 1e-6)
+
+def exercise_02(inputs, verbose=0):
+  #
+  # run at n_step = 0
+  #
+  if (inputs.xray_structure is None):
+    print("Skipping exercise_02(): input file not available")
+    return
+  structure_ = inputs.xray_structure.deep_copy_scatterers()
+  if (verbose): log = sys.stdout
+  else:         log = StringIO()
+  gradients_calculator=cartesian_dynamics.gradients_calculator_reciprocal_space(
+    restraints_manager = inputs.restraints_manager,
+    sites_cart         = structure_.sites_cart(),
+    wc                 = 1)
+  cartesian_dynamics.run(
+    xray_structure = structure_,
+    gradients_calculator = gradients_calculator,
+    temperature = 300,
+    n_steps = 0,
+    time_step = 0.0005,
+    log = log,
+    verbose = 1)
+  assert inputs.xray_structure.rms_difference(structure_) \
+      == structure_.rms_difference(inputs.xray_structure)
+  assert approx_equal(
+    structure_.rms_difference(inputs.xray_structure), 0.0, 1e-6)
+
+def exercise_03(mon_lib_srv, ener_lib, verbose=0):
+  #
+  # normal run with real model
+  #
+  pdb_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/pdb/2ERL_noH.pdb", test=os.path.isfile)
+  if (pdb_file is None):
+    print("Skipping exercise_03: input file not available")
+    return
+  if (verbose): log = sys.stdout
+  else:         log = StringIO()
+  params = mmtbx.monomer_library.pdb_interpretation.master_params.extract()
+  params.nonbonded_weight = 16
+  processed_pdb = mmtbx.monomer_library.pdb_interpretation.process(
+    mon_lib_srv = mon_lib_srv,
+    params=params,
+    ener_lib = ener_lib,
+    file_name = pdb_file,
+    log = log)
+  xray_structure = processed_pdb.xray_structure()
+  restraints_manager = mmtbx.restraints.manager(
+    geometry=processed_pdb.geometry_restraints_manager())
+  structure_ = xray_structure.deep_copy_scatterers()
+  gradients_calculator=cartesian_dynamics.gradients_calculator_reciprocal_space(
+    restraints_manager = restraints_manager,
+    sites_cart         = xray_structure.sites_cart(),
+    wc                 = 1)
+  cartesian_dynamics.run(
+    xray_structure = xray_structure,
+    gradients_calculator = gradients_calculator,
+    temperature = 300,
+    n_steps = 200,
+    time_step = 0.0005,
+    log = log,
+    verbose = 1)
+  rms1 = xray_structure.rms_difference(structure_)
+  rms2 = structure_.rms_difference(xray_structure)
+  assert rms1 == rms2
+  rms = rms1
+  if(verbose):
+    print("rms between structures before and after dynamics = ", rms)
+  array_of_distances_between_each_atom = \
+       flex.sqrt(structure_.difference_vectors_cart(xray_structure).dot())
+  if(verbose):
+    flex.histogram(
+      data=array_of_distances_between_each_atom,
+      n_slots=12).show(
+        format_cutoffs="%6.4f")
+  n_rms = 5.3
+  selected_by_rms = (array_of_distances_between_each_atom > n_rms * rms)
+  outlier_sc = xray_structure.scatterers().select(selected_by_rms)
+  if (outlier_sc.size() != 0):
+    print("number of rms outliers:", outlier_sc.size())
+    outlier_d = array_of_distances_between_each_atom.select(selected_by_rms)
+    for sc,d in zip(outlier_sc, outlier_d):
+      print(sc.label, d)
+    raise RuntimeError("rms outliers.")
+
+def run():
+  verbose = "--verbose" in sys.argv[1:]
+  exercise_basic(verbose=verbose)
+  mon_lib_srv = mmtbx.monomer_library.server.server()
+  ener_lib = mmtbx.monomer_library.server.ener_lib()
+  inputs = get_inputs(
+    mon_lib_srv=mon_lib_srv, ener_lib=ener_lib, verbose=verbose)
+  exercise_00(inputs=inputs, verbose=verbose)
+  exercise_01(inputs=inputs, verbose=verbose)
+  exercise_03(mon_lib_srv=mon_lib_srv, ener_lib=ener_lib, verbose=verbose)
+  exercise_02(inputs=inputs, verbose=verbose)
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/dynamics/tst_sa.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+import iotbx.pdb
+from libtbx import group_args
+from libtbx.utils import user_plus_sys_time
+import mmtbx.f_model
+from mmtbx.dynamics import simulated_annealing as sa
+import random
+from mmtbx.dynamics import cartesian_dynamics
+from mmtbx.refinement import real_space
+import mmtbx.utils
+import mmtbx.refinement.real_space.individual_sites
+from libtbx.utils import null_out
+import mmtbx.model
+
+pdb_str_1 = """\
+CRYST1   26.960   29.455   29.841  90.00  90.00  90.00 P 21 21 21
+ATOM      1  N   ASP A  18      14.467  12.258  12.105  1.00 21.41           N
+ATOM      2  CA  ASP A  18      13.225  13.003  12.273  1.00 34.70           C
+ATOM      3  C   ASP A  18      12.437  13.061  10.968  1.00 35.50           C
+ATOM      4  O   ASP A  18      12.962  13.483   9.937  1.00 38.48           O
+ATOM      5  CB  ASP A  18      13.514  14.418  12.777  1.00 38.15           C
+ATOM      6  CG  ASP A  18      12.251  15.231  12.986  1.00 27.39           C
+ATOM      7  OD1 ASP A  18      11.675  15.164  14.092  1.00 35.78           O
+ATOM      8  OD2 ASP A  18      11.836  15.939  12.044  1.00 30.67           O
+ATOM      9  N   ASN A  19      11.178  12.632  11.029  1.00 22.94           N
+ATOM     10  CA  ASN A  19      10.286  12.621   9.871  1.00 22.82           C
+ATOM     11  C   ASN A  19      10.847  11.832   8.689  1.00 20.25           C
+ATOM     12  O   ASN A  19      11.419  12.404   7.762  1.00 33.24           O
+ATOM     13  CB  ASN A  19       9.930  14.049   9.443  1.00 28.83           C
+ATOM     14  CG  ASN A  19       8.884  14.085   8.345  1.00 26.44           C
+ATOM     15  OD1 ASN A  19       8.101  13.149   8.185  1.00 22.64           O
+ATOM     16  ND2 ASN A  19       8.867  15.171   7.581  1.00 28.91           N
+ATOM     17  N   TYR A  20      10.677  10.514   8.730  1.00 23.81           N
+ATOM     18  CA  TYR A  20      11.164   9.645   7.666  1.00 35.69           C
+ATOM     19  C   TYR A  20      10.078   8.675   7.210  1.00 28.94           C
+ATOM     20  O   TYR A  20       9.800   7.684   7.886  1.00 25.26           O
+ATOM     21  CB  TYR A  20      12.403   8.874   8.129  1.00 33.37           C
+ATOM     22  CG  TYR A  20      13.017   7.996   7.061  1.00 31.48           C
+ATOM     23  CD1 TYR A  20      13.880   8.527   6.111  1.00 36.91           C
+ATOM     24  CD2 TYR A  20      12.740   6.636   7.007  1.00 21.36           C
+ATOM     25  CE1 TYR A  20      14.446   7.729   5.134  1.00 36.56           C
+ATOM     26  CE2 TYR A  20      13.301   5.831   6.034  1.00 29.56           C
+ATOM     27  CZ  TYR A  20      14.153   6.382   5.100  1.00 35.08           C
+ATOM     28  OH  TYR A  20      14.714   5.584   4.130  1.00 38.73           O
+ATOM     29  N   ARG A  21       9.475   8.975   6.062  1.00 38.95           N
+ATOM     30  CA  ARG A  21       8.416   8.153   5.478  1.00 38.77           C
+ATOM     31  C   ARG A  21       7.232   7.966   6.426  1.00 27.69           C
+ATOM     32  O   ARG A  21       7.166   6.988   7.171  1.00 22.82           O
+ATOM     33  CB  ARG A  21       8.964   6.795   5.023  1.00 20.00           C
+ATOM     34  CG  ARG A  21       7.967   5.947   4.248  1.00 20.00           C
+ATOM     35  CD  ARG A  21       8.578   4.619   3.832  1.00 20.00           C
+ATOM     36  NE  ARG A  21       7.634   3.793   3.085  1.00 20.00           N
+ATOM     37  CZ  ARG A  21       7.914   2.585   2.606  1.00 20.00           C
+ATOM     38  NH1 ARG A  21       9.116   2.058   2.795  1.00 20.00           N
+ATOM     39  NH2 ARG A  21       6.993   1.904   1.938  1.00 20.00           N
+ATOM     40  N   GLY A  22       6.299   8.912   6.390  1.00 24.85           N
+ATOM     41  CA  GLY A  22       5.121   8.854   7.235  1.00 29.53           C
+ATOM     42  C   GLY A  22       5.429   9.164   8.687  1.00 33.22           C
+ATOM     43  O   GLY A  22       5.303  10.306   9.128  1.00 30.06           O
+ATOM     44  N   TYR A  23       5.835   8.140   9.432  1.00 27.25           N
+ATOM     45  CA  TYR A  23       6.161   8.302  10.844  1.00 34.16           C
+ATOM     46  C   TYR A  23       7.511   8.988  11.024  1.00 23.48           C
+ATOM     47  O   TYR A  23       8.309   9.064  10.089  1.00 39.30           O
+ATOM     48  CB  TYR A  23       6.161   6.946  11.553  1.00 29.65           C
+ATOM     49  CG  TYR A  23       4.829   6.231  11.512  1.00 34.88           C
+ATOM     50  CD1 TYR A  23       3.865   6.460  12.485  1.00 30.77           C
+ATOM     51  CD2 TYR A  23       4.536   5.326  10.500  1.00 32.29           C
+ATOM     52  CE1 TYR A  23       2.646   5.809  12.452  1.00 39.91           C
+ATOM     53  CE2 TYR A  23       3.320   4.670  10.458  1.00 30.45           C
+ATOM     54  CZ  TYR A  23       2.379   4.915  11.436  1.00 37.13           C
+ATOM     55  OH  TYR A  23       1.167   4.264  11.398  1.00 38.59           O
+ATOM     56  N   SER A  24       7.760   9.485  12.231  1.00 36.25           N
+ATOM     57  CA  SER A  24       9.014  10.164  12.536  1.00 26.44           C
+ATOM     58  C   SER A  24       9.914   9.295  13.408  1.00 20.40           C
+ATOM     59  O   SER A  24       9.451   8.660  14.355  1.00 39.27           O
+ATOM     60  CB  SER A  24       8.743  11.501  13.229  1.00 21.07           C
+ATOM     61  OG  SER A  24       7.969  12.355  12.404  1.00 34.95           O
+ATOM     62  N   LEU A  25      11.202   9.273  13.082  1.00 22.77           N
+ATOM     63  CA  LEU A  25      12.170   8.483  13.834  1.00 36.60           C
+ATOM     64  C   LEU A  25      13.164   9.380  14.565  1.00 28.89           C
+ATOM     65  O   LEU A  25      12.775  10.223  15.373  1.00 38.59           O
+ATOM     66  CB  LEU A  25      12.917   7.510  12.914  1.00 27.50           C
+ATOM     67  CG  LEU A  25      12.178   6.262  12.416  1.00 38.78           C
+ATOM     68  CD1 LEU A  25      11.174   6.594  11.319  1.00 22.10           C
+ATOM     69  CD2 LEU A  25      13.171   5.212  11.938  1.00 26.92           C
+TER
+END
+"""
+
+def shake_sites(xrs, random, shift, grm=None):
+  if(random):
+    xrs.shake_sites_in_place(mean_distance = shift)
+  else:
+    grad_calc = cartesian_dynamics.gradients_calculator_geometry_restraints(
+      restraints_manager = grm)
+    cartesian_dynamics.run(
+      xray_structure       = xrs,
+      gradients_calculator = grad_calc,
+      temperature          = 1000,
+      n_steps              = 100000,
+      time_step            = 0.0005,
+      stop_cm_motion       = True,
+      stop_at_diff         = shift)
+  return xrs
+
+def get_pdb_inputs(pdb_str):
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_str)
+  model = mmtbx.model.manager(model_input = pdb_inp, log = null_out())
+  model.process(make_restraints=True)
+  return group_args(
+    ph  = model.get_hierarchy(),
+    grm = model.get_restraints_manager(),
+    xrs = model.get_xray_structure())
+
+def exercise_1():
+  random.seed(0)
+  flex.set_random_seed(0)
+  pi = get_pdb_inputs(pdb_str=pdb_str_1)
+  f_obs = abs(pi.xrs.structure_factors(d_min = 2.5).f_calc())
+  r_free_flags = f_obs.generate_r_free_flags(use_lattice_symmetry=False)
+  if(0):
+    pi.ph.adopt_xray_structure(pi.xrs)
+    pi.ph.write_pdb_file(file_name="start.pdb",
+      crystal_symmetry = pi.xrs.crystal_symmetry())
+  xrs_poor = shake_sites(xrs = pi.xrs.deep_copy_scatterers(), random=False,
+   shift = 1.5, grm=pi.grm)
+  if(0):
+    pi.ph.adopt_xray_structure(xrs_poor)
+    pi.ph.write_pdb_file(file_name="poor.pdb",
+      crystal_symmetry = xrs_poor.crystal_symmetry())
+
+  fmodel = mmtbx.f_model.manager(
+    f_obs          = f_obs,
+    r_free_flags   = r_free_flags,
+    xray_structure = xrs_poor)
+  print("start r_work:", fmodel.r_work())
+  #
+  params = sa.master_params().extract()
+  params.start_temperature=3000
+  params.final_temperature=0
+  params.cool_rate = 100
+  params.number_of_steps = 100
+  params.update_grads_shift = 0.
+  #
+  sa.run(
+    params = params,
+    fmodel = fmodel,
+    restraints_manager = pi.grm,
+    wx                 = 20,
+    wc                 = 1,
+    verbose            = True)
+  #
+  r = fmodel.r_work()
+  print("final r_work:", r)
+  assert r < 0.03, r
+  dist = flex.mean(flex.sqrt((pi.xrs.sites_cart() -
+          fmodel.xray_structure.sites_cart()).dot()))
+  print("Distance(refined, answer): %6.4f"%dist)
+  assert dist < 0.25, dist
+  if(0):
+    pi.ph.adopt_xray_structure(fmodel.xray_structure)
+    pi.ph.write_pdb_file(file_name="refined.pdb",
+      crystal_symmetry = fmodel.xray_structure.crystal_symmetry())
+
+def exercise_2(d_min = 1.5):
+  random.seed(2679941)
+  flex.set_random_seed(2679941)
+  for shake in [True, False]:
+    pi = get_pdb_inputs(pdb_str=pdb_str_1)
+    f_obs = abs(pi.xrs.structure_factors(d_min = d_min).f_calc())
+    r_free_flags = f_obs.generate_r_free_flags(use_lattice_symmetry=False)
+    xrs_poor = pi.xrs.deep_copy_scatterers()
+    if(shake):
+      xrs_poor = shake_sites(xrs = pi.xrs.deep_copy_scatterers(), random=False,
+       shift = 2.0, grm=pi.grm)
+    fmodel = mmtbx.f_model.manager(
+      f_obs          = f_obs,
+      r_free_flags   = r_free_flags,
+      xray_structure = xrs_poor)
+    print("start r_work:", fmodel.r_work())
+    #
+    f_calc = pi.xrs.structure_factors(d_min = d_min).f_calc()
+    fft_map = f_calc.fft_map(resolution_factor=0.25)
+    fft_map.apply_sigma_scaling()
+    target_map = fft_map.real_map_unpadded()
+    # find optimal weight
+    rsr_simple_refiner = mmtbx.refinement.real_space.individual_sites.simple(
+      target_map                  = target_map,
+      selection                   = flex.bool(pi.xrs.scatterers().size(), True),
+      real_space_gradients_delta  = d_min/4,
+      max_iterations              = 150,
+      geometry_restraints_manager = pi.grm.geometry)
+    refined = mmtbx.refinement.real_space.individual_sites.refinery(
+      refiner                  = rsr_simple_refiner,
+      xray_structure           = xrs_poor.deep_copy_scatterers(),
+      start_trial_weight_value = 1,
+      rms_bonds_limit          = 0.02,
+      rms_angles_limit         = 2)
+    print(refined.weight_final, refined.rms_bonds_final, refined.rms_angles_final)
+    #
+    params = sa.master_params().extract()
+    params.start_temperature=5000
+    params.final_temperature=0
+    params.cool_rate = 100
+    params.number_of_steps = 100
+    params.update_grads_shift = 0. # does not change runtime visibly
+    #
+    sa.run(
+      params             = params,
+      fmodel             = fmodel,
+      real_space         = True,
+      target_map         = target_map,
+      restraints_manager = pi.grm,
+      wx                 = refined.weight_final,
+      wc                 = 1.,
+      verbose            = True)
+    #
+    r = fmodel.r_work()
+    print("final r_work:", r)
+    if(shake):
+      assert r < 0.07, r
+    else:
+      assert r < 0.13, r
+    dist = flex.mean(flex.sqrt((pi.xrs.sites_cart() -
+            fmodel.xray_structure.sites_cart()).dot()))
+    print("Distance(refined, answer): %6.4f"%dist)
+    if(shake):
+      assert dist < 0.35, r
+    else:
+      assert dist < 0.14, dist
+    if(0):
+      pi.ph.adopt_xray_structure(fmodel.xray_structure)
+      pi.ph.write_pdb_file(file_name="refined.pdb",
+        crystal_symmetry = fmodel.xray_structure.crystal_symmetry())
+
+def exercise_3():
+  pi = get_pdb_inputs(pdb_str=pdb_str_1)
+  xrs = pi.xrs.deep_copy_scatterers()
+  sites_cart_start = xrs.sites_cart()
+  states_collector = mmtbx.utils.states(
+    pdb_hierarchy  = pi.ph)
+  #
+  params = sa.master_params().extract()
+  params.start_temperature=5000
+  params.final_temperature=0
+  params.cool_rate = 100
+  params.number_of_steps = 100
+  params.update_grads_shift = 0.
+  params.time_step = 0.0005
+  params.interleave_minimization=True
+  #
+  sa.run(
+    params = params,
+    xray_structure     = xrs,
+    restraints_manager = pi.grm,
+    states_collector   = states_collector)
+  states_collector.write(file_name = "all.pdb")
+
+
+if(__name__ == "__main__"):
+  timer = user_plus_sys_time()
+  exercise_1()
+  exercise_2()
+  exercise_3()
+  print("Time: %6.2f" % timer.elapsed())
+
+
+ *******************************************************************************

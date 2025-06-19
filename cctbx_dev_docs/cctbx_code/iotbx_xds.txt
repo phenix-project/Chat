@@ -1,0 +1,1959 @@
+
+
+ *******************************************************************************
+iotbx/xds/__init__.py
+"""Tools for manipulation of XDS formatted data files
+"""
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/blank_cbf.py
+#!/usr/bin/env libtbx.python
+#
+# iotbx.xds.xds_blank_cbf.py
+#
+#   James Parkhurst, Diamond Light Source, 2012/OCT/16
+#
+#   Class to read the BLANK.CBF files used in XDS
+#
+from __future__ import absolute_import, division, print_function
+
+from iotbx.xds import xds_cbf
+
+class reader(xds_cbf.reader):
+  """A class to read the BLANK.CBF files used in XDS"""
+  def __init__(self):
+    xds_cbf.reader.__init__(self)
+
+  def get_data(self):
+    """Get the dark current array from the file"""
+    # XXX is this actually necessary here?
+    import numpy # import dependency
+
+    # Get the image data
+    return xds_cbf.reader.get_data(self)
+
+
+if __name__ == '__main__':
+    import sys
+    handle = reader()
+    handle.read_file(sys.argv[1])
+    image = handle.get_data()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/correction.py
+#!/usr/bin/env libtbx.python
+#
+# iotbx.xds.correction.py
+#
+#   James Parkhurst, Diamond Light Source, 2012/OCT/16
+#
+#   Class to read the X/Y-CORRECTIONS.CBF files used in XDS
+#
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+class reader:
+  """A class to read the X/Y-CORRECTIONS.CBF files used in XDS"""
+  def __init__(self):
+    pass
+
+  def read_file(self, filename):
+    """Read the CBF correction file"""
+    import pycbf
+    self.cbf_handle = pycbf.cbf_handle_struct()
+    self.cbf_handle.read_file(filename, pycbf.MSG_DIGEST)
+    self.cbf_handle.rewind_datablock()
+
+  def get_correction_array(self):
+    """Get the correction array from the file"""
+    import numpy
+
+    # Select the first datablock and rewind all the categories
+    self.cbf_handle.select_datablock(0)
+    self.cbf_handle.select_category(0)
+    self.cbf_handle.select_column(2)
+    self.cbf_handle.select_row(0)
+
+    # Check the type of the element to ensure it's a binary
+    # otherwise raise an exception
+    type = self.cbf_handle.get_typeofvalue()
+    if type.find('bnry') > -1:
+
+      # Read the image data into an array
+      image_string = self.cbf_handle.get_integerarray_as_string()
+      image = numpy.fromstring(image_string, numpy.int32)
+
+      # Get the array parameters
+      parameters = self.cbf_handle.get_integerarrayparameters_wdims()
+      image_size = (parameters[10], parameters[9])
+
+      # Resize the image
+      image.shape = (image_size)
+
+    else:
+      raise TypeError('Can\'t find image')
+
+    # Return the image
+    return image
+
+  def get_correction(self, dim):
+    """Get the correction at each pixel."""
+    import numpy
+
+    # Get the raw array
+    raw_array = self.get_correction_array()
+
+    # Ensure out dimensions are ok
+    if raw_array.shape[0] * 4 < dim[0] or raw_array.shape[1] * 4 < dim[1]:
+      raise ValueError("Dimensions are incompatible")
+
+    # Create the array of the given dimension
+    correction = numpy.zeros(dim, dtype=numpy.float64)
+
+    # Loop through all pixels and get the correction
+    i1 = numpy.array([list(range(dim[1]))] * dim[0], dtype=numpy.int32)
+    j1 = numpy.array([list(range(dim[0]))] * dim[1], dtype=numpy.int32).transpose()
+    i2 = numpy.divide(i1, 4)
+    j2 = numpy.divide(j1, 4)
+    correction[j1,i1] = raw_array[j2,i2] / 10.0
+
+    # Return the array of corrections
+    return correction
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/crystal_symmetry_from_hkl.py
+from __future__ import absolute_import, division, print_function
+from iotbx.xds import read_ascii
+
+def extract_from(file_name):
+  with open(file_name) as f:
+    cs = read_ascii.reader(f, header_only=True).crystal_symmetry()
+  return cs
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/gain_cbf.py
+#!/usr/bin/env libtbx.python
+#
+# iotbx.xds.gain_cbf.py
+#
+#   James Parkhurst, Diamond Light Source, 2012/OCT/16
+#
+#   Class to read the GAIN.CBF files used in XDS
+#
+from __future__ import absolute_import, division, print_function
+
+from iotbx.xds import xds_cbf
+from six.moves import range
+
+class reader(xds_cbf.reader):
+  """A class to read the GAIN.CBF files used in XDS"""
+  def __init__(self):
+    xds_cbf.reader.__init__(self)
+
+  def get_data(self, dim):
+    """Get the gain array from the file"""
+    from math import ceil
+    import numpy
+
+    # Get the image data
+    sampled_gain = xds_cbf.reader.get_data(self)
+    ny = int(ceil(dim[0] / sampled_gain.shape[0]))
+    nx = int(ceil(dim[1] / sampled_gain.shape[1]))
+
+    # Resize the gain image
+    i1 = numpy.array([list(range(dim[1]))] * dim[0], dtype=numpy.int32)
+    j1 = numpy.array([list(range(dim[0]))] * dim[1], dtype=numpy.int32).transpose()
+    i2 = numpy.divide(i1, nx)
+    j2 = numpy.divide(j1, ny)
+    gain = numpy.zeros(dim, dtype=numpy.float64)
+    gain[j1,i1] = sampled_gain[j2,i2] / 1000.0
+    return gain
+
+if __name__ == '__main__':
+    import sys
+    import numpy
+    handle = reader()
+    handle.read_file(sys.argv[1])
+    image = handle.get_data(sys.argv[2])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/geometry.py
+#!/usr/bin/env libtbx.python
+#
+# iotbx.xds.geometry.py
+#
+# Code to read experimental geometry from a number of XDS output files
+# (XPARM, reflection files) returning geometry object tree in the existing
+# coordinate frame. Use method structured_xds_geometry(filename)
+#
+# Aim of code: to save writing this over and over...
+#
+# Graeme Winter, Diamond Light Source, 2012/OCT/16
+
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+class bucket:
+  pass
+
+def structured_xds_geometry(filename):
+  '''
+  Structured view of the geometry stored in an XDS data or metadata file.
+  '''
+
+  # read the geometric information from the file
+
+  if open(filename, 'r').read(26) == '!OUTPUT_FILE=INTEGRATE.HKL':
+    _osc, _det, _ub, _pix, _beam = read_geometry_integrate_hkl(filename)[:5]
+  elif open(filename, 'r').read(17) == '!FORMAT=XDS_ASCII':
+    _osc, _det, _ub, _pix, _beam = read_geometry_integrate_hkl(filename)[:5]
+  else:
+    _osc, _det, _ub, _pix, _beam = read_geometry_xparm_xds(filename)[:5]
+
+  # create some data structures for this
+  oscillation = bucket()
+
+  # FIXME I should remove the need from frame0 here - recalculate phi0
+  oscillation.phi0 = _osc['phi0'] - (_osc['frame0'] - 1) * _osc['dphi']
+  oscillation.dphi = _osc['dphi']
+  oscillation.axis = _osc['axis']
+
+  beam = bucket()
+  beam.direction = _beam['direction'].normalize()
+  beam.wavelength = _beam['wavelength']
+
+  detector = bucket()
+  detector.fast = _det['fast']
+  detector.slow = _det['slow']
+  detector.normal = _det['normal']
+  detector.origin = _det['origin']
+  detector.size = _pix['nx'], _pix['ny']
+  detector.pixel_size = _pix['qx'], _pix['qy']
+
+  sample = bucket()
+  sample.ub = _ub['ub']
+  sample.cell = (_ub['a'].length(), _ub['b'].length(), _ub['c'].length(),
+           _ub['b'].angle(_ub['c'], deg = True),
+           _ub['c'].angle(_ub['a'], deg = True),
+           _ub['a'].angle(_ub['b'], deg = True))
+
+  # gather everything together
+  geometry = bucket()
+  geometry.oscillation = oscillation
+  geometry.beam = beam
+  geometry.detector = detector
+  geometry.sample = sample
+
+  return geometry
+
+def read_geometry_xparm_xds(filename):
+  '''
+  Read XDS XPARM file from indexing or global refinement and generate a model
+  of the geometry. Returns object using cctbx matrices.
+  '''
+
+  from scitbx import matrix
+
+  oscillation = { }
+  detector = { }
+  ub = { }
+  pixel = { }
+  beam = { }
+  variance = { }
+
+  # read
+  xparm_values = open(filename, 'r').read().split()
+
+  # validate
+  assert(len(xparm_values) == 42)
+
+  # understand
+  xparm_values = [float(x) for x in xparm_values]
+  oscillation['frame0'] = int(xparm_values[0])
+  oscillation['phi0'] = xparm_values[1]
+  oscillation['dphi'] = xparm_values[2]
+  oscillation['axis'] = matrix.col(xparm_values[3:6])
+  beam['wavelength'] = xparm_values[6]
+  beam['direction'] = matrix.col(xparm_values[7:10])
+  pixel['nx'] = int(xparm_values[10])
+  pixel['ny'] = int(xparm_values[11])
+  pixel['qx'] = xparm_values[12]
+  pixel['qy'] = xparm_values[13]
+  detector['distance'] = xparm_values[14]
+  detector['orgx'] = xparm_values[15] * pixel['qx']
+  detector['orgy'] = xparm_values[16] * pixel['qy']
+  detector['fast'] = matrix.col(xparm_values[17:20])
+  detector['slow'] = matrix.col(xparm_values[20:23])
+  detector['normal'] = matrix.col(xparm_values[23:26])
+  detector['origin'] = (detector['distance'] * detector['normal'] -
+              detector['orgx'] * detector['fast'] -
+              detector['orgy'] * detector['slow'])
+  ub['a'] = matrix.col(xparm_values[33:36])
+  ub['b'] = matrix.col(xparm_values[36:39])
+  ub['c'] = matrix.col(xparm_values[39:42])
+  ub['ub'] = matrix.sqr(ub['a'].elems + ub['b'].elems +
+              ub['c'].elems).inverse()
+
+  return oscillation, detector, ub, pixel, beam
+
+def read_geometry_integrate_hkl(filename):
+  '''
+  Read XDS INTEGRATE.HKL or XDS_ASCII.HKL from integrate or correct steps,
+  return model of geometry. Returns object using cctbx matrices.
+  '''
+
+  from scitbx import matrix
+
+  oscillation = { }
+  detector = { }
+  ub = { }
+  pixel = { }
+  beam = { }
+
+  for record in open(filename):
+    if not record.startswith('!'):
+      break
+
+    tokens = record[1:].split()
+
+    if tokens[0] == 'NX=':
+      for j in range(0, 8, 2):
+        pixel[tokens[j].replace('=', '').lower()] = float(
+          tokens[j + 1])
+    elif tokens[0] == 'STARTING_FRAME=':
+      oscillation['frame0'] = int(tokens[1])
+    elif tokens[0] == 'STARTING_ANGLE=':
+      oscillation['phi0'] = float(tokens[1])
+    elif tokens[0] == 'OSCILLATION_RANGE=':
+      oscillation['dphi'] = float(tokens[1])
+    elif tokens[0] == 'INCIDENT_BEAM_DIRECTION=':
+      # TODO verify if matrix.col accepts iterator in both py2/3
+      beam['direction'] = matrix.col( [float(t) for t in tokens[-3:]])
+      beam['wavelength'] = 1.0 / beam['direction'].length()
+    elif tokens[0] == 'ROTATION_AXIS=':
+      oscillation['axis'] = matrix.col( [float(t) for t in tokens[-3:]])
+    elif tokens[0] == 'DIRECTION_OF_DETECTOR_X-AXIS=':
+      detector['fast'] = matrix.col([float(t) for t in tokens[-3:]])
+    elif tokens[0] == 'DIRECTION_OF_DETECTOR_Y-AXIS=':
+      detector['slow'] = matrix.col([float(t) for t in tokens[-3:]])
+    elif tokens[0] == 'ORGX=':
+      orgx, orgy = float(tokens[1]), float(tokens[3])
+      detector['_org'] = orgx, orgy
+    elif tokens[0] == 'DETECTOR_DISTANCE=':
+      detector['distance'] = float(tokens[1])
+    elif tokens[0] == 'UNIT_CELL_A-AXIS=':
+      ub['a'] = matrix.col([float(t) for t in tokens[-3:]])
+    elif tokens[0] == 'UNIT_CELL_B-AXIS=':
+      ub['b'] = matrix.col([float(t) for t in tokens[-3:]])
+    elif tokens[0] == 'UNIT_CELL_C-AXIS=':
+      ub['c'] = matrix.col([float(t) for t in tokens[-3:]])
+
+  # postprocess results
+  orgx, orgy = detector['_org']
+  detector['normal'] = detector['fast'].cross(detector['slow'])
+  detector['orgx'], detector['orgy'] = (orgx * pixel['qx'],
+                      orgy * pixel['qy'])
+  detector['origin'] = (detector['distance'] * detector['normal'] -
+              detector['orgx'] * detector['fast'] -
+              detector['orgy'] * detector['slow'])
+  ub['ub'] = matrix.sqr(ub['a'].elems + ub['b'].elems +
+              ub['c'].elems).inverse()
+
+  return oscillation, detector, ub, pixel, beam
+
+# code here to allow test cases - static example texts
+
+__integrate_text = '''!OUTPUT_FILE=INTEGRATE.HKL    DATE=11-Oct-2012
+!Generated by INTEGRATE    (VERSION  March 15, 2012)
+!PROFILE_FITTING= TRUE
+!SPACE_GROUP_NUMBER=   75
+!UNIT_CELL_CONSTANTS=    57.965    57.965   150.135  90.000  90.000  90.000
+!NAME_TEMPLATE_OF_DATA_FRAMES=/Users/graeme/data/i03-setup-110711/x1/thau_2_????
+!DETECTOR=PILATUS
+!NX=  2463  NY=  2527    QX=  0.172000  QY=  0.172000
+!STARTING_FRAME=       1
+!STARTING_ANGLE=     0.000
+!OSCILLATION_RANGE=  0.100000
+!ROTATION_AXIS=  0.999999 -0.001342 -0.000955
+!X-RAY_WAVELENGTH=  0.976300
+!INCIDENT_BEAM_DIRECTION=  0.001787  0.003138  1.024269
+!DIRECTION_OF_DETECTOR_X-AXIS=  1.000000  0.000000  0.000000
+!DIRECTION_OF_DETECTOR_Y-AXIS=  0.000000  1.000000  0.000000
+!ORGX=   1220.98  ORGY=   1263.78
+!DETECTOR_DISTANCE=   268.288
+!UNIT_CELL_A-AXIS=    41.592    10.019    39.111
+!UNIT_CELL_B-AXIS=   -13.760    56.308     0.209
+!UNIT_CELL_C-AXIS=   -98.311   -24.435   110.808
+!BEAM_DIVERGENCE_E.S.D.=     0.027
+!REFLECTING_RANGE_E.S.D.=     0.059
+!MINPK=  75.00000
+!CUT=    2.00
+!VARIANCE_MODEL=  4.000E+00  1.000E-04
+!NUMBER_OF_ITEMS_IN_EACH_DATA_RECORD=20
+!H,K,L,IOBS,SIGMA,XCAL,YCAL,ZCAL,RLP,PEAK,CORR,MAXC,
+!             XOBS,YOBS,ZOBS,ALF0,BET0,ALF1,BET1,PSI
+!Items are separated by a blank and can be read in free-format
+!END_OF_HEADER
+ -48 -5 -9 1.240E+01 2.380E+01 8.8 2512.5 777.2 0.73498 99.99931 9 5 9.0 2511.7 777.3 60.34 0.20 134.15 48.13 -21.18
+ -48 -4 -10 4.495E+01 2.502E+01 10.9 2508.8 760.9 0.73320 100.00000 21 5 12.3 2508.4 761.1 60.34 0.20 134.18 48.06 -19.17
+ -48 -3 -11 3.779E+01 2.556E+01 12.5 2506.9 744.6 0.73225 100.00000 25 4 13.2 2506.3 744.7 60.34 0.20 134.19 48.02 -17.22
+ -48 -2 -12 1.510E+02 3.357E+01 13.4 2506.3 728.2 0.73204 100.00000 51 9 13.1 2506.3 727.8 60.34 0.20 134.18 48.00 -15.32
+ -48 -2 -11 3.612E+01 2.472E+01 4.4 2494.2 728.3 0.72505 82.11671 24 6 6.4 2493.7 728.7 60.34 0.20 134.68 47.97 -15.59
+ -48 -1 -13 7.332E+00 2.338E+01 13.8 2507.4 711.8 0.73262 99.99820 11 6 14.8 2506.6 710.7 60.34 0.20 134.15 48.01 -13.46
+ -48 -1 -12 6.146E+00 2.490E+01 4.8 2495.0 711.8 0.72553 87.16513 21 9 5.4 2493.8 712.3 60.34 0.20 134.65 47.97 -13.71
+ -48 0 -14 6.579E+01 2.778E+01 13.5 2510.0 695.3 0.73400 99.99902 29 9 13.2 2508.7 694.7 60.34 0.20 134.09 48.05 -11.66
+ -48 0 -13 -1.972E+00 2.098E+01 4.6 2497.5 695.2 0.72682 84.58707 -14 5 5.7 2494.4 695.0 60.34 0.20 134.59 48.00 -11.89
+ '''
+
+__correct_text = '''!FORMAT=XDS_ASCII    MERGE=FALSE    FRIEDEL'S_LAW=TRUE
+!OUTPUT_FILE=XDS_ASCII.HKL        DATE=11-Oct-2012
+!Generated by CORRECT   (VERSION  March 15, 2012)
+!PROFILE_FITTING= TRUE
+!NAME_TEMPLATE_OF_DATA_FRAMES=/Users/graeme/data/i03-setup-110711/x1/thau_2_????
+!DATA_RANGE=       1    1800
+!ROTATION_AXIS=  0.999999 -0.001347 -0.000967
+!OSCILLATION_RANGE=  0.100000
+!STARTING_ANGLE=     0.000
+!STARTING_FRAME=       1
+!INCLUDE_RESOLUTION_RANGE=    68.140     1.189
+!SPACE_GROUP_NUMBER=   89
+!UNIT_CELL_CONSTANTS=    57.967    57.967   150.137  90.000  90.000  90.000
+!UNIT_CELL_A-AXIS=    41.594    10.018    39.112
+!UNIT_CELL_B-AXIS=   -13.760    56.310     0.209
+!UNIT_CELL_C-AXIS=   -98.311   -24.435   110.810
+!REFLECTING_RANGE_E.S.D.=     0.059
+!BEAM_DIVERGENCE_E.S.D.=     0.027
+!X-RAY_WAVELENGTH=  0.976300
+!INCIDENT_BEAM_DIRECTION=  0.001783  0.003139  1.024269
+!FRACTION_OF_POLARIZATION=   0.990
+!POLARIZATION_PLANE_NORMAL=  0.000000  1.000000  0.000000
+!AIR=  0.001000
+!SILICON=  3.670924
+!SENSOR_THICKNESS=  0.320000
+!DETECTOR=PILATUS
+!OVERLOAD=   1048500
+!DIRECTION_OF_DETECTOR_X-AXIS=   1.00000   0.00000   0.00000
+!DIRECTION_OF_DETECTOR_Y-AXIS=   0.00000   1.00000   0.00000
+!DETECTOR_DISTANCE=   268.292
+!ORGX=   1220.99  ORGY=   1263.77
+!NX=  2463  NY=  2527    QX=  0.172000  QY=  0.172000
+!VARIANCE_MODEL=  1.761E+00  6.348E-04
+!NUMBER_OF_ITEMS_IN_EACH_DATA_RECORD=12
+!ITEM_H=1
+!ITEM_K=2
+!ITEM_L=3
+!ITEM_IOBS=4
+!ITEM_SIGMA(IOBS)=5
+!ITEM_XD=6
+!ITEM_YD=7
+!ITEM_ZD=8
+!ITEM_RLP=9
+!ITEM_PEAK=10
+!ITEM_CORR=11
+!ITEM_PSI=12
+!END_OF_HEADER
+     0     0     3  3.094E+00  6.167E-01  1203.7  1245.6    780.2 0.01474 100  49  -27.01
+     0     0    -4  1.658E+04  5.552E+02  1250.3  1299.2    762.9 0.01965 100  53   25.88
+     0     0     4  1.609E+04  5.387E+02  1197.0  1238.0    782.6 0.01965 100  55  -27.18
+     0     0    -5  1.144E+00  7.676E-01  1257.0  1306.9    760.4 0.02457 100  39   25.72
+     0     0     5  4.891E-02  7.921E-01  1190.4  1230.3    785.1 0.02457 100  10  -27.34
+     0     0    -6  6.769E-01  9.447E-01  1263.7  1314.5    758.0 0.02949 100  29   25.56
+     0     0     6 -6.594E-01  8.800E-01  1183.7  1222.7    787.6 0.02949 100 -31  -27.50
+     0     0    -7  9.411E-01  9.236E-01  1270.3  1322.2    755.5 0.03441 100  25   25.40
+     0     0     7  2.855E-01  1.032E+00  1177.0  1215.0    790.0 0.03441 100  27  -27.66
+     0     0    -8  2.716E+04 -9.096E+02  1277.0  1329.9    753.0 0.03932 100  62   25.24
+     0     0     8  3.547E+04 -1.187E+03  1170.4  1207.3    792.5 0.03932 100  64  -27.82
+     0     0    -9  3.287E+00  1.238E+00  1283.7  1337.6    750.5 0.04424 100  40   25.07
+     0     0     9  2.630E+00  1.346E+00  1163.7  1199.7    795.0 0.04425 100  32  -27.98
+'''
+
+__xparm_text = '''     1        0.0000    0.1000  0.999999 -0.001347 -0.000967
+       0.976300       0.001783       0.003139       1.024269
+      2463      2527    0.172000    0.172000
+     268.291748    1220.988037    1263.773804
+       1.000000       0.000000       0.000000
+       0.000000       1.000000       0.000000
+       0.000000       0.000000       1.000000
+    89     57.9672     57.9672    150.1366  90.000  90.000  90.000
+      41.594490      10.018485      39.111748
+     -13.759865      56.310059       0.209473
+     -98.310692     -24.435324     110.810379
+'''
+
+def work():
+  '''
+  Test out the code above.
+  '''
+
+  import os
+  import tempfile, math
+
+  cell_ref = (57.97, 57.97, 150.14, 90.00, 90.00, 90.00)
+
+  for text in __integrate_text, __correct_text, __xparm_text:
+    fd, filename = tempfile.mkstemp()
+    f = os.fdopen(fd, 'w')
+    f.write(text)
+    f.close()
+    geometry = structured_xds_geometry(filename)
+    cell = geometry.sample.cell
+    for j in range(6):
+      assert(math.fabs(cell[j] - cell_ref[j]) < 0.1)
+    os.remove(filename)
+
+  print('OK')
+
+if __name__ == '__main__':
+  work()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/integrate_hkl.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+class reader:
+  """A class to read the INTEGRATE.HKL file used in XDS"""
+
+  def __init__(self):
+    """Initialise the file contents."""
+    self._header = {}
+    self.hkl = []
+    self.iobs = []
+    self.sigma = []
+    self.xyzcal = []
+    self.rlp = []
+    self.peak = []
+    self.corr = []
+    self.maxc = []
+    self.xyzobs = []
+    self.alfbet0 = []
+    self.alfbet1 = []
+    self.psi = []
+    self.iseg = []
+
+  @staticmethod
+  def is_integrate_hkl_file(filename):
+    '''Check that the file is identified as an INTEGRATE.HKL
+
+    Params:
+      filename The path to the file
+
+    Returns:
+      True/False Is the file an INTEGRATE.HKL file
+
+    '''
+    with open(filename, 'r') as fh:
+      return fh.read(26) == '!OUTPUT_FILE=INTEGRATE.HKL'
+
+  def read_file(self, filename):
+    """Read the INTEGRATE.HKL file.
+
+    See http://xds.mpimf-heidelberg.mpg.de/html_doc/xds_files.html for more
+    information about the file format.
+
+    Params:
+      filename The path to the file
+
+    """
+
+    # Check the file is an INTEGRATE.HKL file
+    if not reader.is_integrate_hkl_file(filename):
+      raise IOError("{0} is not an INTEGRATE.HKL file".format(filename))
+
+    # Read the lines from the file
+    with open(filename, 'r') as fh:
+      lines = fh.readlines()
+
+    # Loop through the lines in the file. First off, parse the header
+    # lines until we reach !END_OF_HEADER. Then parse the data lines
+    # until we read !END_OF_DATA
+    in_header = True
+    for l in lines:
+      if in_header:
+        if l.strip().startswith('!END_OF_HEADER'):
+          in_header = False
+          continue
+        else:
+          if not l.strip().startswith('!'):
+            continue
+          self._parse_header_line(l.strip()[1:])
+      else:
+        if l.strip().startswith('!END_OF_DATA'):
+          break
+        else:
+          self._parse_data_line(l)
+
+    # Set the header parameters
+    self._set_header_parameters()
+
+  def _parse_str(self, s):
+    """Parse a string to either an int, float or string
+
+    Params:
+      s The input string
+
+    Returns:
+      The parsed value
+
+    """
+    try:
+      return int(s)
+    except ValueError:
+      try:
+        return float(s)
+      except ValueError:
+        return str(s)
+
+  def _parse_value(self, value):
+    """Parse the value or array of values contained in the string
+
+    Params:
+      value The value to parse
+
+    Returns:
+      The parsed value
+
+    """
+    values = value.split()
+    if len(values) == 1:
+      return self._parse_str(values[0])
+    else:
+      return tuple([self._parse_str(s) for s in values])
+
+  def _set_header_parameters(self):
+    """Get the parameters from the header dict
+
+    """
+    self.space_group       = self._header['SPACE_GROUP_NUMBER']
+    self.unit_cell         = self._header['UNIT_CELL_CONSTANTS']
+    self.detector_size     = (self._header['NX'], self._header['NY'])
+    self.pixel_size        = (self._header['QX'], self._header['QY'])
+    self.starting_frame    = self._header['STARTING_FRAME']
+    self.starting_angle    = self._header['STARTING_ANGLE']
+    self.oscillation_range = self._header['OSCILLATION_RANGE']
+    self.rotation_axis     = self._header['ROTATION_AXIS']
+    self.wavelength        = self._header['X-RAY_WAVELENGTH']
+    self.beam_vector       = self._header['INCIDENT_BEAM_DIRECTION']
+    self.detector_x_axis   = self._header['DIRECTION_OF_DETECTOR_X-AXIS']
+    self.detector_y_axis   = self._header['DIRECTION_OF_DETECTOR_Y-AXIS']
+    self.detector_origin   = (self._header['ORGX'], self._header['ORGY'])
+    self.detector_distance = self._header['DETECTOR_DISTANCE']
+    self.unit_cell_a_axis  = self._header['UNIT_CELL_A-AXIS']
+    self.unit_cell_b_axis  = self._header['UNIT_CELL_B-AXIS']
+    self.unit_cell_c_axis  = self._header['UNIT_CELL_C-AXIS']
+    self.sigma_divergence  = self._header['BEAM_DIVERGENCE_E.S.D.']
+    self.sigma_mosaicity   = self._header['REFLECTING_RANGE_E.S.D.']
+    self.template          = self._header['NAME_TEMPLATE_OF_DATA_FRAMES']
+    self.detector_type     = self._header['DETECTOR']
+    self.minpk             = self._header['MINPK']
+    self.cut               = self._header['CUT']
+    self.variance_model    = self._header['VARIANCE_MODEL']
+    del(self._header)
+
+  def _parse_header_line(self, line):
+    """Parse a line that has been identified as a header line
+
+    Params:
+      line The line to parse
+
+    """
+    name_value = line.split('=')
+    if (len(name_value) < 2):
+      return
+
+    name = name_value[0]
+    if (len(name_value) > 2):
+      for i in range(1, len(name_value)-1):
+        value_name = name_value[i].split()
+        value = ''.join(value_name[:-1])
+        self._header[name] = self._parse_value(value)
+        name = value_name[-1]
+
+    value = name_value[-1]
+    self._header[name] = self._parse_value(value)
+
+  def _parse_data_line(self, line):
+    """Parse a data line from the Integrate.hkl file
+
+    Params:
+      line The line to parse
+
+    """
+    # Split the tokens
+    tokens = line.split()
+    tokens = [int(t) for t in tokens[0:3]] + [float(t) for t in tokens[3:]]
+
+    # Get the reflection information and append to the lists
+    self.hkl.append(tuple(tokens[0:3]))
+    self.iobs.append(tokens[3])
+    self.sigma.append(tokens[4])
+    self.xyzcal.append(tuple(tokens[5:8]))
+    self.rlp.append(tokens[8])
+    self.peak.append(tokens[9])
+    self.corr.append(tokens[10])
+    self.maxc.append(tokens[11])
+    self.xyzobs.append(tuple(tokens[12:15]))
+    self.alfbet0.append(tuple(tokens[15:17]))
+    self.alfbet1.append(tuple(tokens[17:19]))
+    self.psi.append(tokens[19])
+    if len(tokens) > 20:
+      self.iseg.append(int(tokens[20]))
+
+  def as_miller_arrays(self,
+                       crystal_symmetry=None,
+                       force_symmetry=False,
+                       merge_equivalents=True,
+                       base_array_info=None,
+                       anomalous=None):
+    if (base_array_info is None):
+      base_array_info = miller.array_info(source_type="xds_integrate_hkl")
+    from cctbx.array_family import flex
+    from cctbx import crystal, miller, sgtbx
+    crystal_symmetry = crystal.symmetry(
+      unit_cell=self.unit_cell,
+      space_group_info=sgtbx.space_group_info(number=self.space_group))
+    indices = flex.miller_index(self.hkl)
+    miller_set = miller.set(crystal_symmetry, indices, anomalous_flag=anomalous)
+    return (miller.array(
+      miller_set, data=flex.double(self.iobs), sigmas=flex.double(self.sigma))
+            .set_info(base_array_info.customized_copy(
+              labels=["iobs", "sigma_iobs"])).set_observation_type_xray_intensity(),
+            miller.array(miller_set, data=flex.vec3_double(self.xyzcal))
+            .set_info(base_array_info.customized_copy(
+              labels=["xyzcal"])),
+            miller.array(miller_set, data=flex.vec3_double(self.xyzobs))
+            .set_info(base_array_info.customized_copy(
+              labels=["xyzobs"])),
+            miller.array(miller_set, data=flex.double(self.rlp))
+            .set_info(base_array_info.customized_copy(
+              labels=["rlp"])),
+            miller.array(miller_set, data=flex.double(self.peak))
+            .set_info(base_array_info.customized_copy(
+              labels=["peak"])),
+            miller.array(miller_set, data=flex.double(self.corr))
+            .set_info(base_array_info.customized_copy(
+              labels=["corr"])),
+            miller.array(miller_set, data=flex.double(self.maxc))
+            .set_info(base_array_info.customized_copy(
+              labels=["maxc"])),
+            miller.array(miller_set, data=flex.vec2_double(self.alfbet0))
+            .set_info(base_array_info.customized_copy(
+              labels=["alfbet0"])),
+            miller.array(miller_set, data=flex.vec2_double(self.alfbet1))
+            .set_info(base_array_info.customized_copy(
+              labels=["alfbet1"])),
+            miller.array(miller_set, data=flex.double(self.psi))
+            .set_info(base_array_info.customized_copy(
+              labels=["psi"])))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/read_ascii.py
+from __future__ import absolute_import, division, print_function
+from cctbx import miller
+from cctbx import crystal
+from cctbx import uctbx
+from cctbx.array_family import flex
+import sys
+
+def get_rhs(line):
+  return line.split("=", 1)[1]
+
+class reader(object):
+
+  def __init__(self, file_handle, header_only=False, allow_unmerged=True):
+    "http://www.mpimf-heidelberg.mpg.de/~kabsch/xds/"
+    flds = file_handle.readline().split()
+    assert flds[0] == "!FORMAT=XDS_ASCII"
+    assert (allow_unmerged) or (flds[1] == "MERGE=TRUE")
+    self.unmerged_data = (flds[1] == "MERGE=FALSE")
+    if   (flds[2] == "FRIEDEL'S_LAW=FALSE"):
+      self.anomalous_flag = True
+    elif (flds[2] == "FRIEDEL'S_LAW=TRUE"):
+      self.anomalous_flag = self.unmerged_data
+    else:
+      raise RuntimeError("Expected FRIEDEL'S_LAW=FALSE|TRUE")
+    self.unit_cell = None
+    self.space_group_number = None
+    self.number_of_items_in_each_data_record = None
+    self.miller_index_columns = [None, None, None]
+    self.iobs_column = None
+    self.sigma_iobs_column = None
+    self.zd_column = None
+    self.wavelength = None
+    for line in file_handle:
+      if (line.startswith("!SPACE_GROUP_NUMBER=")):
+        self.space_group_number = int(get_rhs(line))
+        assert 1 <= self.space_group_number <= 230
+      elif (line.startswith("!UNIT_CELL_CONSTANTS=")):
+        self.unit_cell = uctbx.unit_cell(get_rhs(line))
+      elif (line.startswith("!NUMBER_OF_ITEMS_IN_EACH_DATA_RECORD=")):
+        self.number_of_items_in_each_data_record = int(get_rhs(line))
+      elif (line.startswith("!ITEM_H=")):
+        self.miller_index_columns[0] = self.column_index(line)
+      elif (line.startswith("!ITEM_K=")):
+        self.miller_index_columns[1] = self.column_index(line)
+      elif (line.startswith("!ITEM_L=")):
+        self.miller_index_columns[2] = self.column_index(line)
+      elif (line.startswith("!ITEM_IOBS=")):
+        self.iobs_column = self.column_index(line)
+      elif (line.startswith("!ITEM_SIGMA(IOBS)=")):
+        self.sigma_iobs_column = self.column_index(line)
+      elif (line.startswith("!ITEM_ZD=")):
+        self.zd_column = self.column_index(line)
+      elif (line.startswith("!X-RAY_WAVELENGTH=")):
+        self.wavelength = float(get_rhs(line))
+      elif (line.startswith("!END_OF_HEADER")):
+        break
+    assert self.unit_cell is not None
+    assert self.space_group_number is not None
+    assert self.column_index is not None
+    assert None not in self.miller_index_columns
+    assert self.iobs_column is not None
+    assert self.sigma_iobs_column is not None
+    if (header_only):
+      self.miller_indices = None
+      self.iobs = None
+      self.sigma_iobs = None
+      self.zd = None
+    else:
+      self.miller_indices = flex.miller_index()
+      self.iobs = flex.double()
+      self.sigma_iobs = flex.double()
+      self.zd = None
+      if (self.zd_column is not None):
+        self.zd = flex.double()
+      for line in file_handle:
+        if (line.startswith("!END_OF_DATA")):
+          break
+        data = line.split()
+        assert len(data) == self.number_of_items_in_each_data_record
+        sigma_value = float(data[self.sigma_iobs_column])
+        if sigma_value < 0:
+          continue # negative sigma values should be ignored (outliers)
+        h = [int(data[i]) for i in self.miller_index_columns]
+        self.miller_indices.append(h)
+        self.iobs.append(float(data[self.iobs_column]))
+        self.sigma_iobs.append(sigma_value)
+        if (self.zd_column is not None):
+          self.zd.append(float(data[self.zd_column]))
+
+  def column_index(self, line):
+    i_column = int(get_rhs(line))-1
+    assert 0 <= i_column < self.number_of_items_in_each_data_record
+    return i_column
+
+  def crystal_symmetry(self):
+    return crystal.symmetry(
+      unit_cell=self.unit_cell,
+      space_group_symbol=self.space_group_number)
+
+  def miller_set(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        anomalous=None):
+    crystal_symmetry_from_file = self.crystal_symmetry()
+    if anomalous is None:
+      anomalous = self.anomalous_flag
+    return miller.set(
+        crystal_symmetry=crystal_symmetry_from_file.join_symmetry(
+          other_symmetry=crystal_symmetry,
+          force=force_symmetry),
+        indices=self.miller_indices,
+        anomalous_flag=self.anomalous_flag)
+
+  def as_miller_array(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=None):
+    if (base_array_info is None):
+      base_array_info = miller.array_info(source_type="xds_ascii")
+    crystal_symmetry_from_file = self.crystal_symmetry()
+    array = (miller.array(
+      miller_set=self.miller_set(
+        crystal_symmetry=crystal_symmetry,
+        force_symmetry=force_symmetry,
+        anomalous=anomalous,
+      ),
+      data=self.iobs,
+      sigmas=self.sigma_iobs)
+      .set_info(base_array_info.customized_copy(
+        labels=["iobs", "sigma_iobs"],
+        crystal_symmetry_from_file=crystal_symmetry_from_file,
+        wavelength=self.wavelength))
+      .set_observation_type_xray_intensity())
+    if (merge_equivalents):
+      info = array.info()
+      info.merged = True
+      array = array.merge_equivalents().array().set_info(info)
+    return array
+
+  def as_miller_arrays(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=None):
+    return [self.as_miller_array(
+      crystal_symmetry=crystal_symmetry,
+      force_symmetry=force_symmetry,
+      merge_equivalents=merge_equivalents,
+      base_array_info=base_array_info,
+      anomalous=anomalous,
+    )]
+
+  def batch_as_miller_array(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        base_array_info=None):
+    if (base_array_info is None):
+      base_array_info = miller.array_info(source_type="xds_ascii")
+    crystal_symmetry_from_file = self.crystal_symmetry()
+    return miller.array(
+      miller_set=self.miller_set(
+          crystal_symmetry=crystal_symmetry,
+          force_symmetry=force_symmetry),
+      data=self.zd).set_info(
+        base_array_info.customized_copy(
+          labels=["ZD"],
+          crystal_symmetry_from_file=crystal_symmetry_from_file,
+          wavelength=self.wavelength))
+
+if (__name__ == "__main__"):
+  reader(open(sys.argv[1])).as_miller_array().show_comprehensive_summary()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/spot_xds.py
+#
+# spot_xds.py
+#
+#  Copyright (C) 2013 Diamond Light Source
+#
+#  Authors: James Parkhurst, Richard Gildea
+#
+#  This code is distributed under the BSD license, a copy of which is
+#  included in the root directory of this package.
+
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from six.moves import zip
+
+class reader(object):
+  '''Class to read the SPOT.XDS file.'''
+
+  def __init__(self):
+    ''' Init the reader.'''
+    pass
+
+  def read_file(self, filename):
+    '''Read the spot file.'''
+
+    # Setup the list
+    self.centroid = []
+    self.intensity = []
+    self.miller_index = []
+
+    # Open the file
+    with open(filename, 'r') as handle:
+      for line in handle:
+        tokens = line.split()
+        if len(tokens) < 4:
+          raise IndexError('Not enough tokens')
+        if len(tokens) >= 4:
+          self.centroid.append(tuple([float(t) for t in tokens[0:3]]))
+          self.intensity.append(float(tokens[3]))
+        if len(tokens) >= 7:
+          self.miller_index.append(tuple([int(t) for t in tokens[4:7]]))
+
+class writer(object):
+  '''Class to write the SPOT.XDS file.'''
+
+  def __init__(self, centroids, intensities, miller_indices=None):
+    self.centroids = centroids
+    self.intensities = intensities
+    self.miller_indices = miller_indices
+
+    assert len(self.centroids) == len(self.intensities)
+    if self.miller_indices is not None:
+      assert len(self.centroids) == len(self.miller_indices)
+
+  def write_file(self, filename=None):
+    '''Write the spot file.'''
+
+    with open(filename, 'w') as f:
+      for i in range(len(self.centroids)):
+        print(" %.2f"*3 %self.centroids[i], end=' ', file=f)
+        print("%.2f" %self.intensities[i], end=' ', file=f)
+        if self.miller_indices is not None:
+          print(" %i"*3 %self.miller_indices[i], end=' ', file=f)
+        print("\n", end='', file=f)
+
+if __name__ == '__main__':
+  import sys
+
+  handle = reader()
+  handle.read_file(sys.argv[1])
+
+  for (xc, yc, zc), i, (h, k, l) in zip(handle.centroid,
+                                        handle.intensity,
+                                        handle.miller_index):
+    print((xc, yc, zc), i, (h, k, l))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/tests/tst_integrate_hkl.py
+from __future__ import absolute_import, division, print_function
+
+class Test(object):
+
+  def __init__(self):
+    pass
+
+  def run(self):
+
+    from iotbx.xds import integrate_hkl
+    import os
+    import libtbx.load_env
+    iotbx_dir = libtbx.env.dist_path('iotbx')
+    filename = os.path.join(iotbx_dir, 'xds', 'tests', 'INTEGRATE.HKL')
+    handle = integrate_hkl.reader()
+    handle.read_file(filename)
+
+    handle.space_group
+    handle.unit_cell
+    handle.detector_size
+    handle.pixel_size
+    handle.starting_frame
+    handle.starting_angle
+    handle.oscillation_range
+    handle.rotation_axis
+    handle.wavelength
+    handle.beam_vector
+    handle.detector_x_axis
+    handle.detector_y_axis
+    handle.detector_origin
+    handle.detector_distance
+    handle.unit_cell_a_axis
+    handle.unit_cell_b_axis
+    handle.unit_cell_c_axis
+    handle.sigma_divergence
+    handle.sigma_mosaicity
+    handle.template
+    handle.detector_type
+    handle.minpk
+    handle.cut
+    handle.variance_model
+
+    from iotbx.reflection_file_reader import any_reflection_file
+    file_in = any_reflection_file(filename)
+    assert file_in.file_type() == 'xds_integrate_hkl'
+    miller_arrays = file_in.as_miller_arrays()
+    assert len(miller_arrays) == 10
+    assert miller_arrays[0].space_group().type().number() == handle.space_group
+    content = file_in.file_content()
+    assert content.beam_vector == (-0.001316, 0.001644, 1.020927)
+    assert content.wavelength == 0.9795
+
+    print('OK')
+
+if __name__ == '__main__':
+  test = Test()
+  test.run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/tests/tst_spots_xds.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx.test_utils import open_tmp_file
+from libtbx.test_utils import approx_equal
+from iotbx.xds import spot_xds
+
+
+def exercise_spots_xds():
+  txt = """\
+ 1104.20 1290.27 2.20 632. -4 -3 -1
+ 912.22 1303.37 3.49 346. 0 0 0
+ 1427.55 1339.93 3.34 259. 7 3 -1
+ 1380.54 1187.54 3.58 243. 4 3 4
+ 1222.32 1220.09 3.95 241. -1 0 2
+ 1491.71 1322.33 2.72 237. 9 4 0
+ 1053.50 1227.71 2.87 221. -6 -4 1
+"""
+
+  f = open_tmp_file(suffix="SPOTS.XDS", mode="w")
+  f.write(txt)
+  f.close()
+
+  spots_in = spot_xds.reader()
+  spots_in.read_file(f.name)
+  assert approx_equal(
+    spots_in.centroid,
+    [[1104.2, 1290.27, 2.2], [912.22, 1303.37, 3.49],
+     [1427.55, 1339.93, 3.34], [1380.54, 1187.54, 3.58],
+     [1222.32, 1220.09, 3.95], [1491.71, 1322.33, 2.72],
+     [1053.5, 1227.71, 2.87]])
+  assert approx_equal(
+    spots_in.intensity,
+    [632.0, 346.0, 259.0, 243.0, 241.0, 237.0, 221.0])
+  assert approx_equal(
+    spots_in.miller_index,
+    [[-4, -3, -1], [0, 0, 0], [7, 3, -1], [4, 3, 4],
+     [-1, 0, 2], [9, 4, 0], [-6, -4, 1]])
+
+  spots_out = spot_xds.writer(
+    spots_in.centroid, spots_in.intensity, spots_in.miller_index)
+  f = open_tmp_file(suffix="SPOTS.XDS", mode="wb")
+  f.close()
+  spots_out.write_file(filename=f.name)
+  spots_in = spot_xds.reader()
+  spots_in.read_file(f.name)
+  assert approx_equal(spots_in.centroid, spots_out.centroids)
+  assert approx_equal(spots_in.intensity, spots_out.intensities)
+  assert approx_equal(spots_in.miller_index, spots_out.miller_indices)
+
+  # now without miller indices
+  spots_out = spot_xds.writer(spots_in.centroid, spots_in.intensity)
+  f = open_tmp_file(suffix="SPOTS.XDS", mode="wb")
+  f.close()
+  spots_out.write_file(filename=f.name)
+  spots_in = spot_xds.reader()
+  spots_in.read_file(f.name)
+  assert approx_equal(spots_in.centroid, spots_out.centroids)
+  assert approx_equal(spots_in.intensity, spots_out.intensities)
+  assert len(spots_in.miller_index) == 0
+
+
+def run():
+  exercise_spots_xds()
+
+if __name__ == '__main__':
+  run()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/tests/tst_xds_inp.py
+from __future__ import absolute_import, division, print_function
+from libtbx.test_utils import open_tmp_directory
+
+class Test(object):
+
+  def __init__(self):
+    pass
+
+  def run(self):
+
+    from iotbx.xds import xds_inp
+    import os
+    import libtbx.load_env
+    iotbx_dir = libtbx.env.dist_path('iotbx')
+
+    filename = os.path.join(iotbx_dir, 'xds', 'tests', 'XDS.INP')
+    handle = xds_inp.reader()
+    handle.read_file(filename)
+
+    assert handle.detector == 'PILATUS'
+    assert handle.minimum_valid_pixel_value == 0
+    assert handle.overload == 1048500
+    assert handle.corrections == 'ALL'
+    assert handle.direction_of_detector_x_axis == [1.0, 0.0, 0.0]
+    assert handle.direction_of_detector_y_axis == [0.0, 1.0, 0.0]
+    assert handle.trusted_region == [0.0, 1.41]
+    assert handle.sensor_thickness == 0.32
+    assert handle.untrusted_rectangle == [
+      [487, 495, 0, 2528], [981, 989, 0, 2528], [1475, 1483, 0, 2528],
+      [1969, 1977, 0, 2528], [0, 2464, 195, 213], [0, 2464, 407, 425],
+      [0, 2464, 619, 637], [0, 2464, 831, 849], [0, 2464, 1043, 1061],
+      [0, 2464, 1255, 1273], [0, 2464, 1467, 1485], [0, 2464, 1679, 1697],
+      [0, 2464, 1891, 1909], [0, 2464, 2103, 2121], [0, 2464, 2315, 2333]]
+    assert handle.maximum_number_of_processor == 16
+    assert (handle.nx, handle.ny, handle.px, handle.py) == (2463, 2527, 0.172, 0.172)
+    assert (handle.orgx, handle.orgy) == (1279.1, 1235.3)
+    assert handle.rotation_axis == [1.0, 0.0, 0.0]
+    assert handle.detector_distance == 190.18
+    assert handle.xray_wavelength == 0.9795
+    assert handle.incident_beam_direction == [0.0, 0.0, 1.0]
+    assert handle.fraction_of_polarization == 0.99
+    assert handle.polarization_plane_normal == [0.0, 1.0, 0.0]
+    assert handle.friedels_law
+    assert len(handle.name_template_of_data_frames) == 1
+    assert handle.name_template_of_data_frames[0].endswith(
+      'X4_lots_M1S4_1_????.cbf')
+    assert handle.starting_angle == 0
+    assert handle.starting_frame == 1
+    assert handle.include_resolution_range == [30.0, 1.27]
+    assert handle.unit_cell_constants == [42.45, 42.45, 39.8, 90.0, 90.0, 90.0]
+    assert handle.space_group_number == 89
+    assert handle.max_fac_rmeas == 3.0
+    assert handle.data_range == [1,900]
+
+    filename_1 = os.path.join(iotbx_dir, 'xds', 'tests', 'XDS_2.INP')
+    tmp_dir = open_tmp_directory()
+    filename_2 = os.path.join(tmp_dir, 'XDS.INP')
+    with open(filename_2, 'w') as f2, open(filename_1, 'r') as f1:
+      print(f1.read(), file=f2)
+    handle = xds_inp.reader()
+    handle.read_file(filename_2)
+    assert handle.corrections is None
+    assert handle.incident_beam_direction == [-0.003, 0.001, 1.032]
+    assert len(handle.name_template_of_data_frames) == 2
+    assert handle.name_template_of_data_frames[0] == '/blah/xtal1_1_????.cbf'
+    assert handle.name_template_of_data_frames[1] == 'CBF'
+
+    print('OK')
+
+if __name__ == '__main__':
+
+  test = Test()
+  test.run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/tests/tst_xparm.py
+from __future__ import absolute_import, division, print_function
+
+class Test(object):
+
+  def __init__(self):
+    pass
+
+  def run(self):
+
+    from iotbx.xds import xparm
+    import os
+    import libtbx.load_env
+    from libtbx.test_utils import open_tmp_file
+
+    iotbx_dir = libtbx.env.dist_path('iotbx')
+    filename = os.path.join(iotbx_dir, 'xds', 'tests', 'XPARM.XDS')
+    handle = xparm.reader()
+    assert handle.find_version(filename) == 1
+    handle.read_file(filename)
+
+    print('OK')
+
+    filename = os.path.join(iotbx_dir, 'xds', 'tests', 'NEW_XPARM.XDS')
+    handle = xparm.reader()
+    assert handle.find_version(filename) == 2
+    handle.read_file(filename)
+    print('OK')
+
+    f = open_tmp_file(suffix='XPARM.XDS', mode='wb')
+    f.close()
+    xds_str = xparm.write(
+      handle.starting_frame,
+      handle.starting_angle,
+      handle.oscillation_range,
+      handle.rotation_axis,
+      handle.wavelength,
+      handle.beam_vector,
+      handle.space_group,
+      handle.unit_cell,
+      handle.unit_cell_a_axis,
+      handle.unit_cell_b_axis,
+      handle.unit_cell_c_axis,
+      handle.num_segments,
+      handle.detector_size,
+      handle.pixel_size,
+      handle.detector_origin,
+      handle.detector_distance,
+      handle.detector_x_axis,
+      handle.detector_y_axis,
+      handle.detector_normal,
+      handle.segments,
+      handle.orientation)
+    with open(f.name, 'w') as f:
+      f.write(xds_str)
+    handle_recycled = xparm.reader()
+    # make sure we wrote out version 2
+    assert handle_recycled.find_version(f.name) == 2
+    handle_recycled.read_file(f.name)
+
+    for handle in (handle, handle_recycled):
+
+      # Scan and goniometer stuff
+      assert handle.starting_frame == 1
+      assert handle.starting_angle == 82.0
+      assert handle.oscillation_range == 0.1500
+      assert handle.rotation_axis == (0.999997, -0.001590, -0.001580)
+
+      # Beam stuff
+      assert handle.wavelength == 0.976250
+      assert handle.beam_vector == (0.001608, 0.004392, 1.024317)
+
+      # Detector stuff
+      assert handle.detector_size == (2463, 2527)
+      assert handle.pixel_size == (0.172, 0.172)
+
+      assert handle.detector_distance == 264.928955
+      assert handle.detector_origin == (1224.856812, 1187.870972)
+      assert handle.detector_x_axis == (1.0, 0.0, 0.0)
+      assert handle.detector_y_axis == (0.0, 1.0, 0.0)
+      assert handle.detector_normal == (0.0, 0.0, 1.0)
+
+      # Crystal stuff
+      assert handle.space_group == 75
+      assert handle.unit_cell == (57.7831, 57.7831, 150.0135, 90.000, 90.000, 90.000)
+      assert handle.unit_cell_a_axis == (-14.918090, -22.358297, 51.151196)
+      assert handle.unit_cell_b_axis == (-19.858326, 51.608330, 16.766487)
+      assert handle.unit_cell_c_axis == (-135.447952, -34.400188, -54.539391)
+
+    # segment stuff
+    assert handle_recycled.num_segments == 1
+    assert handle_recycled.segments == [(1, 1, 2463, 1, 2527)]
+    assert handle_recycled.orientation == [
+      (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)]
+
+    print('OK')
+
+if __name__ == '__main__':
+
+  test = Test()
+  test.run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/xds_cbf.py
+#!/usr/bin/env libtbx.python
+#
+# iotbx.xds.xds_cbf.py
+#
+#   James Parkhurst, Diamond Light Source, 2012/OCT/16
+#
+#   Class to read the CBF files used in XDS
+#
+from __future__ import absolute_import, division, print_function
+
+class reader:
+  """A class to read the CBF files used in XDS"""
+  def __init__(self):
+    pass
+
+  def read_file(self, filename):
+    """Read the CBF file"""
+    import pycbf
+    self.cbf_handle = pycbf.cbf_handle_struct()
+    self.cbf_handle.read_file(filename, pycbf.MSG_DIGEST)
+    self.cbf_handle.rewind_datablock()
+
+  def get_data(self):
+    """Get the gain array from the file"""
+    import numpy
+
+    # Select the first datablock and rewind all the categories
+    self.cbf_handle.select_datablock(0)
+    self.cbf_handle.select_category(0)
+    self.cbf_handle.select_column(2)
+    self.cbf_handle.select_row(0)
+
+    # Check the type of the element to ensure it's a binary
+    # otherwise raise an exception
+    type = self.cbf_handle.get_typeofvalue()
+    if type.find('bnry') > -1:
+
+      # Read the image data into an array
+      image_string = self.cbf_handle.get_integerarray_as_string()
+      image = numpy.fromstring(image_string, numpy.int32)
+
+      # Get the array parameters
+      parameters = self.cbf_handle.get_integerarrayparameters_wdims()
+      image_size = (parameters[10], parameters[9])
+
+      # Resize the image
+      image.shape = (image_size)
+
+    else:
+      raise TypeError('Can\'t find image')
+
+    # Return the image
+    return image
+
+if __name__ == '__main__':
+    import sys
+    import numpy
+    handle = reader()
+    handle.read_file(sys.argv[1])
+    image = handle.get_data()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/xds_inp.py
+#!/usr/bin/env libtbx.python
+#
+# iotbx.xds.xds_inp.py
+#
+#   James Parkhurst, Richard Gildea, Diamond Light Source, 2014
+#
+#   Class to read all the data from a XDS.INP file
+#
+from __future__ import absolute_import, division, print_function
+
+class reader:
+  """A class to read the XDS.INP file used in XDS"""
+
+  def __init__(self):
+    pass
+
+  @staticmethod
+  def is_xds_inp_file(filename):
+    """Check if the given file is an XDS.INP file.
+
+    Params:
+      filename The XDS.INP filename
+
+    Returns:
+      True/False the file is a XDS.INP file
+
+    """
+    import os
+    return os.path.basename(filename) == 'XDS.INP'
+
+  def read_file(self, filename, check_filename = True):
+    """Read the XDS.INP file.
+
+    See http://xds.mpimf-heidelberg.mpg.de/html_doc/xds_files.html for more
+    information about the file format.
+
+    Param:
+      filename The path to the file
+
+    """
+
+    # defaults
+    self.unit_cell_constants = None
+    self.minimum_valid_pixel_value = 0
+    self.corrections = None
+    self.trusted_region = None
+    self.maximum_number_of_processor = 32
+    self.fraction_of_polarization = 0.5
+    self.polarization_plane_normal = None
+    self.starting_angle = 0.0
+    self.oscillation_range = None
+    #STARTING_FRAME=first data image (as specified by DATA_RANGE=)
+    self.starting_frame = None
+    self.include_resolution_range = [20.0, 0.0]
+    self.space_group_number = 1
+    self.max_fac_rmeas = 2.0
+    self.data_range = None
+    self.sensor_thickness = 0
+    self.silicon = None
+
+    self.num_segments = 0
+    self.segment_orgx = []
+    self.segment_orgy = []
+    self.direction_of_segment_x_axis = []
+    self.direction_of_segment_y_axis = []
+    self.segment_distance = []
+    self.segment = []
+
+    # Check and read file
+    if reader.is_xds_inp_file(filename):
+      with open(filename, 'r') as fh:
+        lines = fh.readlines()
+    else:
+      raise IOError("{0} is not a XDS.INP file".format(filename))
+
+    # Parse the tokens
+    self.parse_lines(lines)
+
+  def parse_lines(self, lines):
+    """Parse the lines
+
+    Param:
+      tokens The list of lines
+
+    """
+    import re
+    parameters = []
+    self.untrusted_rectangle = []
+    for record in lines:
+      comment_char = record.find("!")
+      if comment_char > -1:
+        record = record[0:comment_char]
+      record = record.strip()
+      tok = [c for c in re.split(r' |\t', record) if c != '']
+      tokens = []
+      for t in tok:
+        i = t.find('=')
+        if i > -1:
+          tokens.append(t[:i+1])
+          if (i+1) < len(t):
+            tokens.append(t[i+1:])
+        else:
+          tokens.append(t)
+      while len(tokens):
+        if len(tokens) == 1:
+          assert tokens[0].find('=') > -1
+          parameters.append(tokens)
+          break
+        for i_tok, t in enumerate(tokens):
+          if i_tok == 0:
+            assert t.find('=') > -1
+          elif i_tok > 0 and t.find('=') > -1:
+            parameters.append((tokens[0:i_tok]))
+            tokens = tokens[i_tok:]
+            break
+          elif (i_tok+1) == len(tokens):
+            parameters.append(tokens)
+            tokens = []
+            break
+
+    for parameter in parameters:
+      name = parameter[0]
+      if name == 'DETECTOR=':
+        self.detector = " ".join(parameter[1:])
+      elif name == 'MINIMUM_VALID_PIXEL_VALUE=':
+        self.minimum_valid_pixel_value = float(parameter[1])
+      elif name == 'OVERLOAD=':
+        self.overload = int(parameter[1])
+      elif name == 'CORRECTIONS=':
+        if len(parameter) == 1:
+          self.corrections = None
+        else:
+          self.corrections = parameter[1]
+      elif name == 'DIRECTION_OF_DETECTOR_X-AXIS=':
+        self.direction_of_detector_x_axis = [float(_p) for _p in parameter[-3:]]
+      elif name == 'DIRECTION_OF_DETECTOR_Y-AXIS=':
+        self.direction_of_detector_y_axis = [float(_p) for _p in parameter[-3:]]
+      elif name == 'TRUSTED_REGION=':
+        self.trusted_region = [float(_p) for _p in parameter[-2:]]
+      elif name == 'SENSOR_THICKNESS=':
+        self.sensor_thickness = float(parameter[1])
+      elif name == 'SILICON=':
+        self.silicon = float(parameter[1])
+      elif name == 'UNTRUSTED_RECTANGLE=':
+        self.untrusted_rectangle.append( [int(_p) for _p in parameter[-4:]])
+      elif name == 'MAXIMUM_NUMBER_OF_PROCESSORS=':
+        self.maximum_number_of_processor = int(parameter[1])
+      elif name == 'NX=':
+        self.nx = int(parameter[1])
+      elif name == 'NY=':
+        self.ny = int(parameter[1])
+      elif name == 'QX=':
+        self.px = float(parameter[1])
+      elif name == 'QY=':
+        self.py = float(parameter[1])
+      elif name == 'ORGX=':
+        self.orgx = float(parameter[1])
+      elif name == 'ORGY=':
+        self.orgy = float(parameter[1])
+      elif name == 'ROTATION_AXIS=':
+        self.rotation_axis = [float(_p) for _p in parameter[-3:]]
+      elif name == 'DETECTOR_DISTANCE=':
+        self.detector_distance = float(parameter[1])
+      elif name == 'X-RAY_WAVELENGTH=':
+        self.xray_wavelength = float(parameter[1])
+      elif name == 'INCIDENT_BEAM_DIRECTION=':
+        self.incident_beam_direction = [float(_p) for _p in parameter[-3:]]
+      elif name == 'FRACTION_OF_POLARIZATION=':
+        self.fraction_of_polarization = float(parameter[-1])
+      elif name == 'POLARIZATION_PLANE_NORMAL=':
+        self.polarization_plane_normal = [float(_p) for _p in parameter[-3:]]
+      elif name == 'FRIEDEL\'S_LAW=':
+        self.friedels_law = bool(parameter[-1])
+      elif name == 'NAME_TEMPLATE_OF_DATA_FRAMES=':
+        self.name_template_of_data_frames = parameter[1:]
+      elif name == 'STARTING_ANGLE=':
+        self.starting_angle = float(parameter[1])
+      elif name == 'STARTING_FRAME=':
+        self.starting_frame = float(parameter[1])
+      elif name == 'OSCILLATION_RANGE=':
+        self.oscillation_range = float(parameter[1])
+      elif name == 'INCLUDE_RESOLUTION_RANGE=':
+        self.include_resolution_range = [float(_p) for _p in  parameter[-2:]]
+      elif name == 'UNIT_CELL_CONSTANTS=':
+        self.unit_cell_constants = [float(_p) for _p in  parameter[-6:]]
+      elif name == 'SPACE_GROUP_NUMBER=':
+        self.space_group_number = int(parameter[-1])
+      elif name == 'MAX_FAC_Rmeas=':
+        self.max_fac_rmeas = float(parameter[-1])
+      elif name == 'DATA_RANGE=':
+        self.data_range = [int(_p) for _p in parameter[-2:]]
+      elif name == 'SEGMENT=':
+        self.num_segments += 1
+        self.segment.append( [int(_p) for _p in parameter[-4:]])
+      elif name == 'DIRECTION_OF_SEGMENT_X-AXIS=':
+        self.direction_of_segment_x_axis.append([float(_p) for _p in parameter[-3:]])
+      elif name == 'DIRECTION_OF_SEGMENT_Y-AXIS=':
+        self.direction_of_segment_y_axis.append([float(_p) for _p in parameter[-3:]])
+      elif name == 'SEGMENT_DISTANCE=':
+        self.segment_distance.append(float(parameter[-1]))
+      elif name == 'SEGMENT_ORGX=':
+        self.segment_orgx.append(float(parameter[-1]))
+      elif name == 'SEGMENT_ORGY=':
+        self.segment_orgy.append(float(parameter[-1]))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/xds/xparm.py
+#!/usr/bin/env libtbx.python
+#
+# iotbx.xds.xparm.py
+#
+#   Copyright (C) 2013 Diamond Light Source, James Parkhurst & Richard Gildea
+#
+#   Class to read all the data from a (G)XPARM.XDS file
+#
+from __future__ import absolute_import, division, print_function
+
+import io
+import sys
+import warnings
+
+from libtbx import adopt_init_args
+from six.moves import range
+from six.moves import map
+
+class reader(object):
+  """A class to read the XPARM.XDS/GXPARM.XDS file used in XDS"""
+
+  @staticmethod
+  def find_version(filename):
+    """Check the version if the given file is a (G)XPARM.XDS file.
+
+    If the file contains exactly 11 lines and 42 tokens, it is the old style
+    version 1 file. If the file starts with XPARM.XDS it is the new style
+    version 2 file. If the file contains segment definitions then it is a
+    version 3 file.
+
+    Params:
+      filename The (G)XPARM.XDS filename
+
+    Returns:
+      The version or None if the file is not recognised
+
+    """
+
+    # Check file contains 11 lines and 42 tokens
+    with io.open(filename, 'r', encoding="ascii") as file_handle:
+      tokens = []
+      version = 1
+      count = 0
+      for count, line in enumerate(file_handle):
+        line_tokens = line.split()
+        if count == 0:
+          if len(line_tokens) > 0 and line_tokens[0] == 'XPARM.XDS':
+              version = 2
+        if version == 1:
+          if count+1 > 11:
+            return None
+        elif version == 2:
+          if count+1 > 14:
+            if len(line_tokens) == 5:
+              version = 3
+            else:
+              return None
+        elif version == 3:
+          if len(line_tokens) not in (5, 9):
+            return None
+        tokens.extend(line_tokens)
+
+      if version == 1:
+        if count+1 != 11 or len(tokens) != 42:
+          return None
+
+    # Is a (G)XPARM.XDS file
+    return version
+
+  @staticmethod
+  def is_xparm_file(filename, check_filename = True):
+    """Check if the given file is a (G)XPARM.XDS file.
+
+    Ensure it is named correctly and contains exactly 11 lines and 42
+    tokens, otherwise return False.
+
+    Params:
+      filename The (G)XPARM.XDS filename
+
+    Returns:
+      True/False the file is a (G)XPARM.XDS file
+
+    """
+    try:
+      return reader.find_version(filename) is not None
+    except UnicodeDecodeError:
+      return False
+
+  def read_file(self, filename, check_filename = True):
+    """Read the XPARM.XDS/GXPARAM.XDS file.
+
+    See http://xds.mpimf-heidelberg.mpg.de/html_doc/xds_files.html for more
+    information about the file format.
+
+    Param:
+      filename The path to the file
+
+    """
+
+    # Check version and read file
+    version = reader.find_version(filename)
+    if version is None:
+      raise IOError("{} is not a (G)XPARM.XDS file".format(filename))
+
+    with io.open(filename, 'r', encoding="ascii") as fh:
+      tokens = [l.split() for l in fh.readlines()]
+
+    # Parse the tokens
+    if version == 1:
+      self.parse_version_1_tokens(tokens)
+    else:
+      self.parse_version_2_tokens(tokens)
+
+  def parse_version_1_tokens(self, tokens):
+    """Parse the version 1 tokens
+
+    Param:
+      tokens The list of tokens
+
+    """
+    # Scan and goniometer stuff
+    self.starting_frame    = int(tokens[0][0])
+    self.starting_angle    = float(tokens[0][1])
+    self.oscillation_range = float(tokens[0][2])
+    self.rotation_axis     = tuple(map(float, tokens[0][3:6]))
+
+    # Beam stuff
+    self.wavelength        = float(tokens[1][0])
+    self.beam_vector       = tuple(map(float, tokens[1][1:4]))
+
+    # Detector stuff
+    self.num_segments      = 0
+    self.detector_size     = tuple(map(int, tokens[2][0:2]))
+    self.pixel_size        = tuple(map(float, tokens[2][2:4]))
+    self.detector_distance = float(tokens[3][0])
+    self.detector_origin   = tuple(map(float, tokens[3][1:3]))
+    self.detector_x_axis   = tuple(map(float, tokens[4]))
+    self.detector_y_axis   = tuple(map(float, tokens[5]))
+    self.detector_normal   = tuple(map(float, tokens[6]))
+
+    # Crystal stuff
+    self.space_group       = int(tokens[7][0])
+    self.unit_cell         = tuple(map(float, tokens[7][1:7]))
+    self.unit_cell_a_axis  = tuple(map(float, tokens[8]))
+    self.unit_cell_b_axis  = tuple(map(float, tokens[9]))
+    self.unit_cell_c_axis  = tuple(map(float, tokens[10]))
+
+  def parse_version_2_tokens(self, tokens):
+    """Parse the version 2 tokens
+
+    Param:
+      tokens The list of tokens
+
+    """
+    # Scan and goniometer stuff
+    self.starting_frame    = int(tokens[1][0])
+    self.starting_angle    = float(tokens[1][1])
+    self.oscillation_range = float(tokens[1][2])
+    self.rotation_axis     = tuple(map(float, tokens[1][3:6]))
+
+    # Beam stuff
+    self.wavelength        = float(tokens[2][0])
+    self.beam_vector       = tuple(map(float, tokens[2][1:4]))
+
+    # Crystal stuff
+    self.space_group       = int(tokens[3][0])
+    self.unit_cell         = tuple(map(float, tokens[3][1:7]))
+    self.unit_cell_a_axis  = tuple(map(float, tokens[4]))
+    self.unit_cell_b_axis  = tuple(map(float, tokens[5]))
+    self.unit_cell_c_axis  = tuple(map(float, tokens[6]))
+
+    # Detector stuff
+    self.num_segments      = int(tokens[7][0])
+    self.detector_size     = tuple(map(int, tokens[7][1:3]))
+    self.pixel_size        = tuple(map(float, tokens[7][3:5]))
+    self.detector_origin   = tuple(map(float, tokens[8][0:2]))
+    self.detector_distance = float(tokens[8][2])
+    self.detector_x_axis   = tuple(map(float, tokens[9]))
+    self.detector_y_axis   = tuple(map(float, tokens[10]))
+    self.detector_normal   = tuple(map(float, tokens[11]))
+
+    # Loop through all the segments
+    self.segments = []
+    self.orientation = []
+    for i in range(self.num_segments):
+        self.segments.append(tuple(map(int, tokens[12+i*2])))
+        self.orientation.append(tuple(map(float, tokens[13+i*2])))
+
+
+class writer(object):
+
+  def __init__(self,
+               starting_frame,
+               starting_angle,
+               oscillation_range,
+               rotation_axis,
+               wavelength,
+               beam_vector,
+               space_group,
+               unit_cell,
+               unit_cell_a_axis,
+               unit_cell_b_axis,
+               unit_cell_c_axis,
+               num_segments,
+               detector_size,
+               pixel_size,
+               detector_origin,
+               detector_distance,
+               detector_x_axis,
+               detector_y_axis,
+               detector_normal,
+               segments=None,
+               orientation=None):
+    adopt_init_args(self, locals())
+    if [num_segments, segments, orientation].count(None) == 3:
+      self.num_segments = 1
+      self.segments = []
+      self.orientation = []
+      for i in range(self.num_segments):
+        self.segments.append(
+          (i+1, 1, self.detector_size[0], 1, self.detector_size[1]))
+        self.orientation.append((0, 0, 0, 1, 0, 0, 0, 1, 0))
+    warnings.warn("xparm.writer() is deprecated, use xparm.write() instead", DeprecationWarning, stacklevel=2)
+
+  def show(self, out=None):
+    """
+    http://xds.mpimf-heidelberg.mpg.de/html_doc/xds_files.html#XPARM.XDS
+    """
+    if out is None:
+      out = sys.stdout
+    print("XPARM.XDS", file=out)
+    print("%6i %13.4f %9.4f" %(
+      self.starting_frame, self.starting_angle, self.oscillation_range), end=' ', file=out)
+    print("%9.6f %9.6f %9.6f" %(self.rotation_axis), file=out)
+    print(" %14.6f" %self.wavelength, end=' ', file=out)
+    print("%14.6f %14.6f %14.6f" %(self.beam_vector), file=out)
+    print("   %3i" %(self.space_group), end=' ', file=out)
+    print("%11.4f %11.4f %11.4f %7.3f %7.3f %7.3f" %self.unit_cell, file=out)
+    print(" %14.6f  %14.6f  %14.6f" %self.unit_cell_a_axis, file=out)
+    print(" %14.6f  %14.6f  %14.6f" %self.unit_cell_b_axis, file=out)
+    print(" %14.6f  %14.6f  %14.6f" %self.unit_cell_c_axis, file=out)
+    print(" %8i %9i %9i %11.6f %11.6f" %(
+      self.num_segments, self.detector_size[0], self.detector_size[1],
+      self.pixel_size[0], self.pixel_size[1]), file=out)
+    print(" %14.6f %14.6f" %self.detector_origin, end=' ', file=out)
+    print(" %14.6f" %self.detector_distance, file=out)
+    print(" %14.6f %14.6f %14.6f" %self.detector_x_axis, file=out)
+    print(" %14.6f %14.6f %14.6f" %self.detector_y_axis, file=out)
+    print(" %14.6f %14.6f %14.6f" %self.detector_normal, file=out)
+    for i in range(self.num_segments):
+      print(" %9i %9i %9i %9i %9i" %tuple(self.segments[i]), file=out)
+      print("".join([" %7.2f"*3] + [" %8.5f"]*6) %tuple(self.orientation[i]), file=out)
+
+  def write_file(self, filename):
+    with open(filename, 'w') as f:
+      self.show(out=f)
+
+# http://xds.mpimf-heidelberg.mpg.de/html_doc/xds_files.html#XPARM.XDS
+xparm_xds_template = """XPARM.XDS
+{starting_frame:6d} {starting_angle:13.4f} {oscillation_range:9.4f} {rotation_axis[0]:9.6f} {rotation_axis[1]:9.6f} {rotation_axis[2]:9.6f}
+ {wavelength:14.6f} {beam_vector[0]:14.6f} {beam_vector[1]:14.6f} {beam_vector[2]:14.6f}
+{space_group:6d} {unit_cell[0]:11.4f} {unit_cell[1]:11.4f} {unit_cell[2]:11.4f} {unit_cell[3]:7.3f} {unit_cell[4]:7.3f} {unit_cell[5]:7.3f}
+ {unit_cell_a_axis[0]:14.6f}  {unit_cell_a_axis[1]:14.6f}  {unit_cell_a_axis[2]:14.6f}
+ {unit_cell_b_axis[0]:14.6f}  {unit_cell_b_axis[1]:14.6f}  {unit_cell_b_axis[2]:14.6f}
+ {unit_cell_c_axis[0]:14.6f}  {unit_cell_c_axis[1]:14.6f}  {unit_cell_c_axis[2]:14.6f}
+ {num_segments:8d} {detector_size[0]:9d} {detector_size[1]:9d} {pixel_size[0]:11.6f} {pixel_size[1]:11.6f}
+ {detector_origin[0]:14.6f} {detector_origin[1]:14.6f}  {detector_distance:14.6f}
+ {detector_x_axis[0]:14.6f} {detector_x_axis[1]:14.6f} {detector_x_axis[2]:14.6f}
+ {detector_y_axis[0]:14.6f} {detector_y_axis[1]:14.6f} {detector_y_axis[2]:14.6f}
+ {detector_normal[0]:14.6f} {detector_normal[1]:14.6f} {detector_normal[2]:14.6f}
+"""
+xparm_xds_segment_template = """
+ (segments[{i}][0]:9d) (segments[{i}][1]:9d) (segments[{i}][2]:9d) (segments[{i}][3]:9d) (segments[{i}][4]:9d)
+ (orientation[{i}][0]:7.2f) (orientation[{i}][1]:7.2f) (orientation[{i}][2]:7.2f) (orientation[{i}][3]:8.5f) (orientation[{i}][4]:8.5f) (orientation[{i}][5]:8.5f) (orientation[{i}][6]:8.5f) (orientation[{i}][7]:8.5f) (orientation[{i}][8]:8.5f)
+""".lstrip("\n")
+
+
+def write(
+    starting_frame,
+    starting_angle,
+    oscillation_range,
+    rotation_axis,
+    wavelength,
+    beam_vector,
+    space_group,
+    unit_cell,
+    unit_cell_a_axis,
+    unit_cell_b_axis,
+    unit_cell_c_axis,
+    num_segments,
+    detector_size,
+    pixel_size,
+    detector_origin,
+    detector_distance,
+    detector_x_axis,
+    detector_y_axis,
+    detector_normal,
+    segments=None,
+    orientation=None,
+):
+    if num_segments is None and segments is None and orientation is None:
+        num_segments = 1
+        orientation = [(0, 0, 0, 1, 0, 0, 0, 1, 0)]
+        segments = [(1, 1, detector_size[0], 1, detector_size[1])]
+
+    template = xparm_xds_template
+    for i in range(num_segments):
+        template += (
+            xparm_xds_segment_template.format(i=i).replace("(", "{").replace(")", "}")
+        )
+
+    return template.format(**locals())
+
+
+ *******************************************************************************

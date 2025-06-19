@@ -1,0 +1,923 @@
+
+
+ *******************************************************************************
+mmtbx/polygon/__init__.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+import iotbx.phil
+import mmtbx.polygon
+import libtbx, os, re, sys
+from libtbx.utils import Sorry
+from libtbx import easy_pickle
+from six.moves import range
+
+keys_to_show = ["r_work", "r_free",
+  "pdb_header_r_work", "pdb_header_r_free",
+  "r_work_cutoffs", "r_free_cutoffs",
+  "completeness_in_range", "completeness_d_min_inf", "completeness_6A_inf",
+  "adp_mean_all", "adp_min_all", "adp_max_all",
+  "wilson_b", "solvent_content_via_mask",
+  "bond_rmsd", "bond_max_deviation", "angle_rmsd", "angle_max_deviation",
+  "dihedral_rmsd", "dihedral_max_deviation",
+  "planarity_rmsd", "planarity_max_deviation",
+  "chirality_rmsd", "chirality_max_deviation",
+  "rama_favored", "rama_allowed", "rama_outliers",
+  "rotamer_outliers", "clashscore"]
+
+other_numerical_keys = ["high_resolution", "low_resolution",
+  'adp_min_backbone', 'adp_min_sidechain', 'adp_min_solvent',
+  'adp_max_backbone', 'adp_max_sidechain', 'adp_max_solvent',
+  'adp_mean_backbone', 'adp_mean_sidechain', 'adp_mean_solvent',
+  'unit_cell_volume']
+
+default_keys = ["r_work", "r_free", "adp_mean_all", "bond_rmsd", "angle_rmsd",
+  "clashscore"]
+
+key_captions = ["R-work", "R-free", "R-work (PDB)", "R-free (PDB)",
+  "R-work (after cutoff)", "R-free (after cutoff)",
+  "Completeness in range", "Completeness", "Completeness to 6A",
+  "Average B", "Minimum B", "Maximum B",
+  "Wilson B", "Solvent content",
+  "RMSD(bonds)", "Bonds max.", "RMSD(angles)", "Angles max.",
+  "RMSD(dihedrals)", "Dihedrals max.", "RMSD(planarity)", "Planarity max",
+  "RMSD(chirality)", "Chirality max.",
+  "Ramachandran favored", "Ramachandran allowed", "Ramachandran outliers",
+  "Rotamer outliers", "Clashscore"]
+
+other_captions = ["High resolution", "Low resolution",
+  "Min. backbone ADP", "Min. sidechain ADP", "Min. solvent ADP",
+  "Max. backbone ADP", "Max. sidechain ADP", "Max. solvent ADP",
+  "Mean backbone ADP", "Mean sidechain ADP", "Mean solvent ADP",
+  "Unit cell volume"]
+
+assert len(keys_to_show) == len(key_captions)
+_selected = []
+for key_name in keys_to_show :
+  if key_name in default_keys :
+    _selected.append("*%s" % key_name)
+  else :
+    _selected.append(key_name)
+key_params_str = " ".join(_selected)
+captions_str = " ".join([ re.sub(" ", "_", txt) for txt in key_captions ])
+
+polygon_params_str = """\
+  database_file_name = None
+    .type = str
+    .style = noauto
+  keys_to_show = %s
+    .type = choice(multi=True)
+    .short_caption = Statistics to display
+    .caption = %s
+    .style = bold hide_label
+  number_of_histogram_slots = 10
+    .type = int
+    .help = Number of histogram slots for the final histogram to be used to \
+            draw the POLYGON's rays.
+    .input_size = 64
+    .style = noauto bold
+""" % (key_params_str, captions_str)
+
+all_params_str = """
+polygon {
+  %s
+}""" % polygon_params_str
+
+master_params = iotbx.phil.parse(all_params_str)
+
+def select_dict(database_dict, selection):
+  result = {}
+  for key in database_dict.keys():
+    result.setdefault(key, database_dict[key].select(selection))
+  return result
+
+def filter_and_convert(database_dict, keys):
+  selection = flex.bool(database_dict[keys[0]].size(), True)
+  for key in keys+["high_resolution"]:
+    values = database_dict[key]
+    selection &= (values != "none")
+  tmp = select_dict(database_dict = database_dict, selection = selection)
+  result = {}
+  for key in keys+["high_resolution"]:
+    vals = flex.double([float(v) for v in tmp[key]])
+    result.setdefault(key, vals)
+  return result
+
+def show_histogram(data, n_slots, smooth = True):
+  triplets = []
+  histogram = flex.histogram(data = data, n_slots = n_slots)
+  l = histogram.data_min()
+  for i, s in enumerate(histogram.slots()):
+    r = histogram.data_min() + histogram.slot_width() * (i+1)
+    triplets.append( [l, r, s] )
+    print("%8.4f %8.4f %d" % (l, r, s))
+    l = r
+  if(smooth):
+    print("... smooth histogram")
+    triplets_smooth = []
+    for i, t in enumerate(triplets):
+      values = flex.double()
+      for j in [-1,0,1]:
+        if(i+j >=0 and i+j < len(triplets)):
+          values.append(float(triplets[i+j][2]))
+      triplets_smooth.append((t[0],t[1],flex.mean(values)))
+    for t in triplets_smooth:
+      print("%8.4f %8.4f %d" % (t[0], t[1], int("%.0f"%t[2])))
+  return histogram
+
+def convert_to_histogram(data, n_slots):
+  histogram = flex.histogram(data=data, n_slots=n_slots)
+  return histogram
+
+def apply_default_filter(database_dict, d_min, key = "high_resolution"):
+  d_mins = database_dict["high_resolution"]
+  offset = 0.1
+  if(d_min>=3 and d_min<4): offset = 0.2
+  if(d_min>=4 and d_min<6): offset = 0.5
+  if(d_min>=6):             offset = 1.0
+  sel  = (d_mins>(d_min-offset))
+  sel &= (d_mins<(d_min+offset))
+  result = select_dict(database_dict = database_dict, selection = sel)
+  # Totally ad-hoc manipulation for histograms to make sense and format nicely.
+  # Perhaps needs to be revised at some point.
+  sel = flex.bool(sel.count(True), True)
+  for key in result.keys():
+    if(key in ["high_resolution"]): continue
+    vals = result[key]
+    if vals.size()==0: continue
+    if(key == "bond_rmsd"):
+      sel &= vals < 0.05
+    elif(key == "angle_rmsd"):
+      sel &= vals < 5.
+    else:
+      mean = flex.mean(vals)
+      sel &= vals > mean/2
+      sel &= vals < mean*2
+      if(key == "r_work" or key == "r_free"):
+        sel &= vals < 0.45
+  result = select_dict(database_dict=result, selection=sel)
+  #
+  return result
+
+def load_db(file_name=None):
+  if(file_name is None):
+    file_name = libtbx.env.find_in_repositories(
+      relative_path = "chem_data/polygon_data/all_mvd.pickle",
+      test = os.path.isfile)
+  assert os.path.isfile(file_name)
+  database_dict = easy_pickle.load(file_name)
+
+  # Python 3 pickle fix
+  # =========================================================================
+  if sys.version_info.major == 3:
+    database_dict = easy_pickle.fix_py2_pickle(database_dict)
+  # =========================================================================
+
+  return database_dict
+
+def polygon(params = master_params.extract(), d_min = None,
+            show_histograms = True, extract_gui_data=False):
+  database_dict = load_db(file_name=params.polygon.database_file_name)
+  result = filter_and_convert(
+    database_dict = database_dict,
+    keys          = params.polygon.keys_to_show)
+  if(d_min is not None):
+    result = apply_default_filter(database_dict = result, d_min = d_min)
+  histograms = []
+  if extract_gui_data :
+    for selected_key in params.polygon.keys_to_show:
+      data = result[selected_key]
+      histograms.append([selected_key, data]) # XXX: not really histograms!
+  elif(show_histograms):
+    for selected_key in params.polygon.keys_to_show:
+      data = result[selected_key]
+      print("%s data_points=%d" % (selected_key, data.size()), \
+        "min/max/mean= %12.4f %12.4f %12.4f"%data.min_max_mean().as_tuple())
+      n_slots = params.polygon.number_of_histogram_slots
+      if(n_slots is None):
+        assert 0
+        n_slots = data.size()//50
+        if(n_slots < 5):
+          for scale in range(25,10,-1):
+            n_slots = data.size()//scale
+            if(n_slots >= 10): break
+      if(n_slots == 0):
+        raise Sorry("Not enough data selected.")
+      h = show_histogram(data = data, n_slots = n_slots)
+      histograms.append([selected_key,h])
+  return histograms
+
+def get_statistics_percentiles(d_min, stats):
+  """
+  For a given set of statistics, determine their percentile ranking compared
+  to other crystal structures at similar resolution.
+  """
+  if (d_min is None):
+    return dict([ (s, None) for s in stats.keys()  ])
+  try :
+    db = load_db()
+  except Exception as e :
+    return {}
+  d_min_mvd = flex.double([ float(x) for x in db['high_resolution'] ])
+  sel_perm = flex.sort_permutation(d_min_mvd)
+  d_min_mvd = d_min_mvd.select(sel_perm)
+  def find_value_in_list(values, value):
+    i = 0
+    j = len(values) - 1
+    while (i != j):
+      k = i + (j - i) // 2
+      if (value and value <= values[k]):
+        j = k
+      else :
+        i = k + 1
+    return i
+  index = find_value_in_list(d_min_mvd, d_min)
+  sel_around = flex.bool(d_min_mvd.size(), False)
+  index_tmp = index
+  while (index_tmp > 0):
+    d_min_other = d_min_mvd[index_tmp]
+    if (d_min_other < d_min - 0.1):
+      break
+    sel_around[index_tmp] = True
+    index_tmp -= 1
+  index_tmp = index
+  while (index_tmp < d_min_mvd.size()):
+    d_min_other = d_min_mvd[index_tmp]
+    if (d_min_other > d_min + 0.1):
+      break
+    sel_around[index_tmp] = True
+    index_tmp += 1
+  #print "%d structures around %g" % (sel_around.count(True), d_min)
+  percentiles = {}
+  for stat_name in stats.keys():
+    stat = stats[stat_name]
+    if (not stat_name in db):
+      percentiles[stat_name] = None
+      continue
+    values = db[stat_name].select(sel_perm).select(sel_around)
+    fvalues = flex.double()
+    for value in values :
+      try :
+        fvalues.append(float(value))
+      except ValueError :
+        pass
+    assert fvalues.size() != 0
+    fvalues_sorted = fvalues.select(flex.sort_permutation(fvalues))
+    stat_index = find_value_in_list(fvalues_sorted, stat)
+    # FIXME I think for some of these statistics we need to reverse this -
+    # i.e. if higher statistics are better
+    stat_perc = 100 * (1 - (stat_index / fvalues.size()))
+    percentiles[stat_name] = stat_perc
+    #print stat_name, stat_index, fvalues.size(), stat_perc
+    #flex.histogram(fvalues, n_slots=10).show(prefix="  ")
+  return percentiles
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/polygon/output.py
+from __future__ import absolute_import, division, print_function
+import sys
+from mmtbx import polygon, model_vs_data
+from math import pi, cos, sin, radians, degrees, floor
+
+import six
+from six.moves import zip
+from six.moves import range
+
+stat_names = dict(zip(polygon.keys_to_show, polygon.key_captions))
+stat_formats = { "r_work" : "%.4f",
+                 "r_free" : "%.4f",
+                 "bond_rmsd" : "%.3f",
+                 "angle_rmsd" : "%.2f",
+                 "adp_mean_all" : "%.1f" }
+
+# XXX: not pickle-able - run this in GUI thread
+def convert_histogram_data(polygon_result):
+  histograms = {}
+  for (stat, data) in polygon_result :
+    histograms[stat] = polygon.convert_to_histogram(data=data,
+                                                    n_slots=10)
+  return histograms
+
+def get_stats_and_histogram_data(mvd_object, params, debug=False):
+  pdb_file = mvd_object.pdb_file
+  mvd_results = model_vs_data.summarize_results(mvd_object)
+  fmodel = mvd_object.fmodel
+  d_min = fmodel.info().d_min
+
+  stats = {}
+  invalid_stats = []
+  for stat_name in params.polygon.keys_to_show :
+    value = getattr(mvd_results, stat_name, None)
+    if value is not None :
+      print(stat_name, value)
+      stats[stat_name] = value
+    else :
+      print("Error: got 'None' for %s" % stat_name)
+      invalid_stats.append(stat_name)
+  for stat_name in invalid_stats :
+    params.polygon.keys_to_show.remove(stat_name)
+  histograms = polygon.polygon(params=params,
+                               d_min=d_min,
+                               show_histograms=debug,
+                               extract_gui_data=True)
+  return stats, histograms
+
+def get_basic_histogram_data(d_min):
+  params = polygon.master_params.fetch().extract()
+  params.polygon.keys_to_show = ["r_work", "r_free",
+    "bond_rmsd", "angle_rmsd", "adp_mean_all", "clashscore"]
+  histograms = polygon.polygon(params=params,
+                               d_min=d_min,
+                               show_histograms=False,
+                               extract_gui_data=True)
+  return histograms
+
+class renderer(object):
+  ratio_cutoffs = [ 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0 ]
+
+  def __init__(self, histogram_data, structure_stats, histogram_length=0.30,
+      center=(0.5, 0.5), center_offset=0.025):
+    self.units = 1
+    histograms = convert_histogram_data(histogram_data)
+    self.stats = structure_stats
+    self.n_pdb = 0
+    max = - sys.maxsize
+    self.slot_avg = None
+    for stat_key, histogram in six.iteritems(histograms):
+      n_pdb = 0
+      for slot in histogram.slots():
+        n_pdb += slot
+        if slot > max :
+          max = slot
+      if self.slot_avg is None :
+        self.slot_avg = float(n_pdb) / float(histogram.slots().size())
+        self.n_pdb = n_pdb
+    self.max = max
+    self._histograms = []
+    initial_angle = radians(90)
+    i = 0
+    n_stats = len(histograms)
+    interval = 2.0 * pi / float(n_stats)
+    for stat_key, histogram in six.iteritems(histograms):
+      angle = initial_angle + ((i - 0.5) * interval)
+      layout = histogram_layout(stat_key, histogram, angle,
+        histogram_length, center, center_offset)
+      self._histograms.append(layout)
+      i += 1
+    self._polygon = polygon_layout(self.stats, self._histograms)
+    self.set_color_model("rainbow")
+    self.relative_scale_colors = False #True
+
+  def resize(self, size):
+    self.w, self.h = size
+    self.units = min([self.w, self.h])
+
+  def set_color_model(self, model_name, relative_scaling=True):
+    self.relative_scale_colors = relative_scaling
+    self.color_model = model_name
+    if model_name == "original" :
+      self.colors = original_color_model()
+    elif model_name == "rainbow" :
+      self.colors = rainbow_color_model()
+    elif model_name == "rmb" :
+      self.colors = rmb_color_model()
+    elif model_name == "blue" :
+      self.colors = blue_color_model()
+    elif model_name == "red" :
+      self.colors = red_color_model()
+    elif model_name == "gray" :
+      self.colors = grayscale_color_model()
+      self.line_color = (255, 0, 0)
+    if model_name != "gray" :
+      self.line_color = (0, 0, 0)
+
+  def get_color_key(self):
+    if self.relative_scale_colors :
+      return (self.colors.ratio_gradient, self.colors.ratio_cutoffs)
+    else :
+      levels = [0.0, 0.5, 1.0]
+      cutoffs = [ int(x * self.max) for x in levels ]
+      colors = [ self.colors.get_bin_color(x) for x in levels ]
+      return (colors, cutoffs)
+
+  def draw(self, out):
+    colors = self.colors.get_histogram_colors(
+      histograms=self._histograms,
+      max=self.max,
+      mean=self.slot_avg,
+      relative_scaling=self.relative_scale_colors)
+    for i, histogram in enumerate(self._histograms):
+      for j, (start,end) in enumerate(histogram.lines):
+        dx = sin(histogram.angle) * 0.01
+        dy = - cos(histogram.angle) * 0.01
+        points = [
+          (self.units * (start[0] - dx), self.units * (start[1] + dy)),
+          (self.units * (end[0] - dx), self.units * (end[1] + dy)),
+          (self.units * (end[0] + dx), self.units * (end[1] - dy)),
+          (self.units * (start[0] + dx), self.units * (start[1] - dy)),
+        ]
+        self.draw_box(
+          out=out,
+          points=points,
+          color=colors[i][j])
+      anchor = (histogram.text_anchor[0] * self.units,
+                histogram.text_anchor[1] * self.units)
+      stat_key = histogram.name
+      if (stat_key == "angles_rmsd"):
+        stat_key = "angle_rmsd"
+      elif (stat_key == "bonds_rmsd"):
+        stat_key = "bond_rmsd"
+      elif (stat_key == "adp_mean"):
+        stat_key = "adp_mean_all"
+      elif (stat_key == "r_work_re_computed"):
+        stat_key = "r_work"
+      elif (stat_key == "r_free_re_computed"):
+        stat_key = "r_free"
+      self.draw_labels(
+        out=out,
+        label=histogram.label,
+        min=self.format_value(histogram.min, histogram.name),
+        max=self.format_value(histogram.max, histogram.name),
+        value=self.format_value(self.stats[stat_key], histogram.name),
+        pos=anchor,
+        angle=histogram.angle)
+    for (start, end, dashed) in self._polygon.get_line_segments(self.units):
+      if dashed :
+        self.draw_dashed_line(out, start, end, self.line_color)
+      else :
+        self.draw_solid_line(out, start, end, self.line_color)
+
+  def draw_box(self, out, points, color):
+    raise NotImplementedError()
+
+  def draw_solid_line(self, out, start, end, color):
+    raise NotImplementedError()
+
+  def draw_dashed_line(self, out, start, end, color):
+    raise NotImplementedError()
+
+  def draw_labels(self, out, label, min, max, value, pos, angle):
+    raise NotImplementedError()
+
+  def format_value(self, value, stat_name):
+    if stat_name in stat_formats :
+      return stat_formats[stat_name] % value
+    else :
+      return "%.3f" % value
+
+class histogram_layout(object):
+  def __init__(self, name, histogram, angle, length, center, center_offset):
+    self.name = name
+    if name in stat_names :
+      self.label = stat_names[name]
+    else :
+      self.label = name
+    min = histogram.data_min()
+    max = histogram.data_max()
+    bins = [ slot for slot in histogram.slots() ]
+    n_bins = len(bins)
+    #print "starting at angle %.1f" % (degrees(angle_start))
+    (center_x, center_y) = center
+    x_start = center_x + (cos(angle) * center_offset)
+    y_start = center_y - (sin(angle) * center_offset)
+    self.lines = []
+    self.text_anchor = (x_start + (cos(angle) * (length + 0.01)),
+                        y_start - (sin(angle) * (length + 0.01)))
+    for i, bin in enumerate(bins):
+      start_frac = length * (float(i) / float(n_bins))
+      end_frac = length * (float(i + 1) / float(n_bins))
+      (line_x_start, line_y_start) = (x_start + (cos(angle) * start_frac),
+                                      y_start - (sin(angle) * start_frac))
+      (line_x_end, line_y_end) = (x_start + (cos(angle) * end_frac),
+                                  y_start - (sin(angle) * end_frac))
+      self.lines.append(( (line_x_start, line_y_start),
+                          (line_x_end, line_y_end) ))
+    self.max = max
+    self.min = min
+    self.bins = bins
+    self.angle = angle
+    self.length = length
+    self.n_bins = n_bins
+    self.x_start = x_start
+    self.y_start = y_start
+
+  def set_colors(self, bin_colors):
+    self.bin_colors = bin_colors
+
+  def get_polygon_intersection(self, stat):
+    point_on_histogram = True
+    hist_x = (stat - self.min) / (self.max - self.min)
+    if hist_x > 1.0 :
+      hist_x = 1.00
+      point_on_histogram = False
+    elif (hist_x < 0.0):
+      hist_x = 0.0
+      point_on_histogram = False
+    poly_x = self.x_start + (cos(self.angle) * self.length * hist_x)
+    poly_y = self.y_start - (sin(self.angle) * self.length * hist_x)
+    return (poly_x, poly_y), point_on_histogram
+
+  def get_absolute_label_position(self, units):
+    angle = self.angle
+    x,y = self.text_anchor
+    if angle >= radians(60) and angle < radians(120):
+      text_x = x - (w/2) - 5
+      text_y = y - h - 15
+    elif angle >= radians(120) and angle < radians(240):
+      text_x = x - w - 15
+      text_y = y - (h/2)
+    elif angle >= radians(240) and angle < radians(300):
+      text_x = x - (w/2)
+      text_y = y
+    else : # 300 =< angle < 420
+      text_x = x + 5
+      text_y = y - (h/2)
+    return (text_x, text_y)
+
+class polygon_layout(object):
+  def __init__(self, stats, histogram_layouts):
+    intersections = []
+    on_histogram = []
+    for histogram in histogram_layouts :
+      if (not histogram.name in stats):
+        continue
+      stat = stats[histogram.name]
+      if (isinstance(stat, list)):
+        raise RuntimeError(("Invalid type 'list' for POLYGON statistic '%s' "+
+          "(values: %s).") % (histogram.name, str(stat)))
+      (x, y), point_on_histogram = histogram.get_polygon_intersection(stat)
+      intersections.append((x,y))
+      on_histogram.append(point_on_histogram)
+    self.intersections = intersections
+    for i, (x, y) in enumerate(intersections):
+      if on_histogram[i] :
+        pass # TODO: dashed line segments for outliers
+
+  def get_line_segments(self, units=1.0):
+    for i, _end in enumerate(self.intersections):
+      _start = self.intersections[i - 1]
+      start = (_start[0] * units, _start[1] * units)
+      end = (_end[0] * units, _end[1] * units)
+      yield (start, end, False)
+
+#-----------------------------------------------------------------------
+class color_model(object):
+  def __init__(self):
+    self.ratio_cutoffs = []
+    self.ratio_gradient = []
+
+  def get_histogram_colors(self, histograms, max, mean,
+      relative_scaling=True):
+    assert len(self.ratio_gradient) == len(self.ratio_cutoffs) + 1
+    colors = []
+    ratio_cutoffs = self.ratio_cutoffs
+    for histogram in histograms :
+      bin_colors = []
+      if relative_scaling :
+        for bin in histogram.bins :
+          val = bin / mean
+          c = None
+          for i, cutoff in enumerate(ratio_cutoffs):
+            if cutoff >= val :
+              c = self.ratio_gradient[i]
+              break
+          if c is None :
+            c = self.ratio_gradient[-1]
+          bin_colors.append(c)
+      else :
+        for bin in histogram.bins :
+          val = float(bin) / float(max)
+          bin_colors.append(self.get_bin_color(val))
+      colors.append(bin_colors)
+    return colors
+
+  def get_bin_color(self, value):
+    return (0, 0, 0)
+
+class original_color_model(color_model):
+  def __init__(self):
+    self.ratio_cutoffs = [ 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0 ]
+    self.ratio_gradient = [ (240, 240, 240),  # off-white
+                            (255,   0,   0),  # red
+                            (255, 150,   0),  # orange
+                            (255, 255,   0),  # yellow
+                            (  0, 255,   0),  # green
+                            (  0, 255, 255),  # cyan
+                            (  0,   0, 255),  # blue
+                            (130,   0, 255) ] # purple
+
+# these two only work on the original scale
+class blue_color_model(original_color_model):
+  def get_bin_color(self, value):
+    return hsv2rgb(240, value, 1)
+
+class red_color_model(original_color_model):
+  def get_bin_color(self, value):
+    return hsv2rgb(0, value, 1)
+
+class grayscale_color_model(original_color_model):
+  def get_bin_color(self, value):
+    return hsv2rgb(0, 0, 1-value)
+
+class rainbow_color_model(color_model):
+  def __init__(self):
+    self.ratio_cutoffs = [ 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0 ]
+    self.ratio_gradient = [ hsv2rgb(240.0-(240.0*x), 1, 1) for x in
+                            [ float(x) / 7.0 for x in range(8) ] ]
+
+  def get_bin_color(self, value):
+    color = hsv2rgb(240.0 - (240.0 * value), 1, 1)
+    return color
+
+class rmb_color_model(color_model):
+  def __init__(self):
+    self.ratio_cutoffs = [ 0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0 ]
+    self.ratio_gradient = [ hsv2rgb(240.0+(120.0*x), 1, 1) for x in
+                            [ float(x) / 7.0 for x in range(8) ] ]
+
+  def get_bin_color(self, value):
+    color = hsv2rgb(240.0 + (120.0 * value), 1, 1)
+    return color
+
+def hsv2rgb(h, s, v):
+  if h >= 360 :
+    h -= 360
+  h /= 60
+  v *= 255
+
+  i = floor(h)
+  f = h - i
+  p = v * (1 - s)
+  q = v * (1 - (s * f))
+  t = v * (1 - (s * (1 - f)))
+
+  if   i == 0 : return (v, t, p)
+  elif i == 1 : return (q, v, p)
+  elif i == 2 : return (p, v, t)
+  elif i == 3 : return (p, q, v)
+  elif i == 4 : return (t, p, v)
+  else        : return (v, p, q)
+
+#---end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/polygon/tst.py
+from __future__ import absolute_import, division, print_function
+import iotbx.phil
+from mmtbx import polygon
+import libtbx, os
+import libtbx.load_env
+
+params1 = iotbx.phil.parse("""\
+polygon {
+  keys_to_show = *r_work *r_free *bond_rmsd *angle_rmsd *adp_mean_all
+}
+""")
+
+params3 = iotbx.phil.parse("""\
+polygon {
+  keys_to_show = %s
+}
+""" % " ".join([ "*%s" % k for k in polygon.keys_to_show ]))
+
+def example_1():
+  # show selected characteristics, apply pre-defined filters
+  pr, unused_definitions = polygon.master_params.fetch(sources = [params1],
+    track_unused_definitions = True)
+  polygon.polygon(params = pr.extract())
+
+def example_2():
+  #
+  #pr, unused_definitions = polygon.master_params.fetch(sources = [params2],
+  #  track_unused_definitions = True, d_min=1.0)
+  polygon.polygon(d_min=1.0)
+
+def example_3():
+  # show selected characteristics, apply default selection
+  # d_min comes from the structure that we are comparing against database
+  pr, unused_definitions = polygon.master_params.fetch(sources = [params1],
+    track_unused_definitions = True)
+  polygon.polygon(params = pr.extract(),
+                  d_min  = 2.0)
+
+if (__name__ == "__main__"):
+  file_name = libtbx.env.find_in_repositories(
+      relative_path = "chem_data/polygon_data/all_mvd.pickle",
+      test = os.path.isfile)
+  if(file_name is None):
+    print("Skip POLYGON test: database file is not available.")
+  else:
+    print("\nEXAMPLE 1:")
+    example_1()
+    print("\nEXAMPLE 2:")
+    example_2()
+    print("\nEXAMPLE 3:")
+    example_3()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/polygon/tst_gui.py
+from __future__ import absolute_import, division, print_function
+
+import mmtbx.polygon.output
+from six.moves import cPickle as pickle
+import six
+
+class test_renderer(mmtbx.polygon.output.renderer):
+  def draw_box(self, out, points, color):
+    pass
+
+  def draw_solid_line(self, out, start, end, color):
+    pass
+
+  def draw_dashed_line(self, out, start, end, color):
+    pass
+
+  def draw_labels(self, out, label, min, max, value, pos, angle):
+    pass
+
+def exercise():
+  stats = {
+    "r_work" : 0.25,
+    "r_free" : 0.28,
+    "adp_mean_all" : 20.0,
+    "bond_rmsd" : 0.02,
+    "angle_rmsd" : 1.8,
+    "clashscore" : 20.0
+  }
+  data = mmtbx.polygon.output.get_basic_histogram_data(d_min=2.5)
+  s = pickle.dumps(data)
+  histograms = mmtbx.polygon.output.convert_histogram_data(data)
+  assert (len(histograms) == 6)
+  for stat_key, histogram in six.iteritems(histograms):
+    bins = [ n for n in histogram.slots() ]
+    #print "%-16s : %s" % (stat_key, " ".join([ "%5d" % n for n in bins ]))
+  renderer = test_renderer(
+    histogram_data=data,
+    structure_stats=stats)
+  renderer.draw(out=None)
+  print("OK")
+
+if __name__ == "__main__" :
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/polygon/tst_polygon_data.py
+from __future__ import division
+from __future__ import print_function
+import os, sys
+from cctbx.array_family import flex
+from libtbx import easy_pickle
+import libtbx.load_env
+from libtbx.test_utils import approx_equal
+
+def load_dict():
+  file = libtbx.env.find_in_repositories(relative_path=
+    "chem_data/polygon_data/all_mvd.pickle", test=os.path.isfile)
+  database_dict = easy_pickle.load(file)
+  # Python 3 pickle fix
+  # =========================================================================
+  if sys.version_info.major == 3:
+    database_dict = easy_pickle.fix_py2_pickle(database_dict)
+  # =========================================================================
+
+  return database_dict
+
+def exercise_00():
+  database_dict = load_dict()
+  #
+  i_1l2h = list(database_dict["pdb_code"]).index("1l2h")
+  found = 0
+  for key in database_dict.keys():
+    #print key, ": ",database_dict[key][i_1l2h]
+    #
+    value = database_dict[key][i_1l2h]
+    if(key == "unit_cell"):
+      assert "(53.89, 53.89, 77.36, 90, 90, 90)" == value.strip()
+      found += 1
+    if(key == "high_resolution"):
+      assert approx_equal(1.54, float(value))
+      found += 1
+    if(key == "pdb_header_tls"):
+      assert "false (n_groups: 0)" == value.strip()
+      found += 1
+    if(key == "test_set_size"):
+      assert approx_equal(0.0476, float(value),.0002)
+      found += 1
+    if(key == "twinned"):
+      assert "h,-k,-l" == value.strip()
+      found += 1
+  #
+  assert found == 5
+
+def exercise_01():
+  database_dict = load_dict()
+  #
+  twinned = database_dict["twinned"]
+  sel  = twinned != "none"
+  sel &= twinned != "false"
+  n_twinned = sel.count(True)
+  print ("TWINNED: %d (percent: %6.2f), TOTAL: %d" % (n_twinned,
+    n_twinned*100./sel.size(), sel.size()))
+  r_work_pdb = database_dict["pdb_header_r_work"]
+  r_work_cutoff = database_dict["r_work_cutoffs"]
+  r_work_re_computed = database_dict["r_work"]
+  name = database_dict["pdb_code"]
+  #
+  sel &= r_work_cutoff != "none"
+  sel &= r_work_pdb != "none"
+  #
+  r_work_pdb         = r_work_pdb.select(sel)
+  r_work_cutoff      = r_work_cutoff.select(sel)
+  r_work_re_computed = r_work_re_computed.select(sel)
+  name               = name.select(sel)
+  twinned            = twinned.select(sel)
+  #
+  def str_to_float(x):
+    tmp = flex.double()
+    for x_ in x:
+      tmp.append(float(x_))
+    return tmp
+  #
+  r_work_cutoff = str_to_float(r_work_cutoff)
+  r_work_re_computed = str_to_float(r_work_re_computed)
+  r_work_pdb = str_to_float(r_work_pdb)
+  #
+  delta = (r_work_cutoff - r_work_pdb)*100.
+  #
+  sp = flex.sort_permutation(delta)
+  name               = name         .select(sp)
+  delta              = delta        .select(sp)
+  r_work_cutoff      = r_work_cutoff.select(sp)
+  r_work_pdb         = r_work_pdb   .select(sp)
+  r_work_re_computed = r_work_re_computed.select(sp)
+  twinned            = twinned.select(sp)
+  #
+  for n,d,rwc,rwp,rw,t in zip(name,delta,r_work_cutoff,r_work_pdb, r_work_re_computed, twinned):
+    print ("%s diff=%6.2f rw_c=%6.4f rw_p=%6.4f rw_ad=%6.4f %s" % (n,d,rwc,rwp,rw, t))
+
+def exercise_02():
+  database_dict = load_dict()
+  #
+  r_work_pdb = database_dict["pdb_header_r_work"]
+  r_work_cutoff = database_dict["r_work_cutoffs"]
+  r_work_re_computed = database_dict["r_work"]
+  name = database_dict["pdb_code"]
+  print ("size: ",name.size())
+  #
+  sel = r_work_pdb != "none"
+  print ("NO R in PDB:", sel.count(False))
+  #
+  r_work_pdb = r_work_pdb.select(sel)
+  r_work_cutoff = r_work_cutoff.select(sel)
+  r_work_re_computed = r_work_re_computed.select(sel)
+  name = name.select(sel)
+  #
+  def str_to_float(x):
+    tmp = flex.double()
+    for x_ in x:
+      tmp.append(float(x_))
+    return tmp
+  #
+  r_work_cutoff = str_to_float(r_work_cutoff)
+  r_work_re_computed = str_to_float(r_work_re_computed)
+  r_work_pdb = str_to_float(r_work_pdb)
+  #
+  delta1 = (r_work_cutoff - r_work_pdb)*100.
+  delta2 = (r_work_re_computed - r_work_pdb)*100.
+  print ("Number with better R: ", (delta1 <=0.).count(True), (delta2 <=0.).count(True))
+  print ("Number with worse  R: ", (delta1 >0.).count(True), (delta2 >0.).count(True))
+  #
+  #sp = flex.sort_permutation(delta)
+  #name          = name         .select(sp)
+  #delta         = delta        .select(sp)
+  #r_work_cutoff = r_work_cutoff.select(sp)
+  #r_work_pdb    = r_work_pdb   .select(sp)
+  #r_work_re_computed = r_work_re_computed.select(sp)
+  #for n,d,rwc,rwp,rw,t in zip(name,delta,r_work_cutoff,r_work_pdb, r_work_re_computed, twinned):
+  #  print "%s %8.4f %8.4f %8.4f %8.4f %s" % (n,d,rwc,rwp,rw, t)
+  #print len(twinned)
+
+
+if (__name__ == "__main__"):
+  exercise_00()
+  exercise_01()
+  exercise_02()
+  print("OK")
+
+
+ *******************************************************************************

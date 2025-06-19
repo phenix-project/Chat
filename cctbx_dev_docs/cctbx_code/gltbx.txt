@@ -1,0 +1,5065 @@
+
+
+ *******************************************************************************
+gltbx/__init__.py
+from __future__ import absolute_import, division, print_function
+import libtbx.forward_compatibility
+from libtbx.version import get_version
+
+__version__ = get_version()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/command_line/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/command_line/try_imports.py
+from __future__ import absolute_import, division, print_function
+def run():
+  available = []
+  missing = []
+  for module in ["gl", "glu", "fonts", "util", "viewer_utils"]:
+    try: exec("import gltbx."+module)
+    except ImportError: missing.append(module)
+    else: available.append(module)
+  if (len(available) == 0):
+    available = "None"
+  else:
+    available = " ".join(available)
+  if (len(missing) == 0):
+    missing = "None"
+  else:
+    missing = " ".join(missing)
+  print("gltbx modules:")
+  print("  available:", available)
+  print("    missing:", missing)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/extract_opengl_specs.py
+"""
+To update opengl_specs.txt:
+
+  1. In an empty temporary directory run:
+       wget_opengl_specs.csh
+
+  2. In $GLTBX_DIST run:
+       python extract_opengl_specs.py /tmpdir/html/*/*.html > opengl_specs.txt
+"""
+from __future__ import absolute_import, division, print_function
+
+import sys, os
+
+sequential_defines = ["GL_AUX", "GL_CLIP_PLANE", "GL_LIGHT"]
+
+def extract_defines(html_string, all_defines):
+  for word in html_string.split():
+    if (   word.startswith("<STRONG>GL_")
+        or word.startswith("<STRONG>GLU_")):
+      i = word.find("</STRONG>")
+      if (i < 0): continue
+      define = word[8:i]
+      if (define.endswith("_")): continue
+      if (define.upper() != define): continue
+      if (not define.replace("_","").isalnum()): continue
+      keep = True
+      for sequential_define in sequential_defines:
+        if (define == sequential_define):
+          keep = False
+          break
+        elif (define.startswith(sequential_define)):
+          num = define[len(sequential_define):]
+          try: num = int(num)
+          except ValueError: pass
+          else:
+            keep = False
+            break
+      if (not keep): continue
+      all_defines.add(define)
+
+def extract_signatures(html_string, all_signatures):
+  signature_block = []
+  active_block = False
+  current_line = None
+  c_specification = "<STRONG>C</STRONG> <STRONG>SPECIFICATION</STRONG>"
+  for line in html_string.splitlines():
+    if (line.strip() == c_specification):
+      active_block = True
+    elif (line.strip() in [
+            "<STRONG>PARAMETERS</STRONG>",
+            "<STRONG>DESCRIPTION</STRONG>"]):
+      active_block = False
+      if (current_line is not None):
+        current_line = current_line.strip()
+        if (len(current_line) > 0):
+          all_signatures.append(current_line)
+        current_line = None
+    elif (active_block):
+      line = line.expandtabs()
+      line = line.replace("<STRONG>", "").replace("</STRONG>", "")
+      line = line.replace("<EM>", "").replace("</EM>", "")
+      line = line.replace("GLvoid (*CallBackFunc)(", "glu_function_pointer fn")
+      line = line.replace("(", " ( ")
+      line = line.replace(")", " ) ")
+      line = " ".join(line.split())
+      if (current_line is None):
+        current_line = line
+      elif (current_line.endswith(",")):
+        current_line += " " + line
+      else:
+        current_line = current_line.strip()
+        if (len(current_line) > 0):
+          all_signatures.append(current_line)
+        current_line = line
+
+def run(args):
+  all_defines = set()
+  for arg in args:
+    extract_defines(html_string=open(arg).read(), all_defines=all_defines)
+  for define in sorted(all_defines):
+    print(define)
+  #
+  all_signatures = []
+  for arg in args:
+    if (os.path.basename(arg).lower() == "index.html"): continue
+    prev_len = len(all_signatures)
+    extract_signatures(
+      html_string=open(arg).read(),
+      all_signatures=all_signatures)
+    assert len(all_signatures) > prev_len
+  for signature in all_signatures:
+    print(signature)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/fonts.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("gltbx_fonts_ext")
+from gltbx_fonts_ext import *
+
+ucs_bitmap_8x13 = ucs_bitmap(short_name="8x13")
+ucs_bitmap_9x15 = ucs_bitmap(short_name="9x15")
+ucs_bitmap_10x20 = ucs_bitmap(short_name="10x20")
+
+@bp.inject_into(ucs_bitmap)
+class _():
+
+  def render_text(self, position, text, relative_line_spacing=1.0,
+                  use_3d_position=False):
+    from gltbx.gl import glRasterPos2f, glRasterPos3f, glBitmap
+    if use_3d_position: glRasterPos = glRasterPos3f
+    else: glRasterPos = glRasterPos2f
+    line_spacing = round(self.height() * relative_line_spacing)
+    for i,string in enumerate(text.splitlines()):
+      glRasterPos(*position)
+      glBitmap(0, 0, 0.0, 0.0, 0.0, -i*line_spacing, b"")
+      self.render_string(string=string.expandtabs())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/generate_defines_bpl.py
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import write_this_is_auto_generated
+import libtbx.load_env
+import libtbx.path
+import os
+from six.moves import range
+
+this = "gltbx.generate_defines_bpl"
+
+additional_defines = """
+GL_VERSION_1_1
+GL_VERSION_1_2
+GL_VERSION_1_3
+GL_VERSION_1_4
+GL_VERSION_1_5
+GL_VERSION_2_0
+GL_ARB_imaging
+GLU_VERSION_1_1
+GLU_VERSION_1_2
+GLU_VERSION_1_3
+GLU_VERSION_1_4
+GLU_VERSION_1_5
+GLU_VERSION_2_0
+GL_MULTISAMPLE
+GL_SAMPLE_BUFFERS
+GL_SAMPLES
+"""
+
+def write_one(f, define):
+  print('#if defined(%s)' % define, file=f)
+  print('    scope.attr("%s") = %s;' % (define, define), file=f)
+  print('#endif', file=f)
+
+def write_define_wrappers(f, namespace, defines, i_fragment):
+  write_this_is_auto_generated(f, this)
+  print("""\
+#include <boost/python/def.hpp>
+#include <boost/python/scope.hpp>
+#include <gltbx/include_opengl.h>
+
+namespace gltbx { namespace %s { namespace boost_python {
+
+  void
+  wrap_defines_%02d(boost::python::scope scope)
+  {""" % (namespace, i_fragment), file=f)
+  for define in defines:
+    write_one(f, define)
+  if (namespace == "gl"):
+    for i in range(4): write_one(f, "GL_AUX%d" % i)
+    for i in range(8): write_one(f, "GL_LIGHT%d" % i)
+    for i in range(32): write_one(f, "GL_TEXTURE%d" % i)
+  print("""\
+  }
+
+}}} // gltbx::%s::boost_python""" % namespace, file=f)
+
+def import_opengl_defines():
+  result = []
+  specs_file = libtbx.env.under_dist("gltbx", "opengl_specs.txt")
+  for line in open(specs_file).read().splitlines():
+    if (line.startswith("GL_") or line.startswith("GLU_")):
+      result.append(line)
+  return result
+
+def run(target_dir):
+  if not os.path.isdir(target_dir):
+    os.makedirs(target_dir)
+  gl_defines = []
+  glu_defines = []
+  for define in additional_defines.split() + import_opengl_defines():
+    if (define.startswith("GLU_")):
+      glu_defines.append(define)
+    else:
+      gl_defines.append(define)
+  for namespace,defines,n_fragments in [("gl", gl_defines, 8),
+                                        ("glu", glu_defines, 2)]:
+    block_size = len(defines) // n_fragments
+    if (block_size * n_fragments < len(defines)):
+      block_size += 1
+    for i_fragment in range(n_fragments):
+      file_name = libtbx.path.norm_join(
+        target_dir, namespace+"_defines_%02d_bpl.cpp" % i_fragment)
+      with open(file_name, "w") as f:
+        write_define_wrappers(
+          f=f,
+          namespace=namespace,
+          defines=defines[i_fragment*block_size:(i_fragment+1)*block_size],
+          i_fragment=i_fragment)
+
+if __name__ == "__main__":
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/generate_fonts_ucs_cpp.py
+from __future__ import absolute_import, division, print_function
+import libtbx.load_env
+from libtbx.str_utils import show_string
+import os
+import sys
+from six.moves import range
+op = os.path
+
+class font_info(object):
+
+  def __init__(O, short_name, file_name, width, height, xorig, yorig):
+    O.short_name = short_name
+    O.file_name = file_name
+    O.width = width
+    O.height = height
+    O.xorig = xorig
+    O.yorig = yorig
+
+font_infos = [
+  font_info("8x13", "8x13.bdf", 8, 13, 0, -2),
+  font_info("9x15", "9x15.bdf", 9, 15, 0, -3),
+  font_info("10x20", "10x20.bdf", 10, 20, 0, -4)
+]
+
+class read_bitmap(object):
+
+  __slots__ = ["label", "encoding", "swidth", "dwidth", "bbx", "bitmap"]
+
+  def __init__(O, bdf_file):
+    """Converts a block of this form:
+STARTCHAR char0
+ENCODING 0
+SWIDTH 568 0
+DWIDTH 8 0
+BBX 8 13 0 -2
+BITMAP
+00
+...
+00
+ENDCHAR
+"""
+    O.label = None
+    O.encoding = None
+    O.swidth = None
+    O.dwidth = None
+    O.bbx = None
+    O.bitmap = None
+    line = next(bdf_file).strip()
+    if (line == "ENDFONT"):
+      return
+    assert line.startswith("STARTCHAR ")
+    O.label = line.split(None, 1)[1]
+    while True:
+      line = next(bdf_file).strip()
+      if (line.startswith("ENCODING ")):
+        fields = line.split()
+        assert len(fields) == 2
+        O.encoding = int(fields[1])
+      elif (line.startswith("SWIDTH ")):
+        fields = line.split()
+        assert len(fields) == 3
+        O.swidth = (int(fields[1]), int(fields[2]))
+      elif (line.startswith("DWIDTH ")):
+        fields = line.split()
+        assert len(fields) == 3
+        O.dwidth = (int(fields[1]), int(fields[2]))
+      elif (line.startswith("BBX ")):
+        fields = line.split()
+        assert len(fields) == 5
+        O.bbx = [int(field) for field in fields[1:]]
+      elif (line == "BITMAP"):
+        break
+      else:
+        raise RuntimeError(
+          "Font file %s: unknown line in STARTCHAR block: %s" % (
+            show_string(bdf_file.name), line))
+    assert O.encoding is not None
+    O.bitmap = []
+    while True:
+      line = next(bdf_file).strip()
+      if (line == "ENDCHAR"):
+        break
+      O.bitmap.append(line)
+    assert len(O.bitmap) == O.bbx[1]
+
+  def as_glbitmap(self):
+    result = []
+    w,h = self.bbx[:2]
+    n_bytes = w//8
+    mask = (256**n_bytes)-1
+    remainder = w - n_bytes*8
+    if (remainder > 0):
+      n_bytes += 1
+      mask <<= remainder
+      mask |= (2**remainder)-1
+      mask <<= 8-remainder
+    n_hex = 2*n_bytes
+    padding = "0"*n_hex
+    rows = list(self.bitmap)
+    rows.reverse()
+    for row in rows:
+      v = int((row+padding)[:n_hex],16) & mask
+      bytes = []
+      for i in range(n_bytes):
+        bytes.append(v & 255)
+        v >>= 8
+      bytes.reverse()
+      result.extend(bytes)
+    return result
+
+  def format_cpp(O):
+    return "/* %5d */ " % O.encoding \
+         + ",".join(["0x%.2x" % i for i in O.as_glbitmap()])
+
+class encoding_range(object):
+
+  __slots__ = ["start", "count"]
+
+  def __init__(O, start):
+    O.start = start
+    O.count = 1
+
+class encoding_ranges(object):
+
+  __slots__ = ["ranges"]
+
+  def __init__(O, bitmaps):
+    O.ranges = []
+    current_range = None
+    previous_encoding = -2
+    for bitmap in bitmaps:
+      if (previous_encoding+1 == bitmap.encoding):
+        current_range.count += 1
+      else:
+        current_range = encoding_range(start=bitmap.encoding)
+        O.ranges.append(current_range)
+      previous_encoding = bitmap.encoding
+
+  def format_cpp(O):
+    return ",\n".join([
+       "%d, %d" % (range.start, range.count)
+         for range in O.ranges])
+
+def format_font_ucs_cpp(
+      short_name,
+      full_name,
+      width,
+      height,
+      xorig,
+      yorig,
+      char_records,
+      encoding_ranges):
+  number_of_chars = len(char_records)
+  raw_bitmaps = ",\n".join(char_records)
+  return """\
+#include <gltbx/fonts_ucs.h>
+
+namespace gltbx { namespace fonts { namespace ucs {
+
+namespace {
+
+static const unsigned char raw_bitmaps[] = {
+%(raw_bitmaps)s
+};
+
+static const encoding_range encoding_ranges[] = {
+%(encoding_ranges)s,
+0, 0
+};
+
+} // namespace <anonymous>
+
+bitmap_font_record bitmap_%(width)dx%(height)d = {
+  "%(short_name)s",
+  "%(full_name)s",
+  %(width)d,
+  %(height)d,
+  %(xorig)d,
+  %(yorig)d,
+  %(number_of_chars)d,
+  sizeof(raw_bitmaps),
+  raw_bitmaps,
+  encoding_ranges,
+};
+
+}}} // namespace gltbx::fonts::ucs
+""" % vars()
+
+def convert(ucs_fonts_dir, target_dir, font_info):
+  bdf_file = open(op.join(ucs_fonts_dir, font_info.file_name))
+  full_name = None
+  number_of_chars = None
+  for line in bdf_file:
+    if (line.startswith("FONT ")):
+      assert full_name is None
+      fields = line.split()
+      assert len(fields) == 2
+      full_name=fields[1]
+    if (line.startswith("CHARS ")):
+      assert number_of_chars is None
+      fields = line.split()
+      assert len(fields) == 2
+      number_of_chars = int(fields[1])
+      break
+  assert full_name is not None
+  assert number_of_chars is not None
+  bitmaps = []
+  while True:
+    bitmap = read_bitmap(bdf_file=bdf_file)
+    if (bitmap.label is None):
+      break
+    bitmaps.append(bitmap)
+  assert len(bitmaps) == number_of_chars
+  char_records = [bitmap.format_cpp() for bitmap in bitmaps]
+  cpp_file_name = op.join(target_dir, "font_ucs_%s.cpp" % font_info.short_name)
+  open(cpp_file_name, "w").write(
+    format_font_ucs_cpp(
+      short_name=font_info.short_name,
+      full_name=full_name,
+      width=font_info.width,
+      height=font_info.height,
+      xorig=font_info.xorig,
+      yorig=font_info.yorig,
+      char_records=char_records,
+      encoding_ranges=encoding_ranges(bitmaps=bitmaps).format_cpp()))
+
+def run(target_dir):
+  if (not op.isdir(target_dir)):
+    os.makedirs(target_dir)
+  for relative_path in ["gui_resources/ucs-fonts", "ucs-fonts"]:
+    ucs_fonts_dir = libtbx.env.find_in_repositories(
+      relative_path=relative_path, test=op.isdir, optional=True)
+    if (ucs_fonts_dir is not None):
+      break
+  else:
+    raise RuntimeError("Cannot find ucs-fonts directory.")
+  done_flag_file = op.join(target_dir, "FONTS_UCS_DONE_FLAG_FILE")
+  if (op.isfile(done_flag_file)):
+    print("      Info: Re-using existing font cpp files.")
+    print("      Hint: Remove %s" % op.join(
+      op.basename(target_dir), op.basename(done_flag_file)))
+    print("            to force generation of new font files.")
+    return
+  print("      fonts:", end=' ')
+  for font_info in font_infos:
+    print(font_info.short_name, end=' ')
+    sys.stdout.flush()
+    convert(
+      ucs_fonts_dir=ucs_fonts_dir, target_dir=target_dir, font_info=font_info)
+  open(done_flag_file, "w")
+  print()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/generate_functions_bpl.py
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import write_this_is_auto_generated
+from libtbx.str_utils import line_breaker
+import libtbx.load_env
+import libtbx.path
+import os
+import sys
+from six.moves import range
+
+this = "gltbx.generate_functions_bpl"
+
+return_types = {
+  "GLenum": 0,
+  "GLboolean": 0,
+  "GLint": 0,
+  "GLuint": 0,
+  "const GLubyte*": 0,
+  "GLUnurbs*": 0,
+  "GLUquadric*": 0,
+  "GLUtesselator*": 0,
+}
+
+arg_types = {
+  "const void*": 0,
+  "GLbitfield": 0,
+  "GLboolean": 0,
+  "GLboolean*": 0,
+  "GLbyte": 0,
+  "GLclampd": 0,
+  "GLclampf": 0,
+  "GLdouble": 0,
+  "GLdouble*": 0,
+  "GLenum": 0,
+  "GLfloat": 0,
+  "GLfloat*": 0,
+  "GLint": 0,
+  "GLint*": 0,
+  "GLshort": 0,
+  "GLsizei": 0,
+  "GLubyte": 0,
+  "GLubyte*": 0,
+  "GLuint": 0,
+  "GLuint*": 0,
+  "GLushort": 0,
+  "GLushort*": 0,
+  "GLvoid*": 0,
+  "GLvoid**": 0,
+  "const GLboolean*": 0,
+  "const GLbyte*": 0,
+  "const GLclampf*": 0,
+  "const GLdouble*": 0,
+  "const GLfloat*": 0,
+  "const GLint*": 0,
+  "const GLshort*": 0,
+  "const GLubyte*": 0,
+  "const GLuint*": 0,
+  "const GLushort*": 0,
+  "const GLvoid*": 0,
+  "GLUnurbs*": 0,
+  "GLUquadric*": 0,
+  "GLUtesselator*": 0,
+  "glu_function_pointer": 0,
+}
+
+opaque_pointers = [
+  "GLUnurbs*",
+  "GLUquadric*",
+  "GLUtesselator*",
+]
+
+pointee_sizes = {
+  "glAreTexturesResident textures": 0,
+  "glAreTexturesResident residences": 0,
+  "glBitmap bitmap": 0,
+  "glCallLists lists": "?n*sizeof(type)",
+  "glClipPlane equation": 4,
+  "glColor3bv v": 3,
+  "glColor3dv v": 3,
+  "glColor3fv v": 3,
+  "glColor3iv v": 3,
+  "glColor3sv v": 3,
+  "glColor3ubv v": 3,
+  "glColor3uiv v": 3,
+  "glColor3usv v": 3,
+  "glColor4bv v": 4,
+  "glColor4dv v": 4,
+  "glColor4fv v": 4,
+  "glColor4iv v": 4,
+  "glColor4sv v": 4,
+  "glColor4ubv v": 4,
+  "glColor4uiv v": 4,
+  "glColor4usv v": 4,
+  "glColorPointer pointer": 0,
+  "glDeleteTextures textures": 0,
+  "glDrawElements indices": 0,
+  "glDrawPixels pixels": 0,
+  "glEdgeFlagv flag": 1,
+  "glEdgeFlagPointer pointer": 0,
+  "glEvalCoord1dv u": 1,
+  "glEvalCoord1fv u": 1,
+  "glEvalCoord2dv u": 2,
+  "glEvalCoord2fv u": 2,
+  "glFeedbackBuffer buffer": "size",
+  "glFogfv params": "?pname=GL_FOG_COLOR: 4, default: 1",
+  "glFogiv params": "?pname=GL_FOG_COLOR: 4, default: 1",
+  "glGenTextures textures": "n",
+  "glGetClipPlane equation": 4,
+  "glGetBooleanv params": "?1..16 depending on pname",
+  "glGetDoublev params": "?1..16 depending on pname",
+  "glGetFloatv params": "?1..16 depending on pname",
+  "glGetIntegerv params": "?1..16 depending on pname",
+  "glGetLightfv params": "?1..4 depending on pname",
+  "glGetLightiv params": "?1..4 depending on pname",
+  "glGetMapdv v": 0,
+  "glGetMapfv v": 0,
+  "glGetMapiv v": 0,
+  "glGetMaterialfv params": "?1..4 depending on pname",
+  "glGetMaterialiv params": 0,
+  "glGetPixelMapfv values": "?glGet(map)",
+  "glGetPixelMapuiv values": 0,
+  "glGetPixelMapusv values": 0,
+  "glGetPointerv params": 0,
+  "glGetPolygonStipple mask": 0,
+  "glGetTexEnvfv params": 0,
+  "glGetTexEnviv params": 0,
+  "glGetTexGendv params": 0,
+  "glGetTexGenfv params": 0,
+  "glGetTexGeniv params": 0,
+  "glGetTexImage pixels": 0,
+  "glGetTexLevelParameterfv params": 0,
+  "glGetTexLevelParameteriv params": 0,
+  "glGetTexParameterfv params": 0,
+  "glGetTexParameteriv params": 0,
+  "glIndexdv c": 0,
+  "glIndexfv c": 0,
+  "glIndexiv c": 0,
+  "glIndexsv c": 0,
+  "glIndexubv c": 0,
+  "glIndexPointer pointer": 0,
+  "glInterleavedArrays pointer": 0,
+  "glLightfv params": 0,
+  "glLightiv params": 0,
+  "glLightModelfv params": 0,
+  "glLightModeliv params": 0,
+  "glLoadMatrixd m": 0,
+  "glLoadMatrixf m": 0,
+  "glMap1d points": 0,
+  "glMap1f points": 0,
+  "glMap2d points": 0,
+  "glMap2f points": 0,
+  "glMaterialfv params": 0,
+  "glMaterialiv params": 0,
+  "glMultMatrixd m": 0,
+  "glMultMatrixf m": 0,
+  "glNormal3bv v": 3,
+  "glNormal3dv v": 3,
+  "glNormal3fv v": 3,
+  "glNormal3iv v": 3,
+  "glNormal3sv v": 3,
+  "glNormalPointer pointer": 0,
+  "glPixelMapfv values": 0,
+  "glPixelMapuiv values": 0,
+  "glPixelMapusv values": 0,
+  "glPolygonStipple mask": 0,
+  "glPrioritizeTextures textures": 0,
+  "glPrioritizeTextures priorities": 0,
+  "glRasterPos2dv v": 2,
+  "glRasterPos2fv v": 2,
+  "glRasterPos2iv v": 2,
+  "glRasterPos2sv v": 2,
+  "glRasterPos3dv v": 3,
+  "glRasterPos3fv v": 3,
+  "glRasterPos3iv v": 3,
+  "glRasterPos3sv v": 3,
+  "glRasterPos4dv v": 4,
+  "glRasterPos4fv v": 4,
+  "glRasterPos4iv v": 4,
+  "glRasterPos4sv v": 4,
+  "glReadPixels pixels": 0,
+  "glRectdv v1": 2,
+  "glRectdv v2": 2,
+  "glRectfv v1": 2,
+  "glRectfv v2": 2,
+  "glRectiv v1": 2,
+  "glRectiv v2": 2,
+  "glRectsv v1": 2,
+  "glRectsv v2": 2,
+  "glSelectBuffer buffer": 0,
+  "glTexCoord1dv v": 1,
+  "glTexCoord1fv v": 1,
+  "glTexCoord1iv v": 1,
+  "glTexCoord1sv v": 1,
+  "glTexCoord2dv v": 2,
+  "glTexCoord2fv v": 2,
+  "glTexCoord2iv v": 2,
+  "glTexCoord2sv v": 2,
+  "glTexCoord3dv v": 3,
+  "glTexCoord3fv v": 3,
+  "glTexCoord3iv v": 3,
+  "glTexCoord3sv v": 3,
+  "glTexCoord4dv v": 4,
+  "glTexCoord4fv v": 4,
+  "glTexCoord4iv v": 4,
+  "glTexCoord4sv v": 4,
+  "glTexCoordPointer pointer": 0,
+  "glTexEnvfv params": 0,
+  "glTexEnviv params": 0,
+  "glTexGendv params": 0,
+  "glTexGenfv params": 0,
+  "glTexGeniv params": 0,
+  "glTexImage1D pixels": 0,
+  "glTexImage2D pixels": 0,
+  "glTexParameterfv params": 0,
+  "glTexParameteriv params": 0,
+  "glTexSubImage1D pixels": 0,
+  "glTexSubImage2D pixels": 0,
+  "gluBeginCurve nurb": 0,
+  "gluEndCurve nurb": 0,
+  "gluBeginPolygon tess": 0,
+  "gluEndPolygon tess": 0,
+  "gluBeginSurface nurb": 0,
+  "gluEndSurface nurb": 0,
+  "gluBeginTrim nurb": 0,
+  "gluEndTrim nurb": 0,
+  "gluBuild1DMipmaps data": 0,
+  "gluBuild2DMipmaps data": 0,
+  "gluCylinder quad": 0,
+  "gluDeleteNurbsRenderer nurb": 0,
+  "gluDeleteQuadric quad": 0,
+  "gluDeleteTess tess": 0,
+  "gluDisk quad": 0,
+  "gluGetNurbsProperty nurb": 0,
+  "gluGetNurbsProperty data": 0,
+  "gluGetTessProperty tess": 0,
+  "gluGetTessProperty data": 0,
+  "gluLoadSamplingMatrices nurb": 0,
+  "gluLoadSamplingMatrices model": 16,
+  "gluLoadSamplingMatrices perspective": 16,
+  "gluLoadSamplingMatrices view": 4,
+  "gluNextContour tess": 0,
+  "gluNurbsCallbackDataEXT nurb": 0,
+  "gluNurbsCallbackDataEXT userData": 0,
+  "gluNurbsCallback nurb": 0,
+  "gluNurbsCurve nurb": 0,
+  "gluNurbsCurve knots": 0,
+  "gluNurbsCurve control": 0,
+  "gluNurbsProperty nurb": 0,
+  "gluNurbsSurface nurb": 0,
+  "gluNurbsSurface sKnots": 0,
+  "gluNurbsSurface tKnots": 0,
+  "gluNurbsSurface control": 0,
+  "gluPartialDisk quad": 0,
+  "gluPickMatrix viewport": 4,
+  "gluProject model": 16,
+  "gluProject proj": 16,
+  "gluProject view": 4,
+  "gluProject winX": 1,
+  "gluProject winY": 1,
+  "gluProject winZ": 1,
+  "gluPwlCurve nurb": 0,
+  "gluPwlCurve data": 0,
+  "gluQuadricCallback quad": 0,
+  "gluQuadricDrawStyle quad": 0,
+  "gluQuadricNormals quad": 0,
+  "gluQuadricOrientation quad": 0,
+  "gluQuadricTexture quad": 0,
+  "gluScaleImage dataIn": 0,
+  "gluScaleImage dataOut": 0,
+  "gluSphere quad": 0,
+  "gluTessBeginContour tess": 0,
+  "gluTessEndContour tess": 0,
+  "gluTessBeginPolygon tess": 0,
+  "gluTessBeginPolygon data": 0,
+  "gluTessCallback tess": 0,
+  "gluTessEndPolygon tess": 0,
+  "gluTessNormal tess": 0,
+  "gluTessProperty tess": 0,
+  "gluTessVertex tess": 0,
+  "gluTessVertex location": 0,
+  "gluTessVertex data": 0,
+  "gluUnProject model": 16,
+  "gluUnProject proj": 16,
+  "gluUnProject view": 4,
+  "gluUnProject objX": 1,
+  "gluUnProject objY": 1,
+  "gluUnProject objZ": 1,
+  "glVertex2dv v": 2,
+  "glVertex2fv v": 2,
+  "glVertex2iv v": 2,
+  "glVertex2sv v": 2,
+  "glVertex3dv v": 3,
+  "glVertex3fv v": 3,
+  "glVertex3iv v": 3,
+  "glVertex3sv v": 3,
+  "glVertex4dv v": 4,
+  "glVertex4fv v": 4,
+  "glVertex4iv v": 4,
+  "glVertex4sv v": 4,
+  "glVertexPointer pointer": 0,
+}
+
+version_guards = {
+  "glBlendColorEXT": "GL_XXX",
+  "glEdgeFlagPointer": "GLTBX_XXX",
+  "gluNurbsCallbackDataEXT": "GL_XXX",
+}
+
+special_wrappers = {
+
+"glGetString": [
+"""\
+  boost::python::str
+  gl_GetString(boost::python::object const& py_name)
+  {
+    boost::python::extract<GLenum> name_proxy(py_name);
+    GLenum name = name_proxy();
+    boost::python::str result(
+      reinterpret_cast<const char*>(glGetString(name)));
+    return result;
+  }
+""",
+None
+],
+
+"gluGetString": [
+"""\
+  boost::python::str
+  glu_GetString(boost::python::object const& py_name)
+  {
+    boost::python::extract<GLenum> name_proxy(py_name);
+    GLenum name = name_proxy();
+    boost::python::str result(
+      reinterpret_cast<const char*>(gluGetString(name)));
+    return result;
+  }
+""",
+None
+],
+
+"gluErrorString": [
+"""\
+  boost::python::str
+  glu_ErrorString(boost::python::object const& py_error)
+  {
+    boost::python::extract<GLenum> error_proxy(py_error);
+    GLenum error = error_proxy();
+    return boost::python::str(
+      reinterpret_cast<const char*>(gluErrorString(error)));
+  }
+""",
+None
+],
+
+}
+
+def bytes_converters(signature, expected_size="0", post_extract=""):
+  assert signature.return_type == "void"
+  function_name = signature.function_name
+  arg_type = signature.args[-1].type
+  arg_name = signature.args[-1].name
+  arg_type_name = arg_type+" "+arg_name
+  is_const = arg_type.startswith("const ")
+  call = "\n".join(signature.format_call(
+    return_directly=is_const,
+    prefix="    "))
+  if (not is_const):
+    call += "\n    %s_proxy.write_back();" % arg_name
+    is_const = "false"
+  else:
+    is_const = "true"
+  extracts = [""]
+  for arg in signature.args[:-1]:
+    assert not arg.type.startswith("const ")
+    extracts.append("boost::python::extract<%s> %s_proxy(py_%s);" % (
+      arg.type, arg.name, arg.name))
+    extracts.append("%s %s = %s_proxy();" % (
+      arg.type, arg.name, arg.name))
+  extracts = "\n  ".join(extracts)
+  return """\
+%(extracts)s%(post_extract)s
+  if      (type == GL_BYTE) {
+    boost_python::converter_str<GLubyte> %(arg_name)s_proxy(
+      "%(arg_name)s", py_%(arg_name)s, %(expected_size)s, %(is_const)s);
+    %(arg_type_name)s = reinterpret_cast<%(arg_type)s>(
+      %(arg_name)s_proxy.get());
+%(call)s
+  }
+  else if (type == GL_UNSIGNED_BYTE) {
+    boost_python::converter_str<GLbyte> %(arg_name)s_proxy(
+      "%(arg_name)s", py_%(arg_name)s, %(expected_size)s, %(is_const)s);
+    %(arg_type_name)s = reinterpret_cast<%(arg_type)s>(
+      %(arg_name)s_proxy.get());
+%(call)s
+  }
+  else {
+    throw std::runtime_error(
+      "Conversion not implemented for given GLenum type:"
+      " %(function_name)s(): %(arg_type_name)s");
+  }""" % vars()
+
+def glReadPixels_wrapper_body(signature):
+  return bytes_converters(
+    signature=signature,
+    expected_size="expected_size",
+    post_extract="""
+  boost::python::ssize_t expected_size = glReadPixels_pixels_expected_size(
+    width, height, format, type);""")
+
+special_wrapper_bodies = {
+
+"glCallLists": bytes_converters,
+"glDrawPixels": bytes_converters,
+"glGetTexImage": bytes_converters,
+"glReadPixels": glReadPixels_wrapper_body,
+"glTexImage1D": bytes_converters,
+"glTexImage2D": bytes_converters,
+"glTexSubImage1D": bytes_converters,
+"glTexSubImage2D": bytes_converters,
+
+}
+
+class argument:
+
+  def __init__(self, function_name, string):
+    fields = string.split()
+    self.type = " ".join(fields[:-1])
+    self.name = fields[-1]
+    assert self.type in arg_types
+    arg_types[self.type] += 1
+    if (self.type[-1] != "*"):
+      self.pointee_size = None
+    else:
+      self.pointee_size = pointee_sizes[function_name + " " + self.name]
+
+class signature:
+
+  def __init__(self, string):
+    assert string.endswith(" )")
+    fields = string[:-2].split("(")
+    assert len(fields) == 2
+    arg_strings = []
+    for arg in fields[1].split(","):
+      arg_strings.append(
+        " ".join(arg.replace("*", " * ").split()).replace(" *", "*"))
+    fields = fields[0].split()
+    self.return_type = " ".join(" ".join(fields[:-1])
+      .replace("*", " * ").split()).replace(" *", "*")
+    self.function_name = fields[-1]
+    if (self.return_type != "void"):
+      assert self.return_type in return_types
+      return_types[self.return_type] += 1
+    self.args = []
+    if (arg_strings != ["void"]):
+      for arg in arg_strings:
+        self.args.append(argument(self.function_name, arg))
+    self.version_guard = version_guards.get(self.function_name, None)
+    self.have_opaque_pointer = self.return_type in opaque_pointers
+    if (not self.have_opaque_pointer):
+      for arg in self.args:
+        if (arg.type in opaque_pointers):
+          self.have_opaque_pointer = True
+
+  def show(self, f=None):
+    if (f is None): f = sys.stdout
+    print("function name:", self.function_name, file=f)
+    print("  return type:", self.return_type, file=f)
+    for arg in self.args:
+      print("  arg type:", arg.type, "name:", arg.name, file=f)
+
+  def wrapper_function_name(self):
+    i = 2
+    if (self.function_name.startswith("glu")): i = 3
+    return self.function_name[:i]+"_"+self.function_name[i:]
+
+  def write_no_opaque_pointers_guard_if(self, f):
+    if (self.have_opaque_pointer):
+      print("#if !defined(GLTBX_NO_OPAQUE_POINTERS)", file=f)
+
+  def write_no_opaque_pointers_guard_endif(self, f):
+    if (self.have_opaque_pointer):
+      print("#endif", file=f)
+
+  def write_version_guard_if(self, f):
+    if (self.version_guard is not None):
+      print("#if defined(%s)" % self.version_guard, file=f)
+
+  def write_version_guard_endif(self, f):
+    if (self.version_guard is not None):
+      print("#endif", file=f)
+
+  def format_call(self, return_directly, prefix):
+    s = ""
+    if (self.return_type != "void"):
+      if (return_directly):
+        s += "return "
+      else:
+        s += self.return_type + " result = "
+    s += self.function_name+"("
+    s += ", ".join([arg.name for arg in self.args])
+    s += ");"
+    result = []
+    indent = ""
+    for line in line_breaker(s, 70):
+      result.append(prefix+indent+line)
+      indent = "  "
+    return result
+
+  def write_wrapper(self, f):
+    special = special_wrappers.get(self.function_name, None)
+    if (special is not None and special[0] is not None):
+      print(special[0], file=f)
+      return
+    lines = [
+      self.return_type,
+      self.wrapper_function_name()+"("
+    ]
+    for arg in self.args:
+      lines.append("  %s %s," % (
+        "boost::python::object const&", "py_"+arg.name))
+    if (lines[-1][-1] == ","):
+      lines[-1] = lines[-1][:-1]
+    lines[-1] += ")"
+    lines.append("{")
+    special_body = special_wrapper_bodies.get(self.function_name, None)
+    if (special_body is not None):
+      lines.extend(special_body(self).splitlines())
+    else:
+      not_implemented = [
+        "const void*",
+        "GLvoid*",
+        "GLvoid**",
+        "const GLvoid*",
+        "glu_function_pointer"]
+      to_write_back = []
+      ss = ""
+      for arg in self.args:
+        if ((arg.pointee_size is not None
+             and arg.type not in opaque_pointers)
+            or arg.type == "glu_function_pointer"):
+          if (arg.type in not_implemented):
+            lines.append(ss+"  throw std::runtime_error(")
+            lines.append(ss+'    "Conversion not implemented:"')
+            lines.append(ss+'    " %s(): %s %s");' % (
+                self.function_name, arg.type, arg.name))
+            ss = "//"
+            lines.append(ss+"  %s %s = 0;" % (arg.type, arg.name))
+          else:
+            expected_size = arg.pointee_size
+            if (isinstance(expected_size, str)):
+              if (expected_size[0] == "?"):
+                expected_size = "0"
+            else:
+              assert isinstance(expected_size, int)
+              expected_size = str(expected_size)
+            if (arg.type.startswith("const ")):
+              is_const = "true"
+              converter_t = arg.type[6:-1]
+            else:
+              is_const = "false"
+              converter_t = arg.type[:-1]
+            if (   arg.type.endswith("GLbyte*")
+                or arg.type.endswith("GLubyte*")):
+              converter = "boost_python::converter_str"
+            else:
+              converter = "boost_python::converter"
+            lines.append(ss+'  %s<%s> %s_proxy(' % (
+              converter,
+              converter_t,
+              arg.name))
+            lines.append(ss+'    "%s", py_%s, %s, %s);' % (
+              arg.name,
+              arg.name,
+              expected_size,
+              is_const))
+            lines.append(ss+"  %s %s = %s_proxy.get();" % (
+              arg.type, arg.name, arg.name))
+            if (is_const == "false"): to_write_back.append(arg)
+        else:
+          assert not arg.type.startswith("const ")
+          lines.append(ss+'  boost::python::extract<%s> %s_proxy(py_%s);' % (
+            arg.type, arg.name, arg.name))
+          lines.append(ss+"  %s %s = %s_proxy();" % (
+            arg.type, arg.name, arg.name))
+      return_directly = len(to_write_back) == 0
+      lines.extend([ss+line for line in
+        self.format_call(return_directly=return_directly, prefix="  ")])
+      for arg in to_write_back:
+        lines.append(ss+"  %s_proxy.write_back();" % arg.name)
+      if (self.return_type != "void" and not return_directly):
+        lines.append(ss+"  return result;")
+    lines.append("}")
+    self.write_no_opaque_pointers_guard_if(f=f)
+    self.write_version_guard_if(f=f)
+    for line in lines:
+      print(" ", line, file=f)
+    self.write_version_guard_endif(f=f)
+    self.write_no_opaque_pointers_guard_endif(f=f)
+    print(file=f)
+
+  def write_def(self, f):
+    special = special_wrappers.get(self.function_name, None)
+    if (special is not None and special[1] is not None):
+      print(special[1], file=f)
+      return
+    return_opaque = self.return_type in opaque_pointers
+    def_args = (self.function_name, self.wrapper_function_name())
+    self.write_no_opaque_pointers_guard_if(f=f)
+    self.write_version_guard_if(f=f)
+    if (len(self.args) == 0):
+      if (not return_opaque):
+        print('    def("%s", %s);' % def_args, file=f)
+      else:
+        print('    def("%s", %s,' % def_args, file=f)
+        print("      return_value_policy<return_opaque_pointer>());", file=f)
+    else:
+      assert not return_opaque
+      print('    def("%s", %s, (' % def_args, file=f)
+      s = ""
+      for arg in self.args:
+        s += ', arg("%s")' % arg.name
+      s = s[2:] + "));"
+      for line in line_breaker(s, 73):
+        print("      "+line, file=f)
+    self.write_version_guard_endif(f=f)
+    self.write_no_opaque_pointers_guard_endif(f=f)
+
+def get_signatures():
+  result = []
+  specs_file = libtbx.env.under_dist("gltbx", "opengl_specs.txt")
+  for line in open(specs_file).read().splitlines():
+    if (not (line.startswith("GL_") or line.startswith("GLU_"))):
+      result.append(signature(line))
+  return result
+
+def write_function_wrappers(f, namespace, signatures, i_fragment):
+  write_this_is_auto_generated(f, this)
+  print("""\
+#include <gltbx/special_wrapper_support.h>
+#include <gltbx/pointer_args_bpl.h>
+#include <gltbx/error.h>
+""", file=f)
+  if (namespace == "glu"):
+    print("#if defined(__GNUC__) && __GNUC__ == 2 \\", file=f)
+    print("     && __GNUC_MINOR__ == 96 && __GNUC_PATCHLEVEL__ == 0", file=f)
+    print("#define GLTBX_NO_OPAQUE_POINTERS", file=f)
+    print("#else", file=f)
+    print("#include <boost/python/return_value_policy.hpp>", file=f)
+    print("#include <boost/python/return_opaque_pointer.hpp>", file=f)
+    for opaque_pointer in opaque_pointers:
+      print("BOOST_PYTHON_OPAQUE_SPECIALIZED_TYPE_ID(%s)" % (
+        opaque_pointer[:-1]), file=f)
+    print("#endif", file=f)
+    print(file=f)
+  print("""\
+namespace gltbx { namespace %s { namespace {
+""" % namespace, file=f)
+  for signature in signatures:
+    signature.write_wrapper(f=f)
+  print("""\
+} // namespace <anonymous>
+
+namespace boost_python {
+
+  void
+  wrap_functions_%02d()
+  {
+    using namespace boost::python;""" % i_fragment, file=f)
+  for signature in signatures:
+    signature.write_def(f=f)
+  print("""\
+  }
+
+}}} // namespace gltbx::%s::boost_python""" % namespace, file=f)
+
+def run(target_dir):
+  if (not os.path.isdir(target_dir)):
+    os.makedirs(target_dir)
+  gl_signatures = []
+  glu_signatures = []
+  for signature in get_signatures():
+    if (signature.function_name.startswith("glu")):
+      glu_signatures.append(signature)
+    else:
+      gl_signatures.append(signature)
+  for namespace,signatures,n_fragments in [("gl", gl_signatures, 16),
+                                           ("glu", glu_signatures, 4)]:
+    block_size = len(signatures) // n_fragments
+    if (block_size * n_fragments < len(signatures)):
+      block_size += 1
+    for i_fragment in range(n_fragments):
+      file_name = libtbx.path.norm_join(
+        target_dir, namespace+"_functions_%02d_bpl.cpp" % i_fragment)
+      with open(file_name, "w") as f:
+        write_function_wrappers(
+          f=f,
+          namespace=namespace,
+          signatures=signatures[i_fragment*block_size:(i_fragment+1)*block_size],
+          i_fragment=i_fragment)
+
+if __name__ == "__main__":
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/gl.py
+from __future__ import absolute_import, division, print_function
+try:
+  import OpenGL  # implicit import
+  from OpenGL.GL import *
+except ImportError:
+  import boost_adaptbx.boost.python as bp
+  ext = bp.import_ext("gltbx_gl_ext")
+  from gltbx_gl_ext import *
+
+def __function_taking_transposed_matrix(f):
+  def wrapper(m):
+    mt = m[0:13:4] + m[1:14:4] + m[2:15:4] + m[3:16:4]
+    f(mt)
+  return wrapper
+
+glLoadTransposeMatrixf = __function_taking_transposed_matrix(glLoadMatrixf)
+glLoadTransposeMatrixd = __function_taking_transposed_matrix(glLoadMatrixd)
+glMultTransposeMatrixf = __function_taking_transposed_matrix(glMultMatrixf)
+glMultTransposeMatrixd = __function_taking_transposed_matrix(glMultMatrixd)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/gl_managed.py
+from __future__ import absolute_import, division, print_function
+
+from gltbx import gl
+
+class display_lists_owner:
+
+  def __init__(self, range_values):
+    self.range_values = range_values
+    self.list = gl.glGenLists(range_values)
+
+  def __del__(self):
+    try: gl.glDeleteLists(self.list, self.range_values)
+    except RuntimeError as e:
+      if (str(e) != 'OpenGL: invalid operation'): raise
+      # else: apparently the GL context was destroyed already
+
+class display_list:
+
+  def __init__(self, index=0, owner=None):
+    if (owner is None):
+      assert index == 0
+      self.owner = display_lists_owner(range_values=1)
+      self.gl_index = self.owner.list
+    else:
+      assert index < self.owner.range_values
+      self.owner = owner
+      self.gl_index = self.owner.list + index
+
+  def compile(self, execute=False):
+    if (execute):
+      mode = gl.GL_COMPILE_AND_EXECUTE
+    else:
+      mode = gl.GL_COMPILE
+    gl.glNewList(self.gl_index, mode)
+
+  def end(self):
+    gl.glEndList()
+
+  def call(self):
+    gl.glCallList(self.gl_index)
+
+class display_lists:
+
+  def __init__(self, range_values):
+    self.owner = display_lists_owner(range_values=range_values)
+
+  def __getitem__(self, index):
+    return display_list(index=index, owner=self.owner)
+
+
+class material_model(object):
+
+  def __init__(self,
+               ambient_front_colour,
+               diffuse_front_colour,
+               specular_front_colour=(1,1,1,1),
+               ambient_back_colour=None,
+               diffuse_back_colour=None,
+               specular_back_colour=None,
+               specular_focus=30):
+    self.ambient_front_colour = ambient_front_colour
+    self.diffuse_front_colour = diffuse_front_colour
+    self.specular_front_colour = specular_front_colour
+    if ambient_back_colour is None:
+      ambient_back_colour = ambient_front_colour
+    self.ambient_back_colour = ambient_back_colour
+    if diffuse_back_colour is None:
+      diffuse_back_colour = diffuse_front_colour
+    self.diffuse_back_colour = diffuse_back_colour
+    if specular_back_colour is None:
+      specular_back_colour = specular_front_colour
+    self.specular_back_colour = specular_back_colour
+    self.specular_focus = specular_focus
+
+  def execute(self, specular=True):
+    from gltbx.gl import glMaterialfv, glMaterialf
+    glMaterialfv(gl.GL_BACK, gl.GL_AMBIENT, self.ambient_back_colour)
+    glMaterialfv(gl.GL_FRONT, gl.GL_AMBIENT, self.ambient_front_colour)
+    glMaterialfv(gl.GL_BACK, gl.GL_DIFFUSE, self.diffuse_back_colour)
+    glMaterialfv(gl.GL_FRONT, gl.GL_DIFFUSE, self.diffuse_front_colour)
+    if specular:
+      glMaterialfv(gl.GL_BACK, gl.GL_SPECULAR, self.specular_back_colour)
+      glMaterialfv(gl.GL_FRONT, gl.GL_SPECULAR, self.specular_front_colour)
+      glMaterialf(gl.GL_FRONT_AND_BACK, gl.GL_SHININESS, self.specular_focus)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/glu.py
+from __future__ import absolute_import, division, print_function
+try:
+  import OpenGL  # implicit import
+  from OpenGL.GLU import *
+except ImportError:
+  import boost_adaptbx.boost.python as bp
+  ext = bp.import_ext("gltbx_glu_ext")
+  from gltbx_glu_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/images.py
+from __future__ import absolute_import, division, print_function
+import os.path
+from libtbx.utils import to_bytes
+from six.moves import range
+
+def encode(data):
+  edata = ""
+  for i in range(len(data)):
+    edata += "%.2x" % ord(data[i])
+  return edata
+
+def create_encoded(image_file_name):
+  import wx
+  img = wx.Image(name=image_file_name)
+  w,h = img.GetSize()
+  name, ext = os.path.splitext(os.path.basename(image_file_name))
+  print (
+    '%s_img = img_data(width=%d, height=%d, mask=-1, encoded_data = """\\'
+     % (name, w, h))
+  encoded = encode(img.GetData())
+  while (len(encoded) > 0):
+    print(encoded[:78]+"\\")
+    encoded = encoded[78:]
+  print('""")')
+  print()
+
+class img_data:
+
+  def __init__(self, width, height, mask, encoded_data):
+    self.width = width
+    self.height = height
+    self.data = self.decode(encoded_data)
+    self.mask = mask * 3
+
+  def get_width(self): return self.width
+  def get_height(self): return self.height
+  def get_size(self): return (self.width, self.height)
+  def get_data(self): return self.data
+  def get_mask(self): return self.mask
+
+  def decode(self, edata):
+    hex_chars = {"0":  0, "1":  1, "2":  2, "3":  3,
+                 "4":  4, "5":  5, "6":  6, "7":  7,
+                 "8":  8, "9":  9, "a": 10, "b": 11,
+                 "c": 12, "d": 13, "e": 14, "f": 15}
+    data = ""
+    for i in range(0, len(edata), 2):
+      data += chr(hex_chars[edata[i]] * 16 + hex_chars[edata[i+1]])
+    return data
+
+  def as_wx_Bitmap(self):
+    import wx
+    w,h = self.get_size()
+    data = to_bytes(self.get_data())
+    mask = self.get_mask()
+    img = wx.Image(w, h)
+    img.SetData(data)
+    if (mask >= 0):
+      img.SetMaskColour(ord(data[mask]), ord(data[mask+1]), ord(data[mask+2]))
+      img.SetMask()
+    return img.ConvertToBitmap()
+
+if (__name__ == "__main__"):
+  import sys
+  print('from gltbx.images import img_data\n')
+  for arg in sys.argv[1:]:
+    create_encoded(arg)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/libtbx_refresh.py
+from __future__ import absolute_import, division, print_function
+from gltbx import generate_defines_bpl
+from gltbx import generate_functions_bpl
+from gltbx import generate_fonts_ucs_cpp
+
+if self.env.is_ready_for_build():
+  target_dir = self.env.under_build("gltbx")
+  print('  Generating C++ files in:\n    "%s"' % target_dir)
+  generate_defines_bpl.run(target_dir=target_dir)
+  generate_functions_bpl.run(target_dir=target_dir)
+  generate_fonts_ucs_cpp.run(target_dir=target_dir)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/quadrics.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("gltbx_quadrics_ext")
+from gltbx_quadrics_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+from libtbx import test_utils
+import libtbx.load_env
+
+
+tst_list = (
+    "$D/tst_ellipsoids.py",
+  )
+
+def run():
+  build_dir = libtbx.env.under_build("gltbx")
+  dist_dir = libtbx.env.dist_path("gltbx")
+
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/tst.py
+from __future__ import absolute_import, division, print_function
+from gltbx import gl
+from gltbx import glu
+from libtbx.test_utils import Exception_expected, show_diff
+import sys
+from six.moves import range
+
+def exercise_converter():
+  textures = []
+  gl.glGenTextures(3, textures)
+  assert textures == [0,0,0]
+  for i in range(10000):
+    textures = []
+    gl.glGenTextures(3, textures)
+    assert textures == [0,0,0]
+  for i in range(10000):
+    textures = [9,3,5]
+    gl.glGenTextures(3, textures)
+    assert textures == [9,3,5]
+  try:
+    textures = [9,3,5]
+    gl.glGenTextures(4, textures)
+  except RuntimeError as e:
+    assert not show_diff(str(e), """\
+Argument "textures" has the wrong number of elements:
+  expected size: 4
+     given size: 3""")
+  else: raise Exception_expected
+  try:
+    textures = [9,"foo",5]
+    gl.glGenTextures(3, textures)
+  except RuntimeError as e:
+    assert not show_diff(str(e), """\
+Argument "textures" has one or more elements of the wrong type.""")
+  else: raise Exception_expected
+
+def exercise_all():
+  print("trying glGetError()...", end=' ')
+  sys.stdout.flush()
+  error = gl.glGetError()
+  print("OK:", error)
+  sys.stdout.flush()
+  print("trying gluErrorString()...", end=' ')
+  sys.stdout.flush()
+  msg = glu.gluErrorString(error=error)
+  print("OK:", msg)
+  assert msg in ["no error", "invalid operation"]
+  sys.stdout.flush()
+  forever = "--forever" in sys.argv[1:]
+  while True:
+    exercise_converter()
+    if (not forever): break
+
+if (__name__ == "__main__"):
+  exercise_all()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/tst_ellipsoids.py
+from __future__ import absolute_import, division, print_function
+#coding: utf-8
+import random
+from scitbx.array_family import flex
+import scitbx.math
+from scitbx import matrix
+from libtbx.test_utils import approx_equal
+from six.moves import range
+
+def exercise_ellipsoid(n_trials=100, n_sub_trials=10):
+  from gltbx import quadrics
+  rnd = random.Random(0)
+  for i in range(n_trials):
+    centre = matrix.col([ rnd.random() for k in range(3) ])
+    half_lengths = matrix.col([ 0.1 + rnd.random() for k in range(3) ])
+    r = scitbx.math.euler_angles_as_matrix(
+      [ rnd.uniform(0, 360) for i in range(3) ], deg=True)
+    metrics = r * matrix.diag([ x**2 for x in half_lengths ]) * r.transpose()
+    t = quadrics.ellipsoid_to_sphere_transform(centre, metrics.as_sym_mat3())
+    assert approx_equal(t.translation_part(), centre)
+    m = matrix.sqr(t.linear_part())
+    assert m.determinant() > 0
+    for j in range(n_sub_trials):
+      y = matrix.col([ rnd.random() for k in range(3) ])
+      c_y = y.transpose() * y
+      x = m*y
+      c_x = x.transpose() * metrics.inverse() * x
+      assert approx_equal(c_x, c_y)
+  r = scitbx.math.euler_angles_as_matrix((30, 115, 260), deg=True)
+  centre = matrix.col((-1, 2, 3))
+  metrics = r * matrix.diag((-1, 0.1, 1)) * r.transpose()
+  t = quadrics.ellipsoid_to_sphere_transform(centre, metrics.as_sym_mat3())
+  assert t.non_positive_definite()
+
+def time_ellipsoid(n=1000000):
+  from gltbx.quadrics import time_ellipsoid_to_sphere_transform
+  import timeit
+  u = flex.sym_mat3_double(n, (0.0008, 0.0004, 0.0002,
+                               0.0001, 0.00015, 0.00005))
+  timer = timeit.Timer(lambda: time_ellipsoid_to_sphere_transform(u))
+  # \xb5s is unicode for mu
+  print (u"%i ellipsoid --> sphere transforms: %.3g \xb5s per transform"
+         % (n, timer.timeit(1)/n*1e6))
+
+def run():
+  import sys
+  from libtbx.option_parser import option_parser
+  try:
+    import gltbx.gl
+  except ImportError:
+    print("Skipping gltbx/tst_ellipsoids.py: gltbx.gl module not available.")
+    sys.exit(1)
+
+  exercise_ellipsoid()
+
+  command_line = (option_parser(
+    usage="",
+    description="")
+    .option(None, "--time", action="store_true")
+    ).process(args=sys.argv[1:])
+  if command_line.options.time:
+    if command_line.args:
+      time_ellipsoid(int(command_line.args[0]))
+    else:
+      time_ellipsoid()
+  print("OK")
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/tst_fonts.py
+from __future__ import absolute_import, division, print_function
+from gltbx import fonts
+
+def exercise():
+  for short_name,full_name,width,height,xorig,yorig in [
+      ("8x13", "-Misc-Fixed-Medium-R-Normal--13-120-75-75-C-80-ISO10646-1",
+        8,13,0,-2),
+      ("9x15", "-Misc-Fixed-Medium-R-Normal--15-140-75-75-C-90-ISO10646-1",
+        9,15,0,-3),
+      ("10x20", "-Misc-Fixed-Medium-R-Normal--20-200-75-75-C-100-ISO10646-1",
+        10,20,0,-4)]:
+    bitmap = fonts.ucs_bitmap(short_name=short_name)
+    assert bitmap.short_name() == short_name
+    assert bitmap.full_name() == full_name
+    assert bitmap.width() == width
+    assert bitmap.height() == height
+    assert bitmap.xorig() == xorig
+    assert bitmap.yorig() == yorig
+  print("OK")
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/tst_viewer_utils.py
+from __future__ import absolute_import, division, print_function
+
+from scitbx.array_family import flex, shared
+import gltbx.viewer_utils
+from six.moves import range
+
+# this is the pdb file used to create the bonds table for testing
+ethanol_pdb = """
+COMPND      METHANOL
+AUTHOR      DAVE WOODCOCK  96 01 03
+CRYST1  100.000  100.000  100.000  90.00  90.00  90.00  P 1
+SCALE1      0.010000  0.000000  0.000000       0.000000
+SCALE2      0.000000  0.010000  0.000000       0.000000
+SCALE3      0.000000  0.000000  0.010000       0.000000
+ATOM      1  C1  EOH A   1      -0.426  -0.115  -0.147  1.00  0.00
+ATOM      2  O   EOH A   1      -0.599   1.244  -0.481  1.00  0.00
+ATOM      3  H11 EOH A   1      -0.750  -0.738  -0.981  1.00  0.00
+ATOM      4  H12 EOH A   1      -1.022  -0.351   0.735  1.00  0.00
+ATOM      5  HO  EOH A   1      -1.642   1.434  -0.689  1.00  0.00
+ATOM      6  C2  EOH A   1       1.047  -0.383   0.147  1.00  0.00
+ATOM      7  H21 EOH A   1       1.370   0.240   0.981  1.00  0.00
+ATOM      8  H22 EOH A   1       1.642  -0.147  -0.735  1.00  0.00
+ATOM      9  H23 EOH A   1       1.180  -1.434   0.405  1.00  0.00
+HETATM   10  O   HOH W   2      29.478  23.354  61.364  1.00  8.67
+END
+"""
+
+#---
+def exercise():
+  bonds = shared.stl_set_unsigned([
+    [1, 2, 3, 5],
+    [0, 4],
+    [0],
+    [0],
+    [1],
+    [0, 6, 7, 8],
+    [5],
+    [5],
+    [5],
+    []
+  ])
+
+  atoms_drawable = flex.bool([True for i in range(0, 10) ])
+  atoms_drawable_non_h = flex.bool(
+    [True, True, False, False, False, True, False, False, False, True]
+  )
+
+  # all atoms drawable
+  visibility = gltbx.viewer_utils.atom_visibility(
+    bonds            = bonds,
+    atoms_drawable   = atoms_drawable,
+    flag_show_points = True
+  )
+  assert (list(visibility.bonds_visible) ==
+    [True, True, True, True, True, True, True, True, True, False]
+  )
+  assert (list(visibility.points_visible) ==
+    [False, False, False, False, False, False, False, False, False, True]
+  )
+
+  # hydrogens off, points on
+  visibility = gltbx.viewer_utils.atom_visibility(
+    bonds            = bonds,
+    atoms_drawable   = atoms_drawable_non_h,
+    flag_show_points = True
+  )
+  assert (list(visibility.bonds_visible) ==
+    [True, True, False, False, False, True, False, False, False, False]
+  )
+  assert (list(visibility.points_visible) ==
+    [False, False, False, False, False, False, False, False, False, True]
+  )
+
+  # equivalent to "not element H"
+  atoms_selected_non_h = flex.bool(
+    [True, True, False, False, False, True, False, False, False, True]
+  )
+
+  visibility.get_selection_visibility(
+    bonds          = bonds,
+    atoms_selected = atoms_selected_non_h
+  )
+  assert (list(visibility.selected_points_visible) ==
+    [False, False, False, False, False, False, False, False, False, True]
+  )
+
+  # no hydrogens, no points
+  visibility = gltbx.viewer_utils.atom_visibility(
+    bonds            = bonds,
+    atoms_drawable   = atoms_drawable_non_h,
+    flag_show_points = False
+  )
+  assert (list(visibility.bonds_visible) ==
+    [True, True, False, False, False, True, False, False, False, False]
+  )
+  assert (not True in list(visibility.points_visible))
+
+  visibility.get_selection_visibility(
+    bonds          = bonds,
+    atoms_selected = atoms_selected_non_h
+  )
+  assert (not True in list(visibility.selected_points_visible))
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/util.py
+from __future__ import absolute_import, division, print_function
+import scitbx.array_family.flex # import dependency
+import scitbx.matrix
+from libtbx import easy_run
+import boost_adaptbx.boost.python as bp
+from six.moves import zip
+ext = bp.import_ext("gltbx_util_ext")
+from gltbx_util_ext import *
+import re
+import sys
+
+def handle_error():
+  '''
+  Windows will sometimes throw extra errors that can be ignored
+  This function will ignore errors with "invalid" in the message (e.g.
+  GL_INVALID_ENUM, GL_INVALID_OPERATION) on Windows.
+  '''
+  try:
+    ext.handle_error()
+  except RuntimeError as e:
+    if (sys.platform == 'win32') and ('invalid' in repr(e)):
+      pass
+    else:
+      raise
+
+def show_versions():
+  from gltbx import gl
+  from gltbx import glu
+  if (hasattr(gl, "GL_VENDOR")):
+    print("GL_VENDOR:", gl.glGetString(gl.GL_VENDOR))
+  if (hasattr(gl, "GL_RENDERER")):
+    print("GL_RENDERER:", gl.glGetString(gl.GL_RENDERER))
+  if (hasattr(gl, "GL_VERSION")):
+    print("GL_VERSION:", gl.glGetString(gl.GL_VERSION))
+  if (hasattr(gl, "GL_EXTENSIONS")):
+    print("GL_EXTENSIONS:", gl.glGetString(gl.GL_EXTENSIONS))
+  if (hasattr(glu, "GLU_VERSION")):
+    print("GLU_VERSION:", glu.gluGetString(glu.GLU_VERSION))
+  if (hasattr(glu, "GLU_EXTENSIONS")):
+    print("GLU_EXTENSIONS:", glu.gluGetString(glu.GLU_EXTENSIONS))
+
+# this is essential for Linux - if the X server does not support GLX,
+# attempting to use OpenGL will crash the entire program.  this usually
+# only happens with remote display on Windows. . .
+def check_glx_availability():
+  glxerr = easy_run.fully_buffered("glxinfo -b").stderr_lines
+  for line in glxerr :
+    if re.search('extension "GLX" missing', line):
+      return False
+  return True
+
+class version(object):
+
+  _shared_state = {}
+
+  def __init__(self):
+    from gltbx import gl
+    from libtbx.utils import to_str
+    import re
+    self.__dict__ = self._shared_state
+    if not self._shared_state:
+      vers_pat = re.compile(r"^((\d+)\.(\d+))(?:\.(\d+))?(?: (.*))?$")
+      m = vers_pat.search(to_str(gl.glGetString(gl.GL_VERSION)))
+      self.__dict__.update(dict(zip(
+        ["principal", "major_number", "minor_number", "release_number",
+         "vendor_info"], m.groups())))
+      self.principal = float(self.principal)
+
+class extensions(set):
+
+  def __init__(self):
+    from gltbx import gl
+    ext = gl.glGetString(gl.GL_EXTENSIONS)
+    super(extensions, self).__init__(ext.split())
+
+class rescale_normals(object):
+
+  _shared_state = {}
+
+  GL_RESCALE_NORMAL = 0x803A
+
+  def __init__(self, fallback_to_normalize=False):
+    self.__dict__ = self._shared_state
+    if not self._shared_state:
+      self.has_rescale_normal = version().principal >= 1.2
+    self.fallback_to_normalize = fallback_to_normalize
+
+  def enable(self, flag=True):
+    from gltbx import gl
+    if self.has_rescale_normal:
+      mode = self.GL_RESCALE_NORMAL
+    else:
+      assert self.fallback_to_normalize,\
+             "Rescale normals only available from OpenGL 1.2 onward"
+      mode = gl.GL_NORMALIZE
+    if flag:
+      gl.glEnable(mode)
+    else:
+      gl.glDisable(mode)
+
+  def is_enabled(self):
+    from gltbx import gl
+    return self.has_rescale_normal and gl.glIsEnabled(self.GL_RESCALE_NORMAL)
+
+def modelview_matrix_as_rt():
+  return scitbx.matrix.rt((
+    extract_rotation_from_gl_modelview_matrix(),
+    extract_translation_from_gl_modelview_matrix()))
+
+def augment_3x3(m):
+  a,b,c,d,e,f,g,h,i = m
+  return (a,b,c,0,
+          d,e,f,0,
+          g,h,i,0,
+          0,0,0,1)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/viewer_utils.py
+from __future__ import absolute_import, division, print_function
+import scitbx.array_family.flex # import dependency
+import time
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("gltbx_viewer_utils_ext")
+from gltbx_viewer_utils_ext import *
+
+def read_pixels_to_str(x, y, width, height):
+  ext = bp.import_ext("gltbx_gl_ext")
+  from gltbx_gl_ext import glPixelStorei, glReadPixels, \
+    GL_PACK_ALIGNMENT, GL_RGB, GL_UNSIGNED_BYTE
+  # from gltbx.gl import glPixelStorei, glReadPixels, \
+  #   GL_PACK_ALIGNMENT, GL_RGB, GL_UNSIGNED_BYTE
+  glPixelStorei(GL_PACK_ALIGNMENT, 1)
+  pixels = []
+  glReadPixels(
+    x=x, y=y, width=width, height=height,
+    format=GL_RGB, type=GL_UNSIGNED_BYTE,
+    pixels=pixels)
+  return pixels[0]
+
+def read_pixels_to_pil_image(x, y, width, height):
+  try:
+    import PIL.Image
+  except ImportError:
+    return None
+  mode = "RGB"
+  size = (width, height)
+  data = read_pixels_to_str(x=x, y=y, width=width, height=height)
+  decoder_name = "raw"
+  raw_mode = "RGB"
+  stride = 0
+  orientation = -1
+  return PIL.Image.frombytes(
+    mode, size, data, decoder_name, raw_mode, stride, orientation)
+
+class fps_monitor(object):
+  def __init__(self):
+    self._t_start = time.time()
+    self._n = 0
+
+  def update(self):
+    self._n += 1
+    if (self._n % 10 == 0):
+      t_curr = time.time()
+      t_elapsed = t_curr - self._t_start
+      self._t_start = t_curr
+      print("%.2f fps" % (10 / t_elapsed))
+      self._n = 0
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_cube.py
+from __future__ import absolute_import, division, print_function
+import wx
+import wx.glcanvas
+from gltbx.gl import *
+from gltbx.glu import *
+
+class MyCanvasBase(wx.glcanvas.GLCanvas):
+    def __init__(self, parent):
+        wx.glcanvas.GLCanvas.__init__(self, parent, -1)
+        self.init = False
+        # initial mouse position
+        self.lastx = self.x = 30
+        self.lasty = self.y = 30
+        self.Bind(wx.EVT_ERASE_BACKGROUND, self.OnEraseBackground)
+        self.Bind(wx.EVT_SIZE, self.OnSize)
+        self.Bind(wx.EVT_PAINT, self.OnPaint)
+        self.Bind(wx.EVT_LEFT_DOWN, self.OnMouseDown)
+        self.Bind(wx.EVT_LEFT_UP, self.OnMouseUp)
+        self.Bind(wx.EVT_MOTION, self.OnMouseMotion)
+
+
+    def OnEraseBackground(self, event):
+        pass # Do nothing, to avoid flashing on MSW.
+
+
+    def OnSize(self, event):
+        size = self.GetClientSize()
+        if self.GetContext():
+          self.SetCurrent()
+          glViewport(0, 0, size.width, size.height)
+        event.Skip()
+
+    def OnPaint(self, event):
+        dc = wx.PaintDC(self)
+        self.SetCurrent()
+        if not self.init:
+          self.InitGL()
+          self.init = True
+        self.OnDraw()
+
+    def OnMouseDown(self, evt):
+        self.CaptureMouse()
+
+    def OnMouseUp(self, evt):
+        self.ReleaseMouse()
+
+    def OnMouseMotion(self, evt):
+        if evt.Dragging() and evt.LeftIsDown():
+            self.lastx, self.lasty = self.x, self.y
+            self.x, self.y = evt.GetPosition()
+            self.Refresh(False)
+
+
+class CubeCanvas(MyCanvasBase):
+    def InitGL(self):
+        #print "cube InitCL"
+        # set viewing projection
+        glMatrixMode(GL_PROJECTION)
+        glOrtho(-9.5, 9.5, -9.5, 9.5, 1.0, 3.0)
+
+        # position viewer
+        glMatrixMode(GL_MODELVIEW)
+        glTranslatef(0.0, 0.0, -2.0)
+
+        # position object
+        glRotatef(self.y, 1.0, 0.0, 0.0)
+        glRotatef(self.x, 0.0, 1.0, 0.0)
+
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+        glEnable(GL_LIGHT0)
+
+        glShadeModel(GL_FLAT)
+        glFlush()
+
+    def OnDraw(self):
+        #print "cube OnDraw"
+        # clear color and depth buffers
+        glClear(GL_COLOR_BUFFER_BIT)
+        glClear(GL_DEPTH_BUFFER_BIT)
+
+        # draw six faces of a cube
+        if (1):
+          glBegin(GL_QUADS)
+          glNormal3f( 0.0, 0.0, 1.0)
+          glVertex3f( 0.5, 0.5, 0.5)
+          glVertex3f(-0.5, 0.5, 0.5)
+          glVertex3f(-0.5,-0.5, 0.5)
+          glVertex3f( 0.5,-0.5, 0.5)
+
+          glNormal3f( 0.0, 0.0,-1.0)
+          glVertex3f(-0.5,-0.5,-0.5)
+          glVertex3f(-0.5, 0.5,-0.5)
+          glVertex3f( 0.5, 0.5,-0.5)
+          glVertex3f( 0.5,-0.5,-0.5)
+
+          glNormal3f( 0.0, 1.0, 0.0)
+          glVertex3f( 0.5, 0.5, 0.5)
+          glVertex3f( 0.5, 0.5,-0.5)
+          glVertex3f(-0.5, 0.5,-0.5)
+          glVertex3f(-0.5, 0.5, 0.5)
+
+          glNormal3f( 0.0,-1.0, 0.0)
+          glVertex3f(-0.5,-0.5,-0.5)
+          glVertex3f( 0.5,-0.5,-0.5)
+          glVertex3f( 0.5,-0.5, 0.5)
+          glVertex3f(-0.5,-0.5, 0.5)
+
+          glNormal3f( 1.0, 0.0, 0.0)
+          glVertex3f( 0.5, 0.5, 0.5)
+          glVertex3f( 0.5,-0.5, 0.5)
+          glVertex3f( 0.5,-0.5,-0.5)
+          glVertex3f( 0.5, 0.5,-0.5)
+
+          glNormal3f(-1.0, 0.0, 0.0)
+          glVertex3f(-0.5,-0.5,-0.5)
+          glVertex3f(-0.5,-0.5, 0.5)
+          glVertex3f(-0.5, 0.5, 0.5)
+          glVertex3f(-0.5, 0.5,-0.5)
+          glEnd()
+
+        glRotatef((self.x - self.lastx)/1., 1.0, 0.0, 0.0)
+        glRotatef((self.y - self.lasty)/1., 0.0, 1.0, 0.0)
+        glFlush()
+
+        self.SwapBuffers()
+
+
+class RunDemoApp(wx.App):
+    def __init__(self, name="wx.glCanvas + gltbx"):
+        self.name = name
+        wx.App.__init__(self, redirect=False)
+
+    def OnInit(self):
+        wx.Log_SetActiveTarget(wx.LogStderr())
+        self.SetAssertMode(wx.PYAPP_ASSERT_DIALOG)
+        frame = wx.Frame(
+          None, -1, self.name,
+          pos=(50,50),
+          size=(640,480),
+          style=wx.DEFAULT_FRAME_STYLE)
+        frame.CreateStatusBar()
+        menuBar = wx.MenuBar()
+        menu = wx.Menu()
+        item = menu.Append(-1, "E&xit\tAlt-X", "Exit demo")
+        self.Bind(wx.EVT_MENU, self.OnExitApp, item)
+        menuBar.Append(menu, "&File")
+        frame.SetMenuBar(menuBar)
+        frame.Show(True)
+        frame.SetSize((640, 480))
+        win = CubeCanvas(frame)
+        win.SetFocus()
+        self.SetTopWindow(frame)
+        self.frame = frame
+        return True
+
+    def OnExitApp(self, evt):
+        self.frame.Close(True)
+
+if __name__ == '__main__':
+  RunDemoApp().MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_ellipsoids_test.py
+from __future__ import absolute_import, division, print_function
+import wx
+import gltbx.util
+from gltbx.gl import *
+from gltbx.glu import *
+from gltbx import wx_viewer
+from gltbx import quadrics
+import unicodedata
+from six.moves import zip
+
+class MyGLWindow(wx_viewer.wxGLWindow):
+
+  def __init__(self, *args, **kwds):
+    super(MyGLWindow, self).__init__(*args, **kwds)
+
+    # location of the ellipsoids
+    self.locations = [ (1,0,0), (-1,0,0),
+                       (0,1,0), (0,-1,0),
+                       (0,0,1), (0,0,-1) ]
+    self.set_minimum_covering_sphere(self.locations)
+    self.minimum_covering_sphere = (
+      self.minimum_covering_sphere.expand_relative(0.2))
+
+    # each element is a list of 4 symmetric matrices,
+    # each defining an ellipsoid
+    # one can move from tests to tests by using the left and right arrow keys
+    a, b, c = (0.05, 0.1, 0.2)
+    self.tests = [
+      [ (a, b, c, 0, 0, 0),
+        (a, c, b, 0, 0, 0),
+        (b, a, c, 0, 0, 0),
+        (b, c, a, 0, 0, 0),
+        (c, a, b, 0, 0, 0),
+        (c, b, a, 0, 0, 0) ],
+    ]
+    self.test_index = 0
+
+  def InitGL(self):
+    gltbx.util.handle_error()
+
+    self.initialize_modelview(angle=45) # that does glMatrixMode(GL_MODELVIEW)
+                                        # so we can safely position the light
+                                        # later in this method
+    self.buffer_factor = 2.
+
+    glEnable(GL_NORMALIZE) # mighty important because we use non-uniform
+                           # scaling to render cylinders and ellipsoids,
+                           # which also means thatGL_RESCALE_NORMALS
+                           # would not do here
+
+    # Colours and lighting
+    glClearColor(0., 0., 0., 0.)
+    glShadeModel(GL_SMOOTH)
+    glEnable(GL_DEPTH_TEST)
+    glEnable(GL_LIGHTING)
+    glEnable(GL_LIGHT0)
+    glLightfv(GL_LIGHT0, GL_POSITION, [0, 0, 1, 0])
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE)
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.5, 0.5, 0.5, 1.0])
+    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, (0.2, 0.2, 0.2, 1.))
+    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (1, 1, 1, 1.))
+    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 50.)
+
+    # We build our quadrics
+    self.proto_cylinder = quadrics.proto_cylinder(slices=16)
+    self.proto_ellipsoid = quadrics.proto_ellipsoid(slices=32, stacks=32)
+
+    # We build the texture to paint the principal ellipses on ellipsoids
+    self.principal_ellipses_tex = \
+      quadrics.ellipsoid_principal_sections_texture(darkening=0.75,
+                                                    n_s=64, n_t=64)
+
+    # Enable texturing and specify how to lay the texture on the ellipsoids
+    glEnable(GL_TEXTURE_2D)
+    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+
+    gltbx.util.handle_error()
+
+  def DrawGL(self):
+    glMatrixMode(GL_MODELVIEW) # don't forget!
+
+    radius=0.08
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, (1., 0., 0., 1.))
+    self.proto_cylinder.draw(self.locations[0], self.locations[1],
+                             base_radius=radius)
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, (0., 1., 0., 1.))
+    self.proto_cylinder.draw(self.locations[2], self.locations[3],
+                             base_radius=radius)
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, (0., 0., 1., 1.))
+    self.proto_cylinder.draw(self.locations[4], self.locations[5],
+                             base_radius=radius)
+
+    # Let's draw the following with our texture
+    self.principal_ellipses_tex.bind()
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, (0.2, 0.4, 0.6, 1.))
+    for x, m in zip(self.locations, self.tests[self.test_index]):
+      self.proto_ellipsoid.draw(x, m)
+    # End of drawing with our texture
+    self.principal_ellipses_tex.unbind()
+
+  def OnChar(self, event):
+    key = event.GetKeyCode()
+    if key == wx.WXK_LEFT:
+      self.test_index += 1
+    elif key == wx.WXK_RIGHT:
+      self.test_index -= 1
+    self.test_index %= len(self.tests)
+    super(MyGLWindow, self).OnChar(event)
+
+
+class MyApp(wx_viewer.App):
+
+  def init_view_objects(self):
+    box = wx.BoxSizer(wx.VERTICAL)
+    instructions = wx.StaticText(
+      self.frame,
+      label="Use %s and %s to move up and down the test cases" % (
+        unicodedata.lookup('LEFTWARDS ARROW'),
+        unicodedata.lookup('RIGHTWARDS ARROW')),
+      style=wx.ALIGN_CENTER,
+    )
+    box.Add(instructions, 0, wx.EXPAND)
+    self.view_objects = MyGLWindow(self.frame, size=(1280, 800))
+    self.view_objects.SetFocus()
+    box.Add(self.view_objects, wx.EXPAND, wx.EXPAND)
+    self.frame.SetSizer(box)
+    box.SetSizeHints(self.frame)
+
+if __name__ == '__main__':
+  a = MyApp(title="Ellipsoids")
+  a.MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_motion_on_tab.py
+"""\
+Example:
+  - use results from a function with callback (motion() in this example)
+  - return from callback only after an event in the GUI (Tab-key)
+"""
+from __future__ import absolute_import, division, print_function
+
+from gltbx import wx_viewer
+from libtbx.thread_utils import thread_with_callback_and_wait
+from scitbx.rigid_body.proto.free_motion_reference_impl import \
+  create_triangle_with_center_of_mass_at_origin
+from scitbx.math import minimum_covering_sphere, sphere_3d
+from scitbx.array_family import flex
+from scitbx import matrix
+import wx
+import sys
+from six.moves import range
+
+class viewer(wx_viewer.show_points_and_lines_mixin):
+
+  def __init__(self, *args, **kwds):
+    super(viewer, self).__init__(*args, **kwds)
+
+  def set_points_and_lines(self):
+    self.child_thread = thread_with_callback_and_wait(
+      run = motion,
+      callback = self.motion_callback,
+      first_callback = self.first_motion_callback)
+    self.child_thread.start_and_wait_for_first_callback()
+
+  def first_motion_callback(self, points):
+    self.points = flex.vec3_double(points)
+    self.labels = ["A", "B", "C"]
+    def add_line(i, j, color):
+      line = (i,j)
+      self.line_i_seqs.append(line)
+      self.line_colors[line] = color
+    add_line(0, 1, (1,0,0))
+    add_line(1, 2, (0,1,0))
+    add_line(2, 0, (0,0,1))
+    mcs = minimum_covering_sphere(self.points, epsilon=1.e-2)
+    self.minimum_covering_sphere = sphere_3d(
+      center=matrix.col(mcs.center())+matrix.col((0.5,0.5,0.5)),
+      radius=mcs.radius()*2.0)
+    self.flag_show_minimum_covering_sphere = False
+    self.flag_show_rotation_center = False
+
+  def motion_callback(self, points):
+    wx.PostEvent(self, wx_viewer.ViewerUpdateEvent(points))
+
+  def OnUpdate(self, event):
+    for i in range(len(event.data)):
+      self.points[i] = event.data[i]
+    self.labels_display_list = None
+    self.lines_display_list = None
+    self.points_display_list = None
+    self.OnRedraw()
+
+  def tab_callback(self, shift_down=False, control_down=False):
+    self.child_thread.resume()
+
+  def CleanupBeforeFrameClose(self):
+    self.child_thread.resume(last_iteration=True)
+
+class App(wx_viewer.App):
+
+  def __init__(self, args):
+    assert len(args) == 0
+    super(App, self).__init__(title="Motion Viewer")
+
+  def init_view_objects(self):
+    box = wx.BoxSizer(wx.VERTICAL)
+    self.view_objects = viewer(self.frame, size=(600,600))
+    self.view_objects.set_points_and_lines()
+    box.Add(self.view_objects, wx.EXPAND, wx.EXPAND)
+    self.frame.SetSizer(box)
+    box.SetSizeHints(self.frame)
+
+def run(args):
+  App(args).MainLoop()
+
+def motion(n_steps=20, callback=None):
+  points = create_triangle_with_center_of_mass_at_origin()
+  shift = matrix.col((0.1,0.1,0.1))
+  i_step = 0
+  while (callback is not None or i_step != n_steps):
+    if (callback is None):
+      print([point.elems for point in points])
+    else:
+      status = callback(points)
+      if status == False :
+        break
+    for i in range(len(points)):
+      points[i] += shift
+    i_step += 1
+    if (i_step % 10 == 0):
+      shift = -shift
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_scene.py
+from __future__ import absolute_import, division, print_function
+
+# This file found at:
+#   http://lists.wxwidgets.org/archive/wxPython-users/msg11078.html
+
+# This includes the two classes wxGLWindow and wxAdvancedGLWindow
+# from OpenGL.TK in the PyOpenGL distribution
+# ported to wxPython by greg Landrum
+# modified by Y. Wong
+
+from wxPython.wx import *
+from wxPython.glcanvas import *
+import gltbx.util
+from gltbx.gl import *
+from gltbx.glu import *
+import math
+import sys
+import atexit
+from six.moves import range
+
+
+def v3distsq(a,b):
+  d = ( a[0] - b[0], a[1] - b[1], a[2] - b[2] )
+  return d[0]*d[0] + d[1]*d[1] + d[2]*d[2]
+
+# This code is needed to avoid faults on sys.exit()
+import sys
+oldexitfunc = None
+if hasattr(sys, 'exitfunc'):
+    oldexitfunc = sys.exitfunc
+def cleanup():
+    if oldexitfunc: oldexitfunc()
+atexit.register(cleanup)
+
+class wxGLWindow(wxGLCanvas):
+  """Implements a simple wxPython OpenGL window.
+
+  This class provides a simple window, into which GL commands can be issued. This is done by overriding the built in functions InitGL(), DrawGL(), and FinishGL(). The main difference between it and the plain wxGLCanvas is that it copes with refreshing and resizing the window"""
+  def __init__(self, parent,*args,**kw):
+    self.GL_uninitialised = 1
+    wxGLCanvas.__init__(*(self, parent)+args, **kw)
+    EVT_SIZE(self,self.wxSize)
+    EVT_PAINT(self,self.wxPaint)
+    EVT_ERASE_BACKGROUND(self, self.wxEraseBackground)
+    self.w, self.h = self.GetClientSizeTuple()
+
+  def __del__(self):
+    self.FinishGL()
+
+  def InitGL(self):
+    """OpenGL initialisation routine (to be overridden).
+
+    This routine, containing purely OpenGL commands, should be overridden by the user to set up the GL scene. If it is not overridden, it defaults to setting an ambient light, setting the background colour to gray, and enabling GL_DEPTH_TEST and GL_COLOR_MATERIAL."""
+    #set up lighting
+    glLightfv(GL_LIGHT0, GL_AMBIENT, [1.0, 1.0, 1.0, 1.0])
+    glEnable(GL_LIGHTING)
+    glEnable(GL_LIGHT0)
+    glClearColor(0.7,0.7,0.7,0.0)
+    glShadeModel(GL_SMOOTH)
+    glDepthFunc(GL_LESS)
+    glEnable(GL_DEPTH_TEST)
+    glEnable(GL_COLOR_MATERIAL)
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+
+  def FinishGL(self):
+    """OpenGL closing routine (to be overridden).
+
+    This routine should be overridden if necessary by any OpenGL commands need to be specified when deleting the GLWindow (e.g. deleting Display Lists)."""
+    pass
+
+  def DrawGL(self):
+    """OpenGL drawing routine (to be overridden).
+
+    This routine, containing purely OpenGL commands, should be overridden by the user to draw the GL scene. If it is not overridden, it defaults to drawing a colour cube."""
+    #Draw colour cube
+    glBegin(GL_QUAD_STRIP)
+    glColor3fv([1.0,1.0,1.0]) #corner 1
+    glNormal3f(0.57735027, 0.57735027, 0.57735027)
+    glVertex3f(0.5, 0.5, 0.5)
+    glColor3f(1.0,0.0,1.0) #corner 2
+    glNormal3f(0.57735027, -0.57735027, 0.57735027)
+    glVertex3f(0.5, -0.5, 0.5)
+    glColor3f(1.0,1.0,0.0) #corner 3
+    glNormal3f(0.57735027, 0.57735027, -0.57735027)
+    glVertex3f(0.5, 0.5, -0.5)
+    glColor3f(1.0,0.0,0.0) #corner 4
+    glNormal3f(0.57735027, -0.57735027, -0.57735027)
+    glVertex3f(0.5, -0.5, -0.5)
+    glColor3f(0.0,1.0,0.0) #corner 5
+    glNormal3f(-0.57735027, 0.57735027, -0.57735027)
+    glVertex3f(-0.5, 0.5, -0.5)
+    glColor3f(0.0,0.0,0.0) #corner 6
+    glNormal3f(-0.57735027, -0.57735027, -0.57735027)
+    glVertex3f(-0.5, -0.5, -0.5)
+    glColor3f(0.0,1.0,1.0) #corner 7
+    glNormal3f(-0.57735027, 0.57735027, 0.57735027)
+    glVertex3f(-0.5, 0.5, 0.5)
+    glColor3f(0.0,0.0,1.0) #corner 8
+    glNormal3f(-0.57735027, -0.57735027, 0.57735027)
+    glVertex3f(-0.5, -0.5, 0.5)
+    glColor3f(1.0,1.0,1.0) #corner 1
+    glNormal3f(0.57735027, 0.57735027, 0.57735027)
+    glVertex3f(0.5, 0.5, 0.5)
+    glColor3f(1.0,0.0,1.0) #corner 2
+    glNormal3f(0.57735027, -0.57735027, 0.57735027)
+    glVertex3f(0.5, -0.5, 0.5)
+    glEnd()
+
+    glBegin(GL_QUADS)
+    glColor3f(1.0,1.0,1.0) #corner 1
+    glNormal3f(0.57735027, 0.57735027, 0.57735027)
+    glVertex3f(0.5, 0.5, 0.5)
+    glColor3f(1.0,1.0,0.0) #corner 3
+    glNormal3f(0.57735027, 0.57735027, -0.57735027)
+    glVertex3f(0.5, 0.5, -0.5)
+    glColor3f(0.0,1.0,0.0) #corner 5
+    glNormal3f(-0.57735027, 0.57735027, -0.57735027)
+    glVertex3f(-0.5, 0.5, -0.5)
+    glColor3f(0.0,1.0,1.0) #corner 7
+    glNormal3f(-0.57735027, 0.57735027, 0.57735027)
+    glVertex3f(-0.5, 0.5, 0.5)
+    glColor3f(1.0,0.0,1.0) #corner 2
+    glNormal3f(0.57735027, -0.57735027, 0.57735027)
+    glVertex3f(0.5, -0.5, 0.5)
+    glColor3f(1.0,0.0,0.0) #corner 4
+    glNormal3f(0.57735027, -0.57735027, -0.57735027)
+    glVertex3f(0.5, -0.5, -0.5)
+    glColor3f(0.0,0.0,0.0) #corner 6
+    glNormal3f(-0.57735027, -0.57735027, -0.57735027)
+    glVertex3f(-0.5, -0.5, -0.5)
+    glColor3f(0.0,0.0,1.0) #corner 8
+    glNormal3f(-0.57735027, -0.57735027, 0.57735027)
+    glVertex3f(-0.5, -0.5, 0.5)
+    glEnd()
+
+  def wxSize(self, event = None):
+    """Called when the window is resized"""
+    self.w,self.h = self.GetClientSizeTuple()
+    if self.GetContext():
+      self.SetCurrent()
+      print("HELLO")
+      glViewport(0, 0, self.w, self.h)
+
+  def wxEraseBackground(self, event):
+    """Routine does nothing, but prevents flashing"""
+    pass
+
+  def wxPaint(self, event=None):
+    """Called on a paint event.
+
+    This sets the painting drawing context, then calls the base routine wxRedrawGL()"""
+    dc = wxPaintDC(self)
+    self.wxRedrawGL(event)
+
+  def wxRedraw(self, event=None):
+    """Called on a redraw request
+
+    This sets the drawing context, then calls the base routine wxRedrawGL(). It can be called by the user when a refresh is needed"""
+    dc = wxClientDC(self)
+    self.wxRedrawGL(event)
+
+  def wxRedrawGL(self, event=None):
+    """This is the routine called when drawing actually takes place.
+
+    It needs to be separate so that it can be called by both paint events and by other events. It should not be called directly"""
+
+    self.SetCurrent()
+
+    if self.GL_uninitialised:
+      glViewport(0, 0, self.w, self.h)
+      self.InitGL()
+      self.GL_uninitialised=0
+    glClear(GL_COLOR_BUFFER_BIT)
+    glClear(GL_DEPTH_BUFFER_BIT)
+    glLoadIdentity()
+    glMatrixMode(GL_MODELVIEW)
+
+    glPushMatrix()
+    self.DrawGL()               # Actually draw here
+    glPopMatrix()
+    glFlush()                   # Flush
+    self.SwapBuffers()  # Swap buffers
+
+    if event: event.Skip()  # Pass event up
+
+
+class wxAdvancedGLWindow(wxGLWindow):
+  """Implements a wxPython OpenGL window allowing spinning, zooming, etc.
+
+  This class is derived from wxGLWindow, and can be used in exactly the
+  same way, by overriding the functions InitGL(), FinishGL(), and DrawGL()
+  with functions containing OpenGL commands. The window captures mouse
+  events, and keypresses. You might want to override some of these
+  functions if you need more sophisticated control"""
+  def __init__(self, parent,*args,**kw):
+    if 'autospin_allowed' in kw:
+      # Is the widget allowed to autospin?
+      self.autospin_allowed = kw['autospin_allowed']
+      del kw['autospin_allowed']
+    else:
+      self.autospin_allowed = 0
+    wxGLWindow.__init__(*(self, parent)+args, **kw)
+
+    # The _back color
+    self.r_back = 0.7
+    self.g_back = 0.7
+    self.b_back = 1.
+
+    # Where the eye is
+    self.base_distance = self.distance = 10.0
+
+    # Field of view in y direction
+    self.fovy = 30.0
+
+    # Position of clipping planes.
+    self.near = 0.1
+    self.far = 1000.0
+
+    # Where we are centering.
+    self.xcenter = 0.0
+    self.ycenter = 0.0
+    self.zcenter = 0.0
+
+    self.parent = parent
+    # Current coordinates of the mouse.
+    self.xmouse = 0
+    self.ymouse = 0
+
+    self.xspin = 0
+    self.yspin = 0
+
+    # Is the widget currently autospinning?
+    self.autospin = 0
+
+    self.initLeft = (0,0)
+
+    EVT_SIZE(self,self.wxSize)
+    EVT_PAINT(self,self.wxPaint)
+    EVT_ERASE_BACKGROUND(self, self.wxEraseBackground)
+    EVT_CHAR(self,self.OnChar)
+    EVT_LEFT_DOWN(self,self.OnLeftClick)
+    EVT_LEFT_DCLICK(self,self.OnLeftDClick)
+    EVT_LEFT_UP(self,self.OnLeftUp)
+    EVT_MIDDLE_DOWN(self,self.OnMiddleClick)
+    EVT_RIGHT_DOWN(self,self.OnRightClick)
+    EVT_RIGHT_DCLICK(self,self.OnRightDClick)
+    EVT_MOTION(self,self.wxMouseMotion)
+    EVT_IDLE(self,self.wxIdle)
+
+  def wxIdle(self,event):
+    if self.autospin:
+#      self.do_AutoSpin(event) #doing it this way hogs the cpu
+#      event.RequestMore()     #doing it this way hogs the cpu
+
+      wxWakeUpIdle()
+      self.do_AutoSpin(event)
+      event.Skip(1)
+
+  def OnChar(self,event):
+    key = event.GetKeyCode()
+    if key == ord('a'):
+      self.autospin_allowed = not self.autospin_allowed
+    if self.autospin:
+      self.autospin = 0
+    elif key == ord('q'):
+      self.parent.Destroy()
+
+  def OnLeftClick(self,event):
+    self.wxRecordMouse(event)
+    self.initLeft = event.GetX(),event.GetY()
+  def OnLeftDClick(self,event):
+    self.wxRecordMouse(event)
+    self.reset()
+  def OnLeftUp(self,event):
+    if not event.m_shiftDown:
+      self.wxAutoSpin(event)
+  def OnMiddleClick(self,event):
+    self.wxRecordMouse(event)
+  def OnRightClick(self,event):
+    self.wxRecordMouse(event)
+  def OnRightDClick(self,event):
+    self.wxRecordMouse(event)
+    self.distance=self.base_distance
+    self.wxRedraw()
+  def OnLeftDrag(self,event):
+    self.wxRotate(event)
+  def OnMiddleDrag(self,event):
+    self.wxTranslate(event)
+  def OnRightDrag(self,event):
+    self.wxScale(event)
+  def wxMouseMotion(self,event):
+    if not event.Dragging():
+      return
+    if event.LeftIsDown():
+      self.OnLeftDrag(event)
+    elif event.MiddleIsDown():
+      self.OnMiddleDrag(event)
+    elif event.RightIsDown():
+      self.OnRightDrag(event)
+
+  def report_opengl_errors(message = "OpenGL error:"):
+    """Report any opengl errors that occured while drawing."""
+
+    while 1:
+      err_value = glGetError()
+      if not err_value: break
+      print(message, gluErrorString(err_value))
+
+  def SetBgColour(self, r, g, b):
+    """Change the background colour of the widget.
+
+    There seems to be a problem with this:"""
+
+    self.r_back = r
+    self.g_back = g
+    self.b_back = b
+
+    self.wxRedraw()
+
+  def SetCenterpoint(self, x, y, z):
+    """Set the new center point for the model.
+
+    This is where we are looking."""
+
+    self.xcenter = x
+    self.ycenter = y
+    self.zcenter = z
+
+    self.wxRedraw()
+
+  def set_base_distance(self, distance):
+    """Set how far the eye is from the position we are looking.
+
+    Sets the base distance, to which we are returned if we double click"""
+    self.base_distance = distance
+
+  def set_distance(self, distance):
+    """Set how far the eye is from the position we are looking."""
+    self.distance = distance
+    self.wxRedraw()
+
+  def reset(self):
+    """Reset rotation matrix for this widget."""
+
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    self.wxRedraw()
+
+#  def wxHandlePick(self, event):
+#    """Handle a pick on the scene."""
+#    pass
+
+  def wxRecordMouse(self, event):
+    """Record the current mouse position."""
+    self.xmouse = event.GetX()
+    self.ymouse = event.GetY()
+
+  def wxStartRotate(self, event):
+    # Switch off any autospinning if it was happening
+    self.autospin = 0
+    self.wxRecordMouse(event)
+
+  def wxScale(self, event):
+    """Scale the scene.  Achieved by moving the eye position."""
+    scale = 1 - 0.01 * (event.GetY() - self.ymouse)
+    self.distance = self.distance * scale
+    self.wxRedraw()
+    self.wxRecordMouse(event)
+
+  def do_AutoSpin(self,event):
+    s = 0.5
+
+    gltbx.util.RotateScene(0.5,
+                  self.xcenter, self.ycenter, self.zcenter,
+                  self.yspin, self.xspin, 0, 0)
+    self.wxRedraw()
+
+  def wxAutoSpin(self, event):
+    """Perform autospin of scene."""
+
+    if self.autospin_allowed:
+      self.autospin = 1
+      self.yspin = .1 * (event.GetX()-self.initLeft[0])
+      self.xspin = .1 * (event.GetY()-self.initLeft[1])
+      if self.xspin == 0 and self.yspin == 0:
+        self.autospin = 0
+      else:
+        self.do_AutoSpin(event)
+
+
+  def wxRotate(self, event):
+    """Perform rotation of scene."""
+    xp = event.GetX()
+    yp = event.GetY()
+    if not event.m_shiftDown:
+      gltbx.util.RotateScene(0.5,
+                    self.xcenter, self.ycenter, self.zcenter,
+                    xp, yp, self.xmouse, self.ymouse)
+    else:
+      # rotate about z
+      sz = self.GetClientSizeTuple()
+      sz = (sz[0]/2, sz[1]/2)
+      dy = (self.ymouse-yp)
+      dx = (self.xmouse-xp)
+      if yp > sz[1]:
+        dx = dx * -1
+      if xp < sz[0]:
+        dy = dy * -1
+      d = dx + dy
+      gltbx.util.RotateAboutVector(
+        xcenter=self.xcenter,
+        ycenter=self.ycenter,
+        zcenter=self.zcenter,
+        xvector=0,
+        yvector=0,
+        zvector=1,
+        angle=.5*d)
+
+    self.wxRedraw()
+    self.wxRecordMouse(event)
+
+  def wxTranslate(self, event):
+    """Perform translation of scene."""
+
+    # Scale mouse translations to object viewplane so object tracks with mouse
+    win_height = max( 1,self.w)
+    obj_c      = (self.xcenter, self.ycenter, self.zcenter)
+    model = [0]*16
+    proj = [0]*16
+    view = [0]*4
+    glGetDoublev(GL_MODELVIEW_MATRIX, model)
+    glGetDoublev(GL_PROJECTION_MATRIX, proj)
+    glGetIntegerv(GL_VIEWPORT, view)
+    winx = []
+    winy = []
+    winz = []
+    assert gluProject(
+      obj_c[0], obj_c[1], obj_c[2],
+      model, proj, view,
+      winx, winy, winz)
+    objx = []
+    objy = []
+    objz = []
+    assert gluUnProject(
+      winx[0], winy[0]+0.5*win_height, winz[0],
+      model, proj, view,
+      objx, objy, objz)
+    dist       = math.sqrt( v3distsq( (objx[0],objy[0],objz[0]), obj_c ) )
+    scale      = abs( dist / ( 0.5 * win_height ) )
+
+    gltbx.util.TranslateScene(
+      scale, event.GetX(), event.GetY(), self.xmouse, self.ymouse)
+    self.wxRedraw()
+    self.wxRecordMouse(event)
+
+  def wxRedrawGL(self, event=None):
+    """Method used to actually draw the scene.
+
+    This is more complex than in the wxGLWindow class from which this
+    class is derived, as we need to do rotations, translations, etc."""
+    self.SetCurrent()
+    if self.GL_uninitialised:
+      glViewport(0, 0, self.w, self.h)
+      self.InitGL()
+      self.GL_uninitialised = 0
+
+    # Clear the background and depth buffer.
+    glClearColor(self.r_back, self.g_back, self.b_back, 0.0)
+    glClear(GL_COLOR_BUFFER_BIT)
+    glClear(GL_DEPTH_BUFFER_BIT)
+
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluPerspective(self.fovy, float(self.w)/float(self.h), self.near, self.far)
+
+    gluLookAt(self.xcenter, self.ycenter, self.zcenter + self.distance,
+              self.xcenter, self.ycenter, self.zcenter,
+              0., 1., 0.)
+    glMatrixMode(GL_MODELVIEW)
+
+    glPushMatrix()
+    self.DrawGL()               # Actually draw here
+    glPopMatrix()
+    glFlush()                           # Tidy up
+    self.SwapBuffers()
+
+    if event: event.Skip()
+
+
+#-----------------------------------------------------
+
+if __name__ == '__main__':
+  from OpenGL import GLUT
+
+  class MyApp(wxApp):
+    def OnInit(self):
+      # Using sizer is preferable (no need to specify the size of "frame")
+      # Especially nicer on MacOS X for it correctly triggers the
+      # drawing of the contained OpenGL canvases first time they are
+      # displayed
+      frame = wxFrame(NULL, -1, "wxPython OpenGL example")
+      box = wxFlexGridSizer(2, 2, 10, 10)
+      box.Add( wxGLWindow(frame, -1, wxPoint(5,5), wxSize(190,190)) )
+      box.Add( wxAdvancedGLWindow(frame, -1, wxPoint(205,5),
+                                wxSize(190,190),
+                                autospin_allowed=1) )
+      box.Add( MyWin1(frame, -1, wxPoint(5,205),
+                    wxSize(190,190), autospin_allowed=1) )
+      box.Add( MyWin2(frame, -1, wxPoint(205,205),
+                    wxSize(190,190)) )
+      frame.SetAutoLayout(True)
+      frame.SetSizer(box)
+      box.SetSizeHints(frame)
+      frame.Show(TRUE)
+      self.SetTopWindow(frame)
+      return TRUE
+
+  class MyWin1(wxAdvancedGLWindow):
+    """basic example of a wxAdvancedGLWindow"""
+    def DrawGL(self):
+      glColor3f(1.0,0.3,0.3)
+      GLUT.glutSolidCone(1.0,2,20,16)
+      glRotatef(180.0,0.0,1.0,0.0)
+      glColor3f(0.3,1.0,0.3)
+      GLUT.glutSolidCone(1.0,1,20,16)
+      glLoadIdentity()
+
+  class MyWin2(wxAdvancedGLWindow):
+    """example using display lists"""
+    def InitGL(self):
+      self.uninitialised = 1
+      glClearColor(0.0, 0.0, 0.0, 0.0)
+      glEnable(GL_DEPTH_TEST)
+      glShadeModel(GL_SMOOTH)
+      self.stripeImageWidth=32
+      temp = []
+      for x in range(5):
+        temp.extend([255,0,0,255])
+      for x in range(self.stripeImageWidth-5):
+        temp.extend([0,255,0,255])
+      self.stripeImage = "".join([chr(c) for c in temp])
+      del temp
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+
+      self.texName=[]
+      glGenTextures(1, self.texName)
+      assert len(self.texName) == 1
+      glBindTexture(GL_TEXTURE_2D, self.texName[0])
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+      glTexImage2D(
+        GL_TEXTURE_2D, 0, GL_RGBA, self.stripeImageWidth,1,0,
+        GL_RGBA, GL_UNSIGNED_BYTE, [self.stripeImage])
+      glTexImage2D(
+        GL_TEXTURE_2D, 0, 4, self.stripeImageWidth, 1, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE, [self.stripeImage])
+
+      glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+      glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR)
+      glTexGenfv(GL_S, GL_EYE_PLANE, [1.0, 1.0, 1.0, 0.0])
+
+      glEnable(GL_TEXTURE_GEN_S)
+      glEnable(GL_TEXTURE_2D)
+      glEnable(GL_CULL_FACE)
+      glEnable(GL_LIGHTING)
+      glEnable(GL_LIGHT0)
+      glEnable(GL_AUTO_NORMAL)
+      glEnable(GL_NORMALIZE)
+      glFrontFace(GL_CW)
+      glCullFace(GL_BACK)
+      glMaterialf (GL_FRONT, GL_SHININESS, 64.0)
+      self.DispList=glGenLists(1)
+
+    def DrawGL(self):
+      if self.uninitialised:
+        glNewList(self.DispList, GL_COMPILE)
+        glRotatef(45.0, 0.0, 0.0, 1.0)
+        glBindTexture(GL_TEXTURE_2D, self.texName[0])
+        GLUT.glutSolidTeapot(2.0)
+        glEndList()
+        self.uninitialised = 0
+      glCallList(self.DispList)
+
+    def FinishGL(self):
+      if (self.DispList and glGetError() == 0):
+        glDeleteLists(self.DispList, 1)
+
+  app = MyApp(0)
+  app.MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_viewer.py
+from __future__ import absolute_import, division, print_function
+
+# This code is based on:
+#   http://lists.wxwidgets.org/archive/wxPython-users/msg11078.html
+
+import gltbx.util
+from gltbx.gl import *
+from gltbx.glu import *
+import gltbx.gl_managed
+import gltbx.fonts
+import gltbx.images
+from scitbx.array_family import flex
+import scitbx.math
+from scitbx import matrix
+import six
+from six.moves import range
+from six.moves import zip
+try:
+  import wx
+except ImportError:
+  exit() # To pass through the "make" step (dials.geometry_viewer), for graphics-free HPC build
+import wx.glcanvas
+import math
+import time
+import os
+
+def animation_stepper(time_move=1.0, move_factor=1, frames_per_second=100):
+  time_move *= move_factor
+  n_steps = max(1, int(time_move * frames_per_second + 0.5))
+  time_per_frame = time_move / n_steps
+  i_step = 1
+  t0 = time.time()
+  while True:
+    f = min(1, i_step/n_steps)
+    yield f
+    if (f == 1): break
+    ideal_t = i_step * time_per_frame
+    i_step += 1
+    delta_t = time.time() - t0
+    if (delta_t < ideal_t):
+      time.sleep(ideal_t - delta_t)
+    else:
+      i_step = max(i_step, int(delta_t/time_per_frame + 0.5))
+
+def v3distsq(a, b):
+  result = 0
+  for x,y in zip(a,b): result += (x-y)**2
+  return result
+
+VIEWER_UPDATE_ID = wx.NewId()
+class ViewerUpdateEvent(wx.PyEvent):
+  def __init__(self, data=None, recenter=False):
+    wx.PyEvent.__init__(self)
+    self.data = data
+    self.recenter = recenter
+    self.SetEventType(VIEWER_UPDATE_ID)
+
+class wxGLWindow(wx.glcanvas.GLCanvas):
+
+  def InitGL(self):
+    raise NotImplemented
+
+  def DrawGL(self):
+    raise NotImplemented
+
+  def process_keyword_arguments(self,
+                                auto_spin_allowed=False,
+                                orthographic=False,
+                                animation_time=1, #seconds
+                                background_rgb=(0,0,0),
+                                **kw):
+    self.autospin_allowed = auto_spin_allowed
+    self.orthographic = orthographic
+    self.animation_time = animation_time
+    self.background_rgb = background_rgb
+    return kw
+
+  def __init__(self, parent, *args, **kw):
+    kw['attribList'] = kw.get('attribList', [])
+
+    # Safely identify supported attributes
+    if hasattr(wx.glcanvas, 'WX_GL_RGBA'):
+      kw['attribList'].append(wx.glcanvas.WX_GL_RGBA) # required on Windows
+
+    # Find the highest reasonable depth buffer this display supports - clearly
+    # if none are supported, no setting will be set
+    for buffer_depth in [24,16,8,4]:
+      if self.IsDisplaySupported([wx.glcanvas.WX_GL_DEPTH_SIZE, buffer_depth]):
+        kw['attribList'].extend([wx.glcanvas.WX_GL_DEPTH_SIZE, buffer_depth])
+        break
+
+    if hasattr(wx.glcanvas, 'WX_GL_DOUBLEBUFFER'):
+      try:
+        if self.IsDisplaySupported([wx.glcanvas.WX_GL_DOUBLEBUFFER]):
+          kw['attribList'].append(wx.glcanvas.WX_GL_DOUBLEBUFFER)
+      except AttributeError:
+        # IsDisplaySupported may not be present for wxPython < 2.9
+        # Still attempt to enable double buffering
+        kw['attribList'].append(wx.glcanvas.WX_GL_DOUBLEBUFFER)
+
+    try:
+      if hasattr(wx.glcanvas, 'WX_GL_SAMPLE_BUFFERS'):
+        if self.IsDisplaySupported([wx.glcanvas.WX_GL_SAMPLE_BUFFERS, GL_TRUE]):
+          kw['attribList'].extend([wx.glcanvas.WX_GL_SAMPLE_BUFFERS, GL_TRUE])
+      if hasattr(wx.glcanvas, 'WX_GL_SAMPLES'):
+        if self.IsDisplaySupported([wx.glcanvas.WX_GL_SAMPLES, 4]):
+          kw['attribList'].extend([wx.glcanvas.WX_GL_SAMPLES, 4])
+    except AttributeError:
+      # IsDisplaySupported may not be present for wxPython < 2.9
+      # In that case do not attempt to use multi-/supersampling
+      pass
+
+    kw = self.process_keyword_arguments(**kw)
+    self.GL_uninitialised = 1
+    wx.glcanvas.GLCanvas.__init__(*((self, parent)+args), **kw)
+    self.context = wx.glcanvas.GLContext(self)
+
+    self.Bind(wx.EVT_ERASE_BACKGROUND, self.OnEraseBackground)
+    self.Bind(wx.EVT_SIZE, self.OnSize)
+    self.Bind(wx.EVT_PAINT, self.OnPaint)
+    self.Bind(wx.EVT_CHAR, self.OnChar)
+    self.Bind(wx.EVT_LEFT_DOWN, self.OnLeftClick)
+    self.Bind(wx.EVT_LEFT_UP, self.OnLeftUp)
+    self.Bind(wx.EVT_MIDDLE_DOWN, self.OnMiddleClick)
+    self.Bind(wx.EVT_RIGHT_DOWN, self.OnRightClick)
+    self.Bind(wx.EVT_MOTION, self.OnMouseMotion)
+    self.Bind(wx.EVT_IDLE, self.OnIdle)
+    self.Bind(wx.EVT_TIMER, self.OnTimer)
+    self.Bind(wx.EVT_MOUSEWHEEL, self.OnMouseWheel)
+    self.Connect(-1, -1, VIEWER_UPDATE_ID, self.OnUpdate)
+
+    self.spintimer_id = 100 # any number
+    self.spintimer_maxfps = 30
+    self.spintimer = wx.Timer(self, self.spintimer_id)
+    self.spintimer.Start(1000 // self.spintimer_maxfps)
+
+    self.w, self.h = self.GetClientSize()
+
+    self.field_of_view_y = 10.0
+    self.min_near = 1
+    self.min_dist = -100
+    self.min_viewport_use_fraction = 0.01
+    self.slab_scale = 1.0
+    self.scale_max = 0.1
+    self.z_min = 4.0
+    self.fog_scale_factor = 0.5
+    self.flag_show_fog = False # leave off by default
+    self._settings_widget = None
+
+    self.flag_use_lights = False
+
+    self.rotation_center = (0,0,0)
+    self.marked_rotation = None
+
+    self.parent = parent
+    # Current coordinates of the mouse.
+    self.xmouse = 0
+    self.ymouse = 0
+
+    self.xspin = 0
+    self.yspin = 0
+
+    # Is the widget currently autospinning?
+    self.autospin = False
+
+    self.initLeft = (0,0)
+    self.was_dragged = False
+    self.pick_points = None
+    self.light0_position = [0, 0, 100, 0]
+
+  def OnEraseBackground(self, event):
+    pass # Do nothing, to avoid flashing on MSW.
+
+  def OnSize(self, event=None):
+    self.w, self.h = self.GetClientSize()
+    if (self.GetParent().IsShown()):
+      if (self.context is not None):
+        if wx.VERSION[0] != 3:
+          self.SetCurrent(self.context)
+        else:
+          self.SetCurrent()
+      glViewport(0, 0, self.w, self.h)
+
+  def OnIdle(self,event):
+    pass
+
+  def OnTimer(self, event):
+    if (self.autospin):
+      self.do_AutoSpin()
+
+  def OnChar(self,event):
+    key = event.GetKeyCode()
+    if   (key == ord('m')):
+      self.move_rotation_center_to_mcs_center()
+    elif (key == ord('c')):
+      self.move_to_center_of_viewport(self.rotation_center)
+    elif (key == ord('f')):
+      self.fit_into_viewport()
+    elif key == ord('k'):
+      self.mark_rotation()
+    elif (key == ord('a')):
+      self.snap_back_rotation()
+    elif (key == ord('s')):
+      self.autospin_allowed = not self.autospin_allowed
+    elif (key == ord('l')):
+      self.flag_show_labels = not self.flag_show_labels
+      self.OnRedraw()
+    elif (key == ord('S')):
+      self.save_screen_shot()
+    elif (key == ord('V')):
+      gltbx.util.show_versions()
+    elif (key == ord('O')):
+      self.edit_opengl_settings()
+    elif (key == ord('\t')):
+      callback = getattr(self, "tab_callback", None)
+      if (callback is None):
+        print("Tab callback not available.")
+      else:
+        kwargs = {"shift_down": event.ShiftDown() }
+        if (event.ControlDown()): kwargs["control_down"] = True
+        callback(**kwargs)
+    else:
+      callback = getattr(self, "process_key_stroke", None)
+      if (callback is None):
+        print("No action for this key stroke.")
+      else:
+        if (callback(key=key) == False):
+          print("No action for this key stroke.")
+    self.autospin = False
+
+  def OnMouseWheel(self, event):
+    scale = 0.002*event.GetWheelRotation()
+    self.OnScale(scale)
+
+  def OnLeftClick(self,event):
+    self.OnRecordMouse(event)
+    self.initLeft = event.GetX(),event.GetY()
+    self.was_dragged = False
+    self.autospin = False
+
+  def OnLeftUp(self,event):
+    if (not self.was_dragged):
+      self.get_pick_points(self.initLeft)
+      self.process_pick_points()
+      self.OnRedraw()
+    else:
+      self.was_dragged = False
+      if (not event.ShiftDown()):
+        self.OnAutoSpin(event)
+
+  def OnMiddleClick(self, event):
+    self.OnRecordMouse(event)
+
+  def OnRightClick(self, event):
+    self.OnRecordMouse(event)
+
+  def OnLeftDrag(self,event):
+    self.was_dragged = True
+    if event.AltDown():
+      self.OnTranslate(event)
+    else:
+      self.OnRotate(event)
+
+  def OnMiddleDrag(self,event):
+    self.OnTranslate(event)
+
+  def OnRightDrag(self,event):
+    scale = 0.02 * (event.GetY() - self.ymouse)
+    self.OnScale(scale)
+    self.OnRecordMouse(event)
+
+  def OnMouseMotion(self,event):
+    if (not event.Dragging()):
+      return
+    if (event.LeftIsDown()):
+      self.OnLeftDrag(event)
+    elif (event.MiddleIsDown()):
+      self.OnMiddleDrag(event)
+    elif (event.RightIsDown()):
+      self.OnRightDrag(event)
+
+  def setup_viewing_volume(self):
+    aspect = self.w / max(1,self.h)
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    near, far = self.get_clipping_distances()
+    if self.orthographic:
+      s = self.minimum_covering_sphere
+      #c = s.center()
+      c = self.rotation_center
+      r = s.radius()
+      rf = self.buffer_factor * r
+      left = c[0] - rf
+      right = c[0] + rf
+      bottom = c[1] - rf
+      top = c[1] + rf
+      if (aspect < 1):
+        bottom /= aspect
+        top /= aspect
+      else:
+        left *= aspect
+        right *= aspect
+      glOrtho(left, right, bottom, top, near, far)
+    else:
+      gluPerspective(self.field_of_view_y, aspect, near, far)
+    self.set_lights()
+    self.setup_fog()
+
+  def get_clipping_distances(self):
+    slab = self.far - self.near
+    clip = (1.0 - self.slab_scale) * (slab / 2.0)
+    near = self.near + clip
+    far = self.far - clip
+    if near > far :
+      near = far - 1
+    if near < self.min_near :
+      near = self.min_near
+    return (near, far)
+
+  def setup_lighting(self):
+    if self.flag_use_lights :
+      glEnable(GL_LIGHTING)
+      glEnable(GL_LIGHT0)
+      glEnable(GL_BLEND)
+      #glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+      glBlendFunc(GL_SRC_ALPHA,GL_ZERO)
+      glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE)
+      glLightfv(GL_LIGHT0, GL_AMBIENT, [0.0, 0.0, 0.0, 1.0])
+      glLightfv(GL_LIGHT0, GL_DIFFUSE, [1, 1, 1, 1])
+      glLightfv(GL_LIGHT0, GL_SPECULAR, [0.5, 0.5, 0.5, 1.0])
+
+  def set_lights(self):
+    if self.flag_use_lights :
+      glMatrixMode(GL_MODELVIEW)
+      glPushMatrix()
+      glLoadIdentity()
+      glEnable(GL_LIGHTING)
+      glEnable(GL_LIGHT0)
+      glLightfv(GL_LIGHT0, GL_POSITION, self.light0_position)
+      glPopMatrix()
+
+  def setup_fog(self):
+    if self.flag_show_fog :
+      near, far = self.get_clipping_distances()
+      fog_start = near + self.fog_scale_factor*(far - near)
+      fog_end = max(fog_start + 5, far)
+      glMatrixMode(GL_MODELVIEW)
+      glEnable(GL_FOG)
+      glFogi(GL_FOG_MODE, GL_LINEAR)
+      glFogf(GL_FOG_START, fog_start)
+      glFogf(GL_FOG_END, fog_end)
+      b = self.background_rgb
+      glFogfv(GL_FOG_COLOR, [b[0], b[1], b[2], 1.0])
+    else :
+      glDisable(GL_FOG)
+
+  def set_minimum_covering_sphere(self, atoms=None):
+    if (atoms is None):
+      points = self.points
+    else:
+      points = flex.vec3_double()
+      for atom in atoms:
+        points.append(atom)
+    if (points is not None and len(points) > 1):
+      s = scitbx.math.minimum_covering_sphere_3d(points=points)
+    else:
+      if (points is None or len(points) == 0):
+        center = (0,0,0)
+      else:
+        center = points[0]
+      s = scitbx.math.sphere_3d(center=center, radius=1)
+    self.minimum_covering_sphere = s
+
+  def compute_home_translation(self):
+    s = self.minimum_covering_sphere
+    x,y,z = [-v for v in gltbx.util.object_as_eye_coordinates(s.center())]
+    h = s.radius()
+    if (self.w < self.h):
+      h *= self.h / max(1,self.w)
+    assert 0 < self.field_of_view_y < 90
+    z -= h / math.tan(self.field_of_view_y*math.pi/180/2)
+    return x,y,z
+
+  def initialize_modelview(self, eye_vector=None, angle=None):
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
+    self.setup_lighting()
+    gluLookAt(0,0,0, 0,0,-1, 0,1,0)
+    translation = self.compute_home_translation()
+    glTranslated(*translation)
+    rc = self.minimum_covering_sphere.center()
+    self.rotation_center = rc
+    if eye_vector is None: eye_vector = (1,1,1)
+    if angle is None: angle = -120
+    gltbx.util.rotate_object_about_eye_vector(
+      xcenter=rc[0], ycenter=rc[1], zcenter=rc[2],
+      xvector=eye_vector[0], yvector=eye_vector[1], zvector=eye_vector[2],
+      angle=angle)
+
+  def rotation_move_factor(self, rotation_angle):
+    return abs(rotation_angle)/180
+
+  def translation_move_factor(self, translation_vector):
+    return min(2,  abs(matrix.col(translation_vector))
+                 / max(1,self.minimum_covering_sphere.radius()))
+
+  def fit_into_viewport(self):
+    dx,dy,dz = self.compute_home_translation()
+    move_factor=self.translation_move_factor((dx,dy,dz))
+    mvm = gltbx.util.get_gl_modelview_matrix()
+    for f in animation_stepper(time_move=self.animation_time,
+                               move_factor=move_factor):
+      glMatrixMode(GL_MODELVIEW)
+      glLoadIdentity()
+      glTranslated(f*dx, f*dy, f*dz)
+      glMultMatrixd(mvm)
+      self.OnRedraw()
+
+  def mark_rotation(self):
+    self.marked_rotation = matrix.sqr(
+      gltbx.util.extract_rotation_from_gl_modelview_matrix())
+
+  def snap_back_rotation(self):
+    rc = self.rotation_center
+    rotation_to_undo = matrix.sqr(
+      gltbx.util.extract_rotation_from_gl_modelview_matrix())
+    if self.marked_rotation is not None:
+      rotation_to_undo *= self.marked_rotation.inverse()
+    aa = scitbx.math.r3_rotation_axis_and_angle_from_matrix(
+      r=rotation_to_undo.as_mat3())
+    u,v,w = aa.axis
+    angle = -aa.angle(deg=True)
+    mvm = gltbx.util.get_gl_modelview_matrix()
+    for f in animation_stepper(time_move=self.animation_time,
+                               move_factor=self.rotation_move_factor(angle)):
+      glMatrixMode(GL_MODELVIEW)
+      glLoadMatrixd(mvm)
+      gltbx.util.rotate_object_about_eye_vector(
+        xcenter=rc[0], ycenter=rc[1], zcenter=rc[2],
+        xvector=u, yvector=v, zvector=w,
+        angle=f*angle)
+      self.OnRedraw()
+
+  def move_rotation_center_to_mcs_center(self):
+    self.rotation_center = self.minimum_covering_sphere.center()
+
+  def move_to_center_of_viewport(self, obj_coor):
+    dx,dy = [-x for x in gltbx.util.object_as_eye_coordinates(obj_coor)[:2]]
+    move_factor = self.translation_move_factor((dx,dy,0))
+    mvm = gltbx.util.get_gl_modelview_matrix()
+    for f in animation_stepper(time_move=self.animation_time,
+                               move_factor=move_factor):
+      glMatrixMode(GL_MODELVIEW)
+      glLoadIdentity()
+      glTranslated(f*dx, f*dy, 0)
+      glMultMatrixd(mvm)
+      self.OnRedraw()
+
+  def ZoomOnSelection(self, xyzs):
+    if not xyzs: return
+    x,y,z = (0,0,0)
+    for xyz in xyzs:
+      x += xyz[0]
+      y += xyz[1]
+      z += xyz[2]
+    x /= len(xyzs)
+    y /= len(xyzs)
+    z /= len(xyzs)
+    self.rotation_center = (x,y,z)
+    self.move_to_center_of_viewport(self.rotation_center)
+
+  def OnRecordMouse(self, event):
+    self.xmouse = event.GetX()
+    self.ymouse = event.GetY()
+
+  def OnStartRotate(self, event):
+    self.autospin = False
+    self.OnRecordMouse(event)
+
+  def OnScale(self, scale):
+    if (abs(scale) > self.scale_max):
+      if (scale < 0):
+        scale = -self.scale_max
+      else :
+        scale = self.scale_max
+    s = self.minimum_covering_sphere
+    r = (1+1.e-6)*s.radius()
+    d = -gltbx.util.object_as_eye_coordinates(self.rotation_center)[2]
+    dr = d + r
+    if (scale > 0 and (dr <= self.min_near or d <= self.min_dist)):
+      pass # near limit
+    elif (scale < 0 and r < d * math.sin(self.field_of_view_y*math.pi/180/2)
+                              * self.min_viewport_use_fraction):
+      pass # far limit
+    else:
+      gltbx.util.translate_object(0,0,dr*scale)
+      self.OnRedraw()
+
+  def OnAutoSpin(self, event):
+    if (self.autospin_allowed):
+      self.autospin = True
+      self.yspin = 0.1 * (event.GetX()-self.initLeft[0])
+      self.xspin = 0.1 * (event.GetY()-self.initLeft[1])
+      if (self.xspin == 0 and self.yspin == 0):
+        self.autospin = False
+      else:
+        self.do_AutoSpin()
+
+  def do_AutoSpin(self):
+    spin_factor = 0.05
+    rc = self.rotation_center
+    glMatrixMode(GL_MODELVIEW)
+    gltbx.util.rotate_object_about_eye_x_and_y(
+      spin_factor, rc[0], rc[1], rc[2],
+      self.yspin, self.xspin, 0, 0)
+    self.OnRedraw()
+
+  def rotate_view(self, x1, y1, x2, y2, shift_down=False, scale=0.5):
+    rc = self.rotation_center
+    if (not shift_down):
+      gltbx.util.rotate_object_about_eye_x_and_y(
+        scale, rc[0], rc[1], rc[2],
+        x2, y2, x1, y1)
+    else:
+      sz = self.GetClientSize()
+      sz = (sz[0]/2, sz[1]/2)
+      dy = (y1-y2)
+      dx = (x1-x2)
+      if (y2 > sz[1]): dx *= -1
+      if (x2 < sz[0]): dy *= -1
+      angle = (dx + dy)/2
+      gltbx.util.rotate_object_about_eye_vector(
+        xcenter=rc[0], ycenter=rc[1], zcenter=rc[2],
+        xvector=0, yvector=0, zvector=1,
+        angle=angle)
+    self.OnRedraw()
+
+  def adjust_slab(self, delta):
+    self.slab_scale += delta
+    if self.slab_scale > 1.0 :
+      self.slab_scale = 1.0
+    elif self.slab_scale < 0.01 :
+      self.slab_scale = 0.01
+
+  def OnRotate(self, event):
+    xp = event.GetX()
+    yp = event.GetY()
+    self.rotate_view(self.xmouse, self.ymouse, xp, yp, event.ShiftDown())
+    self.OnRecordMouse(event)
+
+  def OnTranslate(self, event):
+    model = gltbx.util.get_gl_modelview_matrix()
+    proj = gltbx.util.get_gl_projection_matrix()
+    view = gltbx.util.get_gl_viewport()
+    winx = []
+    winy = []
+    winz = []
+    rc = self.rotation_center
+    rc_eye = gltbx.util.object_as_eye_coordinates(rc)
+    assert gluProject(
+      rc[0], rc[1], rc[2],
+      model, proj, view,
+      winx, winy, winz)
+    win_height = max(1, self.w)
+    objx, objy, objz = gluUnProject(
+      winx[0], winy[0]+0.5*win_height, winz[0],
+      model, proj, view,
+    )
+    dist = v3distsq((objx, objy, objz), rc)**0.5
+    scale = abs(dist / (0.5 * win_height))
+    x,y = event.GetX(), event.GetY()
+    gltbx.util.translate_object(scale, x, y, self.xmouse, self.ymouse)
+    self.rotation_center = tuple(
+      gltbx.util.modelview_matrix_as_rt().inverse() * matrix.col(rc_eye))
+    self.OnRedraw()
+    self.OnRecordMouse(event)
+
+  def get_pick_points(self, mouse_xy):
+    model = gltbx.util.get_gl_modelview_matrix()
+    proj = gltbx.util.get_gl_projection_matrix()
+    view = gltbx.util.get_gl_viewport()
+    self.pick_points = []
+    for winz in [0.0, 1.0]:
+      objx, objy, objz = gluUnProject(
+        mouse_xy[0], self.h-mouse_xy[1], winz,
+        model, proj, view,
+      )
+      if objx and objy and objz:
+        self.pick_points.append((objx, objy, objz))
+      else:
+        self.pick_points = None
+        break
+
+  def OnPaint(self, event=None):
+    wx.PaintDC(self)
+    if (self.context is not None):
+      self.SetCurrent(self.context)
+    else :
+      self.SetCurrent()
+    if (self.GL_uninitialised):
+      glViewport(0, 0, self.w, self.h)
+      self.InitGL()
+      self.GL_uninitialised = 0
+    self.OnRedrawGL(event)
+
+  def OnRedraw(self, event=None):
+    wx.ClientDC(self)
+    if (self.context is not None):
+      self.SetCurrent(self.context)
+    else :
+      self.SetCurrent()
+    self.OnRedrawGL(event)
+
+  def setup_distances(self):
+    s = self.minimum_covering_sphere
+    r = self.buffer_factor*s.radius()
+    #z = -gltbx.util.object_as_eye_coordinates(s.center())[2]
+    z = -gltbx.util.object_as_eye_coordinates(self.rotation_center)[2]
+    if (z < self.z_min):
+      z = self.z_min
+    self.near = max(self.min_near, z-r)
+    self.far = max(self.near+1, z+r)
+
+  def OnRedrawGL(self, event=None):
+    gltbx.util.handle_error()
+    self.setup_distances()
+    self.setup_viewing_volume()
+    gltbx.util.handle_error()
+    glClear(GL_COLOR_BUFFER_BIT)
+    glClear(GL_DEPTH_BUFFER_BIT)
+    mvm = gltbx.util.get_gl_modelview_matrix()
+    self.DrawGL()
+    gltbx.util.handle_error()
+    glFlush()
+    self.SwapBuffers()
+    if (event is not None): event.Skip()
+
+  def show_stack_sizes(self):
+    mv_depth = [0]
+    pr_depth = [0]
+    tx_depth = [0]
+    glGetIntegerv(GL_MODELVIEW_STACK_DEPTH, mv_depth)
+    glGetIntegerv(GL_PROJECTION_STACK_DEPTH, pr_depth)
+    glGetIntegerv(GL_TEXTURE_STACK_DEPTH, tx_depth)
+    print("Modelview: %d  Projection: %d  Texture: %d" % (mv_depth[0],
+      pr_depth[0], tx_depth[0]))
+
+  def OnUpdate(self, event=None):
+    pass
+
+  def force_update(self, recenter=False):
+    wx.PostEvent(self, ViewerUpdateEvent(data=None, recenter=recenter))
+
+  def edit_opengl_settings(self, event=None):
+    if self._settings_widget is None :
+      self._settings_widget = OpenGLSettingsToolbox(self)
+      self._settings_widget.Show()
+
+  def save_screen_shot_via_pil(self,
+        file_name="wx_viewer",
+        extensions=["png", "jpg", "tiff", "eps", "pdf"]):
+    import gltbx.viewer_utils
+    from libtbx.utils import Sorry
+    from libtbx.str_utils import show_string
+    pil_image = gltbx.viewer_utils.read_pixels_to_pil_image(
+      x=0, y=0, width=self.w, height=self.h)
+    if (pil_image is None):
+      print("Cannot save screen shot to file:" \
+        " Python Imaging Library (PIL) not available.")
+      return 0
+    print("Screen shot width x height: %d x %d" % (self.w, self.h))
+    save = pil_image.save
+    def try_save(file_name_ext):
+      try: save(file_name_ext)
+      except KeyboardInterrupt: raise
+      except Exception: return False
+      return True
+    for ext in extensions:
+      if (file_name.endswith("."+ext)):
+        print("Writing file: %s" % show_string(os.path.abspath(file_name)))
+        if (not try_save(file_name_ext=file_name)):
+          print("Failure saving screen shot as %s file." % ext.upper())
+        return 1
+    n_written = 0
+    for ext in extensions:
+      file_name_ext = file_name + "."+ext
+      if (not try_save(file_name_ext=file_name_ext)):
+        print("Image output format not available: %s" % ext.upper())
+      else:
+        print("Wrote file: %s" % show_string(os.path.abspath(file_name_ext)))
+        n_written += 1
+    return n_written
+
+  def save_screen_shot_via_gl2ps(self, file_name):
+    from libtbx.str_utils import show_string
+    gl2ps = gltbx.util.gl2ps_interface
+    if (not gl2ps(file_name=None, draw_background=False, callback=None)):
+      print("PDF output via gl2ps not available: cannot write file %s" \
+        % file_name)
+      return 0
+    try:
+      # preempt potential error in C++, for better reporting here
+      open(file_name, "wb")
+    except KeyboardInterrupt: raise
+    except Exception:
+      print("Error opening file for writing: %s" % \
+        show_string(os.path.abspath(file_name)))
+      return 0
+    gl2ps(file_name=file_name, draw_background=False, callback=self.OnRedraw)
+    print("Wrote file: %s" % show_string(os.path.abspath(file_name)))
+    return 1
+
+  def save_screen_shot(self,
+        file_name="wx_viewer",
+        extensions=["png", "jpg", "tiff", "eps", "pdf"]):
+    extensions_pil = []
+    save_pdf = file_name.endswith(".pdf")
+    gl2ps_file_name = file_name
+    if (not save_pdf):
+      for ext in extensions:
+        if (ext == "pdf"):
+          save_pdf = True
+          gl2ps_file_name += "."+ext
+        else:
+          extensions_pil.append(ext)
+    n_written = 0
+    if (len(extensions_pil) != 0):
+      n_written += self.save_screen_shot_via_pil(
+        file_name=file_name, extensions=extensions_pil)
+    if (save_pdf):
+      n_written += self.save_screen_shot_via_gl2ps(file_name=gl2ps_file_name)
+    if (n_written == 0):
+      raise Sorry(
+        "Cannot save screen shot in any of the formats specified.")
+    return n_written
+
+  def OnClose(self, event=None):
+    self.spintimer.Stop()
+
+class show_points_and_lines_mixin(wxGLWindow):
+
+  def __init__(self, *args, **keyword_args):
+    wxGLWindow.__init__(self, *args, **keyword_args)
+    self.buffer_factor = 2.0
+    self.flag_show_minimum_covering_sphere = True
+    self.flag_show_labels = True
+    self.flag_show_points = True
+    self.flag_show_lines = True
+    self.flag_show_rotation_center = True
+    self.flag_show_spheres = True
+    self.long_labels = None
+    self.labels = []
+    self.points = flex.vec3_double()
+    self.line_i_seqs = []
+    self.line_colors = {}
+    self.spheres = []
+    self.line_width = 1
+    self.labels_display_list = None
+    self.points_display_list = None
+    self.lines_display_list = None
+
+  def InitGL(self):
+    gltbx.util.handle_error()
+    b = self.background_rgb
+    glClearColor(b[0], b[1], b[2], 0.0)
+    self.minimum_covering_sphere_display_list = None
+    self.initialize_modelview()
+    gltbx.util.handle_error()
+
+  def DrawGL(self):
+    if (self.flag_show_minimum_covering_sphere):
+      self.draw_minimum_covering_sphere()
+    if (self.flag_show_points):
+      self.draw_points()
+    if (self.flag_show_lines):
+      self.draw_lines()
+    if (self.flag_show_rotation_center):
+      self.draw_rotation_center()
+    if (self.flag_show_labels):
+      self.draw_labels()
+    if (self.flag_show_spheres):
+      self.draw_spheres()
+
+  def draw_minimum_covering_sphere(self):
+    if (self.minimum_covering_sphere_display_list is None):
+      self.minimum_covering_sphere_display_list=gltbx.gl_managed.display_list()
+      self.minimum_covering_sphere_display_list.compile()
+      s = self.minimum_covering_sphere
+      c = s.center()
+      r = s.radius()
+      gray = 0.3
+      glColor3f(gray,gray,gray)
+      glBegin(GL_POLYGON)
+      for i in range(360):
+        a = i * math.pi / 180
+        rs = r * math.sin(a)
+        rc = r * math.cos(a)
+        glVertex3f(c[0],c[1]+rs,c[2]+rc)
+      glEnd()
+      self.draw_cross_at(c, color=(1,0,0))
+      self.minimum_covering_sphere_display_list.end()
+    self.minimum_covering_sphere_display_list.call()
+
+  def draw_points(self):
+    if (self.points_display_list is None):
+      self.points_display_list = gltbx.gl_managed.display_list()
+      self.points_display_list.compile()
+      glLineWidth(1)
+      for point in self.points:
+        self.draw_cross_at(point)
+      self.points_display_list.end()
+    self.points_display_list.call()
+
+  def draw_lines(self):
+    if (self.lines_display_list is None):
+      self.lines_display_list = gltbx.gl_managed.display_list()
+      self.lines_display_list.compile()
+      assert self.line_width > 0
+      for i_seqs in self.line_i_seqs:
+        color = self.line_colors.get(tuple(i_seqs))
+        if (color is None):
+          color = self.line_colors.get(tuple(reversed(i_seqs)))
+          if (color is None):
+            color = (1,0,1)
+        glColor3f(*color)
+        glLineWidth(self.line_width)
+        glBegin(GL_LINES)
+        glVertex3f(*self.points[i_seqs[0]])
+        glVertex3f(*self.points[i_seqs[1]])
+        glEnd()
+      self.lines_display_list.end()
+    self.lines_display_list.call()
+
+  def draw_labels(self, color=(1,1,1)):
+    if (self.labels_display_list is None):
+      font = gltbx.fonts.ucs_bitmap_8x13
+      font.setup_call_lists()
+      self.labels_display_list = gltbx.gl_managed.display_list()
+      self.labels_display_list.compile()
+      glColor3f(*color)
+      for label,point in zip(self.labels, self.points):
+        glRasterPos3f(*point)
+        font.render_string(label)
+      self.labels_display_list.end()
+    self.labels_display_list.call()
+
+  def draw_cross_at(self, position_tuple, color=(1,1,1), f=0.1):
+    (x,y,z) = position_tuple
+    glBegin(GL_LINES)
+    glColor3f(*color)
+    glVertex3f(x-f,y,z)
+    glVertex3f(x+f,y,z)
+    glVertex3f(x,y-f,z)
+    glVertex3f(x,y+f,z)
+    glVertex3f(x,y,z-f)
+    glVertex3f(x,y,z+f)
+    glEnd()
+
+  def draw_rotation_center(self):
+    self.draw_cross_at(self.rotation_center, color=(0,1,0))
+
+  def draw_spheres(self, solid=False):
+    glMatrixMode(GL_MODELVIEW)
+    gray = 0.3
+    glColor3f(gray,gray,gray)
+    if (solid):
+      glEnable(GL_LIGHTING)
+      glEnable(GL_LIGHT0)
+      glLightfv(GL_LIGHT0, GL_AMBIENT, [1, 1, 1, 1])
+      glLightfv(GL_LIGHT0, GL_POSITION, [0, 0, 1, 0])
+      glEnable(GL_BLEND)
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+      glMaterialfv(GL_FRONT, GL_DIFFUSE, [1,1,1,0.5])
+      sphere = gltbx.util.SolidSphere
+      grid = 50
+    else:
+      sphere = gltbx.util.WireSphere
+      grid = 20
+    for i, (x,r) in enumerate(self.spheres):
+      glPushMatrix()
+      glTranslated(*(x))
+      sphere(radius=r, slices=grid, stacks=grid)
+      glPopMatrix()
+    if (solid):
+      glDisable(GL_LIGHTING)
+      glDisable(GL_LIGHT0)
+      glDisable(GL_BLEND)
+
+  def process_pick_points(self):
+    line = scitbx.math.line_given_points(self.pick_points)
+    min_dist_sq = 1**2
+    i_point_closest = None
+    for i_point,point in enumerate(self.points):
+      dist_sq = line.distance_sq(point=matrix.col(point))
+      if (min_dist_sq > dist_sq):
+        min_dist_sq = dist_sq
+        i_point_closest = i_point
+    if (i_point_closest is not None):
+      self.rotation_center = self.points[i_point_closest]
+      if (self.long_labels is not None):
+        assert len(self.long_labels) == len(self.points)
+        lbl = self.long_labels[i_point_closest]
+      elif (self.labels is not None):
+        assert len(self.labels) == len(self.points)
+        lbl = self.labels[i_point_closest]
+      else:
+        lbl = "index %d" % i_point_closest
+      txt = "pick point: %s" % lbl
+      print(txt)
+      self.parent.SetStatusText(txt)
+
+class OpenGLSettingsToolbox(wx.MiniFrame):
+  def __init__(self, parent):
+    wx.MiniFrame.__init__(self, parent, -1, title="OpenGL settings",
+      pos=(100,100), style=wx.CAPTION|wx.CLOSE_BOX|wx.RAISED_BORDER)
+    self.parent = parent
+    self.widgets = {}
+    panel = wx.Panel(self, -1)
+    main_sizer = wx.BoxSizer(wx.VERTICAL)
+    fog_box = wx.CheckBox(panel, -1, "Use fog")
+    fog_box.SetValue(parent.flag_show_fog)
+    main_sizer.Add(fog_box, 0, wx.ALL, 5)
+    self.fog_box = fog_box
+    szr = wx.FlexGridSizer(rows=0, cols=2, vgap=5, hgap=5)
+    main_sizer.Add(szr, 0, 0, 0)
+    slab_label = wx.StaticText(panel, -1, "Slab:")
+    slab_slider = wx.Slider(panel, -1, int(parent.slab_scale * 100),
+      minValue=1, maxValue=100)
+    szr.Add(slab_label, 0, wx.ALL, 5)
+    szr.Add(slab_slider, 0, wx.ALL, 5)
+    fog_label = wx.StaticText(panel, -1, "Fog scale:")
+    fog_slider = wx.Slider(panel, -1, int(parent.fog_scale_factor * 100),
+      minValue=1, maxValue=100)
+    szr.Add(fog_label, 0, wx.ALL, 5)
+    szr.Add(fog_slider, 0, wx.ALL, 5)
+    self.widgets['slab_scale'] = slab_slider
+    self.widgets['fog_scale_factor'] = fog_slider
+    self.SetSizer(main_sizer)
+    main_sizer.Fit(panel)
+    self.Fit()
+    self.Bind(wx.EVT_SLIDER, self.OnUpdate)
+    self.Bind(wx.EVT_CHECKBOX, self.OnUpdate)
+    self.Bind(wx.EVT_CLOSE, self.OnClose)
+
+  def OnUpdate(self, event=None):
+    for setting_name, widget in six.iteritems(self.widgets):
+      new_value = float(widget.GetValue()) / 100.0
+      setattr(self.parent, setting_name, new_value)
+    self.parent.flag_show_fog = self.fog_box.GetValue()
+    self.parent.OnRedrawGL()
+
+  def OnClose(self, event=None):
+    self.Destroy()
+    self.parent._settings_widget = None
+
+class App(wx.App):
+
+  def __init__(self, title="gltbx.wx_viewer", default_size=(600,600)):
+    self.title = title
+    self.default_size = wx.Size(*default_size)
+    wx.App.__init__(self, 0)
+
+  def OnInit(self):
+    self.frame = wx.Frame(
+      None, -1,
+      self.title,
+      wx.DefaultPosition,
+      self.default_size)
+    self.frame.Bind(wx.EVT_CLOSE, self.OnFrameClose)
+
+    self.frame.CreateStatusBar()
+
+    tb = self.frame.CreateToolBar(
+      style = wx.TB_HORIZONTAL | wx.NO_BORDER | wx.TB_FLAT | wx.TB_TEXT)
+    isinstance(tb, wx.ToolBar)
+    tb.SetToolBitmapSize((32,32))
+
+    import gltbx.wx_viewers_images as images
+
+    tb.Bind(wx.EVT_TOOL, self.OnToolClick)
+
+    self.mcs_center_id = wx.NewId()
+    tb.AddSimpleTool(self.mcs_center_id,
+      images.mcs_img.as_wx_Bitmap(),
+      "Rotate around MCS center",
+      "Object are to be rotated around the Minimum Covering Sphere (MCS)"
+      "centre."
+      " Keyboard shortcut: m")
+
+    self.center_on_screen_id = wx.NewId()
+    tb.AddSimpleTool(self.center_on_screen_id,
+      images.centre_img.as_wx_Bitmap(),
+      "Center in window",
+      "Shifts object so that centre of rotation is centered in window."
+      " Keyboard shortcut: c")
+
+    self.fit_on_screen_id = wx.NewId()
+    tb.AddSimpleTool(self.fit_on_screen_id,
+      images.fit_img.as_wx_Bitmap(),
+      "Fit in window",
+      "Resizes and shifts object to fit into window."
+      " Keyboard shortcut: f")
+
+    self.mark_snap_back_id = wx.NewId()
+    tb.AddSimpleTool(self.mark_snap_back_id,
+      images.mark_snap_back_img.as_wx_Bitmap(),
+      "Mark orientation for snap-back",
+      "Marks object orientation as the target of a subsequent snap-back."
+      " Keyboard shortcut: k")
+
+    self.snap_back_id = wx.NewId()
+    tb.AddSimpleTool(self.snap_back_id,
+      images.snap_back_img.as_wx_Bitmap(),
+      "Snap back orientation",
+      "Rotates object back to the last marked orientation."
+      " Keyboard shortcut: a")
+
+    self.toggle_spin_id = wx.NewId()
+    tb.AddCheckTool(self.toggle_spin_id, 'label',
+      images.spin_img.as_wx_Bitmap(),
+      shortHelp="Spin on/off",
+      longHelp="Turns auto-spin on/off. Keyboard shortcut: s")
+
+    tb.Realize()
+
+    menuBar = wx.MenuBar()
+    file_menu = wx.Menu()
+    item = file_menu.Append(-1, "E&xit\tAlt-X", "Exit demo")
+    self.Bind(wx.EVT_MENU, self.OnExitApp, item)
+    menuBar.Append(file_menu, "&File")
+
+    self.frame.SetMenuBar(menuBar)
+    self.init_view_objects()
+    self.update_status_bar()
+    self.view_objects.SetFocus()
+    self.SetTopWindow(self.frame)
+    self.frame.Show(True)
+    return True
+
+  def OnExitApp(self, event):
+    self.frame.Close(True)
+
+  def OnFrameClose(self, event):
+    f = getattr(self.view_objects, "CleanupBeforeFrameClose", None)
+    if (f is not None): f()
+    self.frame.Destroy()
+
+  def OnToolClick(self, event):
+    id = event.GetId()
+    if (id == self.mcs_center_id):
+      self.view_objects.move_rotation_center_to_mcs_center()
+    elif (id == self.center_on_screen_id):
+      self.view_objects.move_to_center_of_viewport(
+        self.view_objects.rotation_center)
+    elif (id == self.fit_on_screen_id):
+      self.view_objects.fit_into_viewport()
+    elif id == self.mark_snap_back_id:
+      self.view_objects.mark_rotation()
+    elif (id == self.snap_back_id):
+      self.view_objects.snap_back_rotation()
+    elif (id == self.toggle_spin_id):
+      self.view_objects.autospin_allowed \
+        = not self.view_objects.autospin_allowed
+      self.view_objects.autospin = False
+      self.update_status_bar()
+    else:
+      raise RuntimeError("Unknown event Id: %d" % id)
+
+  def update_status_bar(self):
+    self.frame.SetStatusText("Auto Spin %s"
+      % ["Off", "On"][int(self.view_objects.autospin_allowed)])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_viewer_example.py
+from __future__ import absolute_import, division, print_function
+from gltbx import wx_viewer
+import wx
+from gltbx.gl import *
+from scitbx.math import minimum_covering_sphere
+from scitbx.array_family import flex
+
+class MyGLWindow(wx_viewer.show_points_and_lines_mixin):
+
+  def __init__(self, *args, **kwds):
+    super(MyGLWindow, self).__init__(*args, **kwds)
+    self.points = flex.vec3_double([ (-5,-5,-5), (-4,0,0), (0,-8,0), (0,0,-11) ])
+    self.line_i_seqs = [ (0,1), (0,2), (0,3), (1,2), (1,3), (2,3) ]
+    self.spheres = [ ((0,0,0), 1) ]
+    self.flag_show_minimum_covering_sphere = False
+    self.minimum_covering_sphere = minimum_covering_sphere(self.points)
+
+class MyApp(wx_viewer.App):
+
+  def init_view_objects(self):
+    box = wx.BoxSizer(wx.VERTICAL)
+    self.view_objects = MyGLWindow(self.frame, size=(600,600))
+    box.Add(self.view_objects, wx.EXPAND, wx.EXPAND)
+    self.frame.SetSizer(box)
+    box.SetSizeHints(self.frame)
+
+if __name__ == '__main__':
+  a = MyApp(title="An example of using gltbx.wx_viewer")
+  a.MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_viewer_leapmotion.py
+
+"""
+Extensions for using the LeapMotion controller with the wxGLWindow class.
+Should be safe to use even if no controller (and no supporting Python module)
+is present.
+
+The basic functionality (though not the actual code) is cribbed from Brad
+Larson's BSD-licensed Molecules app for Mac.
+Copyright (c) 2013, Sunset Lake Software
+All rights reserved.
+https://github.com/BradLarson/MoleculesMac
+"""
+
+from __future__ import absolute_import, division, print_function
+import wx
+
+leap_enabled = False
+try :
+  import Leap
+except ImportError :
+  Leap = None
+else :
+  leap_enabled = True
+  #from Leap import CircleGesture, KeyTapGesture, ScreenTapGesture, SwipeGesture
+
+LEAP_TRANSLATE_ID = wx.NewId()
+LEAP_ROTATE_ID = wx.NewId()
+LEAP_SCALE_ID = wx.NewId()
+
+class LeapMotionEvent(wx.PyEvent):
+  event_id = None
+  def __init__(self, data, **kwds):
+    self.data = data
+    self.__dict__.update(kwds)
+    wx.PyEvent.__init__(self)
+    self.SetEventType(self.event_id)
+
+class LeapTranslationEvent(LeapMotionEvent):
+  event_id = LEAP_TRANSLATE_ID
+
+class LeapRotationEvent(LeapMotionEvent):
+  event_id = LEAP_ROTATE_ID
+
+class LeapScaleEvent(LeapMotionEvent):
+  event_id = LEAP_SCALE_ID
+
+if (Leap is not None):
+  class Listener(Leap.Listener):
+    def __init__(self, viewer):
+      self._prev_frame = None
+      self.viewer = viewer
+      Leap.Listener.__init__(self)
+
+    def on_init(self, controller):
+      #print "Initialized"
+      self._prev_frame = None
+
+    def on_connect(self, controller):
+      #print "Connected"
+      controller.enable_gesture(Leap.Gesture.TYPE_CIRCLE);
+      controller.enable_gesture(Leap.Gesture.TYPE_KEY_TAP);
+      controller.enable_gesture(Leap.Gesture.TYPE_SCREEN_TAP);
+      controller.enable_gesture(Leap.Gesture.TYPE_SWIPE);
+
+    def on_disconnect(self, controller):
+      pass #print "Disconnected"
+
+    def on_exit(self, controller):
+      pass #print "Exited"
+
+    def on_frame(self, controller):
+      frame = controller.frame()
+      prev_frame = self._prev_frame
+      self._prev_frame = frame
+      if (prev_frame is None):
+        return
+      open_hands = []
+      for hand in frame.hands :
+        if (len(hand.fingers) > 1):
+          open_hands.append(hand)
+      if (len(open_hands) < 1):
+        self._prev_frame = None
+      elif (len(open_hands) == 1):
+        first_hand = open_hands[0]
+        if (len(first_hand.fingers) > 2):
+          translation = first_hand.translation(prev_frame)
+          dx_abs = abs(translation.x)
+          dy_abs = abs(translation.y)
+          dz_abs = abs(translation.z)
+          if (dx_abs > 40) or (dy_abs > 40) or (dz_abs > 40):
+            self._prev_frame = None
+            return
+          elif (dz_abs > 1):
+            self.scale(translation)
+          elif (dx_abs > 1) or (dy_abs > 1):
+            self.rotate(translation)
+      else :
+        translation = frame.translation(prev_frame)
+        dx_abs = abs(translation.x)
+        dy_abs = abs(translation.y)
+        dz_abs = abs(translation.z)
+        if (dx_abs > 40) or (dy_abs > 40) or (dz_abs > 40):
+          self._prev_frame = None
+          return
+        if (dx_abs > 1) or (dy_abs > 1):
+          self.translate(translation)
+
+    def translate(self, vector):
+      event = LeapTranslationEvent((vector[0], vector[1]))
+      wx.PostEvent(self.viewer, event)
+
+    def rotate(self, vector):
+      event = LeapRotationEvent((vector[0], vector[1]))
+      wx.PostEvent(self.viewer, event)
+
+    def scale(self, vector):
+      event = LeapScaleEvent(data=vector.z*0.02)
+      wx.PostEvent(self.viewer, event)
+
+else :
+  class Listener(object):
+    def __init__(self, viewer) : pass
+
+class wxLeapMotionWindowMixin(object):
+  def __init__(self):
+    assert isinstance(self, wx.Window)
+    self.Connect(-1, -1, LEAP_TRANSLATE_ID, self.OnLeapTranslate)
+    self.Connect(-1, -1, LEAP_ROTATE_ID, self.OnLeapRotate)
+    self.Connect(-1, -1, LEAP_SCALE_ID, self.OnLeapScale)
+    self.Bind(wx.EVT_WINDOW_DESTROY, self.OnDestroy)
+    self._leap_controller = None
+    self._leap_listener = None
+
+  def start_leapmotion_controller_listener(self):
+    if (Leap is not None):
+      self._leap_controller = Leap.Controller()
+      self._leap_listener = Listener(self)
+      self._leap_controller.add_listener(self._leap_listener)
+
+  def stop_leapmotion_controller_listener(self):
+    if (self._leap_controller is not None):
+      self._leap_controller.remove_listener(self._leap_listener)
+
+  def OnDestroy(self, event):
+    self.stop_leapmotion_controller_listener()
+
+  def OnLeapTranslate(self, event):
+    pass
+
+  def OnLeapRotate(self, event):
+    pass
+
+  def OnLeapScale(self, event):
+    pass
+
+#-----------------------------------------------------------------------
+# CCTBX-SPECIFIC CODE
+from gltbx.wx_viewer import wxGLWindow
+import gltbx.util
+from scitbx import matrix
+class wxGLWindowLeapEnabled(wxGLWindow, wxLeapMotionWindowMixin):
+  # TODO make these user-configurable
+  _leap_rscale = 5
+  _leap_tscale = 1/3.
+  """
+  Drop-in replacement for gltbx.wx_viewer.wxGLWindow.  The Listener object
+  is created when self.initialize_modelview() is called.  Instead of altering
+  the view directly, the OnLeap* event handlers set internal attributes that
+  are processed as part of the idle loop, which seems to run much more
+  smoothly.
+  """
+  def __init__(self, *args, **kwds):
+    wxGLWindow.__init__(self, *args, **kwds)
+    wxLeapMotionWindowMixin.__init__(self)
+    self._leap_rotation = None
+    self._leap_translation = None
+    self._leap_scale = None
+
+  def initialize_modelview(self):
+    wxGLWindow.initialize_modelview(self)
+    if (self._leap_controller is None):
+      self.start_leapmotion_controller_listener()
+
+  def OnLeapTranslate(self, event):
+    self._leap_translation = event.data
+    event.Skip()
+
+  def OnLeapRotate(self, event):
+    self._leap_rotation = event.data
+    event.Skip()
+
+  def OnLeapScale(self, event):
+    self._leap_scale = event.data
+    #self.OnScale(event.data)
+    event.Skip()
+
+  def OnIdle(self, event):
+    if (self._leap_scale is not None):
+      self.OnScale(self._leap_scale)
+      self._leap_scale = None
+    if (self._leap_rotation is not None):
+      self.leap_rotate()
+    if (self._leap_translation is not None):
+      self.leap_translate()
+
+  def leap_rotate(self):
+    dx, dy = self._leap_rotation
+    self.rotate_view(0, 0, dx*self._leap_rscale, -dy*self._leap_rscale,
+      shift_down=False)
+    self._leap_rotation = None
+
+  def leap_translate(self):
+    rc = self.rotation_center
+    rc_eye = gltbx.util.object_as_eye_coordinates(rc)
+    dx, dy = self._leap_translation
+    gltbx.util.translate_object(1, 0, 0, -dx*self._leap_tscale,
+      dy*self._leap_tscale)
+    self._leap_translation = None
+    self.rotation_center = tuple(
+      gltbx.util.modelview_matrix_as_rt().inverse() * matrix.col(rc_eye))
+    self.OnRedraw()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+gltbx/wx_viewers_images.py
+from __future__ import absolute_import, division, print_function
+from gltbx.images import img_data
+
+align_a_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+fafafaeaeaeaebebebedededededededededededededededededededededededededededededed\
+ededededededededededededededededededededededededededededededededededededededed\
+edededededededededebebebeaeaeaf8f8f8e6e6e6d1d1d1dbdbdbd0d0d0cfcfcfcfcfcfcfcfcf\
+cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf\
+cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfd0d0d0dbdbdbd2d2d2e3e3e3e7e7e7\
+e5e5e59f9f9f1e1e1e141414141414141414141414141414141414141414141414141414141414\
+141414141414141414141414141414141414141414141414141414141414141414141414141414\
+1414141515159a9a9ae7e7e7e4e4e4e7e7e7e6e6e67a7a7a0b0b0b828282878787868686868686\
+868686868686868686868686868686868686868686868686868686868686868686868686868686\
+8686868d8d8d898989868686868686868686868686888888c9c9c9e1e1e1e4e4e4e7e7e7e6e6e6\
+7b7b7b1b1b1be9e9e9f0f0f0efefefefefefefefefefefefefefefefefefefefefefefefefefef\
+efefefefefefefefefefefefefefeff0f0f0f0f0f0b4b4b4d1d1d1f2f2f2efefefefefefefefef\
+efefefeaeaeadededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e7\
+262626848484efefefe6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b\
+1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e72c2c2c8a8a8af7f7f7e8e8e8edededeaeaeae6e6e6\
+e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e72f2f2f\
+727272646464313131525252c5c5c5ebebebe7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1a\
+e0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e7e7e7e7e7e73434340d0d0d6767679c9c9c3d3d3d1d1d1dd6d6d6e9e9e9\
+dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e72c2c2c5a5a5a\
+f4f4f4f2f2f2d7d7d70e0e0e8e8e8eefefefdededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e7e7e7e7e7e72d2d2d929292efefefe6e6e6ececec3636366a6a6af1f1f1dedede\
+e4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e72c2c2c8e8e8eefefef\
+e6e6e6ebebeb333333707070f1f1f1dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e7e7e7e7e7e72c2c2c565656f5f5f5f2f2f2d4d4d40f0f0fa3a3a3eeeeeedededee4e4e4\
+e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e72c2c2c0e0e0e6c6c6c9b9b9b\
+383838373737e3e3e3e8e8e8dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e7e7e7e7e7e7828282a2a2a25c5c5c353535606060d4d4d4eaeaeae7e7e7dededee4e4e4e7e7e7\
+e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6eeeeeeecececeeeeeee9e9e9eeeeee\
+e9e9e9e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e6\
+7b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b\
+1a1a1ae0e0e0e7e7e7e6e6e6e7e7e7ebebebececece9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0e7e7e7e9e9e9e5e5e5b8b8b8acacac\
+d3d3d3ececece6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1a\
+e0e0e0eaeaead6d6d6414141191919232323191919a2a2a2ececece6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7\
+dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0eeeeee565656282828d2d2d2e7e7e7656565\
+1a1a1ae1e1e1e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae2e2e2\
+d9d9d90f0f0f919191f2f2f2eaeaead6d6d6949494dededee7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dedede\
+e4e4e4e7e7e7e6e6e67b7b7b1a1a1ae4e4e4c8c8c8070707b1b1b1ececece5e5e5ebebebf7f7f7\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae3e3e3d0d0d0\
+090909a6a6a6efefefe9e9e9d4d4d48f8f8fdededee7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4\
+e7e7e7e6e6e67b7b7b1a1a1ae0e0e0eaeaea3939394a4a4aebebebf0f0f0636363212121e4e4e4\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e67b7b7b1a1a1ae0e0e0ecececc0c0c0\
+2121212e2e2e363636191919abababececece6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7\
+e6e6e67a7a7a181818e0e0e0e7e7e7ebebebd6d6d69b9b9b989898cfcfcfececece6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7e6e6e6858585252525e3e3e3e7e7e7e6e6e6e9e9e9\
+eeeeeeeeeeeee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e6e6e6d7d7d7\
+d4d4d4c2c2c2e1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e1e1e1d8d8d8e2e2e2f5f5f5dededee2e2e2e4e4e4e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e1e1e1dededef2f2f2\
+""")
+
+align_b_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+fafafaebebebebebebedededededededededededededededededededededededededededededed\
+ededededededededededededededededededededededededededededededededededededededed\
+edededededededededecececeaeaeaf8f8f8e8e8e8d0d0d0dcdcdcd1d1d1cfcfcfcfcfcfcfcfcf\
+cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf\
+cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfd0d0d0dbdbdbd3d3d3e0e0e0e9e9e9\
+e2e2e2b9b9b9222222151515141414141414141414141414141414141414141414141414141414\
+141414141414141414141414141414141414141414141414141414141414141414141414141414\
+1414141616169d9d9de8e8e8e2e2e2e9e9e9e3e3e39e9e9e010101777777888888868686868686\
+868686868686868686868686868686868686868686868686868686868686868686868686868686\
+868686868686868686868686868686868686858585878787cacacae2e2e2e2e2e2e9e9e9e3e3e3\
+9f9f9f090909d6d6d6f3f3f3efefefefefefefefefefefefefefefefefefefefefefefefefefef\
+efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\
+efefefeaeaeadfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f\
+090909cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7eeeeeee9e9e9e8e8e8eeeeeee8e8e8\
+e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7\
+e8e8e88a8a8a3535352f2f2f6e6e6edededee9e9e9dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909\
+cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6eeeeee7d7d7d0f0f0f8888889797971717175f5f5feeeeee\
+dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e8e8e8dadada121212\
+848484f7f7f7f5f5f5a0a0a04b4b4be4e4e4e0e0e0e2e2e2e9e9e9e3e3e39f9f9f090909cecece\
+e9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6ebebebbcbcbc060606bdbdbdebebebe6e6e6e9e9e9e8e8e8e7e7e7dfdfdf\
+e2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6ebebebb8b8b8070707c3c3c3\
+eaeaeae7e7e7e4e4e4d7d7d7e6e6e6dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e8e8e8d4d4d40e0e0e959595f7f7f7f6f6f6868686393939e6e6e6dfdfdfe2e2e2\
+e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6ededed7171711515158f8f8f\
+8989890e0e0e838383eeeeeedfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e7e7e7e6e6e68484843b3b3b3f3f3f8f8f8fe8e8e8e7e7e7dfdfdfe2e2e2e9e9e9\
+e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7eeeeeeebebebececec\
+eeeeeee7e7e7e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e3\
+9f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f\
+090909cececee9e9e9e6e6e6e7e7e7e9e9e9e9e9e9e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cececee9e9e9ebebebe5e5e5cbcbcbcdcdcd\
+e6e6e6ebebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909\
+cececeeeeeeebbbbbb3535352222221f1f1f373737bfbfbfeaeaeae6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7\
+dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cfcfcfededed333333535353d9d9d9d4d4d43e3e3e\
+494949eeeeeee6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909cecece\
+e7e7e7afafafdadadae3e3e3d7d7d7545454393939ebebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdf\
+e2e2e2e9e9e9e3e3e39f9f9f090909cececeeeeeeeb4b4b44646462a2a2a2f2f2f1c1c1c404040\
+ebebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909d2d2d2cdcdcd\
+0d0d0d6c6c6cc3c3c3e4e4e4717171393939ebebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2\
+e9e9e9e3e3e39f9f9f090909d5d5d5b0b0b0030303d0d0d0fafafae4e4e43131313e3e3ef0f0f0\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e39f9f9f090909d0d0d0dbdbdb262626\
+2e2e2e6363633b3b3b3e3e3e111111a1a1a1ececece6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9\
+e3e3e39e9e9e070707cdcdcdedededcecece797979727272b7b7b7e1e1e18b8b8bb3b3b3eaeaea\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9e3e3e3a7a7a7131313d3d3d3e9e9e9eaeaeaf0f0f0\
+f0f0f0ebebebe8e8e8f0f0f0ebebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e8e8e8d6d6d6\
+dadadabebebee0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e1e1e1d9d9d9e0e0e0f6f6f6dededee1e1e1e5e5e5e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e1e1e1dededef1f1f1\
+""")
+
+align_c_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+f8f8f8eaeaeaebebebedededededededededededededededededededededededededededededed\
+ededededededededededededededededededededededededededededededededededededededed\
+edededededededededecececeaeaeaf7f7f7e4e4e4d2d2d2dcdcdcd1d1d1cfcfcfcfcfcfcfcfcf\
+cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf\
+cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcfd0d0d0dadadad4d4d4dededee5e5e5\
+e5e5e5ababab1f1f1f151515141414141414141414141414141414141414141414141414141414\
+141414141414141414141414141414141414141414141414141414141414141414141414141414\
+141414151515919191eaeaeae0e0e0e5e5e5e7e7e78b8b8b0505057d7d7d878787868686868686\
+868686868686868686868686868686868686868686868686868686868686868686868686868686\
+868686868686868686868686868686868686868686878787c5c5c5e3e3e3e0e0e0e5e5e5e7e7e7\
+8c8c8c111111e1e1e1f1f1f1efefefefefefefefefefefefefefefefefefefefefefefefefefef\
+efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\
+efefefe9e9e9e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c\
+101010d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e9e9e9efefefe9e9e9eaeaeaefefefe7e7e7\
+e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e9e9e9\
+d1d1d16464643535353a3a3a7a7a7adfdfdfe8e8e8e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010\
+d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e8e8e8373737373737a5a5a5919191141414747474efefef\
+e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dedede707070\
+d2d2d2fafafafafafa555555484848eeeeeee0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8\
+e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6ebebebd6d6d67d7d7d5050503d3d3d101010515151eeeeeee0e0e0\
+e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e9e9e9cecece1f1f1f414141\
+898989b4b4b45353534b4b4beeeeeee0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6efefef9696960b0b0be2e2e2fafafaf6f6f63b3b3b4f4f4ff2f2f2e0e0e0e0e0e0\
+e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6ebebebb8b8b8060606717171a3a3a3\
+5a5a5a1616162e2e2ecbcbcbe3e3e3e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6eaeaea9696963737373d3d3d8a8a8abdbdbd4a4a4aa1a1a1e7e7e7e0e0e0e5e5e5\
+e7e7e78c8c8c101010d8d8d8e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6ededede9e9e9eaeaeaeeeeee\
+eaeaeaededede9e9e9e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d8d8d8e8e8e8e7e7e7e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e7\
+8c8c8c101010d8d8d8e8e8e8e2e2e2e4e4e4e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d9d9d9e6e6e6444444a1a1a1ededed\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c\
+101010d9d9d9e6e6e6202020919191f3f3f3eeeeeeebebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d9d9d9e6e6e6242424969696bfbfbf929292\
+b6b6b6eaeaeae7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010\
+d9d9d9e6e6e62b2b2b3131312828283636360d0d0d6d6d6deaeaeae6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d9d9d9e6e6e6262626323232d9d9d9f0f0f09c9c9c\
+010101b7b7b7ebebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d9d9d9\
+e6e6e6242424919191f1f1f1e7e7e7e6e6e6202020808080f0f0f0e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0\
+e0e0e0e5e5e5e7e7e78c8c8c101010d9d9d9e6e6e6262626a0a0a0eeeeeee6e6e6eaeaea303030\
+747474f0f0f0e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d9d9d9e6e6e6\
+232323858585f3f3f3e9e9e9e2e2e2191919929292eeeeeee6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0\
+e5e5e5e7e7e78c8c8c101010d9d9d9e6e6e6252525252525cccccce7e7e7828282121212d2d2d2\
+e9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e7e7e78c8c8c101010d9d9d9e6e6e63c3c3c\
+4e4e4e2525252626261919199e9e9eededede6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5\
+e7e7e78b8b8b0e0e0ed8d8d8e8e8e8d6d6d6e5e5e5c9c9c9afafafd1d1d1ececece6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5e6e6e69595951b1b1bdcdcdce8e8e8e8e8e8e7e7e7\
+eaeaeaececece9e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e3e3e3d8d8d8\
+d7d7d7c0c0c0e1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0dadadadededef3f3f3dededee2e2e2e5e5e5e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0dededef0f0f0\
+""")
+
+centre_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+f9f9f9e3e3e3e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e4e5e5e5e5e5e8e8e6\
+ecebe8eeede9efeee9efeee9eeeee9ecece8e8e8e6e5e5e5e4e4e5e5e5e5e5e5e5e5e5e5e5e5e5\
+e5e5e5e5e5e5e5e5e5e5e5e5e3e3e3f5f5f5ecececd1d1d1dedededededededededededededede\
+dedededddddee0e0dfe6e6e2e1e1dfc5c6d3a1a3c28287b57177ad7076ad7f84b39b9fc0c0c1d0\
+dededee7e7e2e1e0dfdddddededededededededededededededededfdfdfd5d5d5e3e3e3ededed\
+dadadae8e8e8e7e7e7e7e7e7e7e7e7e7e7e7e8e7e7f0efebdbdce29093c03f479c0d188500027b\
+00007800007800007800007800007b081383363e978387bad3d4def0f0ebefefefe9e9e9e6e6e6\
+e7e7e7e7e7e7e8e8e8dededee5e5e5edededd9d9d9e7e7e7e6e6e6e6e6e6e6e6e6eaeae8e8e8e7\
+9095c0222a8e00007900027b1a258b4951a06d74b08086b98187b97177b24f57a3212b8e00057c\
+00007817208a7b81b58e8e8ed9d9d9eaeaeae6e6e6e6e6e6e7e7e7dddddde5e5e5edededd9d9d9\
+e7e7e7e6e6e6e6e6e6ecece9d5d6df4c53a100017a00077d464d9ea3a7c8dadbe1edece9f0efea\
+f0efeaf0efeaf0f0eaeeede9dfdfe3aeb1cd555ca609128303093d242321555555ddddddeaeaea\
+e6e6e6e7e7e7dddddde5e5e5edededd9d9d9e7e7e7e6e6e6ecece9cbccda2b3492000078242c8f\
+a5a8c9ebebe8eeeeeae8e8e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7efefebedecea\
+5455643736354242422d2d2d535353dcdcdceaeaeae7e7e7dddddde5e5e5edededd9d9d9e7e7e7\
+eaeae8d4d5de293391000078434b9dd5d6dfefefeae6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e8e8e8e8e8e87575754343414e4e4d4545454040402d2d2d535353d7d7d7\
+e9e9e9dddddde5e5e5edededd9d9d9e8e8e8e7e7e6454f9f000078444d9ee1e2e4ebebe8e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e8e8e8e8e8e87979794a4a4a5a5a5a\
+5252524c4c4c454545424242242422878787f0efefdddddde5e5e5edededd9d9d9f0f0eb888dbc\
+000179273090d8d9e0ebebe8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e4e4e4e7e7e7e8e8e8\
+e7e7e7e8e8e87d7d7d5454546767675e5e5e5858585252524e4e4d3a3a38070939676eabefefeb\
+dddddde5e5e5edededdcdcdbd6d7e019238a040b7eacafccefeeeae6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e8e8e8d8d8d76f6f6fddddddebebeb8080805d5d5d7474746b6b6b6565655e5e5e\
+5a5a5a45454454555d121b850a1384c1c3d6e2e2dfe5e5e5ededede3e2de8388bb0000784f58a3\
+edede9e6e6e6e8e7e7e9e9e8ebebe8ebebe8e9e9e8e7e7e6e5e5e6e1e2e45c5d5e7272727f7f7f\
+6767677f7f7f7676767171716b6b6b676767505050656565e9e9e57178b40000776269ace6e5e1\
+e5e5e5eeededd9d9d9313b9601087db2b5cff2f1ebe7e7e6dadbe1c8cad8b5b8d0a4a8c8979bc3\
+8d92be858fc0848cbf5a576d797a787474748a8a8a8181817c7c7c7676767373735e5e5d5c5c61\
+dededff3f2edcbcdda0b158417238acecfd7e7e7e6f1f1efb5b7c9040f82283392d1d3ddb1b4ce\
+8e93be787eb56c74af6870ae6971ae6c74af717eb87d5c89a01f307c0c0f7f83839797978c8c8c\
+8787878181817f7f7f6969683c3f547077ac8b91bfa8accad5d6df434d9e00037b9ea2c1ecece8\
+f5f5f18a8eb600027b3641987c83b76870ad6e75b08086b8969ac2abaeccbcbfd3cbd2e0c399a3\
+b0080ac30000a60000736c6c9b9d9d9292928c8c8c898989747473626265959abc868cbd7178b1\
+6870ae797fb54851a00000796d73abefefeaf7f6f1676ea700017a3e479a7f86b8a6aac9cbcdda\
+e1e1e4e9e9e7ebebe8ebebe9e8e5e4bc2f2ebe0000cf0000cc0000714e4ea3aaaa9b9b9b949494\
+8181816a6a6addddddededebe3e3e5d1d2dcadb1cd848aba4d56a100037b4a539cedede9f6f6f1\
+535a9d0000796e76b1e4e4e5ebebe8e9e9e7e7e7e6e6e6e6e6e6e6e7ebebdbbcbcb50202c90000\
+db0000ed0000891a1a7165657c7d7d878e8e7f82826e6d6ddddddde9e9e9e6e6e6e9e9e7ebebe8\
+e7e7e78b90bd00047b374193eaeae7f6f5f14f579c00027b3a4299c4c6d7efeeeaeeeeeae9e9e7\
+e6e6e6e6e6e6e8ececd8b1b1b60000cc0000df0000f30000f30000ca0000a201017d0f0f785c5c\
+5e61615c5c5ce0e0e0eae9e8edede9f0efead0d1dc4f56a200037b343e92eae9e7f6f6f15c63a2\
+00057d00047c081383555ca5a1a5c7d2d2dde8e8e7efefeaf0f2ede8d6d2bd130fcb0000dc0000\
+e90000ec0000e30000d50000c40300e5bfbbebeeead3d3cee3e3e1d7d8dfaaadcb6168ab121b87\
+00027b00067d404997ecebe8f6f6f1767cad00037c232e9017238a00007800007a0f1a86363f98\
+5e65aa8187b99da6cb96405a9c0216b10211bd010ebf010eb50211a10215952a44a0a3c7878cbd\
+676eaf3d469b141f8800037b0000770e1a8629349200047c5960a3efeee9f3f3f09ea2bf00047c\
+4851a0d7d8df8e92be4a51a019238a00097e00007800007700007900077f00067b020778050877\
+06087703077800077a00087f00007a00007700007800067d141e8841499c8387b9d3d4dd676eae\
+0000798389b6eeeee9efefeec9cad214218a0e1a86d3d4ddf2f2ececece9dadae0bbbdd3989cc3\
+777db55c63a847509f38429a2e39962733932633932c3895364199444d9e5860a77279b39397c1\
+b6b8d0d6d6dfebeae8f1f0ebe4e5e5242f90040e81b7b9cceaeae7ededede1e1dd555da7000078\
+848abbf1efeae6e6e6e8e8e7ebebe8eeeeeaf0efeaefefeaecece9e9e8e7e5e5e6e3e3e4e2e3e4\
+e5e5e5e8e8e7ecebe9efeeeaf0efeaefeeeaecece9e8e8e7e6e6e6eeeeeaa3a7c800047b364098\
+dededee6e6e5ededede0e0dcb0b3cf02087d202b8edadbe1e9e9e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e7e7e6e7e7e6e7e7e6e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e7e7e7e7e7e73943990001799297c1e6e6e1e5e5e5edededdadad9ebebe94751a0000078\
+6a71aff0efeae6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6f1f0eb888ebd00027a2c3693e1e2e4dfdede\
+e5e5e5edededd9d9d9edeceac2c5d60f188503097e999ec4f1f0ebe6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6f0efea\
+b3b6d00d1583040b7faaadcbeeeeeadddddde5e5e5edededd9d9d9e7e7e7efefea9197c100057d\
+0b1383a1a5c8f1f0ebe7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6f1f0ebb8bbd219218a000079747bb4eeeeeae7e7e7dddddde5e5e5\
+edededd9d9d9e7e7e7e6e6e6eeede97980b600037c060f818388bae8e8e7edede9e7e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6ecebe9edede9989dc3111a86000079\
+5e66aae9e9e7e7e7e7e7e7e7dddddde5e5e5edededd9d9d9e7e7e7e6e6e6e7e7e6edece98489ba\
+050d8000007a40489cb1b4cee9e9e7f0f0eaecece9e9e9e7e8e8e7e8e8e7e9e8e7ebebe8f0efea\
+ecece9bebfd45158a300057c00057c6b72b0e8e8e7e8e8e7e6e6e6e7e7e7dddddde5e5e5ededed\
+d9d9d9e7e7e7e6e6e6e6e6e6e7e7e6efeeeaacb0cc2b339200007800097e3a43998388bab6b9d1\
+d1d2dddbdce1dcdce2d3d4debcbed38c91be454d9e040f810000781d258b999ec4edece9e8e8e7\
+e6e6e6e6e6e6e7e7e7dddddde5e5e5edededd9d9d9e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6eeeeea\
+dedee38388ba262f9000037b00007800077e0d19861a258c1b268c101c87000a7f00007800007a\
+1c258c7479b3d5d6deefefeae7e7e7e6e6e6e6e6e6e6e6e6e7e7e7dddddde5e5e5ecececd3d3d3\
+e1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e2e2e1e9e9e4d8d9dda2a4c46369a8343d93182387\
+0c18820b17811621862f38915b61a4989bc0d2d3dae9e9e4e3e3e1e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e1e1e1d7d7d7e3e3e3f8f8f8dfdfdfe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e2e2e1e8e7e4eaeae5e3e3e2d8d9ddd0d1d9cfd0d9d7d7dce2e2e1eae9e5e8e8e4e3e3e1\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e1e1e1dededef3f3f3\
+""")
+
+fit_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+f6f6f6e5e5e5ededededededededededededededededededededededededededededededededed\
+ededededededededededededededededededededededededededededededededededededededed\
+edededededededededededede4e4e4f4f4f4e8e8e8c3c3c39090908a8a8a8a8a8a8a8a8a8a8a8a\
+8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a\
+8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8b8b8b969696cececee3e3e3f1f1f1\
+8282820000000c0c0c0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d\
+0d0d0d0e0e0e0e0e0e0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d\
+0e0e0e0a0a0a000000aaaaaaeaeaeaf1f1f17a7a7a131313cbcbcbd6d6d6d4d4d4d4d4d4d4d4d4\
+d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d5d5d5d8dbdbd0d2d2d2d4d4d7dadad5d5d5d4d4d4d4d4d4\
+d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d8d8d8b3b3b3040404a5a5a5eaeaeaf1f1f17a7a7a\
+151515dededeeaeaeae8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e9eaeaecf0f0e4e5e5c5a9a9\
+a65656ab6060ccb5b5e6e9e8ecefefe9e9e9e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8ededed\
+c4c4c4050505a5a5a5eaeaeaf1f1f17a7a7a151515dcdcdce8e8e8e6e6e6e6e6e6e6e6e6e6e6e6\
+e7e8e8eaeeeee0e0e0c0a2a1a250509e2729a7292cab2c2ea83233af6061c9afafe2e4e4e9ecec\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6eaeaeac2c2c2050505a5a5a5eaeaeaf1f1f17a7a7a151515\
+dcdcdce8e8e8e6e6e6e6e6e6e7e8e8eaeeeedfdedebe9c9ca04b4b9d2627a7292cac3133af3436\
+b33739b7393bb83538b4393ab56262c9acace0e2e2e9ecede7e7e7e6e6e6e6e6e6eaeaeac2c2c2\
+050505a5a5a5eaeaeaf1f1f17a7a7a151515dcdcdce8e8e8e7e8e8eaeeeededcdbbb97969f4647\
+9c2426a6292bab3032ae3335b23638b5383bb83b3dbc3d3fbf4042c34244c54143bf4143bb6364\
+c9a9a8dfe0e0e8ecece7e7e8eaeaeac2c2c2050505a5a5a5eaeaeaf1f1f17a7a7a151515dcdcdc\
+ebededddd9d9b991909d42429b2325a5292baa3032ad3234b13537b4383ab73a3cbb3c3ebe3f41\
+c14244c44547c74749ca494ccd4c4ed04b4dc94a4bc06666c9a6a6e1dfdfeceeeec2c2c2050505\
+a5a5a5eaeaeaf1f1f17a7a7a151515dfe1e1bda5a48f39399a2123a6292ba92f31ac3234b03537\
+b4383ab83b3eba3c3fbd3f41c04143c34446c74649c9494bcc4b4ecf4e50d25153d45355d85658\
+de575ad45355ac5858cbbcbbc5c6c6050505a5a5a5eaeaeaf1f1f17a7a7a151515dfe3e3b48281\
+972c2c932e2e9d2d2eae3335b5383ab73a3db33335af282aba393bc44547c74749c9484bcb4a4d\
+ce4d4fd15052d35254d65557dc5a5cda5a5cc24d4ea0393a852222bfa2a2c6c9c9050505a5a5a5\
+eaeaeaf1f1f17a7a7a151515dfe3e3b68585aa3839b24444a63f409b3736a22f30a91f20ab0f11\
+ad0b0dae1013b52628c34143ce4e51d15153d25153d65456db595bd8585ac04c4da43d3d9a3536\
+9933348b2728c1a6a5c6c9c9050505a5a5a5eaeaeaf1f1f17a7a7a151515dfe3e3b48484a33536\
+b04243b13b3ca52021950c0c900b0ba10d0eb50d10bd0c10bc0a0db90f11bd2729cb4748db595b\
+d6585abe4b4ca94141a94041ae4042a63b3d993334862526c1a5a5c6c9c9050505a5a5a5eaeaea\
+f1f1f17a7a7a151515dfe4e3b38484972728951a1b9a0b0da5090bb00b0db20b0ea50c0d9b0c0d\
+aa0c0ec20d0fcc0c10cf0a0dc20f11a82626a93e3eb94b4cc14c4eb94749ad3f41a2383a963132\
+832324c0a5a4c6c9c9050505a5a5a5eaeaeaf1f1f17a7a7a151515e0e4e4b285848916178a0708\
+940b0ca10b0dad0b0db50b0ebe0b0ec10b0eb20c0ea60d0eb70d0fb20d0e990c0c950707bf3d3f\
+cc5658bf4b4db54446aa3d3f9e3638922f307f2122bfa4a4c6c9c9050505a5a5a5eaeaeaf1f1f1\
+7a7a7a151515e0e4e4b083838616168b090a940b0d970c0c9e0b0cae0b0dbc0b0ec50b0ece0b0f\
+c70c0e950c0c9b0c0dab0b0ea4090bbe3d3fc85355bc494bb24244a73b3d9b34358f2d2e7c2020\
+bea4a4c6c9c9050505a5a5a5eaeaeaf1f1f17a7a7a151515e0e4e4ae828281141486090a910b0c\
+9a0c0da00c0ea20c0da90c0db60b0db00b0dae0c0e9c0c0ea90c0eab0b0ea0090bbc3c3ec55153\
+b94749af4042a43a3c9833348b2b2c781d1ebea4a4c6c9c9050505a5a5a5eaeaeaf1f1f17a7a7a\
+151515e0e4e4ac81817c121381090a8b0b0c940b0d9e0c0ea80d0fad0e0fa30c0eac0c0fb10c0f\
+9b0c0da60c0ea90b0e9e080ab93b3cc34f51b74547ac3f41a13839943131882a2b751c1dbda4a3\
+c7c9c9050505a5a5a5eaeaeaf1f1f17a7a7a151515e0e4e4aa807f7710117c080a860a0c8f0b0c\
+980c0da10c0eab0d0fa30c0eaa0c0ead0c0e990c0da50b0ea60b0d9d080bb73a3cc04d4fb44345\
+a93d3f9e3637912f30842829711a1bbca3a3c7c9c9050505a5a5a5eaeaeaf1f1f17a7a7a151515\
+e1e4e4a87e7e720e0f77080a800a0b890b0c930b0d9c0c0da50d0e9f0c0da60c0eaa0b0e970b0d\
+a30b0ea40b0d9b090bb5393abd4b4db14244a63b3d9a34358e2d2e8126276d1819bca3a2c7c9c9\
+050505a5a5a5eaeaeaf1f1f17a7a7a151515e1e4e4a67d7d6c0c0e7107087b0a0b850a0c8d0b0c\
+970c0da00c0e9c0c0da30c0ea60b0e950b0da10b0da20a0c980609b33739bb494bae4042a3393b\
+9732338a2b2c7d24256a1617bba3a2c7c9c9050505a5a5a5eaeaeaf1f1f17a7a7a151515e1e4e4\
+a27a7a690d0f73111276090b7e090a880b0c910b0d9a0c0d980c0d9f0c0da30c0d920b0c9d080a\
+a10d0fad292bbc4749b64648ac3e40a0373994303187292a782021620e0fbaa2a2c7c9ca050505\
+a5a5a5eaeaeaf1f1f17a7a7a151515dedfdfd6cdcd9869697926277b1a1b7e1314810a0b8b0a0b\
+950b0d940b0c9c0b0d9e090b8e0b0cad2829c84b4dc95456be4b4db34345a83c3e9d3537902d2e\
+7e1f20782c2ca17b7be1dcdcc3c4c4050505a5a5a5eaeaeaf1f1f17a7a7a151515dcdcdceaecec\
+e9ececcabbbb975f5f842829881f208914158d0a0b8f090a950b0ca42021a43535cb5759d0585a\
+c54f51bb484ab04143a63a3c962c2d893030a17271d4cbcbebeeeeecececc2c2c2050505a5a5a5\
+eaeaeaf1f1f17a7a7a151515dcdcdce8e8e8e6e6e6eaecece6e9e8c4b0af9957578f2c2d932324\
+921a1ba63434bb494aaa4141c75254cc5557c24d4fb94648ac3a3c9b3637a56a6acfc2c1e9ecec\
+e9eaeae6e6e6eaeaeac2c2c2050505a5a5a5eaeaeaf1f1f17a7a7a151515dcdcdce8e8e8e6e6e6\
+e6e6e6e6e7e7eaedede3e4e4bfa4a39d51519d3334ac3d3eb64546a63d3dc65152cb5355bf4749\
+ac3e40aa6565cbb8b8e7eaeae9ebebe6e6e6e6e6e6e6e6e6eaeaeac2c2c2050505a5a5a5eaeaea\
+f1f1f17a7a7a151515dcdcdce8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7eaededdfdedeba9897\
+a14c4cab3a3ba33939c44d4ebf494bb26263c7afaee4e6e6e9ecece6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6eaeaeac2c2c2050505a5a5a5eaeaeaf1f1f17a7a7a151515dcdcdce8e8e8e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e8e8e8eaeeeedbd7d7ba8e8d98403fb25a5bc7a7a7e1e2e2eaeded\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6eaeaeac2c2c2050505a5a5a5eaeaeaf1f1f1\
+7a7a7a151515dfdfdfebebebe9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9eaebeb\
+ecefefd5ccccddd9d9ecf0f0e9eaeae9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9e9\
+edededc4c4c4050505a5a5a5eaeaeaf1f1f17b7b7b0000002c2c2c2f2f2f2e2e2e2e2e2e2e2e2e\
+2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e3032323030302e2e2e2e2e2e2e2e2e2e2e2e\
+2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2f2f2f262626000000a6a6a6eaeaeaeaeaeab4b4b4\
+636363595959595959595959595959595959595959595959595959595959595959595959595959\
+595959595959595959595959595959595959595959595959595959595959595959595959595959\
+5959596a6a6ac7c7c7e4e4e4f4f4f4e2e2e2eaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaea\
+eaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaea\
+eaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae0e0e0f2f2f2\
+""")
+
+mark_snap_back_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+fefefef7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7\
+f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7\
+f7f7f7f7f7f7f7f7f7f7f7f7f6f6f6fdfdfdebebebcfcfcfd7d7d7d7d7d7d9d9d9d1d1d1cdcdcd\
+cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdd0d0d0d9d9d9d8d8d8d6d6d6d6d6d6\
+d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d7d7d7d1d1d1e3e3e3e9e9e9\
+dcdcdcebebebdfdfdfbebebec7c7c7d3d3d3d2d2d2cfcfcfc9c9c9c9c9c9c9c9c9d0d0d0d2d2d2\
+d3d3d3c6c6c6bebebeddddddeaeaeae7e7e7e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8\
+e8e8e8e8e8e8e9e9e9e0e0e0e2e2e2e9e9e9dcdcdcdededebababae9e9e9dcdcdca7a7a7a7a7a7\
+c0c0c0f8f8f8f6f6f6f6f6f6b8b8b8a7a7a7a8a8a8e6e6e6eaeaeabbbbbbdbdbdbe7e7e7e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9dedede\
+bebebee6e6e6fefefe9e9e9e000000000000282828efefeff5f5f5e3e3e3131313000000000000\
+c1c1c1fcfcfceaeaeabcbcbce8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e7e7e7dfdfdfe2e2e2e9e9e9d6d6d6c3c3c3f6f6f6fbfbfba1a1a10000000d0d0d0b0b0b\
+d1d1d1fcfcfcbcbcbc0303030b0b0b000000bcbabaece8e8f8fafac7c8c8dddddde7e7e7e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2eaeaead2d2d2c8c8c8\
+f6f6f6fbfbfba1a1a1000000393939060606a3a3a3ffffff8686861112122f2f2f0000009d7474\
+c88e8ed1b1b1bcb6b6d9dedeebeeeee6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e7e7e7dfdfdfe2e2e2eaeaead2d2d2c8c8c8f6f6f6fbfbfba1a1a10000005a5a5a1f1f1f6a6a6a\
+ffffff4d4e4e2d2222382d2d000000a66a6bd68889d48686a26061924d4dc2b1b1e4e9e9ebeeee\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dfdfdfe2e2e2eaeaead2d2d2c8c8c8f6f6f6\
+fbfbfba1a1a10000006d6d6d5153532e2d2dccb6b5151312603d3e402929000000a86b6cd9898a\
+da8a8bb25e60a50104a10c0d9e4848bda8a7e1e6e5ebeeeee7e7e7e6e6e6e6e6e6e6e6e6e7e7e7\
+dfdfdfe2e2e2eaeaead2d2d2c8c8c8f6f6f6fbfbfba2a2a200000065605f766a6a080303935f60\
+010000925e5f3f2929000000ab6b6cdc898add8a8bb45f60af090cc10c0fc00609ad090ba13e3f\
+b99e9ddee2e2ebefefe6e6e6e6e6e6e7e7e7dfdfdfe2e2e2eaeaead2d2d2c8c8c8f6f6f6fbfbfb\
+9c9a9a000000573b3b9c6767020101492f30080505bb77783d2627000000ad6b6cdf898ae08a8b\
+b75f61b5090cc50d10c80d11ce0d11d0070bc0070aa83536b19594e4e4e4e6e7e7e7e7e7dfdfdf\
+e2e2e2eaeaead5d5d5c4c4c4f6f6f6fbfcfc948d8d000000533939bf7f7f100a0a040202261818\
+d787883b2525000000b06b6ce3898ae48b8cb6595abe080ccb0d11cf0d11d70d11d60d11b70d0f\
+7c0304652220dfdddceaebe7eaeae7e0e0dfe2e2e2e9e9e9dcdcdcbebebeedededfdfdfd938d8d\
+0000004b3535c58e8d261c1c000000503132e78e8f342020000000b06a6be78a8be18b8caa3437\
+ce090dd60d11d20d11ae0d0f7b0d0d5f0c0c5a07096c2a29dbd9dfcccce9cbcbe9d5d5e0e3e3e2\
+e9e9e9ddddddd8d8d8bfbfbff5f6f6bbadad6f4e4f97696ad391929967687651529e706fdd8d8e\
+9d6060865051d37f80e68d8fb65759c40c10d00d10a70d0f790d0d670d0d680c0e660c0d5e0709\
+6e2d29c4c3e05e5ef15757f1ababe2e8e8e2e9e9e9dbdbdbeaeaead5d5d5bec1c1aa9696a26869\
+a56a6ba36768ad6b6cb46e6fae6b6c9f6767ac6a6abb6b6cc06163b5393cb80c10a30c0d780e0e\
+6f0e0e740e0f710d0f6a0c0e640c0d5c07086d2c29c4c3e05d5df15555f1ababe2e8e8e2e9e9e9\
+dededcededeaebebe9ebefef977272690204770c0e7e0d0f850e108c0f119410129c10139d1113\
+850f10840b0b9b0905800e0a780f0f7f0f117c0e10750d0f6e0d0e680c0e630b0d5a07086c2c29\
+c4c3e05d5df15656f1ababe2e8e8e2ebebeac3c4d0b6b6cfd1d3ddf4f7f4a179796f04057e0e10\
+850f118d10129411139c1214a41315ac1416b71517a6141a3f0b476c1033841014820e0a7a0d0c\
+730d0f6d0d0e670c0d610b0c5806086b2c29c5c3e05d5df15656f1ababe2e8e8e2f1f1ed8c91b8\
+00017a283191bcc2dba47b776e04017b0e0e810f108810128f10139712149e1215a61316af1416\
+aa141b15077b0e1199311c8c551d626c152e710d0d6d0a06660b0a5f0b0c5706086b2c29c5c3e0\
+5d5df15656f1ababe2e8e8e2eaeaead8d8da4e57a40000790311842c2574460b34670d1d7b0e11\
+880f0d91100d98110f9e1211a51312ae1413a813181907760f11981d1fab292dbe3735bf49309c\
+59235f6113255e09065503006a2b26c5c3e05d5df15656f1ababe2e8e8e2e9e9e9dededce5e5e6\
+8489ba1f278c000882000d89040d7d170d6a2f0e58460e475b0f3a6e10317d112b8a12278a1228\
+1507780f11981f1fa72c2cb73636c43b3dd14144db4a45cf53399e53205369323bc4c2df5d5df1\
+5656f1ababe2e8e8e2e9e9e9dbdbdbe8e8e8efefeadee1e7725f8322054c110d6e020d7e000d87\
+000d89000d89000d86000d84000d81010c7f0507861211961f1fa72c2cb73636c33c3ccb4242d3\
+494adf4e54f15458f7645acfa8a6e75f5ff05656f1ababe2e8e8e2e9e9e9dbdbdbe7e7e7e6e6e6\
+eef3f29f7873580000650c0f5f0d1e550d2f490e3e3e0e4c340e572d0e5f280e64230d68090782\
+1111971f1fa72c2cb73636c43b3dd04144db4a46d1523aa14f1d53632c35c4c2df5d5df15656f1\
+ababe2e8e8e2e9e9e9dbdbdbe7e7e7e6e6e6e9eaeac8bbbb783f3e5d0606690606760d0b7f0e0b\
+870f0c8e100e9411109b12119611171707760f11981d1faa292dbe3735c046319f552362591023\
+5100005e1b15a78882cbcbe95c5cf05656f1ababe2e8e8e2e9e9e9dbdbdbe7e7e7e6e6e6e6e6e6\
+eaebebe6e7e7b6a09f78383865060773080a7d0e10840f118b101295111391111713077a0e1199\
+2e1c8d4f1d6464152f670a0a5c0000611816987472d8d3d2eff2eecacae85c5cf05656f1ababe2\
+e8e8e2e9e9e9dbdbdbe7e7e7e6e6e6e6e6e6e6e6e6e7e7e7eceeeee3e3e3b096967831306e0607\
+7e0b0d8810129011128c1117410a49620f33760e13750a07670301651514936a69d3ccccecefef\
+e8e9e9e9e9e6cacae85c5cf05656f1ababe2e8e8e2e9e9e9dbdbdbe7e7e7e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e7e7e7ecefefdfdfdeab8c8b7a2a2a7906078b0d0f8b1112770f0b820d0b710506\
+6a11128f605fcec5c4ebefefe9eaeae6e6e6e6e6e6e9e9e6cacae85c5cf05656f1ababe2e8e8e2\
+e9e9e9dbdbdbe7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e8e8ecefefdcdad9\
+a682817e24247d07086d0707720e0f8c5655c9bdbceaeeede9ebebe6e6e6e6e6e6e6e6e6e6e6e6\
+e9e9e6cacae85c5cf05656f1ababe2e8e8e2e9e9e9dbdbdbe7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e8e8e8ecefefd8d4d49d7271824b49c4b4b4e9ececeaecec\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e9e9e6cacae85c5cf05656f1ababe2e8e8e2e9e9e9\
+dbdbdbe7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e8e9e9e9ecece6e8e8eaecece6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e6\
+e0e0e6cacae8c9c9e9d4d4e0e3e3e2e9e9e9dbdbdbe7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e6eaeae6ebebe7e1e1dfe2e2e2e8e8e8d4d4d4\
+e0e0e0dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf\
+dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf\
+dfdfdfe0e0e0d8d8d8e0e0e0f6f6f6e0e0e0e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2\
+e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2\
+e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e0e0e0f2f2f2\
+""")
+
+mcs_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+f8f8f8e9e9e9eaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaebebea\
+eeeeecf1f1edf2f2edf2f2edf1f1edefeeecebebeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaea\
+eaeaeaeaeaeaeaeaeaeaeaeae8e8e8f6f6f6e4e4e4d2d2d2dcdcdcdbdbdbdbdbdbdbdbdbdbdbdb\
+dbdbdbdbdbdbdcdcdbe2e1dee3e3ded2d3d7b6b7ca9b9ebe8c90b88b8fb7999cbdb2b4c8cfcfd5\
+e2e2dee3e2dedcdcdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd5d5d5dededee5e5e5\
+dededee8e8e8e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7eeeeeae7e7e7abaecc5c62a8212b8f010e81\
+00017b00007900007900017b000b801c268c5259a4a1a4c8e2e3e5efefebe8e8e7e7e7e7e7e7e7\
+e7e7e7e7e7e7e7e7e7e1e1e1e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e8e8e7edede9\
+abaecc39409800047c0000780713832e38945059a46671b26873b4545da6323c960c1785000079\
+00017a2d35939ca0c5eaeae8e9e9e8e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddd\
+e7e7e7e6e6e6e6e6e6eaeae8e2e2e4676dad00097e00007a2c3593878cbbcaccdaeaeeeeeaece8\
+c2aaa4bb9b96e5e5e0ecf0f0d0d2de9296c037409800027b00037b545ba5d8d9e0ecebe9e6e6e6\
+e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6eaeae8dadbe1424b9d000078111b86\
+898dbce3e4e6f5f8f3e4e5e3b69d9b8d3c3c8b080a8f05078e2e2eae8a89dcdcdaf4f8f4e9eae9\
+999dc41d268c000078303894cdcedbecece9e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7\
+e9e8e7e0e0e33f489c0000782c3492c4c7d8f6f9f4dfdfdeb193928a35358a07089b070aa20d10\
+a50d10a7080c9d0407942728ab807fd6d5d4f4f9f4d2d5e03e469a0000782b3492d4d5deeaeae8\
+e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7ecece95e66aa0000782f3996d8dde7e2e0dcac8989\
+882e2e8b05079b080ba10d10a30d10a60d10aa0d10ad0d10b20d10b5090cab04069b2122a97776\
+d7d4d0e2e8ec444ea1000078444d9ee6e6e6e7e7e7e0e0e0e0e0e0e5e5e5ddddddefefea9fa3c7\
+00077e1a2791b8b7c6ae87828627278b04069a080b9f0d10a20d10a50d10a90d10ac0d10b00d10\
+b30d10b60d10ba0d10bf0d10c30a0db90406a31c1dae726fbebac129389800017c848abaf0efeb\
+e0e0e0e0e0e0e5e5e5dfdfdee1e1e42834940304725936578f2a258d04069a090c9e0d10a10d10\
+a40d10a70d10ab0d10ae0d10b20d10b50d10b90d10bc0d10c00d10c30d10c70d10cb0d11d10b0f\
+c90307ba1e1c74384e07076e16218bd2d3dde3e3e1e0e0e0e5e5e5e6e6e1989cc4000580221763\
+6e0d06770a0a8f0d0fa20d10a50d10a70d10aa0d10ad0d10b10d10b40d10b80d10bb0d10bf0d10\
+c20d10c60d10c90d11cd0d11d20d11d90d11cc0d109e0b0c6a09022d1c5a0002807b81b7eae9e5\
+e0e0e0e5e5e5e2e2e0444d9e000680716388851310861011780f0f7b0e0e970d0eae0d10b30d10\
+b40d10b70d10ba0d10be0d10c10d10c50d10c80d11cc0d11d20d11d80d11c60d10950d0e690c0c\
+5c0b0c5c09077f6982051186293493dddddfe1e1e1e8e8e6c7c8d40e1a86192890af9ea47a0d0d\
+8b10129311139011137f10107f0e0e9e0d0eba0d10c00d10c10d10c40d10c70d10cb0d11d10d11\
+d60d11c10d10910d0e6c0d0d650d0d670c0d630b0d570404b09898313e9c020b7fb6b8cde5e5e3\
+ecece8a1a4c300037b4a56a6c5b1ae740b0c860f118c10129411139d12159a1314871111830e0e\
+a40d0ec60d10ce0d11d10d11d40d11bb0d0f8d0d0e6f0e0e6f0e0f720d0f6d0c0e660c0d610b0d\
+550304bca39d6872b4000078888db9e9e9e4eeeee98186b4000078747db9c9b5af710a0b810f11\
+8810128f11139612149e1215a81316a514168e1212870f0fac0d0fb70d0f8a0e0e740e0f790f10\
+7c0e10760e0f700d0f6b0c0e650c0d5f0b0c540304bba39d9098c4000072646ba6eaeae5efeee9\
+6c72ab000078747db9ccb8af6f0a097d0e10840f118b1012921113991214a01315a81316b21417\
+b1151890120f770f09890f0b8a0f0c820e0d7a0d0e740d0e6f0d0e690c0e630c0d5e0b0c520202\
+bba297aeb4e13336c36f74d1e5e5e2efeee96a71aa00037b0c1988534d89620e1b7c0e0c850f0c\
+8a100f8f11129511139c1214a31315ab1416ab141c490b5844105a5f164e6b173f71152f73121f\
+720e136e0c0a6809056208035c0803550c148d7cb27b81ff666aff8084e0e4e4dfefeee9767cb0\
+00057c000a7e00017d070d7b260d5c4a0e3e690f2780101a9011139c1211a51311ad1411b71410\
+2f086a050e9c171ca92729b63533bd3f36b94937af51369f5732895a2c725d3d95625cde6065ff\
+6266fe363dc95e66a8e9e9e4edede99296bc00027b3e479c5a5d9d080973000d87000d89000d83\
+0b0d771c0e6a2f0e5e400f544f104c5f11442b0969080b9119199f2626af3132bf3839c93e40d2\
+4447dd4a4ee75056f5595fff5f5ef18b88ec6269c3000077767cb0eaeae5eaeae7b7b9cc030d80\
+333f9cc3b0ac5809124b0c31330d4e1e0d650d0d75010d7f000d85000d88000d89000c89000986\
+09098b16169c2323ac2f2fbb3838c53d3dcc4345d8494ce3533eac5a2a63501025baa29b4c58a5\
+00027ba1a5c4e7e7e3e6e6e5d9d9dc273292061286928297630d096c0c09740d0a780e0e760e17\
+710f216a0f2c6310365d103f5a1044490e4f0907851313982020a82d2db83636c43a3ed3453ec1\
+57235e5c0a0b5606014e03009a848e13228e121e88cecfd8e3e3e1e5e5e5e7e6e27177b200017e\
+3e34735e0b066207096c0c0e730d0f7b0e0f830f0f8c100f94110f9c1110a7130f961112110672\
+0f10971d1da5292bb93435c44c2a856111226108045a0a0b5207085005014e3d6e000480535ca5\
+e8e7e4e0e0e0e5e5e5e2e2dfc7c9d90b16850a117e866a7a702a275f03046d0a0b760e0f7c0e10\
+830f118b10129211139b121492110f22075b090d96171ba83323985d18436b0b09650b0a5d090a\
+52010263211f8f7077161d81020a7fb0b3cee7e6e3e0e0e0e5e5e5ddddddefefeb686fae000079\
+4c58a8dedad8a17d7c6c1e1e690405780c0e800f118610118d101296111491110d3b0844090a90\
+44135c6f0e17700c08680a0c5c0204611818987271e0dad56671b40000794c55a2ebebe9e0e0e0\
+e0e0e0e5e5e5dddddde9e9e8d8d9e0242e90000079737bb5f5f8f3d7d1d099706f6f1818740507\
+830e108a10129211138a1110610c22620c2d7c0e0a730c0c660405641313916565d2cacaf7f9f4\
+8d94c100057c141d87c8c9d9ebebe9e0e0e0e0e0e0e5e5e5dddddde7e7e7edede9b4b7d00c1483\
+00057c787eb5efefeceff3f1d0c8c79464637414148007098f0f12841011770e0d810e0c710607\
+690f0f8c5a59ccc1c0eef0eff2f3ee8e93bf050c80030a7e9da1c6efeeeae6e6e6e0e0e0e0e0e0\
+e5e5e5dddddde7e7e7e6e6e6efeeeaa1a5c80a128300027b575ea6d4d6def3f4efedf0efcabfbe\
+9158577c10117d090a700808710c0c884e4ec5b7b6ebefedf3f4f0dedee26a70af00077d02097e\
+8a8fbdeeeeeae6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6efeeeaabafcc\
+1b238a0000781d268c868bbbd6d7dff2f4eff2f5f0cbbbb78a4c49824340c5b3aff1f3eef4f5f0\
+dcdce19498c1283191000078101885989dc3eeeeeae6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5\
+dddddde7e7e7e6e6e6e6e6e6e6e6e6eeeeeacdcfdb5158a300087e000078162089555ca58c91be\
+b3b8d4bcbfd2bbbdd1b7bcd69297c15d64a91d288c00007900037b42499cc0c3d5efeeeae6e6e6\
+e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6ebeae8\
+ebebe9aeb1cd4d54a20c168500007900007800047c000c80000d8100057c000079000079061182\
+42499da2a5c8e8e8e7ecece9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e3e3e3d6d6d6\
+e0e0e0dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfe6e6e2e5e5e2c4c6d38f93bb5f66a6404898\
+3039912f39913d45975b61a4898db8bec0d0e3e2e1e7e6e2e0e0dfdfdfdfdfdfdfdfdfdfdfdfdf\
+dfdfdfdfdfdfd9d9d9dededef4f4f4e0e0e0e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2\
+e2e2e2e2e2e2e5e5e3eaeae6ebebe6e8e8e5e4e4e3e4e4e3e7e7e4ebebe6ebeae6e6e6e4e2e2e2\
+e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e0e0e0f1f1f1\
+""")
+
+snap_back_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+fafafaeaeaeaebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb\
+ebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb\
+ebebebebebebebebebebebebeaeaeaf8f8f8e6e6e6d1d1d1dbdbdbdadadadadadadadadadadada\
+dadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadada\
+dadadadadadadadadadadadadadadadadadadadadadadadadadadadbdbdbd2d2d2e3e3e3e7e7e7\
+dddddde8e8e8e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7\
+e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7\
+e7e7e7e7e7e7e8e8e8dfdfdfe4e4e4e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7dcdcdc\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7\
+eaececebeeeee7e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e7e7e7dededee4e4e4e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e7e7e7ebeeeee4e8e8bda9a8af908fdbdbdaebefefe8e9e9e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7dcdcdce7e7e7\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7ebeeeee2e5e5baa5a49045448a0a0c\
+9004068e2a2aab8484d7d6d6eaefefe8e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e7e7e7dededee4e4e4e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e8e8ebefef\
+e0e2e2b69c9b8d3d3c8a080a9b0609a30c10a60d10a9090c9f0406942424a97b7bd3d1d0eaefef\
+e9eaeae6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7dededee4e4e4e7e7e7dcdcdce7e7e7e6e6e6\
+e6e6e6e6e6e6e8e8e8ebefefdddeddb193928a35358a07089b070aa10d10a40d10a70d10ab0d10\
+af0d10b30d10b80a0dad04069d1e1fa87271cfcbcbe9efeee9ebebe6e6e6e6e6e6e6e6e6e7e7e7\
+dededee4e4e4e7e7e7dcdcdce7e7e7e6e6e6e6e6e6ebededdcdad9ac8a89882e2e8a05079a080b\
+a00d10a20d10a60d10aa0d10ad0d10b10d10b50d10b80d10bc0d10c10d10c60a0dbc0407a6191b\
+a86868cdc5c4eaecece7e7e7e6e6e6e7e7e7dededee4e4e4e7e7e7dcdcdce7e7e7e6e6e6e9ebeb\
+ac94937725248b04069c080b9f0d10a10d10a50d10a90d10ac0d10b00d10b40d10b70d10bb0d10\
+bf0d10c20d10c60d10c90d11ce0d11d60b0fd20408a41415946968e2e2e2e7e7e7e7e7e7dedede\
+e4e4e4e7e7e7dcdcdce7e7e7e6e6e6eaeeee8f56556f0202760e0e8e0d0ea50d10aa0d10ac0d10\
+af0d10b30d10b60d10ba0d10be0d10c10d10c50d10c80d11cc0d11d20d11d90d11ca0d109a0d0e\
+6906066a2a29e4e3e1edede7edece7dfdfdee4e4e4e7e7e7dcdcdce7e7e7e6e6e6eaeeee945c5c\
+8407098910127c0f107b0e0e960d0eb10d10b90d10b90d10bd0d10c00d10c40d10c70d11cb0d11\
+d20d11d70d11c50d10950d0e6b0c0c5f0c0c5d0608723330cfd0e3afb1ebb1b3ebd2d2dfe5e5e4\
+e7e7e7dcdcdce7e7e7e6e6e6eaeeee935c5c7d07088b10129411139412148411117f0e0e9c0d0e\
+bd0d10c70d10c70d10ca0d11d10d11d50d11bf0d10900d0e6e0d0d690d0e6b0c0e660c0d5d0608\
+743630afb0e55156f1565af1bebfe0e7e7e3e7e7e7dcdcdce7e7e7e6e6e6eaeeee925c5c790608\
+8610118d10129511149f12159f13158c1212840f0ea20d0ec90d10d40d11ba0d0f8d0d0e720e0e\
+730e0f760e0f700d0e6a0c0e640c0d5b0608733630b1b2e5575bf15b5ff1bfc0e0e7e7e3e7e7e7\
+e1e1def0f0ebeaeae8eaeeee915c5b750607810f11891012901113981214a01315aa1416ab1417\
+961314880f0f8a0e0a7c0f0a7f0f0f810f117a0e10740d0f6e0d0e680c0e620b0d59060772362f\
+b1b2e5575bf15b5ff1bfc0e0e7e7e3ebeae9abaec69293bfc5c7d7f4f8f2905d5b7005077d0e10\
+850f118c10129411139b1214a21315ab1416b81516961228300a5e68113c801019810d0a7a0d0b\
+730d0e6d0c0e660c0d600b0c57060772362fb1b2e5575bf15b5ff1bfc0e0e7e7e3f0f0ec7e83b2\
+0000761f288da9b0d18e5a597105017c0e0d810f108810128f11139712149e1215a61316b11514\
+93112b06088d11159e2e2097512170691739700d116d0a05650b095f0b0c56050771362fb1b2e5\
+575bf15b5ff1bfc0e0e7e7e3e8e8e8d9d9db555ea700007a00087f1a16703b0c415d0d26750e16\
+850f0f90100e99110ea01210a71311b214109311280a088814159a2022ad2c30c13737c64734a8\
+57276d5f152e5d0a0954020070342cb1b2e5575bf15b5ff1bfc0e0e7e7e3e7e7e7dededde8e8e8\
+9397c12d3592000d84000d8a000d830d0d75210d64360e544b0f475d103d6d10367d12306b0f3e\
+0a088814159a2222aa2f2fba3737c63c3ed24246dd4b48d7543eab53245f703d4aafafe4575bf1\
+5b5ff1bfc0e0e7e7e3e7e7e7dcdcdce8e8e7efeeeae5e8ea6e4f6a2b0542190d65080d78000d83\
+000d88000d89000d89000d87000d86000b8408088a15159a2222aa2f2fba3737c53d3dcd4444d5\
+494ce25056f45556f16b5dc19e9ee8585cf05b5ff1bfc0e0e7e7e3e7e7e7dcdcdce7e7e7e6e6e6\
+edf0ef8a58545a0000690c0c660d175f0e26550e344a0e42410e4d3b0f55370f5a2a0c64080889\
+15159a2222aa2f2fba3638c73b3fd54345d94d41be5430804d0f2f6a312cb2b3e5575bf15b5ff1\
+bfc0e0e7e7e3e7e7e7dcdcdce7e7e7e6e6e6e9eaeac5b6b67a42415d0707690607760d0c7e0e0c\
+870f0c8f100d96110fa1120e850f250a088814159b1f23af2d30c03c33b44d2b845a1b445a090f\
+510000682b27b8a19ab6b8eb565af05b5ff1bfc0e0e7e7e3e7e7e7dcdcdce7e7e7e6e6e6e6e6e6\
+eaecece6e7e7b7a2a178393865060773090a7d0e10840f118c10129711117d0e2906088d191594\
+3b1c7d5a194c69101d6807035b0000682524a78a89e0dedef1f3eeb4b6e9565af05b5ff1bfc0e0\
+e7e7e3e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e7e7e7ebeeeee3e3e3b096957830306f0506\
+7f0b0d8810129111117f0f20470b456f10237a0e0c740906650202691f1ea07d7ddcd8d8ecefef\
+e7e8e8ebebe6b4b6e9565af05b5ff1bfc0e0e7e7e3e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e7e7e7ecefefdfdedeaa8a897928287a06078c0d0f891011790e0a7f0d0c6f0505\
+6c19199a7170d7d1d1ecefefe8e9e9e6e6e6e6e6e6ebebe6b4b6e9565af05b5ff1bfc0e0e7e7e3\
+e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e8e8ecefefdbd8d8\
+a47e7d7d21227b07076d0506731414946665d1c9c9ecefefe8e9e9e6e6e6e6e6e6e6e6e6e6e6e6\
+ebebe6b4b6e9565af05b5ff1bfc0e0e7e7e3e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e8e9e9ebefefd6d2d1986c6b885554ccc0c0ebeeeee9eaea\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6ebebe6b4b6e9575bf05c60f1bfc0e0e7e7e3e7e7e7\
+dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e8e9e9e9ebebe8e9e9e9ebebe6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e6\
+dcdde7cacbe8cccce9d8d8dee5e5e4e7e7e7dcdcdce7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e8e8e6eaeae6ebebe7dfdfdee4e4e4e6e6e6d6d6d6\
+e1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e1e1e1d8d8d8e2e2e2f5f5f5dededee1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e1e1e1dededef2f2f2\
+""")
+
+spin_img = img_data(width=32, height=32, mask=-1, encoded_data = """\
+f8f8f8eaeaeaebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb\
+ebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb\
+ebebebebebebebebebebebebeaeaeaf7f7f7e4e4e4d2d2d2dbdbdbdadadadadadadadadadadada\
+dadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadada\
+dadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad4d4d4dededee5e5e5\
+dededee8e8e8e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7\
+e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7\
+e7e7e7e7e7e7e7e7e7e1e1e1e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddd\
+e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+eaececebefefe8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e7e7e7ebedede5e9e9bfacacae8e8dd9d8d8ebefefe8e9e9e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7ebeeeee3e7e6bda9a8914948890c0d\
+9003068d2728aa807fd6d4d4eaefefe8e9eae6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e8e8ebefef\
+e1e3e3b8a09f8e404089090b9a0609a20c0fa50d10a9090c9f0406942122a87776d1cecee9efef\
+e9eaeae6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6\
+e6e6e6e6e6e6e7e8e8ebefefdfe0e0b397978b38388908099a0709a10d10a30d10a70d10aa0d10\
+ae0d10b30d10b70a0dae04069d1c1da76d6dcdc8c7e8eeeee9ebebe6e6e6e6e6e6e6e6e6e6e6e6\
+e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6eaececdedcdcae8e8e89313189060799070a\
+a00d10a20d10a60d10a90d10ad0d10b10d10b40d10b80d10bb0d10c00d10c60b0ebd0407a71719\
+a76464cbc1c1e9ecece7e7e7e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6eaebeb\
+b19c9a7728278a05069b080b9f0d10a10d10a50d10a80d10ac0d10b00d10b30d10b70d10ba0d10\
+be0d10c20d10c50d10c90d11ce0d11d60b0fd30408a71213916261e0dfdfe7e7e7e6e6e6e0e0e0\
+e0e0e0e5e5e5dddddde7e7e7e6e6e6ecefef9766646e0102770e0d8d0d0ea40d10aa0d10ab0d10\
+af0d10b20d10b60d10ba0d10bd0d10c10d10c40d10c80d11cc0d11d10d11d90d11cb0d109d0d0e\
+6b0707641f1fdddadae7e8e8e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7ebeae8f2f6f29a6a6a\
+8207088910127d10107a0e0e940d0eb00d10b80d10b90d10bc0d10c00d10c40d10c70d10cb0d11\
+d10d11d70d11c60d10970d0e6c0d0d5f0c0d5e08096a2626e2e0daeaebe7e6e6e6e0e0e0e0e0e0\
+e5e5e5dededdefeeeac3c6d7626bb1471d45830d0b8a10129311139512148511117f0e0e9b0d0e\
+bc0d0fc70d10c70d10ca0d11d00d11d50d11c10d10920d0e6e0d0d690d0e6b0c0e660c0d600909\
+5b19289696e9d0d2ecebebe5e0e0e0e0e0e0e5e5e5e2e2e0868bbc0c148400007d330b3d810f0b\
+8510118c10129411139e1214a013158e1212840f0fa00d0ec70d10d40d11bc0d0f8e0d0e720e0e\
+730e0f760e0f710d0f6a0c0e650c0d5e09085716295a5cf5696dfeadaef2e2e2e0e0e0e0ecece8\
+969abe00077d0a1282707ab8855861750707810f118810128f1113971114a31311ae1312ac1416\
+971314890f0f870e0e780f0f7e1011810f117b0e10750e0f6f0d0e690c0e630b0d5b0809642326\
+9f9fe76b70fe6165ffb5b6e8e5e4dfefeee95a61a302037a7b81b6fffff99b6f6c6e04067d0e10\
+840f118f1110740e2a3e0b5f7b133aa5141bba1411ac131279100f8e1012860f117f0f11790e10\
+730d0f6d0d0e670c0d610b0d590708662625eae7d9b9bbf16064ff8a8df1e4e4dfedece88e93ba\
+00037b20288da4acd09568676f05017b0e0d810f0f8b100e6a0c2e01089012159d3620946b236e\
+8f1b397e10108e0e0a840e0d7d0e10770e0f710d0f6b0c0e650b0b5f0907570300652521c5c3e1\
+868afa5d62ff989aeee5e5dfe6e6e5dddddd5d65aa00027a00067e1a1873390c435c0d27740e17\
+88100c6b0c2a07088b15159b1f22ae2b31c23738c44d34a46a27697a172c7d0d0b770a05700905\
+6a0a09640f165f1b355e306c6353be656afd5d61ff8689f9d7d7e2e2e2e0e5e5e5dfdfdeeae9e8\
+989cc3313894000d84000d8a000d830c0d75210e63260b6108088a15159b2222ab3030bb3838c6\
+3c3fd24146dd4d48d45d3ca368337b6941986750bb665edf666aff6772ff666eff767afbacaef1\
+e3e3e7e2e2e0e0e0e0e5e5e5dddddde8e8e7eeeeeae8eaeb775c752c04401a0d64090d77000d83\
+000a8608088a15159b2222ab3030bb3838c53e3ecd4444d5494ce34e56f4565fff6069ff656dff\
+6665f26457ce5c3e94653c68d9d6ddecede7e7e7e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6\
+edf1f0946864580000680b0b660d17610e23410a4607088b15159b2222ab3030bb3739c83c40d5\
+4344d7533fb862358a693479692d61652142601424590a0d4d00005d1c17e0dddbe7e8e8e6e6e6\
+e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e8eaeacabebd7e49485d0809670506780d085e0a28\
+07088b14159c1e23b12d31c04034b1572a7f721c417a0f14770b067009046a09056409075c0605\
+510101652827ad9392e6e7e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6\
+eaebebe8e9e9bca9a87c3f3f6807045304270308901c1593441c79731b4a8a141d780d08830d0b\
+7a0e0f740d0f6e0d0e67090b5b0203662120a28281dedbdaecefefe6e6e6e6e6e6e6e6e6e0e0e0\
+e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e7e7ebeeeee5e6e6b79e9b6834483e033b\
+710b1b8b0f0d93100d8d1010740e0f7f0f11780e10720b0d650304681b1b9b7675d9d4d4eceff0\
+e8e8e8e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e7e7e7ebeeefe3e2e0b3928c7d2d2b7806078a0c0f891012730e0f7f0d0f700507\
+6c1515956a69d3cdccecefefe8e9e9e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0\
+e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7ecefefdddcdc\
+a886857e26267b07076c0606721112905e5dcec4c3ebeeeee9eaeae6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e8e8ecefefd9d6d69d747385504ec8babaeaedede9ebeb\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5\
+dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e8e9e9e9ecece7e9e9eaecece6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e5e5e5dddddde7e7e7e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e7e7e7e7e7e7e6e6e6e6e6e6e6e6e6e6e6e6\
+e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0e0e0e0e0e0e3e3e3d7d7d7\
+e1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0dadadadededef3f3f3dededee1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0\
+e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0dededef0f0f0\
+""")
+
+
+
+ *******************************************************************************

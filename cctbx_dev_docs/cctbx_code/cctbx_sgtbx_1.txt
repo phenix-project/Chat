@@ -1,0 +1,2872 @@
+
+
+ *******************************************************************************
+cctbx/sgtbx/direct_space_asu/short_cuts.py
+from __future__ import absolute_import, division, print_function
+from cctbx.sgtbx.direct_space_asu.cut_plane import cut
+from boost_adaptbx.boost import rational
+
+r1 = rational.int(1)
+
+x1 = cut((-1,0,0), 1)
+x0 = -x1*0
+x2 = x1/2
+x3 = x1/3
+x4 = x1/4
+x8 = x1/8
+x34 = x1*3/4
+y1 = cut((0,-1,0), 1)
+y0 = -y1*0
+y2 = y1/2
+y3 = y1/3
+y4 = y1/4
+y8 = y1/8
+z1 = cut((0,0,-1), 1)
+z0 = -z1*0
+z2 = z1/2
+z3 = z1/3
+z4 = z1/4
+z6 = z1/6
+z8 = z1/8
+z12 = z1/12
+p1 = cut((-1,1,0), 1)
+p0 = -p1*0
+p2 = p1/2
+p3 = p1/3
+p4 = p1/4
+m1 = cut((-1,-1,0), 1)
+m0 = -m1*0
+m2 = m1/2
+m4 = m1/4
+h1 = cut((1,-2,0), 1)
+h0 = -h1*0
+k1 = cut((-2,1,0), 1)
+k0 = -k1*0
+xz1 = cut((1,0,1), 1)
+xz0 = -xz1*0
+xz2 = xz1/2
+xz4 = xz1/4
+zx1 = cut((-1,0,1), 1)
+zx0 = -zx1*0
+zx2 = zx1/2
+yz1 = cut((0,1,1), 1)
+yz0 = -yz1*0
+yz2 = yz1/2
+yz4 = yz1/4
+zy1 = cut((0,-1,1), 1)
+zy0 = -zy1*0
+zy2 = zy1/2
+zy4 = zy1/4
+dy8 = cut((1,-1,1), 1)/8
+tx0 = cut((-2,1,1), 0)
+ty0 = cut((-1,2,-1), 0)
+tz2 = cut((-2,1,-1), 1)/2
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/harker.py
+from __future__ import absolute_import, division, print_function
+from cctbx import crystal
+from cctbx import sgtbx
+from boost_adaptbx.boost import rational
+import math
+import sys
+from six.moves import range
+
+def dot3(a, b):
+  return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def mod_positive3(x_frac):
+  result = [math.fmod(x, 1.) for x in x_frac]
+  for i in range(3):
+    while (result[i] <  0.): result[i] += 1.
+    while (result[i] >= 1.): result[i] -= 1.
+  return tuple(result)
+
+class plane_fractional(object):
+
+  def __init__(self, s, n, p, c):
+    self.s = s
+    self.n = n
+    self.p = p
+    self.c = c
+
+  def operation(self):
+    return sgtbx.rt_mx(self.s.r().minus_unit_mx(), self.s.t())
+
+  def algebraic(self):
+    op = self.operation()
+    # eliminate minus signs to make the expression look more like
+    # what people are used to see
+    r = op.r().num()
+    d = op.r().den()
+    signs = [None,None,None]
+    for j in range(3):
+      for i in range(3):
+        rij = r[i*3+j]
+        if (signs[i] is None and rij != 0):
+          if (rij < 0): signs[i] = -1
+          else: signs[i] = 1
+    m = list(sgtbx.rot_mx(d, d).num())
+    for i in range(3):
+      if (signs[i] == -1): m[i*4] *= -1
+    return str(sgtbx.rt_mx(op.r().multiply(sgtbx.rot_mx(m,d)), op.t()))
+
+class planes_fractional(object):
+
+  def __init__(self, space_group):
+    self.space_group = space_group
+    nc_dict = {}
+    self.list = []
+    for i_smx in range(space_group.order_p()):
+      s = space_group(i_smx)
+      r_info = s.r().info()
+      if (r_info.type() < 2): continue
+      if (r_info.sense() < 0): continue
+      n = r_info.ev()
+      p = s.t().mod_positive()
+      assert p.den() == space_group.t_den()
+      c = -dot3(n, p.num())
+      if ((n,c) not in nc_dict):
+        nc_dict[(n,c)] = 0
+        self.list.append(
+          plane_fractional(s=s, n=n, p=p, c=rational.int(c,p.den())))
+
+class plane_cartesian(object):
+
+  def __init__(self, n, c):
+    self.n = n
+    self.c = c
+
+  def distance(self, x):
+    return abs(dot3(self.n, x) + self.c)
+
+class planes_cartesian(crystal.symmetry):
+
+  def __init__(self, crystal_symmetry):
+    crystal.symmetry._copy_constructor(self, crystal_symmetry)
+    planes_f = planes_fractional(self.space_group())
+    self.list = []
+    for pf in planes_f.list:
+      n_c = self.unit_cell().orthogonalize(pf.n)
+      p_c = self.unit_cell().orthogonalize(pf.p.as_double())
+      len_n_c = math.sqrt(dot3(n_c, n_c))
+      n_c = tuple([x/len_n_c for x in n_c])
+      pl = plane_cartesian(n_c, -dot3(n_c, p_c))
+      assert pl.distance(p_c) < 1.e-6
+      self.list.append(pl)
+    self.patterson_group = self.space_group().build_derived_patterson_group()
+
+  def count(self):
+    return len(self.list)
+
+  def min_distance(self, x_frac):
+    result = None
+    for s in self.patterson_group:
+      x = mod_positive3(s * x_frac)
+      for u0 in (-1,0,1):
+        for u1 in (-1,0,1):
+          for u2 in (-1,0,1):
+            xu = [x[0]+u0, x[1]+u1, x[2]+u2]
+            xuc = self.unit_cell().orthogonalize(xu)
+            for pl in self.list:
+              if (result is None): result = pl.distance(xuc)
+              else: result = min(result, pl.distance(xuc))
+    return result
+
+def test_call_back(flags, space_group_info):
+  planes = planes_fractional(space_group_info.group())
+  for plane in planes.list:
+    print(plane.s, plane.algebraic(), plane.n, plane.c, plane.p)
+
+def test():
+  from cctbx.development import debug_utils
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], test_call_back)
+
+if (__name__ == "__main__"):
+  test()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/lattice_symmetry.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+group = sgtbx.lattice_symmetry_group
+find_max_delta = sgtbx.lattice_symmetry_find_max_delta
+
+def metric_supergroup(group):
+  return sgtbx.space_group_info(group=group).type(
+    ).expand_addl_generators_of_euclidean_normalizer(True,True
+    ).build_derived_acentric_group()
+
+from libtbx import adopt_init_args
+from cctbx.sgtbx import subgroups
+from scitbx.array_family import flex
+from cctbx import crystal
+from cctbx.sgtbx import bravais_types, change_of_basis_op
+
+class metric_subgroups:
+
+  def __init__(self,
+        input_symmetry,
+        max_delta,
+        enforce_max_delta_for_generated_two_folds=True,
+        bravais_types_only=True,
+        best_monoclinic_beta=True):
+    adopt_init_args(self,locals())
+    self.result_groups = []
+
+    self.change_input_to_minimum_cell()
+    self.derive_result_group_list(group_of_interest=self.lattice_group_info())
+
+  def change_input_to_minimum_cell(self):
+    # Get cell reduction operator
+    self.cb_op_inp_minimum = self.input_symmetry.change_of_basis_op_to_minimum_cell()
+
+    # New symmetry object with changed basis
+    self.minimum_symmetry = self.input_symmetry.change_basis(self.cb_op_inp_minimum)
+
+  def lattice_group_info(self):
+    # Get highest symmetry compatible with lattice
+    lattice_group = sgtbx.lattice_symmetry_group(
+      self.minimum_symmetry.unit_cell(),
+      max_delta=self.max_delta,
+      enforce_max_delta_for_generated_two_folds
+        =self.enforce_max_delta_for_generated_two_folds)
+    return sgtbx.space_group_info(group=lattice_group)
+
+  def derive_result_group_list(self,group_of_interest):
+
+    # Get list of sub-spacegroups
+    subgrs = subgroups.subgroups(group_of_interest).groups_parent_setting()
+
+    # Order sub-groups
+    sort_values = flex.double()
+    for group in subgrs:
+      order_z = group.order_z()
+      space_group_number = sgtbx.space_group_type(group, False).number()
+      assert 1 <= space_group_number <= 230
+      sort_values.append(order_z*1000+space_group_number)
+    perm = flex.sort_permutation(sort_values, True)
+
+    for i_subgr in perm:
+      acentric_subgroup = subgrs[i_subgr]
+      acentric_supergroup = metric_supergroup(acentric_subgroup)
+      # Add centre of inversion to acentric lattice symmetry
+      centric_group = sgtbx.space_group(acentric_subgroup)
+      centric_group.expand_inv(sgtbx.tr_vec((0,0,0)))
+      # Make symmetry object: unit-cell + space-group
+      # The unit cell is potentially modified to be exactly compatible
+      # with the space group symmetry.
+      subsym = crystal.symmetry(
+        unit_cell=self.minimum_symmetry.unit_cell(),
+        space_group=centric_group,
+        assert_is_compatible_unit_cell=False)
+      supersym = crystal.symmetry(
+        unit_cell=self.minimum_symmetry.unit_cell(),
+        space_group=acentric_supergroup,
+        assert_is_compatible_unit_cell=False)
+      # Convert subgroup to reference setting
+      cb_op_minimum_ref = subsym.space_group_info().type().cb_op()
+      ref_subsym = subsym.change_basis(cb_op_minimum_ref)
+      # Ignore unwanted groups
+      if (self.bravais_types_only and
+          not str(ref_subsym.space_group_info()) in bravais_types.centric):
+        continue
+      # Choose best setting for monoclinic and orthorhombic systems
+      cb_op_best_cell = self.change_of_basis_op_to_best_cell(ref_subsym)
+      best_subsym = ref_subsym.change_basis(cb_op_best_cell)
+      # Total basis transformation
+      cb_op_best_cell = change_of_basis_op(str(cb_op_best_cell),stop_chars='',r_den=144,t_den=144)
+      cb_op_minimum_ref=change_of_basis_op(str(cb_op_minimum_ref),stop_chars='',r_den=144,t_den=144)
+      self.cb_op_inp_minimum=change_of_basis_op(str(self.cb_op_inp_minimum),stop_chars='',r_den=144,t_den=144)
+      cb_op_inp_best = cb_op_best_cell * cb_op_minimum_ref * self.cb_op_inp_minimum
+      # Use identity change-of-basis operator if possible
+      if (best_subsym.unit_cell().is_similar_to(self.input_symmetry.unit_cell())):
+        cb_op_corr = cb_op_inp_best.inverse()
+        try:
+          best_subsym_corr = best_subsym.change_basis(cb_op_corr)
+        except RuntimeError as e:
+          if (str(e).find("Unsuitable value for rational rotation matrix.") < 0):
+            raise
+        else:
+          if (best_subsym_corr.space_group() == best_subsym.space_group()):
+            cb_op_inp_best = cb_op_corr * cb_op_inp_best
+      self.result_groups.append({'subsym':subsym,
+                                 'supersym':supersym,
+                                 'ref_subsym':ref_subsym,
+                                 'best_subsym':best_subsym,
+                                 'cb_op_inp_best':cb_op_inp_best,
+                                 'max_angular_difference':
+                                  find_max_delta(
+                                  reduced_cell=self.minimum_symmetry.unit_cell(),
+                                  space_group=acentric_supergroup)
+                               })
+  def change_of_basis_op_to_best_cell(self,ref_subsym):
+    return ref_subsym.change_of_basis_op_to_best_cell(
+      best_monoclinic_beta=self.best_monoclinic_beta)
+
+  def show_input(self):
+    print()
+    print("Input")
+    print("=====")
+    print()
+    self.input_symmetry.show_summary()
+    print()
+    print("Angular tolerance: %.3f degrees" % self.max_delta)
+    print()
+    print("Similar symmetries")
+    print("==================")
+    print()
+
+  def show_groups(self):
+    # Loop sub-groups in sorted order
+    for item in self.result_groups:
+      item['subsym'].space_group_info().show_summary(
+        prefix="Symmetry in minimum-lengths cell: ")
+      print("      Input minimum-lengths cell:", self.minimum_symmetry.unit_cell())
+      print("           Symmetry-adapted cell:", item['subsym'].unit_cell())
+      item['best_subsym'].space_group_info().show_summary(
+        prefix="            Conventional setting: ")
+      print("                       Unit cell:", item['best_subsym'].unit_cell())
+      print("                 Change of basis:", item['cb_op_inp_best'].c())
+      print("                         Inverse:", item['cb_op_inp_best'].c_inv())
+      print("      Maximal angular difference: %.3f degrees" % (
+        item['max_angular_difference']))
+      print()
+
+  def show(self):
+    self.show_input()
+    self.show_groups()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/literal_description.py
+from __future__ import absolute_import, division, print_function
+def str_ev(ev):
+  return "[%d,%d,%d]" % ev
+
+class literal_description:
+
+  def __init__(self,symop):
+    self.symop = symop # an instance of rt_mx
+    from cctbx import sgtbx
+    self.r_info = sgtbx.rot_mx_info(self.symop.r())
+    self.t_info = sgtbx.translation_part_info(self.symop)
+
+  def long_form(self):
+
+    if str(self.t_info.origin_shift()) == "0,0,0":
+      origin_message = ""
+    else:
+      origin_message = "origin shift: %11s" % (str(self.t_info.origin_shift()))
+
+    if origin_message == "" and str(self.t_info.intrinsic_part()) == "0,0,0":
+      intrinsic_message = ""
+    else:
+      intrinsic_message = "intrinsic part: %11s" % (str(self.t_info.intrinsic_part()))
+
+    if (self.r_info.type() == 1):
+      return "     no rotation             %s %s" % (
+        intrinsic_message,
+        origin_message)
+    elif (self.r_info.type() == -1):
+      return "     rotation type: %d %s %s" % (
+        self.r_info.type(),
+        intrinsic_message,
+        origin_message)
+    elif (abs(self.r_info.type()) == 2):
+      return "     %d-fold about %10s %s %s" % (
+        self.r_info.type(),
+        str_ev(self.r_info.ev()),
+        intrinsic_message,
+        origin_message)
+    else:
+      return "%s %d-fold about %10s %s %s" % (
+         {-1:"rev.",1:"fwd."}[self.r_info.sense()],
+         self.r_info.type(),
+         str_ev(self.r_info.ev()),
+         intrinsic_message,
+         origin_message)
+
+  def cosets_form(self):
+    return "%20s  %20s   Rotation: %4s ; direction: %10s ; screw/glide: %10s"%(
+          self.symop,
+          self.symop.r().as_hkl(),
+          self.symop.r().info().type() ,
+          self.symop.r().info().ev(),
+          "("+self.symop.t().as_string()+")" )
+
+  def labelit_check_pdb_symmetry_form(self):
+    return "%22s  %18s  %s"%(
+          self.symop,
+          self.symop.r().as_hkl(),
+          self.long_form())
+
+  def labelit_check_pdb_symmetry_short(self):
+    return "%18s  %s"%(
+          self.symop.r().as_hkl(),
+          self.long_form())
+
+  def select(self,format):
+    return literal_description.__dict__[format](*[self])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/plane_groups.py
+from __future__ import absolute_import, division, print_function
+hermann_mauguin_hall_table = (
+  ('p_1',     'P 1'),
+  ('p_2',     'P 2'),
+  ('p_m',     'P -2x'),
+  ('p_g',     'P -2xb'),
+  ('c_m',     'C -2x'),
+  ('p_2_m_m', 'P 2 -2'),
+  ('p_2_m_g', 'P 2 -2a'),
+  ('p_2_g_g', 'P 2 -2ab'),
+  ('c_2_m_m', 'C 2 -2'),
+  ('p_4',     'P 4'),
+  ('p_4_m_m', 'P 4 -2'),
+  ('p_4_g_m', 'P 4 -2ab'),
+  ('p_3',     'P 3'),
+  ('p_3_m_1', 'P 3 -2"'),
+  ('p_3_1_m', 'P 3 -2'),
+  ('p_6',     'P 6'),
+  ('p_6_m_m', 'P 6 -2'),
+)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/pointgroup_tools.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from cctbx import sgtbx
+from cctbx.crystal.find_best_cell import alternative_find_best_cell
+from cctbx.sgtbx import cosets
+from cctbx import crystal
+from cctbx import miller
+import cctbx.sgtbx.lattice_symmetry
+import cctbx.sgtbx.cosets
+from scitbx import matrix
+from scitbx.python_utils import graph_tools
+from libtbx.utils import Sorry
+import sys
+from six.moves import range
+from six.moves import zip
+
+
+def reference_setting_choices(space_group):
+  # we used to have
+  cyclic_permutations =  ['x,y,z',
+                          'y,z,x',
+                          'z,x,y' ]
+
+
+
+
+  adams_group = sgtbx.space_group_info(
+    group=space_group.build_derived_group(False, False))
+
+  space_group = sgtbx.space_group_info(group=space_group)
+
+  # please check that we have something in reference setting
+  # just to make sure that thne thing is used for it's original purpose
+  assert space_group.is_reference_setting()
+
+  info = []
+
+  identity_op = sgtbx.change_of_basis_op('x,y,z').c().r()
+
+  for cyclic_permutation in cyclic_permutations:
+
+    cob_op = sgtbx.change_of_basis_op(cyclic_permutation)
+    transformed_adams_group = adams_group.change_basis(cob_op)
+    transformed_space_group = space_group.change_basis(cob_op)
+
+    cob_to_ref_sg = transformed_space_group.\
+                    change_of_basis_op_to_reference_setting()
+    cob_to_ref_pg = transformed_adams_group.\
+                    change_of_basis_op_to_reference_setting()
+
+
+    adams_norm = False
+    space_norm = False
+
+    # check if the rotation part of the cb_op to ref is
+    # the identity operator
+
+    # if hall symbols are equal, sg's are equal
+    if (identity_op == cob_to_ref_pg.c().r()):
+      adams_norm=True
+
+    if (identity_op == cob_to_ref_sg.c().r()):
+      space_norm=True
+
+    info_tuple = (cob_op, cob_to_ref_sg, adams_norm, space_norm)
+    info.append(info_tuple)
+
+  possible_additional_transforms = []
+  # we have to of course take into account the identity operator
+  possible_additional_transforms.append(info[0][0]*info[0][1])
+  for ii in info:
+    if ii[2]: # should fall in the adams normalizer
+      if not ii[3]: # should NOT fall in the space normalizer
+        # cob should ONLY be applied on unit cell, not to the sg.
+        possible_additional_transforms.append(ii[0])
+
+  return possible_additional_transforms
+
+
+def coset_lookup(pg_low,
+                 pg_high):
+  coset = cosets.left_decomposition(g=pg_high,
+                                    h=pg_low)
+  full_cosets = []
+
+  for set in coset.partitions:
+    if (set[0].r().determinant()>0):
+      tmp = []
+      for symop in set:
+        tmp.append(symop.r().as_hkl())
+      full_cosets.append(tmp)
+  return full_cosets
+
+
+class sub_super_point_group_relations(object):
+  def __init__(self,
+               sg_low,
+               sg_high,
+               enforce_point_groups=True):
+    self.enforce_point_groups=enforce_point_groups
+    if enforce_point_groups:
+      assert (sg_low == sg_low.build_derived_point_group())
+      assert (sg_high == sg_high.build_derived_point_group())
+    self.sg_low = sg_low
+    self.sg_high = sg_high
+
+    self.symops=[]
+    self.grouped_symops = []
+    self.grouped_index = []
+    self.sg_groups = []
+    self.left_over_symops= []
+
+    self.get_symops_from_supergroup_that_are_not_in_subgroup(sg_high)
+
+    self.assemble_symops()
+    self.find_left_over_symops()
+
+
+  def get_symops_from_supergroup_that_are_not_in_subgroup(self, sg_high):
+    coset = cosets.left_decomposition(g=sg_high,
+                                      h=self.sg_low)
+    for set in coset.partitions[1:]:
+      if self.enforce_point_groups:
+        if set[0].r().determinant()>0:
+          self.symops.append(set[0])
+      else:
+        self.symops.append(set[0])
+
+  def assemble_symops(self):
+    t_den = self.sg_low.t_den()
+    r_den = self.sg_low.r_den()
+
+    # loop over all symops
+    for item, symop in enumerate(self.symops):
+      tmp_symops = []
+      tmp_indices = []
+
+      # multiply in the symop in the space group
+      check_sg = sgtbx.space_group(self.sg_low)
+
+      check_sg.expand_smx(symop.new_denominators(r_den, t_den))
+      # Check if this SG is already in the list
+      assert check_sg != self.sg_low
+      if check_sg not in self.sg_groups:
+        # add sg to list
+        self.sg_groups.append(check_sg)
+        tmp_symops.append(symop)
+        tmp_indices.append(item)
+
+        # check if the other symops generate the same sg please
+        for check_item, check_op in enumerate(self.symops):
+          if check_sg.contains(check_op.new_denominators(r_den,t_den)):
+            # add symop to list if it is not in there yet
+            if check_op not in tmp_symops:
+              tmp_symops.append(check_op)
+            # add index to list
+            if check_item not in tmp_indices:
+              tmp_indices.append(check_item)
+
+        self.grouped_symops.append(tmp_symops)
+        self.grouped_index.append(tmp_indices)
+
+  def find_left_over_symops(self):
+    # this function gives the left over symops after
+    # assuming a certain supergroup
+    for set, group in zip(self.grouped_symops,
+                          self.sg_groups):
+      if len(set)>0:
+        select = []
+        for item, symop in enumerate(self.symops):
+          if symop not in set:
+            select.append(symop)
+        self.left_over_symops.append(select)
+      else:
+        self.left_over_symops.append([])
+
+  def return_next_set(self):
+    for set in self.grouped_symops:
+      yield set
+
+  def return_next_index(self):
+    for iset in self.grouped_index:
+      yield iset
+
+  def return_next_sg(self):
+    for sg in self.sg_groups:
+      yield sg
+
+  def return_next_left_over_set(self):
+    for missing_set in self.left_over_symops:
+      yield missing_set
+
+
+  def show(self, out=None):
+    if out is None:
+      out = sys.stdout
+
+    print((
+      "Input subgroup      : %s" % sgtbx.space_group_info(group=self.sg_low)), file=out)
+    print((
+      "Input lattice group : %s" % sgtbx.space_group_info(group=self.sg_high)), file=out)
+    print(file=out)
+    print(file=out)
+    for set,group,leftover in zip(self.grouped_symops,
+                                  self.sg_groups,
+                                  self.left_over_symops):
+      assert(len(set)+len(leftover)==len(self.symops))
+      print((
+        "Supergroup : %s" % sgtbx.space_group_info(group=group)), file=out)
+      print("             Used symops:", file=out)
+      for symop in set:
+        print("             (%s)    "%(symop.r().as_hkl()), file=out)
+      print(file=out)
+      print("             Left over symops:", file=out)
+      for symop in leftover:
+        if symop is not None:
+          print("             (%s)  "%(symop.r().as_hkl()), file=out)
+        else:
+          print("             None", file=out)
+      print(file=out)
+      print(file=out)
+
+
+
+
+class edge_object(object):
+  def __init__(self, used, unused,as_xyz=False):
+    # This object characterises a spacegroup transformation
+    # by listing: used symops, unused symops
+    self.symops_used = used
+    self.symops_unused = unused
+    self.as_xyz = as_xyz
+
+  def return_used(self):
+    for symop in self.symops_used:
+      yield symop
+
+  def return_unused(self):
+    for symop in self.symops_unused:
+      yield symop
+
+  def __repr__(self):
+    repr = str()
+    repr += "  using: "
+    for symop in self.symops_used:
+      if self.as_xyz:
+        repr+="("+symop.as_xyz()+")  "
+      else:
+        repr+="("+symop.r().as_hkl()+")  "
+    repr +="  symops left: " +str(len(self.symops_unused))
+    return repr
+
+  def __str__(self):
+    repr = str()
+    repr += "  using: "
+    for symop in self.symops_used:
+      if self.as_xyz:
+        repr+="("+symop.as_xyz()+")  "
+      else:
+        repr+="("+symop.r().as_hkl()+")  "
+    repr +="  symops left: " +str(len(self.symops_unused))
+    return repr
+
+
+
+class point_group_graph(object):
+  def __init__(self,
+               pg_low,
+               pg_high,
+               enforce_point_group=True,
+               as_xyz = False):
+
+    # It is rather import (i think) to make sure
+    # that point groups are supplied. This might prevent later surprises.
+    # hopefully.
+    self.as_xyz = as_xyz
+
+    low_point_group_check = (pg_low == pg_low.build_derived_point_group())
+    if enforce_point_group:
+      if not low_point_group_check:
+        raise Sorry("Input spacegroup not a point group")
+
+    high_point_group_check = (pg_high == pg_high.build_derived_point_group())
+
+    if enforce_point_group:
+      if not high_point_group_check:
+        raise Sorry("Input spacegroup not a point group")
+
+    self.assert_pg = enforce_point_group
+    self.graph = graph_tools.graph()
+    self.pg_low = pg_low
+    self.pg_high = pg_high
+
+    self.queue = [] # the queue used in building the space_group
+    self.build_it()
+    del self.queue # you have no business looking at this object,
+                   # so I delete it .. ;-)
+
+    self.graph.assert_is_clean()
+
+  def build_it(self):
+    # we start by putting the spacegroup on the queue
+    self.queue.append(self.pg_low)
+
+    while len(self.queue) > 0 :
+      this_sg = self.queue.pop(0)
+      self.make_and_place_nodes_and_connections(this_sg)
+
+  def make_and_place_nodes_and_connections(self, input_sg):
+    # make the object and name please
+    object = sgtbx.space_group_info(group=input_sg)
+    name = str(object)
+    sg_relations = sub_super_point_group_relations(
+      input_sg,
+      self.pg_high,
+      self.assert_pg)
+
+    # loop over the possible outgoing edges
+    edge_list = {}
+    for possible_super_sg, used_symops, unused_symops \
+        in zip(sg_relations.return_next_sg(),
+               sg_relations.return_next_set(),
+               sg_relations.return_next_left_over_set()):
+
+      # This is enough info to make connections from the given node
+      edge = edge_object(used =used_symops,
+                         unused = unused_symops,
+                         as_xyz = self.as_xyz)
+      edge_list[str(sgtbx.space_group_info(group=possible_super_sg)) ] = edge
+
+      # place the sg's generated on the queue
+      if not possible_super_sg in self.queue:
+        self.queue.append(possible_super_sg)
+
+    # place/insert the node with the proper connections please
+    # print object, type(object)
+    self.graph.insert_node(name = name,
+                          edge_object = edge_list,
+                          node_object = object)
+
+  def remove_point_group_and_its_super_groups_from_graph(self, group_name):
+    # please find all super groups of the given group
+    # and remove them from the graph
+    #
+    # I think the easiest way is just to find all nodes with
+    # no outgoing nodes, and determine all possible paths between them
+    # Then group the found pg's and remove them from the graph
+    end_nodes = []
+
+    for trial_node in self.graph.edge_objects:
+      n_out = len(self.graph.edge_objects[trial_node])
+      if n_out == 0:
+        end_nodes.append(trial_node)
+
+    # now see if there is a path between the given group and the end points
+    to_be_removed = []
+
+    for trial_end_node in end_nodes:
+      tmp_paths = self.graph.find_all_paths(group_name, trial_end_node)
+      for path in tmp_paths:
+        for sg in path:
+          if not (sg in to_be_removed):
+            to_be_removed.append(sg)
+    for sg in to_be_removed:
+      self.graph.remove_node(sg)
+    self.graph.assert_is_clean()
+
+
+  def reverse_dict(self):
+      new_dict = {}
+      for item in self.graph.o:
+        for value in self.graph.o[item]:
+          if value is not None:
+            if value in new_dict:
+              tmp = new_dict[value]
+              tmp.append(item)
+              new_dict[value] = tmp
+            else:
+              new_dict[value] = [item]
+      return new_dict
+
+  def get_maximal_subgroup(self, sg_name):
+      subgroups = []
+      reverse_graph = self.reverse_dict()
+      if sg_name in reverse_graph:
+        subgroups = reverse_graph[sg_name]
+      maximal = {}
+      for sg in subgroups:
+        maximal[sg] = True
+      result = []
+      for trial_sg in subgroups:
+        tmp = {}
+        if trial_sg in reverse_graph:
+          tmp = reverse_graph[trial_sg]
+        is_trial_sg_a_subgroup_of_items_in_subgroups=False
+        for item in tmp:
+          if item in subgroups:
+            maximal[item] = False
+            is_trial_sg_a_subgroup_of_subgroups=True
+      for item in maximal:
+        if maximal[item]:
+          result.append(item)
+      return result
+
+
+
+
+class find_compatible_space_groups(object):
+  def __init__(self,
+               likely_pointgroup=None,
+               xtal_sg=None,
+               unit_cell=None,
+               sys_abs_flag=True,
+               miller_array=None):
+    # we have the choice of supplynig either a dataset
+    # or just cell, symmetry and likely point group
+    # when supplynig data, an attempt will bhe made to detemine
+    # the most likely spacegroup
+
+    self.miller_array = None
+    self.x_sg = None
+    self.x_uc = None
+    self.x_lpg = None
+
+    if (xtal_sg is None) or (unit_cell is None):
+      assert miller_array is not None
+      self.miller_array = miller_array
+      assert likely_pointgroup is None
+      self.miller_array = miller_array
+      self.x_sg = miller_array.space_group()
+      self.x_uc = miller_array.unit_cell()
+      self.x_lpg = miller_array.space_group().build_derived_group(True, True)
+
+    if miller_array is None:
+      assert xtal_sg is not None
+      assert unit_cell is not None
+      assert likely_pointgroup is not None
+      self.x_lpg = likely_pointgroup
+      self.x_sg = xtal_sg
+      self.x_uc = unit_cell
+
+    self.xs = crystal.symmetry(self.x_uc,
+                              space_group=self.x_sg)
+
+    self.cb_op_xs_to_niggli = self.xs.change_of_basis_op_to_niggli_cell()
+
+    self.cb_op_lpg_to_ref_set = sgtbx.space_group_info(
+      group=self.x_lpg).change_of_basis_op_to_reference_setting()
+
+    self.point_group_compatible_sg = []
+    self.is_chiral = []
+    self.get_space_groups_compatible_with_likely_point_group()
+
+    self.allowed_under_pg_and_sys_abs = []
+
+
+    for sg in self.point_group_compatible_sg:
+      additional_cb_ops = reference_setting_choices(sg)
+      for add_cb_op in additional_cb_ops: # not optimal, but EASY
+         # make a new xs object please
+        new_xs = self.xs.change_basis(add_cb_op *
+                                      self.cb_op_lpg_to_ref_set *
+                                      self.cb_op_xs_to_niggli)
+        if sys_abs_flag:
+
+          # get sys abs for this setting please
+          current_xtal_sys_abs = self.make_sys_abs_list(new_xs.space_group())
+          # get sys abs for current sg please
+          trial_sg_abs = self.make_sys_abs_list(sg)
+          # check if current abs are 'in' trial abs
+          inside = self.compare_abs_lists(current_xtal_sys_abs,
+                                          trial_sg_abs)
+          if inside:
+            final_xs = crystal.symmetry(unit_cell = new_xs.unit_cell(),
+                                        space_group = sg,
+                                        assert_is_compatible_unit_cell=False)
+            best_cell = alternative_find_best_cell(
+              final_xs.unit_cell(),
+              final_xs.space_group())
+            final_xs = best_cell.return_best_xs()
+            # please get the total cb_op from input cell to best cell
+            tmp_cb_op = best_cell.return_change_of_basis_op_to_best_cell()
+            final_cb_op = ( tmp_cb_op*
+                            add_cb_op*
+                            self.cb_op_lpg_to_ref_set*
+                            self.cb_op_xs_to_niggli)
+            self.allowed_under_pg_and_sys_abs.append( (final_xs,
+                                                        final_cb_op) )
+    #-------------------------------------------
+    self.full_mask=None
+    if self.miller_array is not None:
+      self.full_mask = flex.bool(self.miller_array.data().size(), True)
+      # True when present, false when absent
+      for xs_and_cb_op in self.allowed_under_pg_and_sys_abs:
+        xs_and_cb_op[0].show_summary()
+        xs_and_cb_op[1].as_xyz()
+
+  def find_absent_indices():
+    print()
+
+  def get_space_groups_compatible_with_likely_point_group(self):
+    # loop over all standard sg's
+    for space_group_number in range(1,231):
+      trial_group = sgtbx.space_group_info(space_group_number).group()
+
+      if trial_group.build_derived_group(False,False) \
+             == self.x_lpg.change_basis(self.cb_op_lpg_to_ref_set):
+        self.is_chiral.append(trial_group.is_chiral())
+        self.point_group_compatible_sg.append(trial_group)
+
+  def make_sys_abs_list(self, space_group):
+    max_index=(5,5,5)
+    sg_type = sgtbx.space_group_info(1).type()
+    tmp_miller_list = miller.index_generator(sg_type,
+                                             False,
+                                             max_index).to_array()
+    abs_list = flex.miller_index()
+    for miller_index in tmp_miller_list:
+      if space_group.is_sys_absent(miller_index):
+        abs_list.append(miller_index)
+    return abs_list
+
+  def compare_abs_lists(self,
+                        abs_list_sub,
+                        abs_list_super):
+    # check sysb abs
+    contains=True
+    for sub_item in abs_list_sub:
+      if not (sub_item in abs_list_super):
+        contains=False
+    return contains
+
+  def full_sys_abs_mask(self):
+    # here we make a
+    print()
+    print()
+
+
+
+  def show(self, out=None):
+    if out == None:
+      out=sys.stdout
+
+    print("Input space group  : ", sgtbx.space_group_info(
+      group=self.x_sg), file=out)
+    print("Input unit cell    : ", self.x_uc.parameters(), file=out)
+    print("Likely point group : ", sgtbx.space_group_info(
+      group=self.lpg), file=out)
+    print(file=out)
+    print("Possible crystal symmetries: ", file=out)
+    for sx_cb in self.allowed_under_pg_and_sys_abs:
+      sx_cb.show(out)
+      print(file=out)
+
+
+class node_object(object):
+  def __init__(self,
+               point_group_info,
+               allowed_xtal_syms):
+    self.point_group_info = point_group_info
+    self.allowed_xtal_syms = allowed_xtal_syms
+
+
+class space_group_graph_from_cell_and_sg(object):
+  def __init__(self,
+               unit_cell,
+               sg_low,
+               max_delta=5.0,
+               ):
+    # No primitive settings assumed
+    self.unit_cell = unit_cell
+    self.sg_low = sg_low
+    self.pg_low = sg_low.build_derived_point_group()
+    self.xs_low = crystal.symmetry(unit_cell = self.unit_cell,
+                                   space_group=self.sg_low)
+
+    self.pg_low_prim_set = self.pg_low.change_basis(
+      self.xs_low.change_of_basis_op_to_niggli_cell())
+
+    self.xs_prim_set = self.xs_low.change_basis(
+      self.xs_low.change_of_basis_op_to_niggli_cell())
+
+    self.pg_high = sgtbx.lattice_symmetry.group(
+      self.xs_prim_set.unit_cell(),
+      max_delta=max_delta)
+
+
+    self.pg_graph = point_group_graph(self.pg_low_prim_set,
+                                      self.pg_high)
+
+    self.coset_table = coset_lookup(self.pg_low_prim_set,
+                                    self.pg_high)
+
+    new_dict = {}
+    for pg_name in self.pg_graph.graph.node_objects:
+      # for each possible point group, find a set of allowed space_groups
+      pg_object = self.pg_graph.graph.node_objects[pg_name].group()
+
+      # now find out the possible space groups please
+      tmp_allowed_sgs = find_compatible_space_groups(
+        likely_pointgroup=pg_object, # point group
+        xtal_sg=self.sg_low, # sg of given system
+        unit_cell=self.unit_cell) # uc of given system
+
+      new_node = node_object(
+        self.pg_graph.graph.node_objects[pg_name],
+        tmp_allowed_sgs.allowed_under_pg_and_sys_abs)
+      # now it is good to replace the node with the one we just made
+      new_dict[pg_name] = new_node
+    #
+    self.pg_graph.graph.node_objects = new_dict
+
+
+  def return_likely_sg_and_cell(self):
+    for pg in self.pg_graph.graph.node_objects:
+      object = self.pg_graph.graph.node_objects[ pg ]
+      for sg in object.allowed_xtal_syms:
+        yield (sg[0].space_group(), sg[0].unit_cell())
+
+  def show(self, out=None):
+
+    if out==None:
+      out=sys.stdout
+    print("------------------------", file=out)
+    print("Vertices and their edges", file=out)
+    print("------------------------", file=out)
+    print(file=out)
+    for pg in self.pg_graph.graph.node_objects:
+      print("Point group  ", pg, "  is a maximal subgroup of :", file=out)
+      if (len(self.pg_graph.graph.o[ str(pg) ])==0):
+        print("  * None", file=out)
+      else:
+        for edge in self.pg_graph.graph.o[ str(pg) ]:
+          print("  *", edge, file=out)
+      print(file=out)
+
+    print(file=out)
+    print(file=out)
+    print("-------------------------", file=out)
+    print("Transforming point groups", file=out)
+    print("-------------------------", file=out)
+    print(file=out)
+    for pg in self.pg_graph.graph.node_objects:
+      for next_pg in self.pg_graph.graph.edge_objects[ pg ]:
+        print("From", pg, "  to ", next_pg, " using :", file=out)
+        for symop in self.pg_graph.graph.edge_objects[ pg ][ next_pg]\
+                                        .return_used():
+          print("  * ",symop.r().as_hkl(), file=out)
+        print(file=out)
+
+    print(file=out)
+    print(file=out)
+    print("----------------------", file=out)
+    print("Compatible spacegroups", file=out)
+    print("----------------------", file=out)
+    print(file=out)
+    print("Spacegroups compatible with a specified point group ", file=out)
+    print("**and** with the systematic absenses specified by the ", file=out)
+    print("input space group, are listed below.", file=out)
+    print(file=out)
+
+    for pg in self.pg_graph.graph.node_objects:
+      print("Spacegroup candidates in point group %s:"%(pg), file=out)
+      for trial_sym in self.pg_graph.graph.node_objects[ pg ]\
+                                    .allowed_xtal_syms:
+        trial_sg = trial_sym[0].space_group_info()
+        print("  *", trial_sg, end=' ', file=out)
+        print(" %5.2f %5.2f %5.2f %5.2f %5.2f %5.2f"\
+            %(trial_sym[0].unit_cell().parameters()[0],
+              trial_sym[0].unit_cell().parameters()[1],
+              trial_sym[0].unit_cell().parameters()[2],
+              trial_sym[0].unit_cell().parameters()[3],
+              trial_sym[0].unit_cell().parameters()[4],
+              trial_sym[0].unit_cell().parameters()[5]), file=out)
+      print(file=out)
+
+
+  def graphviz_pg_graph(self, out=None):
+    if out==None:
+      out=sys.stdout
+    print("digraph f { ", file=out)
+    print("rankdir=LR", file=out)
+    for pg in self.pg_graph.graph.node_objects:
+      for next_pg in self.pg_graph.graph.edge_objects[ pg ]:
+        pg = pg.replace("\"","''")
+        next_pg = next_pg.replace("\"","''")
+
+        print("\"",pg,"\" -> \"", next_pg, "\" ;", file=out)
+    print("}", file=out)
+
+
+def compatible_symmetries(point_group):
+  """ Primitive setting assumed """
+  for op in point_group:
+    r = op.r()
+    order = r.order()
+    if r.info().type() == 1: continue
+    yield op
+    invariants = [ matrix.col(u) for u in r.info().basis_of_invariant() ]
+    if len(invariants) == 2:
+      t1, t2 = invariants
+      invariants.extend((t1 + t2, t1 - t2))
+    translations = []
+    for t in invariants:
+      t = sgtbx.tr_vec(t, order).mod_short()
+      if not t.is_zero() and t not in translations:
+        translations.append(t)
+    for t in translations:
+      yield sgtbx.rt_mx(r, t.new_denominator(sgtbx.sg_t_den))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/rational_matrices_point_groups.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+from cctbx.sgtbx import sub_lattice_tools
+from scitbx import matrix
+from boost_adaptbx.boost import rational
+from libtbx.math_utils import ifloor
+from six.moves import zip
+
+def as_hkl( op ):
+  def row_as_hkl( row, txt=['h','k','l']):
+      result = ""
+      part = 0
+      for n,j in zip(row,txt):
+        nn=""
+        if n != rational.int(0):
+          part += 1
+          if n >rational.int(0):
+            if part==1:
+              if n==rational.int(1):
+                nn = j
+              else:
+                nn = str(n)+j
+            if part > 1:
+              if n==rational.int(1):
+                nn = "+"+j
+              else:
+                nn = "+"+str(n)+j
+          if n < rational.int(0):
+            if part==1:
+              if n==rational.int(-1):
+                nn = "-"+j
+              else:
+                nn = str(n)+j
+            else:
+              if n == rational.int(-1):
+                nn+="-"+j
+              else:
+                nn = str(n)+j
+        result += nn
+      return result
+
+  hklmat=op.as_mat3()
+  hkl = row_as_hkl(hklmat[0:3]) + "," + row_as_hkl(hklmat[3:6]) +","+ row_as_hkl(hklmat[6:])
+  return hkl
+
+class rat_rot_group(object):
+  def __init__(self):
+    self.unit = matrix.sqr( [rational.int(1),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(1),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(1)
+                               ]  )
+
+    self.ops = [ self.unit ]
+    self.max_ops = 100
+
+  def expand(self, new_op=None,show=False):
+    if new_op==None:
+      new_op = self.ops[0]
+    if not self.is_in_group( new_op ):
+      self.ops.append( new_op )
+    done=False
+    while not done:
+      new_ops = []
+      for op in self.ops:
+        pno = op*new_op
+        if show:
+          print(pno, op, new_op)
+        if not self.is_in_group( pno ):
+          new_ops.append( pno )
+      if len(new_ops)==0:
+        done=True
+      else:
+        self.ops = self.ops+new_ops
+      assert len(self.ops)<= self.max_ops
+
+  def is_in_group(self,this_op):
+    inside=False
+    for op in self.ops:
+      if op==this_op:
+        inside=True
+    return inside
+
+  def change_basis(self, cb_op):
+    new_ops = []
+    for op in self.ops:
+      new_op = cb_op.inverse()*op*cb_op
+      new_ops.append( new_op )
+    self.ops = new_ops
+
+  def show(self):
+    for op in self.ops:
+      print(as_hkl( op.transpose() ))
+
+
+def rt_mx_as_rational(rot_mat):
+  # make sure one provides an integer matrix!
+  tmp_mat = rot_mat.num()
+  rational_list = []
+  for ij in tmp_mat:
+    rational_list.append( rational.int( ifloor(ij) ) )
+  return matrix.sqr( rational_list )
+
+def cb_op_as_rational(cb_op):
+   num = cb_op.c().r().num()
+   den = cb_op.c().r().den()
+   rational_list = []
+   for ii in num:
+     rational_list.append( rational.int(ii)/rational.int(den) )
+   return matrix.sqr( rational_list ).inverse()
+
+def construct_rational_point_group( space_group,  cb_op=None ):
+  gr = rat_rot_group()
+  if cb_op is None:
+    cb_op = sgtbx.change_of_basis_op(  "a,b,c" )
+    cb_op = cb_op_as_rational( cb_op )
+  for s in space_group:
+    tmp_r = rt_mx_as_rational( s.r() )
+    gr.expand( tmp_r )
+  gr.change_basis( cb_op )
+  gr.expand(show=False)
+  return gr
+
+
+def compare_groups( sg1, sg2 ):
+  if len(sg1.ops) == len(sg2.ops):
+    equal=True
+    for op1 in sg1.ops:
+      this_one = False
+      for op2 in sg2.ops:
+        if op1 == op2:
+          this_one = True
+          break
+      if not this_one:
+        equal = False
+    return equal
+  else:
+    return False
+
+def tst_compare():
+  sg1 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2" ).group() )
+  sg2 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2" ).group() )
+  sg3 = construct_rational_point_group( sgtbx.space_group_info( "P 4 2 2" ).group() )
+  sg4 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2 (a+b,a-b,2c)").group() )
+  assert compare_groups( sg1, sg2 )
+  assert not compare_groups( sg1, sg3 )
+  assert not compare_groups( sg1, sg4 )
+
+def tst_groups():
+  cb_ops = sub_lattice_tools.generate_cb_op_up_to_order(7)
+  mats = sub_lattice_tools.generate_matrix_up_to_order(7)
+  base_group = sgtbx.space_group_info( "P 2 2 2" ).group()
+  for cb_op, mat in zip(cb_ops, mats):
+    rat_cb_op = mat
+    extended_group=None
+    try:
+      extended_group = sgtbx.space_group_info( "P 2 2 2 (%s)"%cb_op ).group()
+    except Exception: pass
+    rbg = construct_rational_point_group( base_group, rat_cb_op )
+    reg = None
+    if extended_group is not None:
+      reg = construct_rational_point_group( extended_group )
+      assert compare_groups(reg, rbg)
+
+
+def run():
+  tst_groups()
+  tst_compare()
+
+if __name__ == "__main__":
+  run()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/reticular_pg_tools.py
+"""
+This code has been specifically developed for the detection of
+reticular twin laws. It is a very simple implementation of rotational groups
+using the boost rationals. Since reticular twin laws typically have matrix elements
+that cannot be handled by the current cctbx implementation, some code duplication was
+unavoidable.
+
+"""
+from __future__ import absolute_import, division, print_function
+
+
+from cctbx import sgtbx
+from cctbx.sgtbx import cosets, sub_lattice_tools
+from scitbx import matrix
+from boost_adaptbx.boost import rational
+from libtbx.math_utils import ifloor
+from six.moves import zip
+
+def as_hkl( op ):
+  def row_as_hkl( row, txt=['h','k','l']):
+      result = ""
+      part = 0
+      for n,j in zip(row,txt):
+        nn=""
+        if n != rational.int(0):
+          part += 1
+          if n >rational.int(0):
+            if part==1:
+              if n==rational.int(1):
+                nn = j
+              else:
+                nn = str(n)+j
+            if part > 1:
+              if n==rational.int(1):
+                nn = "+"+j
+              else:
+                nn = "+"+str(n)+j
+          if n < rational.int(0):
+            if part==1:
+              if n==rational.int(-1):
+                nn = "-"+j
+              else:
+                nn = str(n)+j
+            else:
+              if n == rational.int(-1):
+                nn+="-"+j
+              else:
+                nn = str(n)+j
+        result += nn
+      return result
+
+  hklmat=op#.as_mat3()
+  hkl = row_as_hkl(hklmat[0:3]) + "," + row_as_hkl(hklmat[3:6]) +","+ row_as_hkl(hklmat[6:])
+  return hkl
+
+class rat_rot_group(object):
+  def __init__(self):
+    self.unit = matrix.sqr( [rational.int(1),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(1),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(0),
+                               rational.int(1)
+                               ]  )
+
+    self.ops = [ self.unit ]
+    self.max_ops = 100
+
+  def expand(self, new_op=None,show=False):
+    if new_op==None:
+      new_op = self.ops[0]
+    if not self.is_in_group( new_op ):
+      self.ops.append( new_op )
+    done=False
+    while not done:
+      new_ops = []
+      for op in self.ops:
+        pno = op*new_op
+        if show:
+          print(pno, op, new_op)
+        if not self.is_in_group( pno ):
+          new_ops.append( pno )
+      if len(new_ops)==0:
+        done=True
+      else:
+        self.ops = self.ops+new_ops
+      assert len(self.ops)<= self.max_ops
+
+  def is_in_group(self,this_op):
+    inside=False
+    for op in self.ops:
+      if op==this_op:
+        inside=True
+    return inside
+
+  def change_basis(self, cb_op):
+    new_ops = []
+    for op in self.ops:
+      new_op = cb_op.inverse()*op*cb_op
+      new_ops.append( new_op )
+    self.ops = new_ops
+
+  def show(self):
+    for op in self.ops:
+      print(as_hkl( op.transpose() ))
+
+
+
+def rt_mx_as_rational(rot_mat):
+  # make sure one provides an integer matrix!
+  tmp_mat = rot_mat.num()
+  rational_list = []
+  for ij in tmp_mat:
+    rational_list.append( rational.int( ifloor(ij) ) )
+  return matrix.sqr( rational_list )
+
+def cb_op_as_rational(cb_op):
+   num = cb_op.c().r().num()
+   den = cb_op.c().r().den()
+   rational_list = []
+   for ii in num:
+     rational_list.append( rational.int(ii)/rational.int(den) )
+   return matrix.sqr( rational_list ).inverse()
+
+
+
+def construct_rational_point_group( space_group,  cb_op=None ):
+  gr = rat_rot_group()
+  if cb_op is None:
+    cb_op = sgtbx.change_of_basis_op(  "a,b,c" )
+    cb_op = cb_op_as_rational( cb_op )
+  for s in space_group:
+    tmp_r = rt_mx_as_rational( s.r() )
+    gr.expand( tmp_r )
+  gr.change_basis( cb_op )
+  gr.expand(show=False)
+  return gr
+
+
+def compare_groups( sg1, sg2 ):
+  if len(sg1.ops) == len(sg2.ops):
+    equal=True
+    for op1 in sg1.ops:
+      this_one = False
+      for op2 in sg2.ops:
+        if op1 == op2:
+          this_one = True
+          break
+      if not this_one:
+        equal = False
+    return equal
+  else:
+    return False
+
+def is_subgroup(sub,super):
+  if len(sub.ops) < len(super.ops):
+    subg = True
+    for op1 in sub.ops:
+      this_one = False
+      for op2 in super.ops:
+        if op1 == op2:
+          this_one = True
+          break
+      if not this_one:
+        subg = False
+    return subg
+  else:
+    return False
+
+def extra_operators(old_sg, new_sg):
+  #here we check if new_sg has operators old_sg hasn't
+  new_ops = []
+  for nop in new_sg.ops:
+    found_it=False
+    for oop in old_sg.ops:
+      if nop == oop:
+        found_it = True
+    if not found_it:
+      new_ops.append( nop )
+  return new_ops
+
+def recurring_operators(old_sg, new_sg):
+  #Here we find ops that are common to both sg's"""
+  common_ops = []
+  for nop in new_sg.ops:
+    found_it=False
+    for oop in old_sg.ops:
+      if nop == oop:
+        found_it = True
+    if found_it:
+      common_ops.append( nop )
+  return common_ops
+
+def is_reticular_polyholohedral(old_sg, new_sg):
+  no = len(extra_operators(old_sg,new_sg))
+  co = len(recurring_operators(old_sg,new_sg))
+  all_n = len( new_sg.ops )
+  all_o = len( old_sg.ops )
+  if all_o == co:
+    return False
+  else:
+    return True
+
+
+def cosets(g,h):
+  sets = []
+  for gi in g:
+    result = []
+    for hi in h:
+      result.append( gi*hi )
+    sets.append( result )
+
+
+  unique_sets = []
+  for set in sets:
+    is_unique=True
+    for unique_set in unique_sets:
+      found_it_array=[False]*len(set)
+      for op in set:
+        if op in unique_set:
+          is_unique=False
+    if is_unique:
+      unique_sets.append( set )
+  return unique_sets
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def build_reticular_twin_laws(old_sg, new_sg):
+  new_ops = extra_operators(old_sg,new_sg)
+  common_ops = recurring_operators(old_sg,new_sg)
+  """
+  We are searching for equivalence in the new symmetry operators, given the common operators in this group.
+  """
+  if len(new_ops)==0:
+    return None
+  result = cosets(new_sg.ops, common_ops)
+  repr = []
+  for set in result[1:]:
+    repr.append(set[0])
+  return repr
+
+
+def tst_build_reticular_twin_laws():
+  sg1 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2" ).group() )
+  sg2 =  construct_rational_point_group( sgtbx.space_group_info( "P 4 2 2 (a,b,2c)").group() )
+  result = build_reticular_twin_laws(sg1, sg2)
+  assert len(result)==1
+  for ii in result:
+    assert as_hkl(ii.transpose() )=="k,-h,l"
+
+  sg1 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2" ).group() )
+  sg2 =  construct_rational_point_group( sgtbx.space_group_info( "P 4 2 2").group() )
+  result = build_reticular_twin_laws(sg1, sg2)
+  assert len(result)==1
+  for ii in result:
+    assert as_hkl(ii.transpose() )=="k,-h,l"
+
+
+
+
+def tst_compare():
+  sg1 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2" ).group() )
+  sg2 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2" ).group() )
+  sg3 = construct_rational_point_group( sgtbx.space_group_info( "P 4 2 2" ).group() )
+  sg4 = construct_rational_point_group( sgtbx.space_group_info( "P 2 2 2 (a+b,a-b,2c)").group() )
+  assert compare_groups( sg1, sg2 )
+  assert not compare_groups( sg1, sg3 )
+  assert not compare_groups( sg1, sg4 )
+
+  assert is_subgroup( sg1, sg3 )
+
+
+def tst_groups():
+  cb_ops = sub_lattice_tools.generate_cb_op_up_to_order(3)
+  mats = sub_lattice_tools.generate_matrix_up_to_order(3)
+  base_group = sgtbx.space_group_info( "P 2 2 2" ).group()
+  for cb_op, mat in zip(cb_ops, mats):
+    rat_cb_op = mat
+    extended_group=None
+    try:
+      extended_group = sgtbx.space_group_info( "P 2 2 2 (%s)"%cb_op ).group()
+    except Exception: pass
+    rbg = construct_rational_point_group( base_group, rat_cb_op )
+    reg = None
+    if extended_group is not None:
+      reg = construct_rational_point_group( extended_group )
+      assert compare_groups(reg, rbg)
+
+def run():
+  tst_groups()
+  tst_compare()
+  tst_build_reticular_twin_laws()
+
+
+if __name__ == "__main__":
+  run()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/reticular_twin_laws.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx import crystal
+from cctbx.array_family import flex
+import cctbx.sgtbx.lattice_symmetry
+from cctbx.sgtbx import reticular_pg_tools as rmpg
+from cctbx.sgtbx import sub_lattice_tools as slt
+from scitbx import matrix
+import math, sys
+import scitbx.math
+from six.moves import zip
+
+class symmetry_safe_sublattice_xs(object):
+  def __init__(self,xsin,start_order=1,stop_order=5,max_delta=5.0):
+    self.xs = xsin
+    self.cb_op_to_niggli = xsin.change_of_basis_op_to_niggli_cell()
+    self.xs_n = self.xs.change_basis( self.cb_op_to_niggli )
+    self.basis = matrix.sqr( self.xs_n.unit_cell().orthogonalization_matrix() )
+
+    self.max_delta = max_delta
+
+    self.xs_expand = []
+    self.matrices  = slt.generate_matrix_up_to_order( stop_order, start_order )
+    self.add_to_niggli = []
+    self.metric_r_values = []
+    for mat in self.matrices:
+      self.make_new_xs(mat)
+
+  def metric_r(self,a,b):
+    old = a.metrical_matrix()
+    new = b.metrical_matrix()
+    old = flex.double( old )
+    new = flex.double( new )
+    delta = flex.abs(old - new)
+    result = 0
+    top = 0
+    bottom = 0
+    for oi, ni in zip(old,new):
+      tmp = math.fabs(oi-ni)
+      top += tmp
+      bottom += math.fabs(oi)
+    assert (bottom>0)
+    delta = 100.0*top/bottom
+    return( delta )
+
+  def make_new_xs(self, mat):
+    new_basis = self.basis*mat.as_float()
+    new_uc = uctbx.unit_cell( orthogonalization_matrix = new_basis )
+    new_xs = crystal.symmetry( new_uc, "P1" )
+    ecbn = new_xs.change_of_basis_op_to_niggli_cell()
+    cb_new_xs = new_xs.change_basis( ecbn )
+
+    new_xs = crystal.symmetry( unit_cell=cb_new_xs.unit_cell(),
+                               space_group=sgtbx.lattice_symmetry.group(cb_new_xs.unit_cell(),self.max_delta),
+                               assert_is_compatible_unit_cell=False,
+                             )
+    # gather some results please
+    self.metric_r_values.append( self.metric_r(new_xs.unit_cell(),cb_new_xs.unit_cell() )   )
+    self.xs_expand.append( new_xs )
+    self.add_to_niggli.append( ecbn )
+
+class ret_twin_law_info(object):
+  def __init__(self, twin_laws, m, metric_r, base_xs, subl_xs ):
+    self.m = m
+    self.metric_r = metric_r
+    self.twin_laws = twin_laws
+    self.order = m.determinant()
+    self.base_xs = base_xs
+    self.subl_xs = subl_xs
+
+  def show(self, out=None):
+    if out is None:
+      out = sys.stdout
+    print(file=out)
+    print("----- Reticular twin laws summary ----- ", file=out)
+    print(file=out)
+    print("Base crystal symmetry", file=out)
+    self.base_xs.show_summary(f=out)
+    print(file=out)
+    print("Sublattice symmetry", file=out)
+    self.subl_xs.show_summary(f=out)
+    print(file=out)
+    print("    Matrix M : ", file=out)
+    print(self.m)
+    print("    Order    : %i"%self.order, file=out)
+    print("    Metric R : %3.2e"%self.metric_r, file=out)
+    print("    Twin laws:", file=out)
+    if self.twin_laws is not None:
+      for law in self.twin_laws:
+        print("           ", rmpg.as_hkl( law ), file=out)
+    else:
+      print("         No twin laws", file=out)
+    print(file=out)
+
+class reticular_twin_laws(object):
+  def __init__(self, xs, max_delta=5.0, max_index=5):
+    self.xs1 = xs
+    cbop_prim = self.xs1.change_of_basis_op_to_niggli_cell()
+    self.xs2 = self.xs1.change_basis(cbop_prim)
+    self.cbop =  rmpg.cb_op_as_rational(cbop_prim)
+    self.xs_sl_list = symmetry_safe_sublattice_xs(self.xs2,1,max_index,max_delta)
+    self.base_to_niggli_inv = rmpg.cb_op_as_rational( self.xs_sl_list.cb_op_to_niggli).inverse()
+
+    self.ori_sg = rmpg.construct_rational_point_group( self.xs2.space_group() )
+    self.ori_sg.change_basis( self.cbop.inverse() )
+    self.derived_laws = []
+
+    for nxs, mat, add_cb_op, mr in zip(self.xs_sl_list.xs_expand,
+                                       self.xs_sl_list.matrices,
+                                       self.xs_sl_list.add_to_niggli,
+                                       self.xs_sl_list.metric_r_values):
+      these_laws=  self.construct_twin_laws( nxs, mat, add_cb_op, mr )
+      if these_laws is not None:
+        this_info =   self.construct_twin_laws( nxs, mat, add_cb_op, mr )
+        self.derived_laws.append( this_info )
+
+
+  def construct_twin_laws(self, xs, mat, additional_cb_op, r, show=False):
+    # get the new symmetry object
+    # A.cb(nig).cb(mat).cb(add_to_niggli)
+    tmp_sg = xs.reflection_intensity_symmetry(anomalous_flag = self.xs2.space_group().is_chiral() ).space_group()
+    new_sg = rmpg.construct_rational_point_group( tmp_sg )
+    tmp_cb_op = rmpg.cb_op_as_rational( additional_cb_op ).inverse()
+
+    new_sg.change_basis( tmp_cb_op )
+    new_sg.change_basis( mat.inverse() )
+    new_sg.change_basis( self.base_to_niggli_inv )
+    new_sg.change_basis( self.cbop.inverse() )
+
+    these_twin_laws = rmpg.build_reticular_twin_laws(self.ori_sg,new_sg )
+    if these_twin_laws is not None:
+      tlinfo = ret_twin_law_info(these_twin_laws,mat,r,self.xs1,xs )
+      return tlinfo
+    else:
+      return None
+
+
+
+
+
+  def show(self,out=None):
+    if out is None:
+      out=sys.stdout
+
+    if len(self.derived_laws):
+      for o in self.derived_laws:
+        o.show(out=out)
+    else:
+      print("No reticular twin laws found.", file=out)
+
+
+
+def exercise():
+  """
+  uc = uctbx.unit_cell( "10.079 10.079 48.409 90 90 120" )
+  xs = crystal.symmetry( uc, "R32")
+  reticular_twin_laws( xs , max_index=3, max_delta=1.5).show()
+
+  uc = uctbx.unit_cell( "5.05 11.15 11.45 108.25 98.42 95.78" )
+  xs = crystal.symmetry( uc, "P1" )
+  reticular_twin_laws( xs, max_index=3 ).show()
+
+  uc = uctbx.unit_cell( "127.6, 58.1, 51.2, 90, 97.2, 90" )
+  xs = crystal.symmetry( uc, "C2" )
+  reticular_twin_laws( xs, max_index=3, max_delta=1.5 ).show()
+
+  uc = uctbx.unit_cell( "127.6, 152.1, 51.2, 90, 90.0, 90" )
+  xs = crystal.symmetry( uc, "P222" )
+  reticular_twin_laws( xs, max_index=3, max_delta=1.5 ).show()
+  """
+
+  uc  =  uctbx.unit_cell( "96 74 77 90 113 90")
+  xs  = crystal.symmetry(uc, "C2")
+  trlw = reticular_twin_laws( xs, max_index=2, max_delta=1.5 )
+  #trlw.show()
+  m = [2, 1, 0,0, 1, 0,0, 0, 1]
+  for ii, jj in zip( trlw.derived_laws[0].m, m):
+    assert(ii==jj)
+
+  tl = [-1, 0, 0, 0, -1, 0,-1, 0, 1]
+  dl = trlw.derived_laws[0].twin_laws[0]
+  for ii, jj in zip(tl,dl):
+    assert(ii==jj)
+
+  uc = uctbx.unit_cell( "10.079 10.079 48.409 90 90 120" )
+  xs = crystal.symmetry( uc, "R32")
+  rtl = reticular_twin_laws( xs , max_index=8, max_delta=1.5)
+  for tli in rtl.derived_laws:
+    for ttl in tli.twin_laws:
+      assert(ttl.determinant()==1) #check that these twin laws have det equal to 1
+
+
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/show_cosets.py
+from __future__ import absolute_import, division, print_function
+from cctbx.sgtbx import cosets
+from cctbx import sgtbx
+import sys
+
+def run(g,h,out=None):
+  if out is None:
+    out = sys.stdout
+
+  g = sgtbx.space_group_info( g ).group()
+  h = sgtbx.space_group_info( h ).group()
+
+  success = False
+  try:
+    cc = cosets.left_decomposition( h,g)
+    cc.show(out=out)
+    success = True
+  except Exception: pass
+
+  if not success:
+    print("Coset decomposition not successfull.", file=out)
+    print("Group %s might not be a subgroup of %s"%(sgtbx.space_group_info( group=g ), sgtbx.space_group_info( group=h )   ), file=out)
+    print("Sorry.....", file=out)
+
+
+if __name__ == "__main__":
+  run(sys.argv[1], sys.argv[2])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/sub_lattice_tools.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx import crystal
+from cctbx.array_family import flex
+import cctbx.sgtbx.lattice_symmetry
+from scitbx import matrix
+import math, sys
+import scitbx.math
+from libtbx.test_utils import approx_equal
+from libtbx.utils import format_cpu_times
+from boost_adaptbx.boost import rational
+from libtbx.math_utils import ifloor
+from six.moves import cStringIO as StringIO
+from six.moves import range
+from six.moves import zip
+
+def divisor(n, pairs=False):
+  """ find all divisors """
+  i_n = int( n )
+  d_n = float(n)
+  w_n = int( math.floor( math.sqrt(n) ) )
+  result = []
+  for trial_div in range(1, w_n+1):
+    if d_n%trial_div == 0:
+      a = trial_div
+      b = i_n//trial_div
+      if not pairs:
+        result.append( a )
+        if a != b:
+          result.append( b )
+      if pairs:
+        result.append( (a,b) )
+
+  return result
+
+
+def find_triples_slowly(n):
+  """ finds all triples for which a*b*c==n"""
+  # do this by finding all triplets for which
+  # the above condition holds
+  #
+  # lets do this the stupid way, i.e. like this:
+  divs = divisor(n)
+  triples = []
+  for fst in divs:
+    for snd in divs:
+      for trd in divs:
+        tmp = fst*snd*trd
+        if tmp == n:
+          trip = (fst,snd,trd)
+          if not trip in triples:
+            triples.append( trip )
+  return triples
+
+def sort_triple( triple ):
+  order = flex.sort_permutation( flex.int(triple),False )
+  sorted_triple = ( triple[order[0]],
+                    triple[order[1]],
+                    triple[order[2]] )
+
+  return sorted_triple
+
+
+def make_permutations( triple ):
+  # no nonsense hard coded combinations
+  c1 = (triple[0], triple[1], triple[2])
+  c2 = (triple[0], triple[2], triple[1])
+  c3 = (triple[1], triple[0], triple[2])
+  c4 = (triple[1], triple[2], triple[0])
+  c5 = (triple[2], triple[0], triple[1])
+  c6 = (triple[2], triple[1], triple[0])
+  permuts = [c1,c2,c3,c4,c5,c6 ]
+  result = []
+  for item in permuts:
+    if not item in result:
+      result.append( item )
+
+  return result
+
+
+def make_triples(n):
+  """ finds all triples for which a*b*c==n"""
+  # do this by finding all triplets for which
+  # the above condition holds
+  #
+  divs = divisor(n,True)
+  triples = []
+  for item in divs:
+    div_a = divisor(item[0],True)
+    div_b = divisor(item[1],True)
+    for a in div_a:
+      trial_trip = ( a[0], a[1], item[1] )
+      trial_trip = sort_triple( trial_trip )
+      if not trial_trip in triples:
+        triples.append( trial_trip )
+    for b in div_b:
+      trial_trip = ( b[0], b[1], item[0] )
+      trial_trip = sort_triple( trial_trip )
+      if not trial_trip in triples:
+        triples.append( trial_trip )
+
+  return triples
+
+def find_triples( n ):
+  # fist make a list of ordered triples
+  triples = make_triples( n )
+  result = []
+  # now we have get all combinations
+  for trip in triples:
+    result += make_permutations( trip )
+  return result
+
+def generate_matrix( order ):
+  """ make all sub lattices generators of order order """
+  # first get all triples
+  triples = find_triples( order )
+  matrices = []
+  for triple in triples:
+    # make a list of d and e values
+    a = triple[0]
+    b = triple[1]
+    c = triple[2]
+    d_and_e = []
+    f_list = []
+
+    if a%2 == 0:
+      # a is even
+      tmp = -a//2+1
+      while tmp <= a//2:
+        d_and_e.append( tmp )
+        tmp +=1
+    if a%2 != 0 :
+      # a is odd
+      tmp = -(a-1)//2
+      while tmp <= (a-1)//2:
+        d_and_e.append( tmp )
+        tmp += 1
+
+    if b%2 == 0:
+      # b is even
+      tmp = -b//2+1
+      while tmp <= b//2:
+        f_list.append( tmp )
+        tmp +=1
+
+    if b%2 != 0:
+      # b is odd
+      tmp = -(b-1)//2
+      while tmp <= (b-1)//2:
+        f_list.append( tmp )
+        tmp += 1
+
+    for d in d_and_e :
+      for e in d_and_e :
+        for f in f_list :
+          mat = [rational.int(a),
+                 rational.int(d),
+                 rational.int(e),
+                 rational.int(0),
+                 rational.int(b),
+                 rational.int(f),
+                 rational.int(0),
+                 rational.int(0),
+                 rational.int(c)]
+          matrices.append(  matrix.sqr(mat)  )
+  return matrices
+
+
+def generate_matrix_up_to_order( end_order,start_order=1 ):
+  cum = 0
+  all_matrices = []
+  for n in range(int(start_order),int(end_order)+1):
+    all_matrices += generate_matrix( n )
+  return all_matrices
+
+def generate_cb_op_up_to_order( end_order, start_order=1):
+  def string_it( row ):
+    result = ""
+    abc = ['a','b','c']
+    part = 0
+    for n,j in zip(row,abc):
+      nn=""
+      if n != 0:
+        part += 1
+        if n >0:
+          if part==1:
+            if n==1:
+              nn = j
+            else:
+              nn = str(n)+j
+          if part > 1:
+            if n==1:
+              nn = "+"+j
+            else:
+              nn = "+"+str(n)+j
+        if n < 0 :
+          if part==1:
+            if n==-1:
+              nn = "-"+j
+            else:
+              nn = str(n)+j
+          else:
+            nn = str(n)+j
+      result += nn
+    return result
+  mats = generate_matrix_up_to_order(end_order,start_order)
+  cb_ops = []
+  for mat in mats:
+    new_a = [mat[0], mat[3], mat[6] ] # mat[0:3]
+    new_b = [mat[1], mat[4], mat[7] ] # mat[3:6]
+    new_c = [mat[2], mat[5], mat[8] ]
+    tmp = string_it(new_a)+","+string_it(new_b)+","+string_it(new_c)
+    cb_ops.append( tmp )
+  return cb_ops
+
+
+def rt_mx_as_rational(rot_mat):
+  # make sure one provides an integer matrix!
+  tmp_mat = rot_mat.r().as_double()
+  rational_list = []
+  for ij in tmp_mat:
+    rational_list.append( rational.int( ifloor(ij) ) )
+  return matrix.sqr( rational_list )
+
+def generate_inverse_matrix_up_to_order( end_order,start_order=1 ):
+  mat_list = generate_matrix_up_to_order( end_order, start_order )
+  inv_mat_list = []
+  for mat in mat_list:
+    inv_mat  = mat.inverse()
+    inv_mat_list.append( inv_mat )
+  return( inv_mat_list )
+
+class make_list_of_target_xs_up_to_order(object):
+  def __init__(self,
+               basic_xs,
+               order=1,
+               max_delta=2):
+
+    self.basic_xs = basic_xs
+    self.basic_xs_n = self.basic_xs.change_basis( self.basic_xs.change_of_basis_op_to_niggli_cell() )
+    self.basic_to_niggli_cb_op = self.basic_xs.change_of_basis_op_to_niggli_cell()
+
+
+    self.basis = matrix.sqr( self.basic_xs_n.unit_cell().orthogonalization_matrix() )
+    self.order = order
+    self.max_delta = max_delta
+
+    self.matrices = generate_matrix_up_to_order( self.order )
+    self.cb_ops = generate_cb_op_up_to_order( self.order )
+
+    self.xs_list = []
+    self.sg_list = []
+
+    self.extra_cb_op = []
+    for mat, cb_op in zip(self.matrices, self.cb_ops):
+      self.make_new_xs( mat, cb_op )
+
+  def make_new_xs(self,
+                  mat,
+                  cb_op,
+                  to_reference=True):
+    # make new lattice
+    new_basis = self.basis*mat.as_float()
+    new_uc = uctbx.unit_cell( orthogonalization_matrix = new_basis )
+
+    tmp_xs = crystal.symmetry( unit_cell=new_uc,
+                               space_group=sgtbx.lattice_symmetry.group(new_uc,self.max_delta),
+                               assert_is_compatible_unit_cell=False,
+                             )
+
+    extra_cb_op = tmp_xs.change_of_basis_op_to_reference_setting()
+    self.extra_cb_op.append( extra_cb_op )
+    #
+    new_sg = None
+    try:
+      new_sg = sgtbx.space_group_info( group=self.basic_xs_n.space_group()).change_basis( cb_op )
+    except Exception: pass
+
+    if to_reference:
+      tmp_xs = tmp_xs.change_basis( extra_cb_op )
+      try:
+        new_sg = new_sg.change_basis( extra_cb_op )
+      except Exception: pass
+
+    self.xs_list.append( tmp_xs )
+    self.sg_list.append( new_sg )
+
+class compare_lattice(object):
+  def __init__(self,
+               xs_a,
+               xs_b,
+               max_delta=2.0,
+               out=None,
+               relative_length_tolerance=0.05,
+               absolute_angle_tolerance=10.0,
+               order=1):
+
+    self.relative_length_tolerance = relative_length_tolerance
+    self.absolute_angle_tolerance = absolute_angle_tolerance
+    self.order=order
+
+    self.max_delta=max_delta
+    self.out = out
+    if self.out is None:
+      self.out = sys.stdout
+
+    self.xs_a = xs_a
+    self.xs_b = xs_b
+    # Go to niggli cell
+    self.xs_a_n = self.xs_a.niggli_cell()
+    self.xs_b_n = self.xs_b.niggli_cell()
+
+    if ( self.xs_a.niggli_cell().unit_cell().volume() > self.xs_b.niggli_cell().unit_cell().volume() ):
+      self.xs_a = xs_b
+      self.xs_b = xs_a
+      # go to niggli cell please
+      self.xs_a_n = self.xs_a.niggli_cell()
+      self.xs_b_n = self.xs_b.niggli_cell()
+
+
+    volume_ratio   = self.xs_b_n.unit_cell().volume() / self.xs_a_n.unit_cell().volume()
+    n_volume_ratio = math.floor( volume_ratio + 1 )
+
+    self.show_basic_info()
+
+
+    self.basis_a = matrix.sqr( self.xs_a_n.unit_cell().orthogonalization_matrix() )
+    print("Cartesian basis (column) vectors of lego cell:", file=self.out)
+    tmp_bas = self.basis_a.as_list_of_lists()
+    print("  / %5.1f %5.1f %5.1f \\  " %(tmp_bas[0][0], tmp_bas[0][1], tmp_bas[0][2]), file=self.out)
+    print("  | %5.1f %5.1f %5.1f |  " %(tmp_bas[1][0], tmp_bas[1][1], tmp_bas[1][2]), file=self.out)
+    print("  \\ %5.1f %5.1f %5.1f /  " %(tmp_bas[2][0], tmp_bas[2][1], tmp_bas[2][2]), file=self.out)
+    print(file=self.out)
+    self.basis_b = matrix.sqr( self.xs_b_n.unit_cell().orthogonalization_matrix() )
+    print("Cartesian basis (column) vectors of target cell:", file=self.out)
+    tmp_bas = self.basis_b.as_list_of_lists()
+    print("  / %5.1f %5.1f %5.1f \\  " %(tmp_bas[0][0], tmp_bas[0][1], tmp_bas[0][2]), file=self.out)
+    print("  | %5.1f %5.1f %5.1f |  " %(tmp_bas[1][0], tmp_bas[1][1], tmp_bas[1][2]), file=self.out)
+    print("  \\ %5.1f %5.1f %5.1f /  " %(tmp_bas[2][0], tmp_bas[2][1], tmp_bas[2][2]), file=self.out)
+    print(file=self.out)
+
+    self.lattice_symm_a = sgtbx.lattice_symmetry.group( self.xs_a_n.unit_cell(),self.max_delta )
+    self.lattice_symm_b = sgtbx.lattice_symmetry.group( self.xs_b_n.unit_cell(),self.max_delta )
+
+    self.xs_ref = crystal.symmetry( unit_cell=self.xs_b_n.unit_cell(),
+                                    space_group=self.lattice_symm_b,
+                                    assert_is_compatible_unit_cell=False )
+
+    # make a list of matrices
+    self.matrix_list = generate_matrix_up_to_order( n_volume_ratio, max(n_volume_ratio-1,1) )
+    self.uc_and_symm_list=[]
+    self.possible_solutions = []
+    print("A total of %4i matrices in the hermite normal form have been generated."%( len( self.matrix_list ) ), file=self.out)
+    print("The volume changes they cause lie between %4i and %4i."%(n_volume_ratio, max(n_volume_ratio-1,1)), file=self.out)
+
+    count =0
+
+    print(file=self.out)
+    print("Trying all matrices", file=self.out)
+    print(file=self.out)
+    print("   1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0", file=self.out)
+    print("  ", end=' ', file=self.out)
+    for mat in self.matrix_list:
+      count+=1
+      found_it=False
+      tmp_xs = self.make_new_cell_and_symmetry( mat )
+
+      self.uc_and_symm_list.append( tmp_xs )
+
+      tmp_gen = self.xs_b_n.unit_cell().similarity_transformations(
+        tmp_xs[2].unit_cell(),
+        self.relative_length_tolerance,
+        self.absolute_angle_tolerance,
+        self.order)
+
+      if tmp_gen.size()>0:
+        found_it = True
+        cb_op = sgtbx.change_of_basis_op(sgtbx.rt_mx( sgtbx.rot_mx(tmp_gen[0]))).inverse()
+        tmp_sol = (mat,cb_op,tmp_xs[2].change_basis( cb_op ) , tmp_xs[3]) # matrix, corresponding cb_op, cell + lattice sym
+        self.possible_solutions.append( tmp_sol )
+        #self.show_solution(tmp_sol)
+      if found_it:
+        print("*", end=' ', file=self.out)
+        self.out.flush()
+      else:
+        if count%10==0:
+          print("|", end=' ', file=self.out)
+          self.out.flush()
+        else:
+          print(".", end=' ', file=self.out)
+          self.out.flush()
+      if count%20==0:
+        print(file=self.out)
+        print("  ", end=' ', file=self.out)
+        self.out.flush()
+
+    print(file=self.out)
+    print(" Listing all possible solutions", file=self.out)
+    count=0
+    if len(self.possible_solutions)==0:
+      print(file=out)
+      print("No relations found for this particular sublattice of the specified target cell.", file=out)
+      print("   ", file=out)
+      print(file=out)
+
+    for tmp_sol in self.possible_solutions:
+      count+=1
+      print(file=self.out)
+      print("Solution %4i"%(count), file=self.out)
+      self.show_solution( tmp_sol )
+
+
+  def show_basic_info(self):
+    print(file=self.out)
+    print("Crystal symmetries in supplied setting", file=self.out)
+    print(file=self.out)
+    print("Target crystal symmetry:", file=self.out)
+    self.xs_b.show_summary(f=self.out,
+                           prefix="    ")
+    print("Building block crystal symmetry: ", file=self.out)
+    self.xs_a.show_summary(f=self.out,
+                           prefix="    ")
+    print(file=self.out)
+
+    print("Crystal symmetries in Niggli setting", file=self.out)
+    print(file=self.out)
+    print("Target crystal symmetry:", file=self.out)
+    self.xs_b_n.show_summary(f=self.out,
+                           prefix="    ")
+    print("Building block (lego cell) crystal symmetry: ", file=self.out)
+    self.xs_a_n.show_summary(f=self.out,
+                           prefix="    ")
+    print(file=self.out)
+    print("Volume ratio between target and lego cell: %5.2f"%( self.xs_b_n.unit_cell().volume() / self.xs_a_n.unit_cell().volume() ), file=self.out)
+    print(file=self.out)
+
+
+  def show_solution(self, sol_entry):
+    mat = sol_entry[0].as_list_of_lists()
+    print("--------------------------------------------------------------", file=self.out)
+    print("Target unit cell :     %5.1f %5.1f %5.1f %5.1f %5.1f %5.1f"%(self.xs_b_n.unit_cell().parameters()[0],
+                                                                            self.xs_b_n.unit_cell().parameters()[1],
+                                                                            self.xs_b_n.unit_cell().parameters()[2],
+                                                                            self.xs_b_n.unit_cell().parameters()[3],
+                                                                            self.xs_b_n.unit_cell().parameters()[4],
+                                                                            self.xs_b_n.unit_cell().parameters()[5]), file=self.out)
+    print("Lego cell :            %5.1f %5.1f %5.1f %5.1f %5.1f %5.1f"%(self.xs_a_n.unit_cell().parameters()[0],
+                                                                            self.xs_a_n.unit_cell().parameters()[1],
+                                                                            self.xs_a_n.unit_cell().parameters()[2],
+                                                                            self.xs_a_n.unit_cell().parameters()[3],
+                                                                            self.xs_a_n.unit_cell().parameters()[4],
+                                                                            self.xs_a_n.unit_cell().parameters()[5]), file=self.out)
+    print(file=self.out)
+    print("               /%4i %4i %4i  \\  "%(mat[0][0],mat[0][1],mat[0][2]), file=self.out)
+    print("matrix :  M =  |%4i %4i %4i  |  "%(mat[1][0],mat[1][1],mat[1][2]), file=self.out)
+    print("               \\%4i %4i %4i  /  "%(mat[2][0],mat[2][1],mat[2][2]), file=self.out)
+    print(file=self.out)
+    print("Additional Niggli transform:     ", sol_entry[3].as_xyz(), file=self.out)
+    print("Additional similarity transform: ", sol_entry[1].as_xyz(), file=self.out)
+    print("Resulting unit cell :  %5.1f %5.1f %5.1f %5.1f %5.1f %5.1f"%(
+      sol_entry[2].unit_cell().parameters()[0],
+      sol_entry[2].unit_cell().parameters()[1],
+      sol_entry[2].unit_cell().parameters()[2],
+      sol_entry[2].unit_cell().parameters()[3],
+      sol_entry[2].unit_cell().parameters()[4],
+      sol_entry[2].unit_cell().parameters()[5]), file=self.out)
+    print("Deviations :           %5.1f %5.1f %5.1f %5.1f %5.1f %5.1f"%(
+      100*(self.xs_b_n.unit_cell().parameters()[0]-sol_entry[2].unit_cell().parameters()[0])/self.xs_b_n.unit_cell().parameters()[0],
+      100*(self.xs_b_n.unit_cell().parameters()[1]-sol_entry[2].unit_cell().parameters()[1])/self.xs_b_n.unit_cell().parameters()[1],
+      100*(self.xs_b_n.unit_cell().parameters()[2]-sol_entry[2].unit_cell().parameters()[2])/self.xs_b_n.unit_cell().parameters()[2],
+      (self.xs_b_n.unit_cell().parameters()[3]-sol_entry[2].unit_cell().parameters()[3]),
+      (self.xs_b_n.unit_cell().parameters()[4]-sol_entry[2].unit_cell().parameters()[4]),
+      (self.xs_b_n.unit_cell().parameters()[5]-sol_entry[2].unit_cell().parameters()[5])  ), file=self.out)
+    print("Deviations for unit cell lengths are listed in %.", file=self.out)
+    print("Angular deviations are listed in degrees.", file=self.out)
+    print(file=self.out)
+    print(" ", file=self.out)
+    print("--------------------------------------------------------------", file=self.out)
+
+  def make_new_cell_and_symmetry(self,
+                                 mat):
+    # make new lattice
+    new_basis = self.basis_a*mat.as_float()
+    new_uc = uctbx.unit_cell( orthogonalization_matrix = new_basis )
+
+    tmp_xs = crystal.symmetry( new_uc, "P1" ) # if latice symm is supplied, we loose track of cb op sequence!
+
+    extra_cb_op = sgtbx.change_of_basis_op( tmp_xs.change_of_basis_op_to_niggli_cell().as_xyz() )
+
+    # get the niggli cell please
+    new_uc = new_uc.niggli_cell()
+    # get the lattice symmetry please
+    tmp_xs = tmp_xs.change_basis( extra_cb_op )
+    lattice_group = tmp_xs.space_group_info()
+    return( (new_uc,
+             lattice_group,
+             tmp_xs,
+             extra_cb_op) )
+
+def tst_compare():
+  uc1=uctbx.unit_cell( '61.28,95.92,145.02,90,90,90' )
+  xs1 = crystal.symmetry(uc1, "P212121")
+  uc2=uctbx.unit_cell('115.5,149.0,115.60,90,115.3,90' )
+  xs2 = crystal.symmetry(uc2, "P1211")
+  out=StringIO()
+  compare_object= compare_lattice(xs1,xs2,order=1,out=out)
+  assert len( compare_object.possible_solutions )==1
+
+def tst_sublattice():
+  # compare results to table 2, Acta Cryst A36, 242-248, (1980) Billiet, Rolley Le-Coz
+  i = [2, 3,  4,  5,  6,  7,  8,   9,   10 ]
+  N = [7, 13, 35, 31, 91, 57, 155, 130, 217]
+  for ii, iN in zip(i,N):
+    tmp = generate_matrix( ii )
+    assert ( len(tmp) == iN )
+
+def tst_make_bigger_cell():
+  uc1=uctbx.unit_cell( '61.28,95.92,145.02,90,90,90' )
+  xs1 = crystal.symmetry(uc1, "P212121")
+  tmp  = make_list_of_target_xs_up_to_order(xs1,order=5)
+  for xs,mat,cb_op in zip(tmp.xs_list,
+                          tmp.matrices,
+                          tmp.extra_cb_op):
+    ratio = xs.unit_cell().volume()/xs1.unit_cell().volume()
+    det = float(mat.determinant())
+    det_ref= float(cb_op.c().r().determinant())
+    assert approx_equal( ratio/(det/det_ref),1.0, eps=0.001 )
+
+def tst_centered_cells():
+  out = StringIO()
+  uc1 = uctbx.unit_cell( '13,19,23,90,97,90' )
+  xs1 = crystal.symmetry( uc1, "C2" )
+  cb_op = xs1.change_of_basis_op_to_primitive_setting()
+  xs1p = xs1.change_basis( cb_op )
+  xs2 = crystal.symmetry( uc1, "P1" )
+  comp = compare_lattice( xs1, xs2, out=out )
+  assert len( comp.possible_solutions )==1
+
+  uc1 = uctbx.unit_cell( '13,13,23,90,90,120' )
+  xs1 = crystal.symmetry( uc1, "R32:H" )
+  cb_op = xs1.change_of_basis_op_to_primitive_setting()
+  xs1p = xs1.change_basis( cb_op )
+  xs2 = crystal.symmetry( uc1, "P1" )
+  comp = compare_lattice( xs1, xs2, out=out )
+  assert len( comp.possible_solutions )==1
+
+
+
+
+def exercise():
+  tst_sublattice()
+  tst_compare()
+  tst_make_bigger_cell()
+  tst_centered_cells()
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/subgroups.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+from six.moves import range
+
+def anomalous_reflection_intensity_primitive_cell(space_group):
+  assert space_group.n_ltr() == 1
+  assert not space_group.is_centric()
+  subgroup = sgtbx.space_group(space_group)
+  subgroup.make_tidy()
+  result = [subgroup]
+  for s1 in space_group:
+    assert s1.t().num() == (0,0,0)
+    for s2 in space_group:
+      subgroup = sgtbx.space_group()
+      subgroup.expand_smx(s1)
+      subgroup.expand_smx(s2)
+      subgroup.make_tidy()
+      if (not subgroup in result):
+        result.append(subgroup)
+  return result
+
+class subgroups(object):
+
+  def __init__(self, parent_group_info):
+    self._p_groups = []
+    self.z2p_op = parent_group_info.group().z2p_op()
+    p_parent_group_info = parent_group_info.change_basis(self.z2p_op)
+    p_parent_group = p_parent_group_info.group()
+    assert p_parent_group.order_p() == p_parent_group.order_z()
+    p_parent_group.make_tidy()
+    for i_smx in range(p_parent_group.order_p()):
+      group_i = sgtbx.space_group()
+      group_i.expand_smx(p_parent_group(i_smx))
+      for j_smx in range(i_smx,p_parent_group.order_p()):
+        subgroup = sgtbx.space_group(group_i)
+        subgroup.expand_smx(p_parent_group(j_smx))
+        subgroup.make_tidy()
+        self._add(subgroup)
+
+  def _add(self, group):
+    for g in self._p_groups:
+      if (g == group): return 0
+    self._p_groups.append(group)
+    return 1
+
+  def groups_primitive_setting(self):
+    return self._p_groups
+
+  def groups_parent_setting(self):
+    result = []
+    p2z_op = self.z2p_op.inverse()
+    for g in self._p_groups:
+      result.append(g.change_basis(p2z_op))
+    return result
+
+def show(parent_group_info):
+  parent_group_info.show_summary()
+  subgrs = subgroups(parent_group_info).groups_parent_setting()
+  print("number of subgroups:", len(subgrs))
+  for subgroup in subgrs:
+    subgroup_info = sgtbx.space_group_info(group=subgroup)
+    subgroup_info.show_summary()
+  print()
+
+if (__name__ == "__main__"):
+  raise RuntimeError("Please use the cctbx.subgroups command.")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/symbol_confidence.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+def level(space_group_info):
+  """\
+Determine the level of confidence in a given space group symbol. Often
+data are scaled and merged in a space group that is different from the
+crystal space group. For example, if the crystal space group is P212121
+the data are sometimes processed in space group P222. Therefore this
+function returns 0 for these two symbols. For some space groups this
+kind of ambiguity is not possible, e.g. space group P1. The
+corresponding return value is 2. Some symbols could be ambiguous,
+but are typically not used as "default" symbols by data processing
+programs, e.g. P3212. It is therefore more likely that these symbols
+are chosen on purpose. The corresponding return value is 1.
+This function returns None for all non-chiral space groups.
+The return value for chiral space groups with unusual symbols is -1.
+"""
+  if (not space_group_info.group().is_chiral()):
+    return None
+  # Based on a table in the HKL manual.
+  symbol_groups = [line.split() for line in [
+    "P23 P213",
+    "P432 P4132 P4232 P4332",
+    "I23 I213",
+    "I432 I4132",
+    "F23",
+    "F432 F4132",
+    "R3:H",
+    "R32:H",
+    "P3 P31 P32",
+    "P312 P3112 P3212",
+    "P321 P3121 P3221",
+    "P6 P61 P65 P62 P64 P63",
+    "P622 P6122 P6522 P6222 P6422 P6322",
+    "P4 P41 P42 P43",
+    "P422 P41212 P4212 P4122 P4322 P4222 P42212 P43212",
+    "I4 I41",
+    "I422 I4122",
+    "P222 P212121 P2221 P21212",
+    "C2221 C222",
+    "I222 I212121",
+    "F222",
+    "P121 P1211",
+    "C121",
+    "P1"
+  ]]
+  symbol = space_group_info.type().lookup_symbol().replace(" ", "")
+  for symbol_group in symbol_groups:
+    try: i = symbol_group.index(symbol)
+    except KeyboardInterrupt: raise
+    except Exception: continue
+    if (len(symbol_group) == 1): return 2
+    if (i < 2): return 0
+    return 1
+  return -1
+
+def _test():
+  from cctbx import sgtbx
+  assert level(sgtbx.space_group_info("P -1")) == None
+  assert level(sgtbx.space_group_info("P 1")) == 2
+  assert level(sgtbx.space_group_info("P 2 2 21")) == 1
+  assert level(sgtbx.space_group_info("P 2")) == 0
+  assert level(sgtbx.space_group_info("Hall: C 1")) == -1
+  n = 0
+  for i in range(1,231):
+    c = level(sgtbx.space_group_info(i))
+    if (c is not None):
+      assert c  in (0,1,2)
+      n += 1
+  assert n == 65
+  print("OK")
+
+if (__name__ == "__main__"):
+  _test()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/sgtbx/sys_abs_equiv.py
+from __future__ import absolute_import, division, print_function
+space_group_numbers = [
+  # Output of: cctbx/examples/find_sys_abs_equiv_space_groups.py python
+  # If you have to edit this table, please send email to: cctbx@cci.lbl.gov
+  None,
+  (2,),
+  (1,),
+  (6, 10),
+  (11,),
+  (8, 12),
+  (3, 10),
+  (13,),
+  (5, 12),
+  (15,),
+  (3, 6),
+  (4,),
+  (5, 8),
+  (7,),
+  None,
+  (9,),
+  (25, 47),
+  None,
+  None,
+  None,
+  None,
+  (35, 38, 65),
+  (42, 69),
+  (24, 44, 71),
+  (23, 44, 71),
+  (16, 47),
+  (28, 51),
+  (49,),
+  (26, 51),
+  (57,),
+  (53,),
+  (59,),
+  (55,),
+  (62,),
+  (58,),
+  (21, 38, 65),
+  (40, 63),
+  (66,),
+  (21, 35, 65),
+  (67,),
+  (36, 63),
+  (64,),
+  (22, 69),
+  None,
+  (23, 24, 71),
+  (72,),
+  (74,),
+  (16, 25),
+  None,
+  (27,),
+  None,
+  (26, 28),
+  None,
+  (30,),
+  None,
+  (32,),
+  None,
+  (29,),
+  (34,),
+  (31,),
+  None,
+  None,
+  (33,),
+  (36, 40),
+  (41,),
+  (21, 35, 38),
+  (37,),
+  (39,),
+  None,
+  (22, 42),
+  None,
+  (23, 24, 44),
+  (45,),
+  None,
+  (46,),
+  (81, 83, 89, 99, 111, 115, 123),
+  (78, 91, 95),
+  (84, 93),
+  (76, 91, 95),
+  (82, 87, 97, 107, 119, 121, 139),
+  (98,),
+  (75, 83, 89, 99, 111, 115, 123),
+  (79, 87, 97, 107, 119, 121, 139),
+  (75, 81, 89, 99, 111, 115, 123),
+  (77, 93),
+  (129,),
+  None,
+  (79, 82, 97, 107, 119, 121, 139),
+  None,
+  (75, 81, 83, 99, 111, 115, 123),
+  (113,),
+  (76, 78, 95),
+  (96,),
+  (77, 84),
+  None,
+  (76, 78, 91),
+  (92,),
+  (79, 82, 87, 107, 119, 121, 139),
+  (80,),
+  (75, 81, 83, 89, 111, 115, 123),
+  (117, 127),
+  (116, 132),
+  (118, 136),
+  (124,),
+  (128,),
+  (112, 131),
+  (135,),
+  (79, 82, 87, 97, 119, 121, 139),
+  (120, 140),
+  (122,),
+  None,
+  (75, 81, 83, 89, 99, 115, 123),
+  (105, 131),
+  (90,),
+  None,
+  (75, 81, 83, 89, 99, 111, 123),
+  (101, 132),
+  (100, 127),
+  (102, 136),
+  (79, 82, 87, 97, 107, 121, 139),
+  (108, 140),
+  (79, 82, 87, 97, 107, 119, 139),
+  (109,),
+  (75, 81, 83, 89, 99, 111, 115),
+  (103,),
+  None,
+  None,
+  (100, 117),
+  (104,),
+  (85,),
+  None,
+  (105, 112),
+  (101, 116),
+  None,
+  None,
+  (106,),
+  (102, 118),
+  None,
+  None,
+  (79, 82, 87, 97, 107, 119, 121),
+  (108, 120),
+  None,
+  None,
+  (147, 149, 150, 156, 157, 162, 164),
+  (145, 151, 152, 153, 154),
+  (144, 151, 152, 153, 154),
+  (148, 155, 160, 166),
+  (143, 149, 150, 156, 157, 162, 164),
+  (146, 155, 160, 166),
+  (143, 147, 150, 156, 157, 162, 164),
+  (143, 147, 149, 156, 157, 162, 164),
+  (144, 145, 152, 153, 154),
+  (144, 145, 151, 153, 154),
+  (144, 145, 151, 152, 154),
+  (144, 145, 151, 152, 153),
+  (146, 148, 160, 166),
+  (143, 147, 149, 150, 157, 162, 164),
+  (143, 147, 149, 150, 156, 162, 164),
+  (165,),
+  (163,),
+  (146, 148, 155, 166),
+  (167,),
+  (143, 147, 149, 150, 156, 157, 164),
+  (159,),
+  (143, 147, 149, 150, 156, 157, 162),
+  (158,),
+  (146, 148, 155, 160),
+  (161,),
+  (174, 175, 177, 183, 187, 189, 191),
+  (170, 178, 179),
+  (169, 178, 179),
+  (172, 180, 181),
+  (171, 180, 181),
+  (176, 182),
+  (168, 175, 177, 183, 187, 189, 191),
+  (168, 174, 177, 183, 187, 189, 191),
+  (173, 182),
+  (168, 174, 175, 183, 187, 189, 191),
+  (169, 170, 179),
+  (169, 170, 178),
+  (171, 172, 181),
+  (171, 172, 180),
+  (173, 176),
+  (168, 174, 175, 177, 187, 189, 191),
+  (192,),
+  (188, 193),
+  (190, 194),
+  (168, 174, 175, 177, 183, 189, 191),
+  (185, 193),
+  (168, 174, 175, 177, 183, 187, 191),
+  (186, 194),
+  (168, 174, 175, 177, 183, 187, 189),
+  (184,),
+  (185, 188),
+  (186, 190),
+  (200, 207, 215, 221),
+  (202, 209, 216, 225),
+  (199, 204, 211, 217, 229),
+  (208,),
+  (197, 204, 211, 217, 229),
+  (195, 207, 215, 221),
+  (224,),
+  (196, 209, 216, 225),
+  (227,),
+  (197, 199, 211, 217, 229),
+  None,
+  None,
+  (195, 200, 215, 221),
+  (198,),
+  (196, 202, 216, 225),
+  None,
+  (197, 199, 204, 217, 229),
+  (213,),
+  (212,),
+  None,
+  (195, 200, 207, 221),
+  (196, 202, 209, 225),
+  (197, 199, 204, 211, 229),
+  (223,),
+  (226,),
+  None,
+  (195, 200, 207, 215),
+  None,
+  (218,),
+  (201,),
+  (196, 202, 209, 216),
+  (219,),
+  (203,),
+  None,
+  (197, 199, 204, 211, 217),
+  None
+]
+
+
+ *******************************************************************************

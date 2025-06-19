@@ -1,0 +1,1796 @@
+
+
+ *******************************************************************************
+mmtbx/examples/f_model_manager.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import mmtbx.f_model
+
+pdb_str="""\
+CRYST1   16.960   19.455   19.841  90.00  90.00  90.00 P 1
+ATOM      1  N   ASP A  18      14.727  11.381  11.191  1.00 21.41           N
+ATOM      2  CA  ASP A  18      14.022  12.655  11.131  1.00 34.70           C
+ATOM      3  C   ASP A  18      13.805  13.085   9.684  1.00 35.50           C
+ATOM      4  O   ASP A  18      14.760  13.408   8.976  1.00 38.48           O
+ATOM      5  CB  ASP A  18      14.798  13.731  11.893  1.00 38.15           C
+ATOM      6  CG  ASP A  18      14.068  15.059  11.937  1.00 27.39           C
+ATOM      7  OD1 ASP A  18      13.282  15.275  12.883  1.00 35.78           O
+ATOM      8  OD2 ASP A  18      14.282  15.889  11.028  1.00 30.67           O
+ATOM      9  N   ASN A  19      12.544  13.082   9.257  1.00 22.94           N
+ATOM     10  CA  ASN A  19      12.169  13.463   7.896  1.00 22.82           C
+ATOM     11  C   ASN A  19      12.886  12.623   6.841  1.00 20.25           C
+ATOM     12  O   ASN A  19      13.859  13.069   6.233  1.00 33.24           O
+ATOM     13  CB  ASN A  19      12.419  14.959   7.663  1.00 28.83           C
+ATOM     14  CG  ASN A  19      11.659  15.505   6.465  1.00 26.44           C
+ATOM     15  OD1 ASN A  19      11.356  14.780   5.518  1.00 22.64           O
+ATOM     16  ND2 ASN A  19      11.350  16.797   6.504  1.00 28.91           N
+ATOM     17  N   TYR A  20      12.397  11.404   6.631  1.00 23.81           N
+ATOM     18  CA  TYR A  20      12.992  10.492   5.662  1.00 35.69           C
+ATOM     19  C   TYR A  20      11.909   9.888   4.773  1.00 28.94           C
+ATOM     20  O   TYR A  20      11.281  10.589   3.980  1.00 25.26           O
+ATOM     21  CB  TYR A  20      13.765   9.382   6.379  1.00 33.37           C
+ATOM     22  CG  TYR A  20      13.470   9.266   7.861  1.00 31.48           C
+ATOM     23  CD1 TYR A  20      12.437   8.463   8.327  1.00 36.91           C
+ATOM     24  CD2 TYR A  20      14.228   9.963   8.794  1.00 21.36           C
+ATOM     25  CE1 TYR A  20      12.169   8.355   9.678  1.00 36.56           C
+ATOM     26  CE2 TYR A  20      13.967   9.862  10.147  1.00 29.56           C
+ATOM     27  CZ  TYR A  20      12.936   9.057  10.583  1.00 35.08           C
+ATOM     28  OH  TYR A  20      12.671   8.953  11.930  1.00 38.73           O
+ATOM     29  N   ARG A  21      11.695   8.584   4.914  1.00 38.95           N
+ATOM     30  CA  ARG A  21      10.695   7.881   4.120  1.00 38.77           C
+ATOM     31  C   ARG A  21       9.825   6.998   5.010  1.00 27.69           C
+ATOM     32  O   ARG A  21       8.635   6.819   4.750  1.00 22.82           O
+ATOM     33  CB  ARG A  21      11.373   7.048   3.027  1.00 20.00           C
+ATOM     34  CG  ARG A  21      10.419   6.410   2.025  1.00 20.00           C
+ATOM     35  CD  ARG A  21      10.098   4.968   2.391  1.00 20.00           C
+ATOM     36  NE  ARG A  21       9.189   4.346   1.434  1.00 20.00           N
+ATOM     37  CZ  ARG A  21       8.730   3.103   1.542  1.00 20.00           C
+ATOM     38  NH1 ARG A  21       9.094   2.347   2.569  1.00 20.00           N
+ATOM     39  NH2 ARG A  21       7.906   2.617   0.625  1.00 20.00           N
+"""
+
+def run():
+  # get xray_structure object from input PDB file
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_str)
+  xray_structure = pdb_inp.xray_structure_simple()
+  # make up "F-obs" and R-free-flags
+  f_obs = abs(xray_structure.structure_factors(d_min=1.5).f_calc())
+  r_free_flags = f_obs.generate_r_free_flags()
+  # instantiate fmodel object
+  fmodel = mmtbx.f_model.manager(
+    f_obs          = f_obs,
+    r_free_flags   = r_free_flags,
+    xray_structure = xray_structure)
+  # now we can caclualte R-factors and show some statistics
+  print("r_work:", fmodel.r_work())
+  print("r_free:", fmodel.r_free())
+  fmodel.show()
+  # we can get get 3d array of map values
+  fft_map = fmodel.electron_density_map().fft_map(map_type = "mFobs-DFmodel")
+  fft_map.apply_sigma_scaling()
+  map_data = fft_map.real_map_unpadded(in_place=False)
+  # output map in X-plor formatted file
+  fft_map.as_xplor_map(
+    file_name="mfo-dfm.xplor",
+    title_lines=["mFobs-DFmodel"],
+    gridding_first=(0,0,0),
+    gridding_last=fft_map.n_real())
+  # we can compute another map
+  map_coeffs = fmodel.electron_density_map(
+    ).map_coefficients(map_type = "2mFobs-DFmodel")
+  # output it as MTZ file
+  mtz_dataset = map_coeffs.as_mtz_dataset(column_root_label="2mFoDFc")
+  mtz_object = mtz_dataset.mtz_object()
+  mtz_object.write(file_name = "amap.mtz")
+  # and get actual map values
+  fft_map = map_coeffs.fft_map(resolution_factor=0.25)
+  fft_map.apply_volume_scaling()
+  map_data = fft_map.real_map_unpadded()
+
+if (__name__ == "__main__"):
+  run()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/examples/refine_uaniso_data_only.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import mmtbx.f_model
+from scitbx.array_family import flex
+from libtbx import group_args
+from cctbx import xray
+import scitbx.lbfgs
+from libtbx import adopt_init_args
+import cctbx
+from six.moves import range
+
+pdb_str = """
+CRYST1   12.000   11.000   13.000  80.00  70.00 100.00 P 1
+SCALE1      0.083333  0.014694 -0.035164        0.00000
+SCALE2      0.000000  0.092312 -0.024020        0.00000
+SCALE3      0.000000  0.000000  0.084586        0.00000
+ATOM      1  CB  PHE A   1       7.353   5.743   7.446  1.00 11.07           C
+ANISOU    1  CB  PHE A   1     1417   1711   1077   -802   -534    562       C
+ATOM      2  CG  PHE A   1       6.587   5.028   8.521  1.00 12.41           C
+ATOM      3  CD1 PHE A   1       5.463   4.281   8.210  1.00 15.10           C
+ANISOU    3  CD1 PHE A   1     2242   1692   1805   -865   -520    173       C
+ATOM      4  CD2 PHE A   1       6.993   5.104   9.843  1.00 11.77           C
+ATOM      5  CE1 PHE A   1       4.758   3.623   9.198  1.00 15.96           C
+ATOM      6  CE2 PHE A   1       6.292   4.449  10.836  1.00 12.44           C
+ANISOU    6  CE2 PHE A   1     1794   1178   1756   -466   -772     83       C
+ATOM      7  CZ  PHE A   1       5.173   3.707  10.513  1.00 14.49           C
+ANISOU    7  CZ  PHE A   1     2230   1388   1889   -462   -737     32       C
+ATOM      8  C   PHE A   1       7.886   7.946   6.389  1.00 15.51           C
+ANISOU    8  C   PHE A   1     1740   2635   1517   -904   -600    967       C
+ATOM      9  O   PHE A   1       8.151   7.695   5.214  1.00 16.93           O
+ANISOU    9  O   PHE A   1     1943   2817   1671  -1003   -687   1048       O
+ATOM     10  OXT PHE A   1       8.501   8.858   6.941  1.00 19.45           O
+ATOM     11  N   PHE A   1       5.580   7.078   6.395  1.00 13.11           N
+ANISOU   11  N   PHE A   1     1400   1945   1635   -826   -589    838       N
+ATOM     12  CA  PHE A   1       6.829   7.148   7.143  1.00 12.44           C
+TER
+END
+"""
+
+class minimizer(object):
+  def __init__(self,
+        fmodel,
+        max_iterations=25):
+    self.fmodel = fmodel
+    self.fmodel.xray_structure.scatterers().flags_set_grads(state=False)
+    self.x_target_functor = self.fmodel.target_functor()
+    self.fmodel.xray_structure.scatterers().flags_set_grad_u_aniso(
+      iselection = self.fmodel.xray_structure.use_u_aniso().iselection())
+    self.fmodel.xray_structure.scatterers().flags_set_grad_u_iso(
+      iselection = self.fmodel.xray_structure.use_u_iso().iselection())
+    self.x = flex.double(self.fmodel.xray_structure.n_parameters(), 0)
+    self._scatterers_start = self.fmodel.xray_structure.scatterers()
+    self.call_count = 0
+    self.minimizer = scitbx.lbfgs.run(
+      target_evaluator=self,
+      termination_params=scitbx.lbfgs.termination_parameters(
+        max_iterations=max_iterations),
+      exception_handling_params=scitbx.lbfgs.exception_handling_parameters(
+        ignore_line_search_failed_rounding_errors=True,
+        ignore_line_search_failed_step_at_lower_bound=True,
+        ignore_line_search_failed_maxfev=True))
+    self.fmodel.xray_structure.tidy_us()
+    self.apply_shifts()
+    del self._scatterers_start
+    self.fmodel.update_xray_structure(
+      xray_structure = self.fmodel.xray_structure,
+      update_f_calc  = True)
+
+  def apply_shifts(self):
+    apply_shifts_result = xray.ext.minimization_apply_shifts(
+      unit_cell      = self.fmodel.xray_structure.unit_cell(),
+      scatterers     = self._scatterers_start,
+      shifts         = self.x)
+    scatterers_shifted = apply_shifts_result.shifted_scatterers
+    self.fmodel.xray_structure.replace_scatterers(
+      scatterers = scatterers_shifted)
+    self.fmodel.update_xray_structure(
+      xray_structure = self.fmodel.xray_structure,
+      update_f_calc  = True)
+
+  def compute_functional_and_gradients(self):
+    self.apply_shifts()
+    tgx = func(fmodel=self.fmodel)
+    f = tgx.target_work()
+    g = tgx.grads_u_anisos()
+    xray.minimization.add_gradients(
+      scatterers        = self.fmodel.xray_structure.scatterers(),
+      xray_gradients    = g)
+    self.call_count += 1
+    return f, g
+
+class func(object):
+  def __init__(self, fmodel):
+    adopt_init_args(self, locals())
+    weights = flex.double(self.fmodel.f_obs().data().size(), 1.0)
+    self.core = xray.target_functors.least_squares(
+      compute_scale_using_all_data = False,
+      f_obs                        = self.fmodel.f_obs(),
+      r_free_flags                 = self.fmodel.r_free_flags(),
+      weights                      = weights,
+      scale_factor                 = 1)
+    self.r = self.core(f_calc = self.fmodel.f_model(), compute_gradients=True)
+    self.d_target_d_f_calc = self.r.gradients_work() # XXX needs scales
+    self.ge = cctbx.xray.structure_factors.gradients(
+      miller_set = self.fmodel.f_obs())
+
+  def target_work(self):
+    return self.r.target_work()
+
+  def grads_u_anisos(self):
+    return self.ge(
+      u_iso_refinable_params = None,
+      d_target_d_f_calc      = self.d_target_d_f_calc,
+      xray_structure         = self.fmodel.xray_structure,
+      n_parameters           = self.fmodel.xray_structure.n_parameters(),
+      miller_set             = self.fmodel.f_obs_work(),
+      algorithm              = "direct").packed()
+
+def get_inputs(pdb_str):
+  pdb_inp = iotbx.pdb.input(source_info=None, lines = pdb_str)
+  ph = pdb_inp.construct_hierarchy()
+  xrs = ph.extract_xray_structure(crystal_symmetry =
+    pdb_inp.crystal_symmetry())
+  return group_args(pdb_hierarchy = ph, xray_structure = xrs)
+
+def run():
+  # get xray_structure from PDB file
+  inp = get_inputs(pdb_str = pdb_str)
+  if(1):
+    inp.pdb_hierarchy.adopt_xray_structure(inp.xray_structure)
+    inp.pdb_hierarchy.write_pdb_file(file_name="start.pdb")
+  # simulate poor starting model
+  xrs_poor = inp.xray_structure.deep_copy_scatterers()
+  xrs_poor.shake_adp(aniso_spread=1.5, random_u_cart_scale=10.0)
+  if(1):
+    inp.pdb_hierarchy.adopt_xray_structure(xrs_poor)
+    inp.pdb_hierarchy.write_pdb_file(file_name="poor.pdb")
+  # simulate Fobs
+  f_obs = abs(inp.xray_structure.structure_factors(
+    d_min = 1.0,
+    algorithm="direct").f_calc())
+  r_free_flags = f_obs.generate_r_free_flags()
+  # get fmodel
+  params = mmtbx.f_model.sf_and_grads_accuracy_master_params.extract()
+  params.algorithm = "direct"
+  fmodel = mmtbx.f_model.manager(
+    f_obs                        = f_obs,
+    r_free_flags                 = r_free_flags,
+    xray_structure               = xrs_poor,
+    sf_and_grads_accuracy_params = params,
+    target_name                  = "ls_wunit_kunit")
+  # refinement loop
+  print("start r_factor: %6.4f" % fmodel.r_work())
+  total_call_count = 0
+  for macro_cycle in range(10):
+    minimized = minimizer(fmodel = fmodel)
+    total_call_count += minimized.call_count
+    print("  macro_cycle %3d (adp)   r_factor: %6.4f  call_count=%d" % \
+    (macro_cycle, fmodel.r_work(), minimized.call_count))
+  print('total_call_count =', total_call_count)
+  if(1):
+    inp.pdb_hierarchy.adopt_xray_structure(fmodel.xray_structure)
+    inp.pdb_hierarchy.write_pdb_file(file_name="refined.pdb")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/examples/refine_xyz_biso_data_only.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import random
+import mmtbx.f_model
+from scitbx.array_family import flex
+from libtbx import group_args
+from cctbx import xray
+import scitbx.lbfgs
+from cctbx import adptbx
+from six.moves import range
+
+pdb_str = """
+CRYST1    5.827    9.541    6.239  90.00  90.00  90.00 P 1
+ATOM      1 OH   TYR     1       3.566   1.332   4.100  1.00 10.00           O
+ATOM      2 CZ   TYR     1       3.227   2.567   3.610  1.00 10.00           C
+ATOM      3 CE1  TYR     1       3.773   3.048   2.423  1.00 10.00           C
+ATOM      4 CE2  TYR     1       2.305   3.332   4.316  1.00 10.00           C
+ATOM      5 CD1  TYR     1       3.395   4.305   1.954  1.00 10.00           C
+ATOM      6 CD2  TYR     1       1.920   4.578   3.822  1.00 10.00           C
+ATOM      7 CG   TYR     1       2.457   5.086   2.634  1.00 10.00           C
+ATOM      8 CB   TYR     1       2.033   6.443   2.116  1.00 10.00           C
+ATOM      9 CA   TYR     1       2.859   7.627   2.655  1.00 10.00           C
+ATOM     10 N    TYR     1       4.203   7.676   2.028  1.00 10.00           N
+ATOM     11 HN1  TYR     1       4.827   8.410   2.401  1.00 10.00           H
+ATOM     12 HN2  TYR     1       4.763   6.829   2.214  1.00 10.00           H
+ATOM     13 HN3  TYR     1       4.148   7.735   1.000  1.00 10.00           H
+ATOM     14 HH   TYR     1       4.395   1.000   3.753  1.00 10.00           H
+ATOM     15 HD1  TYR     1       3.841   4.670   1.051  1.00 10.00           H
+ATOM     16 HE1  TYR     1       4.506   2.464   1.906  1.00 10.00           H
+ATOM     17 HD2  TYR     1       1.232   5.163   4.402  1.00 10.00           H
+ATOM     18 HE2  TYR     1       1.940   2.925   5.239  1.00 10.00           H
+ATOM     19 HB1  TYR     1       2.121   6.457   1.034  1.00 10.00           H
+ATOM     20 HB2  TYR     1       1.000   6.608   2.385  1.00 10.00           H
+ATOM     21 HA   TYR     1       2.327   8.541   2.425  1.00 10.00           H
+ATOM     22 O    TYR     1       4.138   7.163   4.634  1.00 10.00           O
+ATOM     23 C    TYR     1       3.064   7.506   4.165  1.00 10.00           C
+TER
+END
+"""
+
+class minimizer(object):
+  def __init__(self,
+        fmodel,
+        max_iterations=100,
+        sites = False,
+        u_iso = False):
+    self.fmodel = fmodel
+    self.fmodel.xray_structure.scatterers().flags_set_grads(state=False)
+    self.x_target_functor = self.fmodel.target_functor()
+    self.sites = sites
+    self.u_iso = u_iso
+    if(self.sites):
+      self.x = self.fmodel.xray_structure.sites_cart().as_double()
+    if(self.u_iso):
+      assert self.fmodel.xray_structure.scatterers().size() == \
+        self.fmodel.xray_structure.use_u_iso().count(True)
+      self.x = self.fmodel.xray_structure.extract_u_iso_or_u_equiv()
+    if(self.sites):
+      xray.set_scatterer_grad_flags(
+        scatterers = self.fmodel.xray_structure.scatterers(),
+        site       = True)
+    if(self.u_iso):
+      sel = flex.bool(
+        self.fmodel.xray_structure.scatterers().size(), True).iselection()
+      self.fmodel.xray_structure.scatterers().flags_set_grad_u_iso(
+        iselection = sel)
+    self.minimizer = scitbx.lbfgs.run(
+      target_evaluator=self,
+      termination_params=scitbx.lbfgs.termination_parameters(
+        max_iterations=max_iterations),
+      exception_handling_params=scitbx.lbfgs.exception_handling_parameters(
+        ignore_line_search_failed_rounding_errors=True,
+        ignore_line_search_failed_step_at_lower_bound=True,
+        ignore_line_search_failed_maxfev=True))
+    self.fmodel.xray_structure.tidy_us()
+    self.fmodel.xray_structure.apply_symmetry_sites()
+    self.fmodel.update_xray_structure(
+      xray_structure = self.fmodel.xray_structure,
+      update_f_calc  = True)
+
+  def compute_functional_and_gradients(self):
+    if(self.sites):
+      self.fmodel.xray_structure.set_sites_cart(
+        sites_cart = flex.vec3_double(self.x))
+    if(self.u_iso):
+      self.fmodel.xray_structure.set_u_iso(values = self.x)
+    self.fmodel.update_xray_structure(
+      xray_structure = self.fmodel.xray_structure,
+      update_f_calc  = True)
+    tgx = self.x_target_functor(compute_gradients=True)
+    if(self.sites):
+      tx = tgx.target_work()
+      gx = flex.vec3_double(tgx.\
+        gradients_wrt_atomic_parameters(site=True).packed())
+      f = tx
+      g = gx
+    if(self.u_iso):
+      tx = tgx.target_work()
+      gx = tgx.gradients_wrt_atomic_parameters(u_iso=True)
+      f = tx
+      g = gx
+    return f, g.as_double()
+
+def get_inputs(pdb_str):
+  pdb_inp = iotbx.pdb.input(source_info=None, lines = pdb_str)
+  ph = pdb_inp.construct_hierarchy()
+  xrs = ph.extract_xray_structure(crystal_symmetry =
+    pdb_inp.crystal_symmetry())
+  return group_args(pdb_hierarchy = ph, xray_structure = xrs)
+
+def run(refine_xyz=True, refine_adp=False):
+  # get xray_structure from PDB file
+  inp = get_inputs(pdb_str = pdb_str)
+  if(1):
+    inp.pdb_hierarchy.adopt_xray_structure(inp.xray_structure)
+    inp.pdb_hierarchy.write_pdb_file(file_name="start.pdb")
+  # simulate poor starting model: shake coordinates and B-factors
+  xrs_poor = inp.xray_structure.deep_copy_scatterers()
+  if(refine_xyz):
+    xrs_poor.shake_sites_in_place(mean_distance = 0.3)
+  if(refine_adp):
+    for sc in xrs_poor.scatterers():
+      sc.u_iso = adptbx.b_as_u(random.choice([7,8,9,11,12,13]))
+  if(1):
+    inp.pdb_hierarchy.adopt_xray_structure(xrs_poor)
+    inp.pdb_hierarchy.write_pdb_file(file_name="poor.pdb")
+  # simulate Fobs
+  f_obs = abs(inp.xray_structure.structure_factors(
+    d_min = 1.0,
+    algorithm="direct").f_calc())
+  r_free_flags = f_obs.generate_r_free_flags()
+  # get fmodel
+  params = mmtbx.f_model.sf_and_grads_accuracy_master_params.extract()
+  params.algorithm = "direct"
+  fmodel = mmtbx.f_model.manager(
+    f_obs                        = f_obs,
+    r_free_flags                 = r_free_flags,
+    xray_structure               = xrs_poor,
+    sf_and_grads_accuracy_params = params,
+    target_name                  = "ls_wunit_kunit")
+  # refinement loop
+  print("start r_factor: %6.4f" % fmodel.r_work())
+  for macro_cycle in range(100):
+    # refine coordinates
+    if(refine_xyz):
+      minimized = minimizer(fmodel = fmodel, sites = True)
+      print("  macro_cycle %3d (sites) r_factor: %6.4f"%(macro_cycle,
+        fmodel.r_work()))
+    # refine ADPs
+    if(refine_adp):
+      minimized = minimizer(fmodel = fmodel, u_iso = True)
+      print("  macro_cycle %3d (adp)   r_factor: %6.4f"%(macro_cycle, fmodel.r_work()))
+  if(1):
+    inp.pdb_hierarchy.adopt_xray_structure(fmodel.xray_structure)
+    inp.pdb_hierarchy.write_pdb_file(file_name="refined.pdb")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/examples/refine_xyz_no_data.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from mmtbx import monomer_library
+import mmtbx.monomer_library.server
+import mmtbx.monomer_library.pdb_interpretation
+from cctbx import geometry_restraints
+import scitbx.lbfgs
+from cctbx import xray
+import mmtbx.utils
+from scitbx.array_family import flex
+import random
+
+# For lbfgs class
+from cctbx import xray
+from cctbx import crystal
+from cctbx.array_family import flex
+import scitbx.lbfgs
+from libtbx import adopt_init_args
+import math
+
+if (1): # fixed random seed
+  random.seed(1)
+  flex.set_random_seed(1)
+
+class lbfgs(object):
+
+  def __init__(self,
+               xray_structure,
+               geometry_restraints,
+               states,
+               max_iterations = 100,
+               min_iterations = 0,
+               verbose = 0,
+               correct_special_position_tolerance = 1.0):
+    adopt_init_args(self, locals())
+    self.f=None
+    self.correct_special_position_tolerance = correct_special_position_tolerance
+    self.x = flex.double(self.xray_structure.n_parameters(), 0)
+    self._scatterers_start = self.xray_structure.scatterers()
+    lbfgs_termination_params=scitbx.lbfgs.termination_parameters(
+      max_iterations = max_iterations,
+      min_iterations = min_iterations)
+    self.minimizer = scitbx.lbfgs.run(
+      target_evaluator          = self,
+      termination_params        = lbfgs_termination_params,
+      exception_handling_params = scitbx.lbfgs.exception_handling_parameters(
+        ignore_line_search_failed_step_at_lower_bound = True))
+    self.apply_shifts()
+    del self._scatterers_start
+    self.compute_target(compute_gradients = False)
+
+  def apply_shifts(self):
+    apply_shifts_result = xray.ext.minimization_apply_shifts(
+      unit_cell      = self.xray_structure.unit_cell(),
+      scatterers     = self._scatterers_start,
+      shifts         = self.x)
+    scatterers_shifted = apply_shifts_result.shifted_scatterers
+    site_symmetry_table = self.xray_structure.site_symmetry_table()
+    for i_seq in site_symmetry_table.special_position_indices():
+      scatterers_shifted[i_seq].site = crystal.correct_special_position(
+        crystal_symmetry = self.xray_structure,
+        special_op       = site_symmetry_table.get(i_seq).special_op(),
+        site_frac        = scatterers_shifted[i_seq].site,
+        site_label       = scatterers_shifted[i_seq].label,
+        tolerance        = self.correct_special_position_tolerance)
+    self.xray_structure.replace_scatterers(scatterers = scatterers_shifted)
+    self.states.add(sites_cart = self.xray_structure.sites_cart())
+
+  def compute_target(self, compute_gradients):
+    target_and_grads = self.geometry_restraints.energies_sites(
+      sites_cart = self.xray_structure.sites_cart(),
+      compute_gradients = True)
+    self.f = target_and_grads.target
+    if(compute_gradients):
+      self.g = target_and_grads.gradients.as_double()
+
+  def callback_after_step(self, minimizer):
+    if(self.verbose > 0):
+      print("refinement.minimization step: f,iter,nfun:", end=' ')
+      print(self.f,minimizer.iter(),minimizer.nfun())
+
+  def compute_functional_and_gradients(self):
+    self.apply_shifts()
+    self.compute_target(compute_gradients = True)
+    if(self.verbose > 1):
+      print("xray.minimization line search: f,rms(g):", end=' ')
+      print(self.f, math.sqrt(flex.mean_sq(self.g)))
+    return self.f, self.g
+
+pdb_str = """
+CRYST1   16.660   13.261   16.215  90.00  90.00  90.00 P 1
+ATOM      1  N   TYR A   7       9.035   7.190   5.709  1.00 15.00           N
+ATOM      2  CA  TYR A   7      10.069   7.387   6.719  1.00 15.00           C
+ATOM      3  C   TYR A   7      11.456   7.352   6.086  1.00 15.00           C
+ATOM      4  O   TYR A   7      11.630   6.849   4.976  1.00 15.00           O
+ATOM      5  CB  TYR A   7       9.962   6.321   7.810  1.00 15.00           C
+ATOM      6  CG  TYR A   7       8.638   6.326   8.541  1.00 15.00           C
+ATOM      7  CD1 TYR A   7       7.575   5.550   8.098  1.00 15.00           C
+ATOM      8  CD2 TYR A   7       8.451   7.106   9.674  1.00 15.00           C
+ATOM      9  CE1 TYR A   7       6.363   5.551   8.762  1.00 15.00           C
+ATOM     10  CE2 TYR A   7       7.243   7.114  10.345  1.00 15.00           C
+ATOM     11  CZ  TYR A   7       6.203   6.335   9.885  1.00 15.00           C
+ATOM     12  OH  TYR A   7       4.998   6.339  10.550  1.00 15.00           O
+ATOM     13  HA  TYR A   7       9.948   8.256   7.132  1.00 15.00           H
+ATOM     14  HB2 TYR A   7      10.073   5.446   7.405  1.00 15.00           H
+ATOM     15  HB3 TYR A   7      10.662   6.472   8.464  1.00 15.00           H
+ATOM     16  HD1 TYR A   7       7.680   5.020   7.340  1.00 15.00           H
+ATOM     17  HD2 TYR A   7       9.151   7.632   9.987  1.00 15.00           H
+ATOM     18  HE1 TYR A   7       5.660   5.026   8.454  1.00 15.00           H
+ATOM     19  HE2 TYR A   7       7.133   7.641  11.103  1.00 15.00           H
+ATOM     20  HH  TYR A   7       5.037   6.856  11.211  1.00 15.00           H
+TER
+END
+"""
+
+def run():
+  # Read and process PDB file
+  mon_lib_srv = monomer_library.server.server()
+  ener_lib = monomer_library.server.ener_lib()
+  processed_pdb_file = monomer_library.pdb_interpretation.process(
+    mon_lib_srv    = mon_lib_srv,
+    ener_lib       = ener_lib,
+    file_name      = None,
+    raw_records    = pdb_str,
+    force_symmetry = True)
+  pdb_hierarchy = processed_pdb_file.all_chain_proxies.pdb_hierarchy
+  xray_structure = processed_pdb_file.xray_structure()
+  #
+  xrs_dc = xray_structure.deep_copy_scatterers()
+  pdb_hierarchy.write_pdb_file(
+    file_name        = "start.pdb",
+    crystal_symmetry = xray_structure.crystal_symmetry())
+  # Create grm
+  geometry_restraints = processed_pdb_file.geometry_restraints_manager(
+    show_energies = False)
+  states = mmtbx.utils.states(
+    xray_structure = xray_structure,
+    pdb_hierarchy  = pdb_hierarchy)
+  states.add(sites_cart = xray_structure.sites_cart())
+  # shake coordinates
+  xray_structure.shake_sites_in_place(rms_difference=5.0)
+  pdb_hierarchy.adopt_xray_structure(xray_structure)
+  pdb_hierarchy.write_pdb_file(
+    file_name        = "distorted.pdb",
+    crystal_symmetry = xray_structure.crystal_symmetry())
+  states.add(sites_cart = xray_structure.sites_cart())
+  #
+  xray_structure.scatterers().flags_set_grads(state=False)
+  xray_structure.scatterers().flags_set_grad_site(
+    iselection = xray_structure.all_selection().iselection())
+  minimized = lbfgs(
+    xray_structure      = xray_structure,
+    states              = states,
+    geometry_restraints = geometry_restraints,
+    verbose             = 0)
+  minimized.states.write(
+    file_name        = "minimized_all_states.pdb",
+    crystal_symmetry = xray_structure.crystal_symmetry())
+  pdb_hierarchy.adopt_xray_structure(minimized.xray_structure)
+  pdb_hierarchy.write_pdb_file(
+    file_name        = "minimized.pdb",
+    crystal_symmetry = xray_structure.crystal_symmetry())
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/examples/reindex.py
+from __future__ import absolute_import, division, print_function
+from mmtbx.xmanip import write_as_pdb_file
+import iotbx.pdb
+from iotbx import reflection_file_utils
+from iotbx import crystal_symmetry_from_any
+import iotbx.phil
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from scitbx.math import matrix
+from libtbx.utils import Sorry, multi_out
+from six.moves import cStringIO as StringIO
+import sys, os
+
+master_params = iotbx.phil.parse("""\
+reindex_utils{
+  input{
+    unit_cell=None
+    .type=unit_cell
+    space_group=None
+    .type=space_group
+    xray_data{
+      file_name=None
+      .type=path
+      labels=None
+      .type=str
+    }
+    model{
+      file_name=None
+      .type=path
+    }
+  }
+  parameters{
+    action = *reindex operator manipulate_pdb
+    .type=choice
+    chain_id_increment = 0
+    .type=int
+    inverse=False
+    .type=bool
+    reindex{
+      standard_laws = niggli *reference_setting invert user_supplied
+      .type=choice
+      user_supplied_law='h,k,l'
+      .type=str
+    }
+    apply_operator{
+      standard_operators = *user_supplied
+      .type=choice
+      user_supplied_operator="x,y,z"
+      .type=str
+      concatenate_model=False
+      .type=bool
+    }
+    manipulate_pdb{
+      set_b = True
+      .type=bool
+      b_iso = 30
+      .type=float
+    }
+  }
+  output{
+    logfile=reindex.log
+    .type=str
+    hklout=reindexed.mtz
+    .type=str
+    xyzout=reindexmodel.pdb
+    .type=str
+  }
+}
+""")
+
+def print_help():
+  print("""
+mmtbx.reindex:
+
+Allows one to quickly reindex a dataset and apply the effect on the
+atomic coordinates as well.
+
+The keywords are sumarized below:
+""")
+  master_params.show()
+
+def reindex_utils(args):
+  if len(args)==0:
+    print_help()
+  elif ( "--help" in args ):
+    print_help()
+  elif ( "--h" in args ):
+    print_help()
+  elif ("-h" in args ):
+    print_help()
+  else:
+    log = multi_out()
+    if (not "--quiet" in args):
+      log.register(label="stdout", file_object=sys.stdout)
+    string_buffer = StringIO()
+    string_buffer_plots = StringIO()
+    log.register(label="log_buffer", file_object=string_buffer)
+
+    phil_objects = []
+    argument_interpreter = master_params.command_line_argument_interpreter(
+      home_scope="map_coefs")
+
+    print("#phil __OFF__", file=log)
+    print("=================", file=log)
+    print("    REINDEX      ", file=log)
+    print("A reindexing tool", file=log)
+    print("=================", file=log)
+    print(file=log)
+
+
+    for arg in args:
+      command_line_params = None
+      arg_is_processed = False
+      # is it a file?
+      if (os.path.isfile(arg)): ## is this a file name?
+        # check if it is a phil file
+        try:
+          command_line_params = iotbx.phil.parse(file_name=arg)
+          if command_line_params is not None:
+            phil_objects.append(command_line_params)
+            arg_is_processed = True
+        except KeyboardInterrupt: raise
+        except Exception : pass
+      else:
+        try:
+          command_line_params = argument_interpreter.process(arg=arg)
+          if command_line_params is not None:
+            phil_objects.append(command_line_params)
+            arg_is_processed = True
+        except KeyboardInterrupt: raise
+        except Exception : pass
+
+      if not arg_is_processed:
+        print("##----------------------------------------------##", file=log)
+        print("## Unknown file or keyword:", arg, file=log)
+        print("##----------------------------------------------##", file=log)
+        print(file=log)
+        raise Sorry("Unknown file or keyword: %s" % arg)
+
+    effective_params = master_params.fetch(sources=phil_objects)
+    params_root = effective_params.extract()
+    params = params_root.reindex_utils
+
+    # now get the unit cell from the files
+    hkl_xs = None
+    pdb_xs = None
+    if params.input.xray_data.file_name is not None:
+      hkl_xs = crystal_symmetry_from_any.extract_from(
+        file_name=params.input.xray_data.file_name)
+    if params.input.model.file_name is not None:
+      pdb_xs = crystal_symmetry_from_any.extract_from(
+        file_name=params.input.model.file_name)
+
+    phil_xs = crystal.symmetry(
+      unit_cell=params.input.unit_cell,
+      space_group_info=params.input.space_group  )
+
+
+    combined_xs = crystal.select_crystal_symmetry(
+      None,phil_xs, [pdb_xs],[hkl_xs])
+
+    # inject the unit cell and symmetry in the phil scope please
+    params.input.unit_cell = combined_xs.unit_cell()
+    params.input.space_group = combined_xs.space_group_info()
+
+    print("#phil __ON__", file=log)
+    new_params =  master_params.format(python_object=params_root)
+    new_params.show(out=log)
+    print("#phil __END__", file=log)
+
+    if params.input.unit_cell is None:
+      raise Sorry("unit cell not specified")
+    if params.input.space_group is None:
+      raise Sorry("space group not specified")
+
+    #-----------------------------------------------------------
+    #
+    # step 1: read in the reflection file
+    #
+    miller_array = None
+    if  params.input.xray_data.file_name is not None:
+      phil_xs = crystal.symmetry(
+        unit_cell=params.input.unit_cell,
+        space_group_info=params.input.space_group  )
+
+      xray_data_server =  reflection_file_utils.reflection_file_server(
+        crystal_symmetry = phil_xs,
+        force_symmetry = True,
+        reflection_files=[])
+
+      miller_array = xray_data_server.get_xray_data(
+        file_name = params.input.xray_data.file_name,
+        labels = params.input.xray_data.labels,
+        ignore_all_zeros = True,
+        parameter_scope = 'reindex_utils.input.xray_data',
+        parameter_name = 'labels'
+        )
+
+      info = miller_array.info()
+
+      miller_array = miller_array.map_to_asu()
+
+      miller_array = miller_array.select(
+        miller_array.indices() != (0,0,0))
+
+      miller_array = miller_array.select(
+        miller_array.data() > 0 )
+      if  miller_array.sigmas() is not None:
+        miller_array = miller_array.select(
+          miller_array.sigmas() > 0 )
+
+      if (miller_array.is_xray_intensity_array()):
+        miller_array = miller_array.f_sq_as_f()
+      elif (miller_array.is_complex_array()):
+        miller_array = abs(miller_array)
+
+      miller_array.set_info(info)
+      print(file=log)
+      print("Summary info of observed data", file=log)
+      print("=============================", file=log)
+      miller_array.show_summary(f=log)
+      print(file=log)
+
+
+    #----------------------------------------------------------------
+    # Step 2: get an xray structure from the PDB file
+    #
+    pdb_model = None
+
+    if params.input.model.file_name is not None:
+      pdb_model = iotbx.pdb.input(
+        file_name=params.input.model.file_name)
+      model = pdb_model.xray_structure_simple(crystal_symmetry=phil_xs)
+      print("Atomic model summary", file=log)
+      print("====================", file=log)
+      model.show_summary()
+      print(file=log)
+
+    if params.parameters.action=="reindex":
+      #----------------------------------------------------------------
+      # step 3: get the reindex laws
+      to_niggli    = phil_xs.change_of_basis_op_to_niggli_cell()
+      to_reference = phil_xs.change_of_basis_op_to_reference_setting()
+      to_inverse   = phil_xs.change_of_basis_op_to_inverse_hand()
+      cb_op = None
+      pr = params.parameters.reindex
+      if (pr.standard_laws == "niggli"):
+        cb_op = to_niggli
+      elif (pr.standard_laws == "reference_setting"):
+        cb_op = to_reference
+      elif (pr.standard_laws == "invert"):
+        cb_op = to_inverse
+      else:
+        cb_op = sgtbx.change_of_basis_op(pr.user_supplied_law)
+
+      if cb_op is None:
+        raise Sorry("No change of basis operation is supplied.")
+      if params.parameters.inverse:
+        cb_op = cb_op.inverse()
+
+      print("Supplied reindexing law:", file=log)
+      print("========================", file=log)
+      print("hkl notation: ", cb_op.as_hkl(), file=log)
+      print("xyz notation: ", cb_op.as_xyz(), file=log)
+      print("abc notation: ", cb_op.as_abc(), file=log)
+      #----------------------------------------------------------------
+      # step 4: do the reindexing
+      #
+      # step 4a: first do the miller array object
+      new_miller_array = None
+      if miller_array is not None:
+        new_miller_array = miller_array.change_basis( cb_op )
+      #
+      # step 4b: the xray structure
+      new_model = None
+      if pdb_model is not None:
+        new_model = model.change_basis( cb_op )
+
+      #----------------------------------------------------------------
+      # step 5a: write the new mtz file
+      print(file=log)
+      print("The data and model have been reindexed", file=log)
+      print("--------------------------------------", file=log)
+      print(file=log)
+      print("Writing output files....", file=log)
+      if miller_array is not None:
+        print("writing mtz file with name %s" % (params.output.hklout), file=log)
+        mtz_dataset = new_miller_array.as_mtz_dataset(
+          column_root_label="FOBS")
+        mtz_dataset.mtz_object().write(file_name=params.output.hklout)
+
+      #step 5b: write the new pdb file
+      if new_model is not None:
+        pdb_file = open(params.output.xyzout, 'w')
+        print("Wring pdb file to: %s" % params.output.xyzout, file=log)
+        write_as_pdb_file(
+          input_pdb = pdb_model,
+          input_xray_structure = new_model,
+          out = pdb_file,
+          chain_id_increment = params.parameters.chain_id_increment,
+          additional_remark = "Generated by mmtbx reindex")
+
+        print("END", file=pdb_file)
+        pdb_file.close()
+      if ( [miller_array,new_model]).count(None)==2:
+        print("No input reflection of coordinate files have been given", file=log)
+
+    if params.parameters.action=="operator":
+      rt_mx = sgtbx.rt_mx(
+        params.parameters.apply_operator.user_supplied_operator,t_den=12*8 )
+      if params.parameters.inverse:
+        rt_mx = rt_mx.inverse()
+      print(file=log)
+      print("Applied operator : ", rt_mx.as_xyz(), file=log)
+      print(file=log)
+
+      sites = model.sites_frac()
+      new_sites = flex.vec3_double()
+      for site in sites:
+        new_site = rt_mx.r()*matrix.col(site)
+        new_site = flex.double(new_site)+flex.double( rt_mx.t().as_double() )
+        new_sites.append( tuple(new_site) )
+      new_model = model.deep_copy_scatterers()
+
+      new_model.set_sites_frac( new_sites )
+      # write the new [pdb file please
+      pdb_file = open(params.output.xyzout, 'w')
+      print("Wring pdb file to: %s" % params.output.xyzout, file=log)
+      if params.parameters.apply_operator.concatenate_model:
+        write_as_pdb_file(
+          input_pdb = pdb_model,
+          input_xray_structure = model,
+          out = pdb_file,
+          chain_id_increment = 0,
+          additional_remark = None,
+          print_cryst_and_scale=True)
+
+      write_as_pdb_file(
+        input_pdb = pdb_model,
+        input_xray_structure = new_model,
+        out = pdb_file,
+        chain_id_increment = params.parameters.chain_id_increment,
+        additional_remark = None,
+        print_cryst_and_scale=False)
+
+      print("END", file=pdb_file)
+      pdb_file.close()
+
+    if params.parameters.action=="manipulate_pdb":
+      #rest all the b values
+      if params.parameters.manipulate_pdb.set_b:
+        b_iso = params.reindex_utils.parameters.manipulate_pdb.b_iso
+        new_model = model.set_b_iso( value = b_iso )
+        print(file=log)
+        print("All B-values have been set to %5.3f"%(b_iso), file=log)
+        print("Writing PDB file %s"%(params.output.xyzout), file=log)
+        print(file=log)
+
+      pdb_file = open(params.output.xyzout, 'w')
+      write_as_pdb_file(
+        input_pdb = pdb_model,
+        input_xray_structure = new_model,
+        out = pdb_file,
+        chain_id_increment = 0,
+        additional_remark = None,
+        print_cryst_and_scale=True)
+      print("END", file=pdb_file)
+      pdb_file.close()
+
+    #write the logfile
+    logger = open(params.output.logfile, 'w')
+    print("Writing log file with name %s" % params.output.logfile, file=log)
+    print(file=log)
+    print(string_buffer.getvalue(), file=logger)
+
+if (__name__ == "__main__" ):
+  reindex_utils(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/examples/sfcalc.py
+from __future__ import absolute_import, division, print_function
+from cctbx import crystal
+from cctbx import sgtbx
+import cctbx.xray.structure_factors
+from libtbx.utils import Sorry, multi_out
+import iotbx.phil
+from iotbx import crystal_symmetry_from_any
+from iotbx.pdb import xray_structure
+from iotbx import pdb
+from six.moves import cStringIO as StringIO
+from mmtbx import f_model
+import sys, os
+
+
+
+
+master_params = iotbx.phil.parse("""\
+sfcalc{
+  input{
+    unit_cell=None
+    .type=unit_cell
+    space_group=None
+    .type=space_group
+    model{
+      file_name=None
+      .type=path
+    }
+  }
+  parameters{
+    d_min = 2.0
+    .type=float
+    overall{
+      b_cart{
+        b_11 = 0
+        .type=float
+        b_22 = 0
+        .type=float
+        b_33 = 0
+        .type=float
+        b_12 = 0
+        .type=float
+        b_13 = 0
+        .type=float
+        b_23 = 0
+        .type=float
+      }
+      k_overall = 0.1
+      .type=float
+    }
+    solvent{
+      k_sol = 0.3
+      .type=float
+      b_sol = 56.0
+      .type=float
+    }
+    output_type = complex *amplitudes intensities
+    .type=choice
+  }
+  output{
+    logfile=sfcalc.log
+    .type=str
+    hklout=sfcalc.mtz
+    .type=str
+  }
+}
+""")
+
+def print_help():
+  print("""
+No help
+  """)
+
+
+def sfcalc(args):
+  if len(args)==0:
+    print_help()
+  elif ( "--help" in args ):
+    print_help()
+  elif ( "--h" in args ):
+    print_help()
+  elif ("-h" in args ):
+    print_help()
+  else:
+    log = multi_out()
+    if (not "--quiet" in args):
+      log.register(label="stdout", file_object=sys.stdout)
+    string_buffer = StringIO()
+    string_buffer_plots = StringIO()
+    log.register(label="log_buffer", file_object=string_buffer)
+
+    phil_objects = []
+    argument_interpreter = master_params.command_line_argument_interpreter(
+      home_scope="sfcalc")
+
+    print("#phil __OFF__", file=log)
+    print("=================", file=log)
+    print("     SFCALC      ", file=log)
+    print("=================", file=log)
+    print(file=log)
+
+
+    for arg in args:
+      command_line_params = None
+      arg_is_processed = False
+      # is it a file?
+      if (os.path.isfile(arg)): ## is this a file name?
+        # check if it is a phil file
+        try:
+          command_line_params = iotbx.phil.parse(file_name=arg)
+          if command_line_params is not None:
+            phil_objects.append(command_line_params)
+            arg_is_processed = True
+        except KeyboardInterrupt: raise
+        except Exception : pass
+      else:
+        try:
+          command_line_params = argument_interpreter.process(arg=arg)
+          if command_line_params is not None:
+            phil_objects.append(command_line_params)
+            arg_is_processed = True
+        except KeyboardInterrupt: raise
+        except Exception : pass
+
+      if not arg_is_processed:
+        print("##----------------------------------------------##", file=log)
+        print("## Unknown file or keyword:", arg, file=log)
+        print("##----------------------------------------------##", file=log)
+        print(file=log)
+        raise Sorry("Unknown file or keyword: %s" % arg)
+
+    effective_params = master_params.fetch(sources=phil_objects)
+    params = effective_params.extract()
+
+    # now get the unit cell from the files
+    hkl_xs = None
+    pdb_xs = None
+
+    if params.sfcalc.input.model.file_name is not None:
+      pdb_xs = crystal_symmetry_from_any.extract_from(
+        file_name=params.sfcalc.input.model.file_name)
+
+    phil_xs = crystal.symmetry(
+      unit_cell=params.sfcalc.input.unit_cell,
+      space_group_info=params.sfcalc.input.space_group  )
+
+    combined_xs = crystal.select_crystal_symmetry(
+      None,phil_xs, [pdb_xs],[None])
+    combined_xs.show_summary()
+    if combined_xs.unit_cell() is None:
+      raise Sorry("Unit cell not defined")
+    if combined_xs.space_group() is None:
+      raise Sorry("Space group not defined")
+
+
+    # inject the unit cell and symmetry in the phil scope please
+    params.sfcalc.input.unit_cell = combined_xs.unit_cell()
+    params.sfcalc.input.space_group = \
+      sgtbx.space_group_info( group = combined_xs.space_group() )
+
+    print("#phil __ON__", file=log)
+    new_params =  master_params.format(python_object=params)
+    new_params.show(out=log)
+    print("#phil __END__", file=log)
+
+    pdb_model = None
+
+    if params.sfcalc.input.model.file_name is not None:
+      pdb_model = pdb.input(file_name=params.sfcalc.input.model.file_name)
+      model = pdb_model.xray_structure_simple(crystal_symmetry=phil_xs)
+      print("Atomic model summary", file=log)
+      print("====================", file=log)
+      model.show_summary()
+      print(file=log)
+
+      #make an f_model object please
+      b_cart = params.sfcalc.parameters.overall.b_cart
+      b_cart = [b_cart.b_11,
+                b_cart.b_22,
+                b_cart.b_33,
+                b_cart.b_12,
+                b_cart.b_13,
+                b_cart.b_23]
+      dummy = abs(model.structure_factors(
+        d_min          = params.sfcalc.parameters.d_min,
+        anomalous_flag = False).f_calc())
+
+      flags = dummy.generate_r_free_flags(fraction = 0.1,
+                                          max_free = 99999999)
+
+      fmodel = f_model.manager( xray_structure   = model,
+                                r_free_flags     = flags,
+                                target_name      = "ls_wunit_k1",
+                                f_obs            = dummy,
+                                b_cart           = b_cart,
+                                k_sol            = params.sfcalc.parameters.solvent.k_sol,
+                                b_sol            = params.sfcalc.parameters.solvent.b_sol )
+
+      calc_data_with_solvent_contrib = fmodel.f_model()
+      calc_data_with_solvent_contrib = calc_data_with_solvent_contrib.array(
+        data=calc_data_with_solvent_contrib.data()*params.sfcalc.parameters.overall.k_overall)
+      result = None
+      label = None
+      if params.sfcalc.parameters.output_type == "complex":
+        result = calc_data_with_solvent_contrib
+        label="FMODEL"
+      if params.sfcalc.parameters.output_type == "amplitudes":
+        result = abs(calc_data_with_solvent_contrib)
+        label="FMODEL"
+      if params.sfcalc.parameters.output_type == "intensities":
+        result = abs(calc_data_with_solvent_contrib)
+        result = result.f_as_f_sq()
+        label="IMODEL"
+
+
+      #write an mtz file with the data
+      mtz_dataset = result.as_mtz_dataset(
+        column_root_label=label)
+
+      mtz_dataset.mtz_object().write(
+        file_name=params.sfcalc.output.hklout)
+
+
+    #write the logfile
+    logger = open( params.sfcalc.output.logfile, 'w')
+    print("writing log file with name %s"%(params.sfcalc.output.logfile), file=log)
+    print(file=log)
+    print(string_buffer.getvalue(), file=logger)
+
+
+
+if (__name__ == "__main__" ):
+  sfcalc(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/examples/simple_command_line_cc.py
+
+"""
+Template for writing simple applications which take as input a data file
+(amplitudes or intensities plus R-free flags) and a PDB file.  Note that the
+script can be modified to also process the covalent geometry of the model by
+setting PROCESS_PDB_FILE=True, but this also requires the CCP4 monomer
+library.
+"""
+
+from __future__ import absolute_import, division, print_function
+import mmtbx.command_line
+import sys
+
+PROCESS_PDB_FILE = False
+
+def master_phil():
+  return mmtbx.command_line.generic_simple_input_phil()
+
+def run(args, out=sys.stdout):
+  # this wrapper loads the data and flags (or raises an error if additional
+  # input is needed), reads the PDB file, optionally processes the geometry,
+  # and creates an fmodel object using the data, flags, and xray.structure
+  # object from the PDB file.
+  cmdline = mmtbx.command_line.load_model_and_data(
+    args=args,
+    master_phil=master_phil(),
+    out=out,
+    process_pdb_file=PROCESS_PDB_FILE,
+    create_fmodel=True,
+    prefer_anomalous=False)
+  fmodel = cmdline.fmodel
+  pdb_hierarchy = cmdline.pdb_hierarchy
+  xray_structure = cmdline.xray_structure
+  params = cmdline.params
+  f_obs = fmodel.f_obs()
+  # the fmodel object will already have the bulk solvent correction and
+  # scaling performed when created using the above code, so we can immediately
+  # use the f_model array.
+  f_calc = abs(fmodel.f_model()) # just amplitudes, please
+  assert (len(f_calc.indices()) == len(f_obs.indices()))
+  from scitbx.array_family import flex
+  cc = flex.linear_correlation(f_obs.data(), f_calc.data()).coefficient()
+  print("CC(obs-calc): %.3f" % cc, file=out)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/examples/simulate_experimental_data.py
+from __future__ import absolute_import, division, print_function
+import math
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import xray
+from cctbx.array_family import flex
+from libtbx.utils import Sorry, multi_out
+import iotbx.phil
+from iotbx import reflection_file_utils
+from iotbx import crystal_symmetry_from_any
+from iotbx import pdb
+import mmtbx.scaling
+from mmtbx.scaling import absolute_scaling
+from mmtbx import f_model
+from six.moves import cStringIO as StringIO
+import sys, os
+from six.moves import range
+
+
+class error_swap(object):
+  def __init__(self,
+               miller_obs,
+               miller_calc,
+               miller_mock,
+               n_reso_bins=25,
+               n_e_bins = 20,
+               thres=3.0):
+    self.miller_obs = miller_obs
+    self.miller_calc = miller_calc
+    self.miller_mock = miller_mock
+
+    # take a common set to avoid possible problems
+    self.miller_calc = self.miller_calc.common_set( self.miller_obs )
+    self.miller_mock = self.miller_mock.common_set( self.miller_obs )
+
+
+    # we need to normalise the data, both fobs and fcalc
+    norma_obs_obj = absolute_scaling.kernel_normalisation( self.miller_obs,auto_kernel=True )
+    norma_calc_obj = absolute_scaling.kernel_normalisation( self.miller_calc,auto_kernel=True )
+    norma_mock_obj = absolute_scaling.kernel_normalisation( self.miller_mock,auto_kernel=True )
+    self.norma_obs  = norma_obs_obj.normalised_miller_dev_eps.f_sq_as_f()           # normalized data (dived by eps)
+    self.norma_calc = norma_calc_obj.normalised_miller_dev_eps.f_sq_as_f()          # as above, for calculated data
+    self.norma_mock = norma_mock_obj.normalised_miller_dev_eps.f_sq_as_f()          # as above, for mock data
+    self.norma_obs_const =  norma_obs_obj.normalizer_for_miller_array   # the divisor (no eps)
+    self.norma_calc_const = norma_calc_obj.normalizer_for_miller_array  # as above
+    self.norma_mock_const = norma_mock_obj.normalizer_for_miller_array  # as above
+
+    self.thres = thres
+
+    self.n_reso_bins = n_reso_bins
+    self.n_e_bins = n_e_bins
+    # first set up a binner please
+    self.miller_obs.setup_binner(n_bins = self.n_reso_bins )
+    self.miller_calc.use_binner_of( self.miller_obs )
+    self.miller_mock.use_binner_of( self.miller_obs )
+    self.norma_obs.use_binner_of( self.miller_obs )
+    self.norma_calc.use_binner_of( self.miller_calc )
+    self.norma_mock.use_binner_of( self.miller_mock )
+
+    self.new_norma_obs = self.norma_obs.deep_copy().set_observation_type( self.norma_obs )
+
+    self.new_obs = None
+    self.swap_it()
+    #we have to denormalize the data now
+    self.new_obs = self.norma_obs.customized_copy(
+      data   = self.new_norma_obs.data()*self.new_norma_obs.epsilons().data().as_double()*flex.sqrt(self.norma_calc_const),
+      sigmas = self.new_norma_obs.sigmas()*self.new_norma_obs.epsilons().data().as_double()*flex.sqrt(self.norma_calc_const)
+    ).set_observation_type( self.miller_obs )
+    # all done
+
+  def swap_it(self):
+    # for each bin
+    for ibin in self.norma_obs.binner().range_used():
+      # select all indices in this bin please
+      selection = self.norma_obs.binner().bin_indices() == ibin
+      tmp_norm_obs = self.norma_obs.select( selection )
+      tmp_norm_calc = self.norma_calc.select( selection )
+      tmp_norm_mock = self.norma_mock.select( selection )
+      # we now have a set of e values, send both arrays of to another routine
+      new_e,new_se = self.do_something_clever( tmp_norm_obs.data(),
+                                               tmp_norm_obs.sigmas(),
+                                               tmp_norm_calc.data(),
+                                               tmp_norm_mock.data() )
+      self.new_norma_obs = self.norma_obs.customized_copy(
+        data = self.norma_obs.data().set_selected(selection,new_e),
+        sigmas = self.norma_obs.sigmas().set_selected(selection,new_se)
+      )
+
+  def do_something_clever(self,obs,sobs,calc,mock):
+    # first get the sort order
+    # sort on the calculated data please
+    sort_order = flex.sort_permutation( calc )
+    inverse_sort_order = sort_order.inverse_permutation()
+
+    sorted_obs  = obs.select(sort_order)
+    sorted_sobs = sobs.select(sort_order)
+    sorted_calc = calc.select(sort_order)
+    sorted_mock = mock.select(sort_order)
+
+    log_calc = flex.log(sorted_mock)
+    deltas   = flex.log(sorted_obs) - flex.log(sorted_calc)
+
+    old_deltas = deltas.deep_copy()
+
+    # make bins on the basis of the order
+    bin_size = float(sorted_obs.size())/self.n_e_bins
+    bin_size = int(bin_size) + 1
+    ebin = flex.int()
+    count=0
+    for ii in range( sorted_obs.size() ):
+      if ii%bin_size==0:
+        count+=1
+      ebin.append( count-1 )
+
+    # the bins have been setup, now we can reorder stuff
+    for ibin in range(self.n_e_bins):
+      this_bin_selection = flex.bool( ebin == ibin )
+      tmp_n = (this_bin_selection).count(True)
+      permute = flex.sort_permutation( flex.random_double( tmp_n ) )
+
+      #select and swap
+      selected_deltas = deltas.select( this_bin_selection )
+      selected_deltas = selected_deltas.select( permute )
+      selected_sobs   = sorted_sobs.select( this_bin_selection )
+      selected_sobs   = selected_sobs.select( permute )
+
+
+      # we have to make a sanity check so that the selected deltas are not very weerd
+      # a safeguard to prevent the introductoin of outliers
+      mean_delta = flex.mean( selected_deltas )
+      std_delta  = math.sqrt( flex.mean( selected_deltas*selected_deltas ) - mean_delta*mean_delta )
+      outliers = flex.bool( flex.abs(selected_deltas-mean_delta)>self.thres*std_delta )
+      #print list( flex.abs(selected_deltas-mean_delta)/std_delta )
+      #print list( outliers )
+
+      if (outliers).count(True) > 0 :
+        non_out_delta   = selected_deltas.select( ~outliers )
+        tmp_permut      = flex.sort_permutation( flex.random_double( (~outliers).count(True)  ) )
+        tmp_delta       = non_out_delta.select( tmp_permut )
+        tmp_delta       = tmp_delta[0:(outliers).count(True)]
+        selected_deltas = selected_deltas.set_selected( outliers.iselection(), tmp_delta )
+
+
+      #set the deltas back please
+      deltas = deltas.set_selected(this_bin_selection, selected_deltas)
+      sorted_sobs = sorted_sobs.set_selected(this_bin_selection, selected_sobs)
+
+    #the deltas have been swapped, apply things back please
+    log_calc = log_calc + deltas
+    log_calc = flex.exp(log_calc)
+
+    #now we have to get things back in proper order again thank you
+    new_fobs = log_calc.select(inverse_sort_order)
+    new_sobs = sorted_sobs.select(inverse_sort_order)
+    return new_fobs, new_sobs
+
+
+
+
+
+
+def select_crystal_symmetry(
+      from_command_line,
+      from_parameter_file,
+      from_coordinate_files,
+      from_reflection_files):
+  result = crystal.symmetry(
+    unit_cell=None,
+    space_group_info=None)
+  if (from_command_line is not None):
+    result = result.join_symmetry(
+      other_symmetry=from_command_line, force=False)
+  if (from_parameter_file is not None):
+    result = result.join_symmetry(
+      other_symmetry=from_parameter_file, force=False)
+  if (result.unit_cell() is None):
+    for crystal_symmetry in from_reflection_files:
+      unit_cell = crystal_symmetry.unit_cell()
+      if (unit_cell is not None):
+        result = crystal.symmetry(
+          unit_cell=unit_cell,
+          space_group_info=result.space_group_info(),
+          assert_is_compatible_unit_cell=False)
+        break
+  for crystal_symmetry in from_coordinate_files:
+    result = result.join_symmetry(other_symmetry=crystal_symmetry, force=False)
+  if (result.space_group_info() is None):
+    for crystal_symmetry in from_reflection_files:
+      space_group_info = crystal_symmetry.space_group_info()
+      if (space_group_info is not None):
+        result = crystal.symmetry(
+          unit_cell=result.unit_cell(),
+          space_group_info=space_group_info,
+          assert_is_compatible_unit_cell=False)
+        break
+  return result
+
+
+
+master_params = iotbx.phil.parse("""\
+simul_utils{
+  input{
+    unit_cell=None
+    .type=unit_cell
+    space_group=None
+    .type=space_group
+    xray_data{
+      file_name=None
+      .type=path
+      labels=None
+      .type=str
+    }
+    model{
+      file_name=None
+      .type=path
+    }
+    mock_model{
+      file_name=None
+      .type=path
+    }
+  }
+  output{
+    logfile=simul.log
+    .type=str
+    hklout=simul.mtz
+    .type=str
+  }
+}
+""")
+
+def print_help():
+  print("""
+mmtbx.simulate_data:
+
+Allows one to quickly simulate data 'experimental' data with similar
+Fobs-Fcalc distribution as in the given model/data pair.
+
+The keywords are sumarized below and should be self explanatory:
+
+simul_utils{
+  input{
+    unit_cell=None
+    space_group=None
+    xray_data{
+      file_name=None
+      labels=None
+    }
+    model{
+      file_name=None
+    }
+    mock_model{
+      file_name=None
+    }
+  }
+  output{
+    logfile=simul.log
+    hklout=simul.mtz
+  }
+}
+
+The main purpose of this file is to generate data with errors that look real.
+This is what is done:
+1. The pdb file 'model.file_name' is scaled to the observed data 'xray_data.file_name'
+   (Fcalc and Fobs are now available and on the same scale)
+2. Structure factors are computed for 'mock_model.file_name' with same bulk solvent
+   parameters as 'model.file_name' (call this Fmock)
+3a. For each resolution bin, generate about 20 E value bins.
+3b. In each E value bin, compute ratio=Fobs/Fcalc (or log Fobs - log Fcalc so you will)
+3c. make a random permuation of these ratios log differences (call this array random_ratio)
+3d. Fmockobs = F_mock*random_ratio
+4.  Write out Fmockobs
+
+The data generated in this manner has similar F/sigF (the sigmas are permuted along with the ratios)
+and R value properties.
+
+If no mock model is supplied, the model will be the mock model.
+The mock model is supposed to be in the same unit cell/spacegroup (this is enforced).
+
+  """)
+
+
+def simul_utils(args):
+  if len(args)==0:
+    print_help()
+  elif ( "--help" in args ):
+    print_help()
+  elif ( "--h" in args ):
+    print_help()
+  elif ("-h" in args ):
+    print_help()
+  else:
+    log = multi_out()
+    if (not "--quiet" in args):
+      log.register(label="stdout", file_object=sys.stdout)
+    string_buffer = StringIO()
+    string_buffer_plots = StringIO()
+    log.register(label="log_buffer", file_object=string_buffer)
+
+    phil_objects = []
+    argument_interpreter = master_params.command_line_argument_interpreter(
+      home_scope="map_coefs")
+
+    print("#phil __OFF__", file=log)
+    print("======================", file=log)
+    print("          SIMUL       ", file=log)
+    print("A data simulation tool", file=log)
+    print("======================", file=log)
+    print(file=log)
+
+
+    for arg in args:
+      command_line_params = None
+      arg_is_processed = False
+      # is it a file?
+      if (os.path.isfile(arg)): ## is this a file name?
+        # check if it is a phil file
+        try:
+          command_line_params = iotbx.phil.parse(file_name=arg)
+          if command_line_params is not None:
+            phil_objects.append(command_line_params)
+            arg_is_processed = True
+        except KeyboardInterrupt: raise
+        except Exception : pass
+      else:
+        try:
+          command_line_params = argument_interpreter.process(arg=arg)
+          if command_line_params is not None:
+            phil_objects.append(command_line_params)
+            arg_is_processed = True
+        except KeyboardInterrupt: raise
+        except Exception : pass
+
+      if not arg_is_processed:
+        print("##----------------------------------------------##", file=log)
+        print("## Unknown file or keyword:", arg, file=log)
+        print("##----------------------------------------------##", file=log)
+        print(file=log)
+        raise Sorry("Unknown file or keyword: %s" % arg)
+
+    effective_params = master_params.fetch(sources=phil_objects)
+    params = effective_params.extract()
+    """
+    new_params =  master_params.format(python_object=params)
+    new_params.show(out=log)
+    """
+    # now get the unit cell from the pdb file
+
+    hkl_xs = crystal_symmetry_from_any.extract_from(
+      file_name=params.simul_utils.input.xray_data.file_name)
+    pdb_xs = crystal_symmetry_from_any.extract_from(
+      file_name=params.simul_utils.input.model.file_name)
+
+    phil_xs = crystal.symmetry(
+      unit_cell=params.simul_utils.input.unit_cell,
+      space_group_info=params.simul_utils.input.space_group  )
+
+
+    combined_xs = select_crystal_symmetry(
+      None,phil_xs, [pdb_xs],[hkl_xs])
+
+    # inject the unit cell and symmetry in the phil scope please
+    params.simul_utils.input.unit_cell = combined_xs.unit_cell()
+    params.simul_utils.input.space_group = \
+      sgtbx.space_group_info( group = combined_xs.space_group() )
+
+    print("#phil __ON__", file=log)
+    new_params =  master_params.format(python_object=params)
+    new_params.show(out=log)
+    print("#phil __END__", file=log)
+
+    if params.simul_utils.input.unit_cell is None:
+      raise Sorry("unit cell not specified")
+    if params.simul_utils.input.space_group is None:
+      raise Sorry("space group not specified")
+    if params.simul_utils.input.xray_data.file_name is None:
+      raise Sorry("Xray data not specified")
+    if params.simul_utils.input.model.file_name is None:
+      raise Sorry("pdb file with  model not specified")
+
+    #-----------------------------------------------------------
+    #
+    # step 1: read in the reflection file
+    #
+    phil_xs = crystal.symmetry(
+      unit_cell=params.simul_utils.input.unit_cell,
+      space_group_info=params.simul_utils.input.space_group  )
+
+    xray_data_server =  reflection_file_utils.reflection_file_server(
+      crystal_symmetry = phil_xs,
+      force_symmetry = True,
+      reflection_files=[])
+
+    miller_array = None
+
+    miller_array = xray_data_server.get_xray_data(
+      file_name = params.simul_utils.input.xray_data.file_name,
+      labels = params.simul_utils.input.xray_data.labels,
+      ignore_all_zeros = True,
+      parameter_scope = 'simul_utils.input.xray_data',
+      parameter_name = 'labels'
+      )
+
+    info = miller_array.info()
+
+    miller_array = miller_array.map_to_asu()
+
+    miller_array = miller_array.select(
+      miller_array.indices() != (0,0,0))
+
+    miller_array = miller_array.select(
+      miller_array.data() > 0 )
+    if  miller_array.sigmas() is not None:
+      miller_array = miller_array.select(
+        miller_array.sigmas() > 0 )
+
+    if (miller_array.is_xray_intensity_array()):
+      miller_array = miller_array.f_sq_as_f()
+    elif (miller_array.is_complex_array()):
+      miller_array = abs(miller_array)
+
+    miller_array.set_info(info)
+    print(file=log)
+    print("Summary info of observed data", file=log)
+    print("=============================", file=log)
+    miller_array.show_summary(f=log)
+    print(file=log)
+
+
+    free_flags = miller_array.generate_r_free_flags()
+
+
+
+    #--------------------------------------------------------------------
+    # Step 2: get an xray structure from the PDB file
+    #
+    model = pdb.input(file_name=params.simul_utils.input.model.file_name).xray_structure_simple(
+                      crystal_symmetry=phil_xs,
+                      )
+    print("Atomic model summary", file=log)
+    print("====================", file=log)
+    model.show_summary()
+    print(file=log)
+
+    #-------------------------------------------------------------------
+    # Step 3: make an F_model object to get model phases and amplitudes
+    #
+    print("Performing bulk solvent scaling", file=log)
+    print("===============================", file=log)
+    print(file=log)
+    print(file=log)
+
+    f_model_object = f_model.manager(
+        f_obs = miller_array,
+        r_free_flags = free_flags,
+        xray_structure = model )
+    f_model_object.update_all_scales(log=log)
+    fmodel = abs( f_model_object.f_model() ).set_observation_type( miller_array )
+
+    mockfmodel = None
+    if params.simul_utils.input.mock_model.file_name is not None:
+      print("Reading in mock model", file=log)
+      print("=====================", file=log)
+      print(file=log)
+      print(file=log)
+      mock_model = pdb.input(file_name=params.simul_utils.input.mock_model.file_name).xray_structure_simple(
+                             crystal_symmetry=phil_xs)
+      mock_f_model = f_model.manager(
+        f_obs = miller_array,
+        r_free_flags = free_flags,
+        xray_structure = mock_model )
+
+      mock_f_model.update(
+        k_sol  = f_model_object.k_sol() ,
+        b_sol  = f_model_object.b_sol() ,
+        b_cart = f_model_object.b_cart()
+      )
+      mockfmodel = abs( mock_f_model.f_model() ).set_observation_type( miller_array )
+    else:
+      mockfmodel = fmodel.deep_copy()
+
+
+
+
+    print("Making new data", file=log)
+    print("===============", file=log)
+    print(file=log)
+    print(file=log)
+
+    new_data_builder = error_swap( miller_array,
+                                   fmodel,
+                                   mockfmodel )
+    new_data = new_data_builder.new_obs
+    # we now have to write the data actually
+
+    print("Writing new data set", file=log)
+    print("====================", file=log)
+
+    mtz_dataset = new_data.as_mtz_dataset(
+      column_root_label="FOBS")
+    mtz_dataset.mtz_object().write(
+      file_name=params.simul_utils.output.hklout)
+
+
+
+
+if (__name__ == "__main__" ):
+  simul_utils(sys.argv[1:])
+
+
+ *******************************************************************************

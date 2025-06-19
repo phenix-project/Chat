@@ -1,0 +1,4503 @@
+
+
+ *******************************************************************************
+xfel/ui/components/xfel_gui_plotter.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from six.moves import zip
+
+'''
+Author      : Lyubimov, A.Y.
+Created     : 06/30/2016
+Last Changed: 06/30/2016
+Description : XFEL UI Plots and Charts
+'''
+
+import wx
+import numpy as np
+from scitbx.array_family import flex
+
+import matplotlib as mpl
+from matplotlib import pyplot as plt
+from matplotlib.gridspec import GridSpec
+from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+import xfel.ui.components.xfel_gui_controls as gctr
+
+class DoubleBarPlot(gctr.CtrlBase):
+  def __init__(self, parent,
+               label='',
+               label_size=wx.DefaultSize,
+               label_style='normal',
+               content_style='normal',
+               gauge_size=(250, 15),
+               button_label='View Stats',
+               button_size=wx.DefaultSize,
+               choice_box=True,
+               choice_label='',
+               choice_label_size=wx.DefaultSize,
+               choice_size=(100, -1),
+               choice_style='normal',
+               choices=[]):
+    gctr.CtrlBase.__init__(self, parent=parent, label_style=label_style,
+                           content_style=content_style)
+
+    self.sizer = wx.FlexGridSizer(1, 4, 0, 5)
+    self.sizer.AddGrowableCol(1)
+    self.dpi = wx.ScreenDC().GetPPI()[0]
+
+    figsize = (gauge_size[0] / self.dpi, gauge_size[1] / self.dpi)
+    self.status_figure = Figure(figsize=figsize)
+    self.status_figure.patch.set_alpha(0)
+    self.ax = self.status_figure.add_subplot(111)
+    self.canvas = FigureCanvas(self, -1, self.status_figure)
+
+    if choice_box:
+      self.bins = gctr.ChoiceCtrl(self,
+                                  label=choice_label,
+                                  label_size=choice_label_size,
+                                  label_style=choice_style,
+                                  ctrl_size=choice_size,
+                                  choices=choices)
+
+    self.txt_iso = wx.StaticText(self, label=label, size=label_size)
+    self.sizer.Add(self.txt_iso, flag=wx.ALIGN_CENTER_VERTICAL)
+    self.sizer.Add(self.canvas, 1, flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+    self.sizer.Add(self.bins, flag=wx.ALIGN_CENTER_VERTICAL)
+    self.btn = wx.Button(self, label=button_label, size=button_size)
+    self.sizer.Add(self.btn, 1, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
+
+    self.SetSizer(self.sizer)
+
+  def redraw_axes(self, valuea, valueb, goal, xmax, minimalist=False):
+    ''' Re-draw axes with latest values '''
+
+    self.ax.clear()
+    bar = self.ax.barh(0, valueb, height=1, align='center', color='green')
+    bar = self.ax.barh(0, valuea, height=1, align='center', color='#7570b3')
+
+    xloc = xmax / 0.8
+    label = '{:.1f}({:.1f})'.format(valueb, valuea)
+    yloc = bar[0].get_y() + bar[0].get_height() / 2.0
+    self.ax.text(xloc, yloc, label, horizontalalignment='right',
+                 verticalalignment='center', weight='bold',
+                 clip_on=False)
+
+    if not minimalist:
+      self.ax.axvline(x=goal, lw=4, c='#d95f02')
+    self.ax.set_xlim(xmax=xmax / 0.8)
+    self.ax.axis('off')
+    self.canvas.draw()
+    self.Fit()
+
+
+class NoBarPlot(gctr.CtrlBase):
+  def __init__(self, parent,
+               label='',
+               label_size=wx.DefaultSize,
+               label_style='bold'):
+    gctr.CtrlBase.__init__(self, parent=parent, label_style=label_style,
+                           content_style='bold')
+
+    self.sizer = wx.BoxSizer(wx.VERTICAL)
+    self.info_sizer=wx.FlexGridSizer(1, 3, 0, 10)
+
+    self.iso_txt = wx.StaticText(self, label=label, size=label_size)
+    self.num_txt = wx.StaticText(self, label='0')
+    self.end_txt = wx.StaticText(self, label='images integrated')
+    self.iso_txt.SetFont(wx.Font(18, wx.DEFAULT, wx.NORMAL, wx.BOLD))
+    self.num_txt.SetFont(wx.Font(20, wx.DEFAULT, wx.NORMAL, wx.BOLD))
+    self.end_txt.SetFont(wx.Font(18, wx.DEFAULT, wx.NORMAL, wx.BOLD))
+
+    self.info_sizer.Add(self.iso_txt, flag=wx.ALIGN_CENTER_VERTICAL)
+    self.info_sizer.Add(self.num_txt, flag=wx.ALIGN_CENTER_VERTICAL)
+    self.info_sizer.Add(self.end_txt, flag=wx.ALIGN_CENTER_VERTICAL)
+
+    self.sizer.Add(self.info_sizer, flag=wx.ALIGN_CENTER)
+    self.SetSizer(self.sizer)
+
+  def update_number(self, number):
+    self.num_txt.SetLabel(str(number))
+
+
+class CommonUnitCellKey(object):
+  """Handle unit cell parameters when setting a common legend for histograms"""
+  sep = '\n'
+  symbols = ['a', 'b', 'c', r'$\alpha$', r'$\beta$', r'$\gamma$']
+  units = 3 * [r'$\AA$'] + 3 * [r'$^\circ$']
+
+  def __init__(self, name='', crystals=0):
+    self.name = name
+    self.crystals = crystals
+    self.means = []
+    self.stds = []
+
+  @property
+  def prefix(self):
+    return self.name + (' ' if self.name else '') + "(N: %d)" % self.crystals
+
+  @property
+  def line_list(self):
+    return ['%s: %.2f +/- %.2f%s' % (d, m, s, u) for d, m, s, u
+            in zip(self.symbols, self.means, self.stds, self.units)]
+
+  def lines(self, mask=6*(True,)):
+    return self.sep.join(line for line, m in zip(self.line_list, mask) if m)
+
+  @classmethod
+  def common_lines_of(cls, uc_keys):
+    line_lists = zip(*[uc_key.line_list for uc_key in uc_keys])
+    return [ll.count(ll[0]) == len(ll) for ll in line_lists] # true if all same
+
+
+class PopUpCharts(object):
+  ''' Class to generate chargs and graphs that will appear in separate
+  windows when user requests them, e.g. unit cell histogram chart '''
+
+  def __init__(self, interactive = True, figure = None):
+    import matplotlib.pyplot as plt
+    self.plt=plt
+    self.interactive = interactive
+    self.figure = figure
+
+  def reject_outliers(self, data, iqr_ratio = 1.5):
+    eps = 1e-6
+    outliers = flex.bool(len(data), False)
+    if iqr_ratio is None:
+      return outliers
+    from scitbx.math import five_number_summary
+    min_x, q1_x, med_x, q3_x, max_x = five_number_summary(data)
+    #print "Five number summary: min %.1f, q1 %.1f, med %.1f, q3 %.1f, max %.1f"%(min_x, q1_x, med_x, q3_x, max_x)
+    iqr_x = q3_x - q1_x
+    cut_x = iqr_ratio * iqr_x
+    outliers.set_selected(data > q3_x + cut_x + eps, True)
+    outliers.set_selected(data < q1_x - cut_x - eps, True)
+    #print "Rejecting", outliers.count(True), "out of", len(outliers)
+    return outliers
+
+  def plot_uc_histogram(self, info_list, legend_list, extra_title = None, xsize = 10, ysize = 10, high_vis = False, iqr_ratio = 1.5, ranges = None, angle_ranges = None, title = None, image_fname=None, hist_scale=None):
+    """
+    Plot a 3x3 grid of plots showing unit cell dimensions.
+    @param info list of lists of dictionaries. The outer list groups seperate lists
+    of cells to be plotted in the same graph, where each dictionary describes one cell.
+    @param extra_title if given will be appended to the title of the plot
+    @param xsize if class initialized with not interacive, this is the x size of the
+    plot to save in inches
+    @param ysize as xsize
+    @param iqr_ratio Inter-quartile range multiplier for rejecting outliers
+    @param ranges Limits for the a, b and c axes. Tuple of 6 doubles, low then high in pairs for each.
+    @return if not interactive, returns the path of the saved image, otherwise None
+    """
+    if ranges is not None:
+      assert len(ranges) == 6
+      alim = ranges[0:2]
+      blim = ranges[2:4]
+      clim = ranges[4:6]
+    else:
+      alim = blim = clim = None
+
+    if angle_ranges is not None:
+      assert len(angle_ranges) == 6
+      allim = angle_ranges[0:2]
+      belim = angle_ranges[2:4]
+      galim = angle_ranges[4:6]
+    else:
+      allim = belim = galim = None
+
+    plot_ratio = max(min(xsize, ysize)/2.5, 3)
+    text_ratio = plot_ratio * (4 if high_vis else 3)
+
+    # Initialize figure
+    if self.figure:
+      fig = self.figure
+    else:
+      fig = plt.figure(figsize=(xsize, ysize))
+    gsp = GridSpec(3, 4)
+    sub_ba = fig.add_subplot(gsp[0, 0])
+    sub_cb = fig.add_subplot(gsp[0, 1])
+    sub_ac = fig.add_subplot(gsp[0, 2])
+    sub_a = fig.add_subplot(gsp[1, 0], sharex=sub_ba)
+    sub_b = fig.add_subplot(gsp[1, 1], sharex=sub_cb, sharey=sub_a)
+    sub_c = fig.add_subplot(gsp[1, 2], sharex=sub_ac, sharey=sub_a)
+    sub_alpha = fig.add_subplot(gsp[2, 0])
+    sub_beta = fig.add_subplot(gsp[2, 1], sharey=sub_alpha)
+    sub_gamma = fig.add_subplot(gsp[2, 2], sharey=sub_alpha)
+    sub_key = fig.add_subplot(gsp[:, 3])
+    total = 0
+    abc_hist_ylim = 0
+    legend_keys = []
+
+    for legend, info in zip(legend_list, info_list):
+      if len(info) == 0:
+        continue
+      # Extract uc dimensions from info list
+      a = flex.double([i['a'] for i in info])
+      b = flex.double([i['b'] for i in info])
+      c = flex.double([i['c'] for i in info])
+      alpha = flex.double([i['alpha'] for i in info])
+      beta = flex.double([i['beta'] for i in info])
+      gamma = flex.double([i['gamma'] for i in info])
+      if ranges is not None:
+        axis_sel = (a >= alim[0]) & (a <= alim[1]) & (b >= blim[0]) & (b <= blim[1]) & (c >= clim[0]) & (c <= clim[1])
+      else:
+        axis_sel = flex.bool(len(a), True)
+      if angle_ranges is not None:
+        angle_sel = (alpha >= allim[0]) & (alpha <= allim[1]) & (beta >= belim[0]) & (beta <= belim[1]) & (gamma >= galim[0]) & (gamma <= galim[1])
+      else:
+        angle_sel = flex.bool(len(a), True)
+      sel = axis_sel & angle_sel
+      a = a.select(sel)
+      b = b.select(sel)
+      c = c.select(sel)
+      alpha = alpha.select(sel)
+      beta = beta.select(sel)
+      gamma = gamma.select(sel)
+
+      accepted = flex.bool(len(a), True)
+      for d in [a, b, c, alpha, beta, gamma]:
+        outliers = self.reject_outliers(d, iqr_ratio)
+        accepted &= ~outliers
+
+      a = a.select(accepted)
+      b = b.select(accepted)
+      c = c.select(accepted)
+      alpha = alpha.select(accepted)
+      beta = beta.select(accepted)
+      gamma = gamma.select(accepted)
+
+      total += len(a)
+      nbins = int(np.sqrt(len(a))) * 2
+      hists = []
+      legend_key = CommonUnitCellKey(name=legend, crystals=len(a))
+
+      for (d, sub, lim) in [(a, sub_a, alim), (b, sub_b, blim), (c, sub_c, clim)]:
+        stats = flex.mean_and_variance(d)
+        mean = stats.mean()
+        try:
+          stddev = stats.unweighted_sample_standard_deviation()
+        except RuntimeError:
+          raise Exception("Not enough data to produce a histogram")
+        legend_key.means.append(mean)
+        legend_key.stds.append(stddev)
+        hist = sub.hist(d, nbins, alpha=0.75, histtype='stepfilled',
+                        label='placeholder-label', range=lim)
+        hists.append(hist)
+        if len(info_list) == 1:
+          sub.set_xlabel(legend_key.line_list[-1]).set_fontsize(text_ratio)
+
+      abc_hist_ylim = max(1.2*max([max(h[0]) for h in hists]), abc_hist_ylim)
+      sub_a.set_ylim([0, abc_hist_ylim])
+
+      for (n1, n2, d1, d2, lim1, lim2, sub) in \
+        [('a', 'b', a, b, alim, blim, sub_ba),
+         ('b', 'c', b, c, blim, clim, sub_cb),
+         ('c', 'a', c, a, clim, alim, sub_ac)]:
+        if len(info_list) == 1:
+          hist_kwargs = {
+            'norm': mpl.colors.LogNorm() if hist_scale == "log" else None,
+            'range': [lim1, lim2] if ranges is not None else None}
+          sub.hist2d(d1, d2, bins=100, **hist_kwargs)
+        else:
+          sub.plot(d1.as_numpy_array(), d2.as_numpy_array(), '.', alpha=0.1,
+                   markeredgewidth=0, markersize=2)
+          if ranges is not None:
+            sub.set_xlim(lim1)
+            sub.set_ylim(lim2)
+        sub.set_xlabel("%s axis" % n1).set_fontsize(text_ratio)
+        sub.set_ylabel("%s axis" % n2).set_fontsize(text_ratio)
+
+      for (angle, sub, lim) in [(alpha, sub_alpha, allim), (beta, sub_beta, belim), (gamma, sub_gamma, galim)]:
+        sub.hist(angle, nbins, alpha=0.75, histtype='stepfilled', range=lim)
+        stats = flex.mean_and_variance(angle)
+        mean = stats.mean()
+        stddev = stats.unweighted_sample_standard_deviation()
+        legend_key.means.append(mean)
+        legend_key.stds.append(stddev)
+        if len(info_list) == 1:
+          sub.set_xlabel(legend_key.line_list[-1]).set_fontsize(text_ratio)
+      legend_keys.append(legend_key)
+
+    # Set up general subplot and legend information
+    sub_a.set_ylabel('Number of images').set_fontsize(text_ratio)
+    self.plt.setp(sub_b.get_yticklabels(), visible=False)
+    self.plt.setp(sub_c.get_yticklabels(), visible=False)
+    for sub in (sub_a, sub_b, sub_c):
+      if not high_vis:
+        sub.xaxis.set_major_locator(plt.MaxNLocator(4))
+
+    sub_alpha.set_ylabel('Number of images').set_fontsize(text_ratio)
+    self.plt.setp(sub_beta.get_yticklabels(), visible=False)
+    self.plt.setp(sub_gamma.get_yticklabels(), visible=False)
+    for sub in [sub_alpha, sub_beta, sub_gamma]:
+      if not high_vis:
+        sub.xaxis.set_major_locator(plt.MaxNLocator(4))
+
+    for ax in (sub_a, sub_b, sub_c, sub_alpha, sub_beta, sub_gamma):
+      ax.tick_params(axis='both', which='both', left='off', right='off')
+      ax.set_yticklabels([])
+    for ax in (sub_ba, sub_cb, sub_ac):
+      ax.tick_params(axis='both', which='both', bottom='off', top='off',
+                     left='off', right='off')
+      plt.setp(ax.get_xticklabels(), visible=False)
+      ax.set_yticklabels([])
+
+    # Prepare common legend by using existing handles and CommonUnitCellKeys
+    handles, _ = sub_a.get_legend_handles_labels()
+    common_key_lines = CommonUnitCellKey.common_lines_of(legend_keys)
+    if len(info_list) == 1:
+      labels = [k.lines() for k in legend_keys]
+    else:
+      unique = [not common for common in common_key_lines]
+      labels = [k.prefix + k.sep + k.lines(unique) for k in legend_keys]
+      if any(common_key_lines):
+        handles.append(mpl.lines.Line2D([0], [0], alpha=0))  # empty handle
+        labels.append(legend_keys[0].lines(common_key_lines))
+    sub_key.legend(handles, labels, fontsize=text_ratio, labelspacing=1, loc=6)
+    sub_key.axis('off')
+
+    gsp.update(wspace=0)
+    title = "Unit cell distribution" if title is None else title
+    title += " (%d xtals)" % total
+    title += " %s" % extra_title if extra_title else ""
+    fig.suptitle(title)
+
+    if not self.interactive:
+      image_fname = image_fname or "ucell_tmp.png"
+      fig.set_size_inches(xsize*1.05+.5, ysize*.95)
+      fig.savefig(image_fname, bbox_inches='tight', dpi=100)
+      plt.close(fig)
+      return "ucell_tmp.png"
+
+  def plot_uc_3Dplot(self, info, iqr_ratio = 1.5):
+    assert self.interactive
+
+    import numpy as np
+    from mpl_toolkits.mplot3d import Axes3D # import dependency
+
+    fig = self.plt.figure(figsize=(12, 10))
+    # Extract uc dimensions from info list
+    a = flex.double([i['a'] for i in info])
+    b = flex.double([i['b'] for i in info])
+    c = flex.double([i['c'] for i in info])
+    alpha = flex.double([i['alpha'] for i in info])
+    beta = flex.double([i['beta'] for i in info])
+    gamma = flex.double([i['gamma'] for i in info])
+    n_total = len(a)
+
+    accepted = flex.bool(n_total, True)
+    for d in [a, b, c, alpha, beta, gamma]:
+      outliers = self.reject_outliers(d, iqr_ratio)
+      accepted &= ~outliers
+
+    a = a.select(accepted)
+    b = b.select(accepted)
+    c = c.select(accepted)
+
+    AA = r"a-edge (%.2f +/- %.2f $\AA$)" % (flex.mean(a),
+                                        flex.mean_and_variance(a).unweighted_sample_standard_deviation())
+    BB = r"b-edge (%.2f +/- %.2f $\AA$)" % (flex.mean(b),
+                                        flex.mean_and_variance(b).unweighted_sample_standard_deviation())
+    CC = r"c-edge (%.2f +/- %.2f $\AA$)" % (flex.mean(c),
+                                        flex.mean_and_variance(c).unweighted_sample_standard_deviation())
+
+
+    subset = min(len(a),1000)
+
+    flex.set_random_seed(123)
+    rnd_sel = flex.random_double(len(a))<(subset/n_total)
+
+    a = a.select(rnd_sel)
+    b = b.select(rnd_sel)
+    c = c.select(rnd_sel)
+
+    fig.suptitle('{} randomly selected cells out of total {} images'
+                 ''.format(len(a),n_total), fontsize=18)
+
+    ax = fig.add_subplot(111, projection='3d')
+
+    for ia in range(len(a)):
+      ax.scatter(a[ia],b[ia],c[ia],c='r',marker='+')
+
+    ax.set_xlabel(AA)
+    ax.set_ylabel(BB)
+    ax.set_zlabel(CC)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/__init__.py
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import Sorry
+import six
+from six.moves import zip
+
+try:
+  import MySQLdb
+except ImportError as e:
+  pass
+
+def get_run_path(rootpath, trial, rungroup, run, task=None):
+  import os
+  try:
+    p = os.path.join(rootpath, "r%04d"%int(run.run), "%03d_rg%03d"%(trial.trial, rungroup.id))
+  except ValueError:
+    p = os.path.join(rootpath, run.run, "%03d_rg%03d"%(trial.trial, rungroup.id))
+  if task is not None:
+    p = os.path.join(p, "task%03d"%task.id)
+  return p
+
+def get_image_mode(rungroup):
+  mode = "other"
+  if rungroup.app.params.facility.name == 'lcls':
+    if "rayonix" in rungroup.detector_address.lower():
+      mode = "rayonix"
+    elif "cspad" in rungroup.detector_address.lower():
+      mode = "cspad"
+    elif "jungfrau" in rungroup.detector_address.lower():
+      mode = "jungfrau"
+  return mode
+
+def write_xtc_locator(locator_path, params, run, rungroup):
+  locator = open(locator_path, 'w')
+  locator.write("experiment=%s\n"%params.facility.lcls.experiment) # LCLS specific parameter
+  locator.write("run=%s\n"%run.run)
+  locator.write("detector_address=%s\n"%rungroup.detector_address)
+  if rungroup.wavelength_offset:
+    locator.write("wavelength_offset=%s\n"%rungroup.wavelength_offset)
+  if rungroup.spectrum_eV_per_pixel:
+    locator.write("spectrum_eV_per_pixel=%s\n"%rungroup.spectrum_eV_per_pixel)
+  if rungroup.spectrum_eV_offset:
+    locator.write("spectrum_eV_offset=%s\n"%rungroup.spectrum_eV_offset)
+  if params.facility.lcls.use_ffb:
+    locator.write("use_ffb=True\n")
+
+  mode = get_image_mode(rungroup)
+  if mode == 'rayonix':
+    from xfel.cxi.cspad_ana import rayonix_tbx
+    pixel_size = rayonix_tbx.get_rayonix_pixel_size(rungroup.binning)
+    locator.write("rayonix.bin_size=%s\n"%rungroup.binning)
+  elif mode == 'cspad':
+    locator.write("cspad.detz_offset=%s\n"%rungroup.detz_parameter)
+  elif mode == 'jungfrau':
+    locator.write("jungfrau.detz_offset=%s\n"%rungroup.detz_parameter)
+
+  if rungroup.extra_format_str:
+    locator.write(rungroup.extra_format_str)
+
+  locator.close()
+
+def get_db_connection(params, block=True, autocommit=True):
+  if params.db.password is None:
+    password = ""
+  else:
+    password = params.db.password
+
+  retry_count = 0
+  retry_max = 20
+  sleep_time = 0.1
+  while retry_count < retry_max:
+    try:
+      dbobj=MySQLdb.connect(
+          passwd=password,
+          user=params.db.user,
+          host=params.db.host,
+          db=params.db.name,
+          port=params.db.port,
+          autocommit=autocommit
+      )
+      return dbobj
+    except Exception as e:
+      retry_count += 1
+      if not block: raise e
+      if "Too many connections" in str(e):
+        print("Too many connections, retry", retry_count)
+      elif  "Can't connect to MySQL server" in str(e):
+        print("Couldn't connect to MYSQL, retry", retry_count)
+      elif "Can't create a new thread" in str(e):
+        print("MySQL can't create a new thread. Retry", retry_count)
+      else:
+        raise e
+      import time
+      time.sleep(sleep_time)
+      sleep_time *= 2
+  raise Sorry("Couldn't execute connect to MySQL. Too many reconnects.")
+
+class db_proxy(object):
+  def __init__(self, app, table_name, id = None, **kwargs):
+    self._db_dict = {}
+    self.app = app
+    self.id = id
+    self.table_name = table_name
+
+    if id is None:
+      # add the new items to the db
+      query = "INSERT INTO `%s` " % self.table_name
+      keys = []
+      vals = []
+      for key, value in six.iteritems(kwargs):
+        assert key in app.columns_dict[table_name]
+        keys.append(key)
+        self._db_dict[key] = value
+        if isinstance(value, bool):
+          value = "'%s'"%int(value)
+        elif value is None or value == "None" or value == "":
+          value = "NULL"
+        else:
+          value = "'%s'"%str(value)
+        vals.append(value)
+      query += "(%s) VALUES (%s)"%(", ".join(keys), ", ".join(vals))
+      cursor = app.execute_query(query, commit=True)
+      if cursor:
+        self.id = cursor.lastrowid
+
+      for key in app.columns_dict[table_name]:
+        if key not in self._db_dict:
+          self._db_dict[key] = None
+    else:
+      keys = []
+      for key in app.columns_dict[table_name]:
+        if key in kwargs:
+          self._db_dict[key] = kwargs.pop(key)
+        else:
+          keys.append(key)
+      assert len(kwargs) == 0
+      if len(keys) > 0:
+        query = "SELECT %s FROM `%s` WHERE id = %d" % (", ".join(keys), table_name, id)
+        results = app.execute_query(query).fetchall()[0]
+        for key, value in zip(keys, results):
+          self._db_dict[key] = value
+
+  def __getattr__(self, key):
+    # Called if the property is not found
+    assert '_db_dict' in self.__dict__
+    if key not in self._db_dict:
+      if key not in ['_ipython_canary_method_should_not_exist_', '_repr_mimebundle_']: # things IPython checks for
+        print(self.table_name, key, 'error!', self._db_dict)
+      raise AttributeError(key)
+
+    return self._db_dict[key]
+
+  def __setattr__(self, key, value):
+    # Need to test for _db_dict to avoid infinite loop
+    #  Test key == "_db_dict" to allow creating _db_dict
+    #  Test hasattr(self, "_db_dict") in case dbproxy.__init__ hasn't been called
+    #  Test key not in self._db_dict to allow setting member variables not in database dictionary
+    if key == "_db_dict" or "_db_dict" not in self.__dict__ or key not in self._db_dict:
+      super(db_proxy, self).__setattr__(key, value)
+      return
+
+    if isinstance(value, bool):
+      v = "%s"%int(value)
+    elif value is None or value == "None" or value == "":
+      v = "NULL"
+    else:
+      v = "'%s'"%value
+
+    query = "UPDATE `%s` SET %s = %s WHERE id = %d"% (
+      self.table_name, key, v, self.id)
+    self.app.execute_query(query, commit=True)
+    self._db_dict[key] = value
+
+  def __str__(self):
+    return "db_proxy %s %d"%(self.table_name, self.id)
+
+  def __repr__(self):
+    return self.__str__()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/cfgs/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/cfgs/shifter_templates.py
+from __future__ import division
+import os
+
+SIT_DATA = os.getenv('SIT_DATA')
+SIT_PSDM_DATA = os.getenv('SIT_PSDM_DATA')
+assert SIT_DATA is not None
+assert SIT_PSDM_DATA is not None
+
+sbatch_template = \
+"""#!/bin/bash -l
+#SBATCH --qos=<queue>
+#SBATCH --job-name=<jobname>
+#SBATCH --reservation=<reservation>
+#SBATCH --time=<walltime>
+#SBATCH --nodes=<nnodes>
+#SBATCH --tasks-per-node=<nproc_per_node>
+#SBATCH --constraint=<constraint>
+#SBATCH --image=<shifter_image>
+#SBATCH --mail-type=NONE
+#SBATCH -A <project>
+#SBATCH -o <out_log>
+#SBATCH -e <err_log>
+#DW jobdw capacity=10GB access_mode=striped type=scratch
+#DW stage_out source=$DW_JOB_STRIPED/stdout destination=<output_dir>/stdout type=directory
+# base directory
+
+# submit jobs
+mkdir ${DW_JOB_STRIPED}/stdout    #DW <-Tagged so we can delete this line if not using DW
+
+echo -n "Starting job @ t="; date +%s
+srun shifter <srun_script>
+echo -n "Finished job @ t="; date +%s
+"""
+
+srun_template = \
+f"""#!/bin/bash
+
+#cctbx
+source /img/activate.sh
+
+#for experiment database
+export SIT_DATA={SIT_DATA}
+
+#for psana
+export SIT_PSDM_DATA={SIT_PSDM_DATA}
+export SIT_ROOT=/reg/g/psdm
+
+#needed to open h5 files from compute nodes
+export HDF5_USE_FILE_LOCKING=FALSE
+
+# run
+<command>
+"""
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/dataset.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui.db import db_proxy
+import os
+
+class Dataset(db_proxy):
+  def __init__(self, app, dataset_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_dataset" % app.params.experiment_tag, id = dataset_id, **kwargs)
+    self.dataset_id = self.id
+
+  def __getattr__(self, name):
+    # Called only if the property cannot be found
+    if name == "tasks":
+      return self.app.get_dataset_tasks(self.id)
+    elif name == "tags":
+      return self.app.get_dataset_tags(self.id)
+    elif name == "versions":
+      return self.app.get_dataset_versions(self.id)
+    elif name == "latest_version":
+      versions = self.app.get_dataset_versions(self.id, latest = True)
+      if versions: return versions[0]
+      else: return None
+    elif name == "active_versions":
+      dataset_task_ids = [t.id for t in self.tasks]
+      return [v for v in self.versions if all([j.task.id in dataset_task_ids for j in v.jobs])]
+    else:
+      return super(Dataset, self).__getattr__(name)
+
+  def __setattr__(self, name, value):
+    assert name not in ["tasks", "tags", "versions", "latest_version"]
+    super(Dataset, self).__setattr__(name, value)
+
+  def add_task(self, task):
+    query = "INSERT INTO `%s_dataset_task` (dataset_id, task_id) VALUES (%d, %d)" % (
+      self.app.params.experiment_tag, self.id, task.id)
+    self.app.execute_query(query, commit=True)
+
+  def remove_task(self, task):
+    query = "DELETE FROM `%s_dataset_task` WHERE dataset_id = %d AND task_id = %s" % (
+      self.app.params.experiment_tag, self.id, task.id)
+    self.app.execute_query(query, commit=True)
+
+  def add_tag(self, tag):
+    query = "INSERT INTO `%s_dataset_tag` (dataset_id, tag_id) VALUES (%d, %d)" % (
+      self.app.params.experiment_tag, self.id, tag.id)
+    self.app.execute_query(query, commit=True)
+
+  def remove_tag(self, tag):
+    query = "DELETE FROM `%s_dataset_tag` WHERE dataset_id = %d AND tag_id = %s" % (
+      self.app.params.experiment_tag, self.id, tag.id)
+    self.app.execute_query(query, commit=True)
+
+class DatasetVersion(db_proxy):
+  def __init__(self, app, dataset_version_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_dataset_version" % app.params.experiment_tag, id = dataset_version_id, **kwargs)
+    self.dataset_version_id = self.id
+    self._dataset = None
+
+  def __getattr__(self, name):
+    # Called only if the property cannot be found
+    if name == "jobs":
+      return self.app.get_dataset_version_jobs(self.id)
+    elif name == "dataset":
+      if self._dataset is None:
+        self._dataset = self.app.get_dataset(self.dataset_id)
+      return self._dataset
+    else:
+      return super(DatasetVersion, self).__getattr__(name)
+
+  def __setattr__(self, name, value):
+    assert name not in ["jobs"]
+    if name == "dataset":
+      self._dataset = value
+      return
+    super(DatasetVersion, self).__setattr__(name, value)
+
+  def add_job(self, job):
+    query = "INSERT INTO `%s_dataset_version_job` (dataset_version_id, job_id) VALUES (%d, %d)" % (
+      self.app.params.experiment_tag, self.id, job.id)
+    self.app.execute_query(query, commit=True)
+
+  def remove_job(self, job):
+    query = "DELETE FROM `%s_dataset_version_job` WHERE dataset_version_id = %d AND job_id = %s" % (
+      self.app.params.experiment_tag, self.id, job.id)
+    self.app.execute_query(query, commit=True)
+
+  def output_path(self):
+    return os.path.join(self.app.params.output_folder, self.dataset.name, "v%03d"%self.version)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/dxtbx_db.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui.db.xfel_db import xfel_db_application
+from xfel.ui.db.experiment import Imageset, Experiment, Event, Bin, Cell_Bin, Cell, Detector, Crystal, Beam
+from scitbx.array_family import flex
+
+def log_frame(experiments, reflections, params, run, n_strong, timestamp = None,
+              two_theta_low = None, two_theta_high = None, db_event = None, app = None, trial = None):
+  if app is None:
+    app = dxtbx_xfel_db_application(params, mode = 'cache_commits')
+  else:
+    app.mode = 'cache_commits'
+
+  if isinstance(run, int) or isinstance(run, str):
+    db_run = app.get_run(run_number=run)
+  else:
+    db_run = run
+
+  if trial is None:
+    if params.input.trial is None:
+      db_trial = app.get_trial(trial_id = params.input.trial_id)
+      params.input.trial = db_trial.trial
+    else:
+      db_trial = app.get_trial(trial_number = params.input.trial)
+  else:
+    db_trial = trial
+
+  if db_event is None:
+    if params.input.rungroup is None:
+      db_event = app.create_event(timestamp = timestamp,
+                                  run_id = db_run.id,
+                                  trial_id = db_trial.id,
+                                  n_strong = n_strong,
+                                  two_theta_low = two_theta_low,
+                                  two_theta_high = two_theta_high)
+    else:
+      db_event = app.create_event(timestamp = timestamp,
+                                  run_id = db_run.id,
+                                  trial_id = db_trial.id,
+                                  rungroup_id = params.input.rungroup,
+                                  n_strong = n_strong,
+                                  two_theta_low = two_theta_low,
+                                  two_theta_high = two_theta_high)
+
+  inserts = ""
+
+  if app.last_query is None:
+    app.last_query = ""
+
+  def save_last_id(name):
+    nonlocal inserts
+    inserts += app.last_query + ";\n"
+    inserts += "SELECT LAST_INSERT_ID() INTO @%s_id;\n"%name
+
+  if experiments:
+    save_last_id('event')
+  else:
+    inserts += app.last_query + ";\n"
+
+  for i, experiment in enumerate(experiments or []):
+    imageset = Imageset(app)
+    save_last_id('imageset')
+
+    if experiment.beam:
+      beam = Beam(app, beam = experiment.beam)
+    else:
+      beam = Beam(app, wavelength = 0)
+    save_last_id('beam')
+
+    detector = Detector(app, detector = experiment.detector)
+    save_last_id('detector')
+
+    if experiment.crystal:
+      cell = Cell(app, crystal=experiment.crystal, isoform_id = None)
+      save_last_id('cell')
+
+      crystal = Crystal(app, crystal = experiment.crystal, make_cell = False, cell_id = "@cell_id")
+      save_last_id('crystal')
+
+      inserts += ("INSERT INTO `%s_experiment` (imageset_id, beam_id, detector_id, crystal_id, crystal_cell_id) " + \
+                  "VALUES (@imageset_id, @beam_id, @detector_id, @crystal_id, @cell_id);\n") % (
+        params.experiment_tag)
+
+    else:
+      inserts += ("INSERT INTO `%s_experiment` (imageset_id, beam_id, detector_id) " + \
+                  "VALUES (@imageset_id, @beam_id, @detector_id);\n") % (
+        params.experiment_tag)
+
+    inserts += "INSERT INTO `%s_imageset_event` (imageset_id, event_id, event_run_id) VALUES (@imageset_id, @event_id, %d);\n" % (
+      params.experiment_tag, db_run.id)
+
+    if reflections and experiment.crystal:
+      reflections_i = reflections.select(reflections['id']==i)
+      d = experiment.crystal.get_unit_cell().d(reflections['miller_index']).select(reflections['id']==i)
+      from cctbx.crystal import symmetry
+      cs = symmetry(unit_cell = experiment.crystal.get_unit_cell(), space_group = experiment.crystal.get_space_group())
+      mset = cs.build_miller_set(anomalous_flag=False, d_min=db_trial.d_min)
+      n_bins = 10 # FIXME use n_bins as an attribute on the trial table
+      binner = mset.setup_binner(n_bins=n_bins)
+      for i in binner.range_used():
+        d_max, d_min = binner.bin_d_range(i)
+        Bin(app, number = i, d_min = d_min, d_max = d_max,
+            total_hkl = binner.counts_complete()[i], cell_id = '@cell_id')
+        save_last_id('bin')
+
+        sel = (d <= float(d_max)) & (d > float(d_min))
+        sel &= reflections_i['intensity.sum.value'] > 0
+        refls = reflections_i.select(sel)
+        n_refls = len(refls)
+        Cell_Bin(app,
+                 count = n_refls,
+                 bin_id = '@bin_id',
+                 crystal_id = '@crystal_id',
+                 avg_intensity = flex.mean(refls['intensity.sum.value']) if n_refls > 0 else None,
+                 avg_sigma = flex.mean(flex.sqrt(refls['intensity.sum.variance'])) if n_refls > 0 else None,
+                 avg_i_sigi = flex.mean(refls['intensity.sum.value'] /
+                                      flex.sqrt(refls['intensity.sum.variance'])) if n_refls > 0 else None)
+        inserts += app.last_query + ";\n"
+  app.mode = 'execute'
+  return inserts
+
+class dxtbx_xfel_db_application(xfel_db_application):
+  def create_experiment(self, experiment):
+    return Experiment(self, experiment=experiment)
+
+  def create_event(self, **kwargs):
+    return Event(self, **kwargs)
+
+  def get_event(self, event_id):
+    return Event(self, event_id=event_id)
+
+  def link_imageset_frame(self, imageset, event):
+    query = "INSERT INTO `%s_imageset_event` (imageset_id, event_id, event_run_id) VALUES (%d, %d, %d)" % (
+      self.params.experiment_tag, imageset.id, event.id, event.run_id)
+    self.execute_query(query, commit=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/experiment.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from xfel.ui.db import db_proxy
+from scitbx.array_family import flex
+from six.moves import zip
+
+class Event(db_proxy):
+  def __init__(self, app, event_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_event" % app.params.experiment_tag, id = event_id, **kwargs)
+    self.event_id = self.id
+
+class Experiment(db_proxy):
+  def __init__(self, app, experiment_id = None, experiment = None, **kwargs):
+    assert [experiment_id, experiment].count(None) == 1
+    if experiment is not None:
+      self.imageset = Imageset(app)
+      self.beam = Beam(app, beam = experiment.beam)
+      self.detector = Detector(app, detector = experiment.detector)
+      self.crystal = Crystal(app, crystal = experiment.crystal)
+
+      kwargs['imageset_id'] = self.imageset.id
+      kwargs['beam_id'] = self.beam.id
+      kwargs['detector_id'] = self.detector.id
+      kwargs['crystal_id'] = self.crystal.id
+      kwargs['crystal_cell_id'] = self.crystal.cell_id
+
+    db_proxy.__init__(self, app, "%s_experiment" % app.params.experiment_tag, id = experiment_id, **kwargs)
+    self.experiment_id = self.id
+
+    if experiment is None:
+      self.imageset = Imageset(app, imageset_id=self.imageset_id)
+      self.beam = Beam(app, beam_id=self.beam_id)
+      self.detector = Detector(app, self.detector_id)
+      self.crystal = Crystal(app, self.crystal_id)
+
+class Imageset(db_proxy):
+  def __init__(self, app, imageset_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_imageset" % app.params.experiment_tag, id=imageset_id, **kwargs)
+    self.imageset_id = self.id
+
+class Beam(db_proxy):
+  def __init__(self, app, beam_id = None, beam = None, wavelength = None, **kwargs):
+    if beam is not None:
+      assert beam_id is None and wavelength is None
+      u_s0 = beam.get_unit_s0()
+      kwargs['direction_1'] = u_s0[0]
+      kwargs['direction_2'] = u_s0[1]
+      kwargs['direction_3'] = u_s0[2]
+      kwargs['wavelength'] = beam.get_wavelength()
+    elif wavelength is not None:
+      assert beam_id is None
+      kwargs['direction_1'] = 0
+      kwargs['direction_2'] = 0
+      kwargs['direction_3'] = 0
+      kwargs['wavelength'] = wavelength
+    else:
+      assert beam_id is not None
+
+    db_proxy.__init__(self, app, "%s_beam" % app.params.experiment_tag, id=beam_id, **kwargs)
+    self.beam_id = self.id
+
+class Detector(db_proxy):
+  def __init__(self, app, detector_id = None, detector = None, **kwargs):
+    assert [detector_id, detector].count(None) == 1
+    if detector is not None:
+      kwargs['distance'] = flex.mean(flex.double([p.get_distance() for p in detector]))
+
+    db_proxy.__init__(self, app, "%s_detector" % app.params.experiment_tag, id=detector_id, **kwargs)
+    self.detector_id = self.id
+
+class Crystal(db_proxy):
+  def __init__(self, app, crystal_id = None, crystal = None, make_cell = True, **kwargs):
+    from scitbx import matrix
+    assert [crystal_id, crystal].count(None) == 1
+    if crystal is not None:
+      u = matrix.sqr(crystal.get_U())  # orientation matrix
+      for i in range(len(u)):
+        kwargs['ori_%d' % (i + 1)] = u[i]
+      try:
+        kwargs['mosaic_block_rotation'] = crystal.get_half_mosaicity_deg()
+        kwargs['mosaic_block_size'] = crystal.get_domain_size_ang()
+      except AttributeError:
+        pass
+
+      if hasattr(crystal, 'identified_isoform'):
+        print("Warning, isoforms no longer have custom support in the database logger.")
+        #tag = app.params.experiment_tag
+        #query = """SELECT cell.id from `%s_cell` cell
+        #           JOIN `%s_isoform` isoform ON cell.isoform_id = isoform.id
+        #           JOIN `%s_trial` trial ON isoform.trial_id = trial.id
+        #           WHERE isoform.name = '%s' AND trial.trial = %d""" % (
+        #  tag, tag, tag, isoform_name, app.params.input.trial)
+        #cursor = app.execute_query(query)
+        #results = cursor.fetchall()
+        #assert len(results) == 1
+        #self.cell = Cell(app, cell_id = results[0][0])
+
+      if make_cell:
+        self.cell = Cell(app, crystal=crystal, isoform_id = None)
+        kwargs['cell_id'] = self.cell.id
+      else:
+        self.cell = None
+
+    db_proxy.__init__(self, app, "%s_crystal" % app.params.experiment_tag, id=crystal_id, **kwargs)
+    self.crystal_id = self.id
+
+    if crystal is None:
+      self.cell = Cell(app, cell_id = self.cell_id)
+
+class Isoform(db_proxy):
+  def __init__(self, app, isoform_id=None, **kwargs):
+    db_proxy.__init__(self, app, "%s_isoform" % app.params.experiment_tag, id=isoform_id, **kwargs)
+    self.isoform_id = self.id
+
+  def __getattr__(self, key):
+    if key == "cell":
+      cells = self.app.get_all_x(Cell, 'cell', where = "WHERE isoform_id = %d"%self.id)
+      assert len(cells) == 1
+      return cells[0]
+    else:
+      return super(Isoform, self).__getattr__(key)
+
+class Cell(db_proxy):
+  def __init__(self, app, cell_id = None, crystal = None, init_bins = False, **kwargs):
+    assert [cell_id, crystal].count(None) in [1,2]
+    if crystal is not None:
+      for key, p in zip(['a', 'b', 'c', 'alpha', 'beta', 'gamma'], crystal.get_unit_cell().parameters()):
+        kwargs['cell_%s'%key] = p
+      kwargs['lookup_symbol'] = crystal.get_space_group().type().lookup_symbol()
+    db_proxy.__init__(self, app, "%s_cell" % app.params.experiment_tag, id=cell_id, **kwargs)
+    self.cell_id = self.id
+
+    assert [self.isoform_id, self.trial_id].count(None) in [1, 2]
+    if self.isoform_id is not None:
+      self.isoform = Isoform(app, isoform_id = self.isoform_id)
+    else:
+      self.isoform = None
+    if init_bins:
+      self._bins = app.get_cell_bins(self.id)
+      self._bins_set = True
+    else:
+      self._bins = []
+      self._bins_set = False
+
+  def __getattr__(self, key):
+    if key == "unit_cell":
+      from cctbx.uctbx import unit_cell
+      return unit_cell([self.cell_a, self.cell_b, self.cell_c,
+                        self.cell_alpha, self.cell_beta, self.cell_gamma])
+    if key == "bins":
+      if len(self._bins) == 0 and not self._bins_set:
+        self._bins = self.app.get_cell_bins(self.id)
+        self._bins_set = True
+      return self._bins
+    else:
+      return super(Cell, self).__getattr__(key)
+
+  def __setattr__(self, key, value):
+    if key == "bins":
+      self._bins = value
+    else:
+      return super(Cell, self).__setattr__(key, value)
+
+class Bin(db_proxy):
+  def __init__(self, app, bin_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_bin" % app.params.experiment_tag, id=bin_id, **kwargs)
+    self.bin_id = self.id
+
+class Cell_Bin(db_proxy):
+  def __init__(self, app, cell_bin_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_cell_bin" % app.params.experiment_tag, id=cell_bin_id, **kwargs)
+    self.cell_bin_id = self.id
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/frame_logging.py
+from __future__ import absolute_import, division, print_function
+
+from dials.command_line.stills_process import Processor
+from xfel.ui.db.dxtbx_db import log_frame, dxtbx_xfel_db_application
+from xfel.ui.db.run import Run
+from xfel.ui.db.trial import Trial
+
+class DialsProcessorWithLogging(Processor):
+  '''Overrides for steps of dials processing of stills with XFEL GUI database logging.'''
+
+  def __init__(self, params, composite_tag = None, rank = 0):
+    self.debug_file_handle = None
+    super(DialsProcessorWithLogging, self).__init__(params, composite_tag, rank)
+    self.tt_low = None
+    self.tt_high = None
+    if self.params.experiment_tag is None:
+      return
+
+    assert params.db.logging_batch_size >= 1
+
+    from libtbx.mpi4py import MPI
+    comm = MPI.COMM_WORLD
+
+    self.queries = []
+    self.rank = rank
+
+    if comm.size > 1:
+      if rank == 0:
+        db_app = dxtbx_xfel_db_application(params, cache_connection=False)
+        run = db_app.get_run(run_number=self.params.input.run_num)
+        run_id = run.id
+        rund = run._db_dict
+        trial = db_app.get_trial(trial_number = params.input.trial)
+        trial_id = trial.id
+        triald = trial._db_dict
+      else:
+        db_app = None
+        run_id = None
+        rund = None
+        trial_id = None
+        triald = None
+      self.db_app, run_id, rund, trial_id, triald = comm.bcast((db_app, run_id, rund, trial_id, triald), root=0)
+      self.run = Run(self.db_app, run_id = run_id, **rund)
+      self.trial = Trial(self.db_app, trial_id = trial_id, **triald)
+    else:
+      self.db_app = dxtbx_xfel_db_application(params, cache_connection=True)
+      self.run = self.db_app.get_run(run_number=self.params.input.run_num)
+      self.trial = self.db_app.get_trial(trial_number = params.input.trial)
+    self.db_app.mode = 'cache_commits'
+    self.n_strong = None
+
+  def finalize(self):
+    super(DialsProcessorWithLogging, self).finalize()
+    if self.params.experiment_tag is None:
+      return
+    self.log_batched_frames()
+    self.trial = None
+
+  def log_batched_frames(self):
+    current_run = self.params.input.run_num
+    current_dbrun = self.run
+    inserts = "BEGIN;\n" # start a transaction
+    for q in self.queries:
+      experiments, reflections, run, n_strong, timestamp, two_theta_low, two_theta_high, db_event = q
+      if run != current_run:
+        self.db_app.mode = "execute"
+        current_run = run
+        current_dbrun = self.db_app.get_run(run_number=run)
+        self.db_app.mode = "cache_commits"
+
+      inserts += log_frame(experiments, reflections, self.params, current_dbrun, n_strong, timestamp = timestamp,
+                           two_theta_low = two_theta_low, two_theta_high = two_theta_high,
+                           db_event = db_event, app = self.db_app, trial = self.trial)
+    inserts += "COMMIT;\n"
+
+    # patch up query so for example '@row_id' becomes @row_id
+    newinserts = []
+    for line in inserts.split('\n'):
+      if '@' in line:
+        newline = []
+        for word in line.split(' '):
+          if '@' in word:
+            word = word.replace("'", "")
+          newline.append(word)
+        line = ' '.join(newline)
+      newinserts.append(line)
+    inserts = '\n'.join(newinserts)
+
+    self.db_app.execute_query(inserts, commit=False) # transaction, so don't commit twice
+    self.queries = []
+
+  def log_frame(self, experiments, reflections, run, n_strong, timestamp = None,
+                two_theta_low = None, two_theta_high = None, db_event = None):
+    # update an existing db_event if db_event is not None
+    if self.params.experiment_tag is None:
+      return
+    self.queries.append((experiments, reflections, run, n_strong, timestamp,
+                         two_theta_low, two_theta_high,
+                         db_event))
+    if len(self.queries) >= self.params.db.logging_batch_size:
+      self.log_batched_frames()
+    return db_event
+
+  def get_run_and_timestamp(self, obj):
+    sets = obj.imagesets()
+    assert len(sets) == 1
+    imageset = sets[0]
+    assert len(imageset) == 1
+    format_obj = imageset.data().reader().format_class._current_instance_ # XXX
+    try: # XTC specific version
+      import psana
+      run = str(format_obj.get_run_from_index(imageset.indices()[0]).run())
+      timestamp = format_obj.get_psana_timestamp(imageset.indices()[0])
+      evt = format_obj._get_event(imageset.indices()[0])
+      if evt:
+        fid = evt.get(psana.EventId).fiducials()
+        timestamp += ", fid:" + str(fid)
+      return run, timestamp
+    except (ImportError, AttributeError): # General version
+      run = self.params.input.run_num
+      timestamp = self.tag
+      return run, timestamp
+
+  def pre_process(self, experiments):
+    super(DialsProcessorWithLogging, self).pre_process(experiments)
+    if self.params.radial_average.enable:
+      try:
+        self.radial_average(experiments)
+      except Exception as e:
+        run, timestamp = self.get_run_and_timestamp(experiments)
+        self.log_frame(experiments, None, run, 0, timestamp = timestamp)
+        raise e
+
+  def radial_average(self, experiments):
+      from dxtbx.command_line.radial_average import run as radial_run
+      from scitbx.array_family import flex
+
+      if self.params.radial_average.verbose:
+        run, timestamp = self.get_run_and_timestamp(experiments)
+        if timestamp == self.tag:
+          print("Radial average of run %s, timestamp %s"%(str(run), self.tag))
+        else:
+          print("Radial average of run %s, tag %s, timestamp %s"%(str(run), self.tag, timestamp))
+
+      imageset = experiments.imagesets()[0]
+      two_thetas, radial_average_values = radial_run(self.params.radial_average, imageset = imageset)
+
+      def get_closest_idx(data, val):
+        deltas = flex.abs(data - val)
+        return flex.first_index(deltas, flex.min(deltas))
+
+      if self.params.radial_average.two_theta_low is not None:
+        self.tt_low = radial_average_values[get_closest_idx(two_thetas, self.params.radial_average.two_theta_low)]
+
+      if self.params.radial_average.two_theta_high is not None:
+        self.tt_high = radial_average_values[get_closest_idx(two_thetas, self.params.radial_average.two_theta_high)]
+
+      if self.params.radial_average.verbose:
+        print("Two theta low and high for run %s, timestamp %s: %f, %f"%(str(run), timestamp, self.tt_low, self.tt_high))
+
+  def find_spots(self, experiments):
+    observed = super(DialsProcessorWithLogging, self).find_spots(experiments)
+    self.n_strong = len(observed)
+    if (
+        not self.params.dispatch.index or
+        len(observed) < self.params.dispatch.hit_finder.minimum_number_of_reflections
+    ):
+      run, timestamp = self.get_run_and_timestamp(experiments)
+      self.log_frame(experiments, None, run, self.n_strong, timestamp = timestamp,
+                     two_theta_low = self.tt_low, two_theta_high = self.tt_high)
+    return observed
+
+  def index(self, experiments, reflections):
+    try:
+      experiments, indexed = super(DialsProcessorWithLogging, self).index(experiments, reflections)
+    except Exception as e:
+      run, timestamp = self.get_run_and_timestamp(experiments)
+      self.log_frame(experiments, None, run, self.n_strong, timestamp = timestamp,
+                     two_theta_low = self.tt_low, two_theta_high = self.tt_high)
+      raise e
+    else:
+      if not self.params.dispatch.integrate:
+        run, timestamp = self.get_run_and_timestamp(experiments)
+        self.log_frame(experiments, indexed, run, self.n_strong, timestamp = timestamp,
+                       two_theta_low = self.tt_low, two_theta_high = self.tt_high)
+    return experiments, indexed
+
+  def integrate(self, experiments, indexed):
+    # Results should always be logged after integration even if it fails.
+    run, timestamp = self.get_run_and_timestamp(experiments)
+    try:
+      integrated = super(DialsProcessorWithLogging, self).integrate(experiments, indexed)
+      self.log_frame(experiments, integrated, run, self.n_strong, timestamp = timestamp,
+                     two_theta_low = self.tt_low, two_theta_high = self.tt_high)
+      return integrated
+    except Exception as e:
+      self.log_frame(experiments, indexed, run, self.n_strong, timestamp = timestamp,
+                     two_theta_low = self.tt_low, two_theta_high = self.tt_high)
+      raise e
+    else:
+      self.log_frame(experiments, indexed, run, len(indexed), timestamp = timestamp,
+                     two_theta_low = self.tt_low, two_theta_high = self.tt_high)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/job.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui import settings_dir
+from xfel.ui.db import db_proxy, get_run_path, write_xtc_locator, get_image_mode
+import os, shutil, copy
+
+known_job_statuses = ["DONE", "ERR", "PEND", "RUN", "SUSP", "PSUSP", "SSUSP", "UNKWN", "EXIT", "DONE", "ZOMBI", "DELETED", "SUBMIT_FAIL", "SUBMITTED", "HOLD", "TIMEOUT"]
+finished_job_statuses = ["DONE", "EXIT", "DELETED", "UNKWN", "ERR", "SUBMIT_FAIL", "TIMEOUT"]
+
+class JobFactory(object):
+  @staticmethod
+  def from_job(job, task_type = None):
+    if job.task_id is None:
+      return IndexingJob(job.app, job.id, **job._db_dict)
+
+    if task_type is None:
+      task_type = job.app.get_task(job.task_id).type
+    if task_type == "indexing":
+      return IndexingJob(job.app, job.id, **job._db_dict)
+    if task_type == "ensemble_refinement":
+      return EnsembleRefinementJob(job.app, job.id, **job._db_dict)
+    if task_type == "scaling":
+      return ScalingJob(job.app, job.id, **job._db_dict)
+    if task_type == "merging":
+      return MergingJob(job.app, job.id, **job._db_dict)
+    if task_type == "phenix":
+      return PhenixJob(job.app, job.id, **job._db_dict)
+
+  @staticmethod
+  def from_args(app, job_id = None, **kwargs):
+    if 'task_type' in kwargs:
+      task_type = kwargs.pop('task_type')
+    else:
+      task_type = None
+    return JobFactory.from_job(Job(app, job_id, **kwargs), task_type=task_type)
+
+class Job(db_proxy):
+  def __init__(self, app, job_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_job" % app.params.experiment_tag, id = job_id, **kwargs)
+    self.job_id = self.id
+    self._run = None
+    self._rungroup = None
+    self._trial = None
+    self._task = None
+    self._dataset = None
+    self._dataset_version = None
+
+  def __getattr__(self, name):
+    # Called only if the property cannot be found
+    if name in ["run", "rungroup", "trial", "task", "dataset", "dataset_version"]:
+      _name = "_" + name
+      name_id = name + "_id"
+      if getattr(self, _name) is None:
+        if name == "dataset_version":
+          if self.dataset_id is not None:
+            self._dataset_version = self.app.get_job_dataset_version(self.id)
+        elif getattr(self, name_id) is not None:
+          setattr(self, _name, getattr(self.app, "get_" + name)(**{name_id:getattr(self, name_id)}))
+      return getattr(self, _name)
+    elif name == "scope":
+      return task_scope[task_types.index(self.type)]
+    else:
+      return super(Job, self).__getattr__(name)
+
+  def __setattr__(self, name, value):
+    if name in ["run", "rungroup", "trial", "task", "dataset", "dataset_version"]:
+      setattr(self, "_"+name, value)
+    else:
+      super(Job, self).__setattr__(name, value)
+
+  def get_log_path(self):
+    run_path = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run)
+    return os.path.join(run_path, "stdout", "out.log")
+
+  def submit(self, previous_job = None):
+    raise NotImplementedError("Override me!")
+
+  def delete(self, output_only=False):
+    raise NotImplementedError("Override me!")
+
+  def get_output_files(self):
+    # Retrun folder and experiment and reflection table suffixes
+    raise NotImplementedError("Override me!")
+
+  def remove_from_db(self):
+    assert self.status == "DELETED"
+
+    print("Removing job %d from the db"%self.id, end=' ')
+    tag = self.app.params.experiment_tag
+    query = """DELETE job FROM `%s_job` job
+               WHERE job.id = %d""" % (
+               tag, self.id)
+    cursor = self.app.execute_query(query, commit=True)
+    print("(%d)"%cursor.rowcount)
+
+  def get_identifier_string(self):
+    if self.app.params.facility.name == 'lcls':
+      s =  "%s_%s_r%04d_t%03d_rg%03d"% \
+        (self.app.params.facility.lcls.experiment, self.app.params.experiment_tag, int(self.run.run), self.trial.trial, self.rungroup.id)
+    else:
+      s =  "%s_%s_t%03d_rg%03d"% \
+        (self.app.params.experiment_tag, self.run.run, self.trial.trial, self.rungroup.id)
+    if self.task is not None:
+      s += "_task%03d"%self.task.id
+    return s
+
+class AveragingJob(Job):
+  def get_identifier_string(self):
+    # Override this function because rungroups are not used for averaging
+    if self.app.params.facility.name == 'lcls':
+      s = "%s_%s_r%04d"% \
+        (self.app.params.facility.lcls.experiment, self.app.params.experiment_tag, int(self.run.run))
+    else:
+      s = "%s_%s"% \
+        (self.app.params.experiment_tag, self.run.run)
+    return s
+
+  def submit(self, previous_job=None):
+    from xfel.command_line.cxi_mpi_submit import Script as submit_script
+    params = copy.deepcopy(self.app.params)
+    params.dispatcher = 'dxtbx.image_average'
+    configs_dir = os.path.join(settings_dir, "cfgs")
+    if not os.path.exists(configs_dir):
+      os.makedirs(configs_dir)
+    identifier_string = self.get_identifier_string()
+
+    # Make an argument list that can be submitted to cxi_mpi_submit.
+    # dxtbx.image_average does not use phil files.
+    extra_args = "-a <output_dir>/avg.cbf -m <output_dir>/max.cbf -s <output_dir>/std.cbf"
+    if self.skip_images > 0:
+      extra_args += f' --skip-images={self.skip_images}'
+    if self.num_images > 0:
+      extra_args += f' --num-images={self.num_images}'
+    self.args = [
+      f'input.run_num = {self.run.run}',
+      'input.dispatcher = dxtbx.image_average',
+      'output.output_dir = {0}'.format(os.path.join(params.output_folder, 'averages')),
+      'output.split_logs = False',
+      'output.add_output_dir_option = False',
+      f'mp.extra_args = {extra_args}',
+      f'mp.method = {params.mp.method}',
+    ]
+    for opt in params.mp.extra_options:
+      self.args.append(f'mp.extra_options = {opt}')
+
+    if params.mp.method != 'local' or (params.mp.method == 'local' and params.facility.name == 'lcls'):
+      mp_args = [
+        f'mp.use_mpi = {params.mp.use_mpi}',
+        f'mp.mpi_command = {params.mp.mpi_command}',
+        f'mp.mpi_option = "--mpi=True"',
+        f'mp.nnodes = {params.mp.nnodes}',
+        f'mp.nproc = {params.mp.nproc}',
+        f'mp.nproc_per_node = {params.mp.nproc_per_node}',
+        f'mp.queue = {params.mp.queue}',
+        f'mp.env_script = {params.mp.env_script[0]}',
+        f'mp.wall_time = {params.mp.wall_time}',
+        f'mp.htcondor.executable_path = {params.mp.htcondor.executable_path}',
+      ]
+      for arg in mp_args:
+        self.args.append(arg)
+    if params.mp.shifter.shifter_image is not None:
+      shifter_args = [
+        f'mp.shifter.nersc_shifter_image = {params.mp.shifter.shifter_image}',
+        f'mp.shifter.sbatch_script_template = {params.mp.shifter.sbatch_script_template}',
+        f'mp.shifter.srun_script_template = {params.mp.shifter.srun_script_template}',
+        f'mp.shifter.nersc_partition = {params.mp.shifter.partition}',
+        f'mp.shifter.nersc_jobname = {params.mp.shifter.jobname}',
+        f'mp.shifter.nersc_project = {params.mp.shifter.project}',
+        f'mp.shifter.nersc_constraint = {params.mp.shifter.constraint}',
+        f'mp.shifter.nersc_reservation = {params.mp.shifter.reservation}',
+        f'mp.shifter.staging = {params.mp.shifter.staging}',
+      ]
+      for arg in shifter_args:
+        self.args.append(arg)
+
+    if params.facility.name == 'lcls':
+      locator_path = os.path.join(configs_dir, identifier_string + ".loc")
+      self.args.append(f'input.locator = {locator_path}')
+      write_xtc_locator(locator_path, params, self.run, self.rungroup)
+    else:
+      self.args.append(self.run.path)
+    result = submit_script().run(self.args)
+    return result
+
+class IndexingJob(Job):
+  def get_output_files(self):
+    run_path = str(get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run))
+    return os.path.join(run_path, 'out'), '_integrated.expt', '_integrated.refl', None, None
+
+  def submit(self, previous_job = None):
+    import libtbx.load_env
+    configs_dir = os.path.join(settings_dir, "cfgs")
+    if not os.path.exists(configs_dir):
+      os.makedirs(configs_dir)
+    identifier_string = self.get_identifier_string()
+
+    target_phil_path = os.path.join(configs_dir, identifier_string + "_params.phil")
+    dispatcher = self.app.params.dispatcher
+    phil_str = self.trial.target_phil_str
+    if phil_str is None: phil_str = ""
+    if self.rungroup.extra_phil_str is not None:
+      phil_str += "\n" + self.rungroup.extra_phil_str
+
+    from xfel.ui import load_phil_scope_from_dispatcher
+    if dispatcher == "cxi.xtc_process":
+      image_format = 'pickle'
+    else:
+      orig_phil_scope = load_phil_scope_from_dispatcher(dispatcher)
+      if os.path.isfile(dispatcher):
+        dispatcher = 'libtbx.python ' + dispatcher
+      from iotbx.phil import parse
+      if self.rungroup.two_theta_low is not None or self.rungroup.two_theta_high is not None:
+        override_str = """
+        radial_average {
+          enable = True
+          show_plots = False
+          verbose = False
+          output_bins = False
+          mask = %s
+        }
+        """%(self.rungroup.untrusted_pixel_mask_path)
+        phil_scope = orig_phil_scope.fetch(parse(override_str))
+      else:
+        phil_scope = orig_phil_scope
+
+      trial_params = phil_scope.fetch(parse(phil_str)).extract()
+
+      image_format = self.rungroup.format
+      mode = get_image_mode(self.rungroup)
+
+      if hasattr(trial_params, 'format'):
+        trial_params.format.file_format = image_format
+        trial_params.format.cbf.mode = mode
+
+      if hasattr(trial_params.indexing.stills, 'known_orientations') and \
+         len(trial_params.indexing.stills.known_orientations) == 1:
+        try:
+          ko_trial, ko_rungroup = trial_params.indexing.stills.known_orientations[0].split('_')
+          ko_trial = self.app.get_trial(trial_number=int(ko_trial))
+          ko_rungroup = self.app.get_rungroup(int(ko_rungroup.lstrip('rg')))
+        except (IndexError, ValueError):
+          pass
+        else:
+          ko_run_path = get_run_path(self.app.params.output_folder, ko_trial, ko_rungroup, self.run)
+          ko_wildcard = trial_params.output.refined_experiments_filename.replace('%s', '*')
+          trial_params.indexing.stills.known_orientations[0] = os.path.join(ko_run_path, 'out', ko_wildcard)
+
+    if self.rungroup.calib_dir is not None or self.rungroup.config_str is not None or dispatcher == 'cxi.xtc_process' or image_format == 'pickle':
+      config_path = os.path.join(configs_dir, identifier_string + ".cfg")
+    else:
+      config_path = None
+
+    if hasattr(trial_params.dispatch, 'process_percent'):
+      trial_params.dispatch.process_percent = self.trial.process_percent
+
+    # Dictionary for formating the submit phil and, if used, the labelit cfg file
+    d = dict(
+      # Generally for the LABELIT backend or image pickles
+      address                   = self.rungroup.detector_address,
+      default_calib_dir         = libtbx.env.find_in_repositories("xfel/metrology/CSPad/run4/CxiDs1.0_Cspad.0"),
+      dark_avg_path             = self.rungroup.dark_avg_path,
+      dark_stddev_path          = self.rungroup.dark_stddev_path,
+      untrusted_pixel_mask_path = self.rungroup.untrusted_pixel_mask_path,
+      detz_parameter            = self.rungroup.detz_parameter,
+      gain_map_path             = self.rungroup.gain_map_path,
+      gain_mask_level           = self.rungroup.gain_mask_level,
+      beamx                     = self.rungroup.beamx,
+      beamy                     = self.rungroup.beamy,
+      energy                    = self.rungroup.energy,
+      binning                   = self.rungroup.binning,
+      two_theta_low             = self.rungroup.two_theta_low,
+      two_theta_high            = self.rungroup.two_theta_high,
+      # Generally for job submission
+      dry_run                   = self.app.params.dry_run,
+      dispatcher                = dispatcher,
+      cfg                       = config_path,
+      experiment                = self.app.params.facility.lcls.experiment, # LCLS specific parameter
+      run_num                   = self.run.run,
+      output_dir                = self.app.params.output_folder,
+      use_ffb                   = self.app.params.facility.lcls.use_ffb, # LCLS specific parameter
+      # Generally for both
+      trial                     = self.trial.trial,
+      rungroup                  = self.rungroup.rungroup_id,
+      experiment_tag            = self.app.params.experiment_tag,
+      calib_dir                 = self.rungroup.calib_dir,
+      nproc                     = self.app.params.mp.nproc,
+      nnodes                    = self.app.params.mp.nnodes_index or self.app.params.mp.nnodes,
+      nproc_per_node            = self.app.params.mp.nproc_per_node,
+      queue                     = self.app.params.mp.queue or None,
+      env_script                = self.app.params.mp.env_script[0] if self.app.params.mp.env_script is not None and len(self.app.params.mp.env_script) > 0 and len(self.app.params.mp.env_script[0]) > 0 else None,
+      phenix_script             = self.app.params.mp.phenix_script[0] if self.app.params.mp.phenix_script is not None and len(self.app.params.mp.phenix_script) > 0 and len(self.app.params.mp.phenix_script[0]) > 0 else None,
+      method                    = self.app.params.mp.method,
+      wall_time                 = self.app.params.mp.wall_time,
+      htcondor_executable_path  = self.app.params.mp.htcondor.executable_path,
+      nersc_shifter_image       = self.app.params.mp.shifter.shifter_image,
+      sbatch_script_template    = self.app.params.mp.shifter.sbatch_script_template,
+      srun_script_template      = self.app.params.mp.shifter.srun_script_template,
+      nersc_partition           = self.app.params.mp.shifter.partition,
+      nersc_jobname             = self.app.params.mp.shifter.jobname,
+      nersc_project             = self.app.params.mp.shifter.project,
+      nersc_constraint          = self.app.params.mp.shifter.constraint,
+      nersc_reservation         = self.app.params.mp.shifter.reservation,
+      nersc_staging             = self.app.params.mp.shifter.staging,
+      target                    = target_phil_path,
+      host                      = self.app.params.db.host,
+      dbname                    = self.app.params.db.name,
+      user                      = self.app.params.db.user,
+      port                      = self.app.params.db.port,
+      # always use mpi for 'lcls'
+      use_mpi                   = self.app.params.mp.method != 'local' or (self.app.params.mp.method == 'local' and self.app.params.facility.name == 'lcls'),
+      mpi_command               = self.app.params.mp.mpi_command,
+      extra_options             = "\n".join(["extra_options = %s"%opt for opt in self.app.params.mp.extra_options]),
+    )
+    if self.app.params.mp.method == 'sge':
+      d['use_mpi'] = False
+    if self.app.params.db.password is not None and len(self.app.params.db.password) == 0:
+      d['password'] = None
+    else:
+      d['password'] = self.app.params.db.password
+
+    phil = open(target_phil_path, "w")
+
+    if dispatcher == 'cxi.xtc_process':
+      phil.write(phil_str)
+    else:
+      extra_scope = None
+      if hasattr(trial_params, 'format'):
+        if image_format == "cbf":
+          trial_params.input.address = self.rungroup.detector_address
+          trial_params.format.cbf.detz_offset = self.rungroup.detz_parameter
+          trial_params.format.cbf.override_energy = self.rungroup.energy
+          trial_params.format.cbf.invalid_pixel_mask = self.rungroup.untrusted_pixel_mask_path
+          if mode == 'cspad':
+            trial_params.format.cbf.cspad.gain_mask_value = self.rungroup.gain_mask_level
+          elif mode == 'rayonix':
+            trial_params.format.cbf.rayonix.bin_size = self.rungroup.binning
+            trial_params.format.cbf.rayonix.override_beam_x = self.rungroup.beamx
+            trial_params.format.cbf.rayonix.override_beam_y = self.rungroup.beamy
+
+        if trial_params.input.known_orientations_folder is not None:
+          trial_params.input.known_orientations_folder = trial_params.input.known_orientations_folder.format(run=self.run.run)
+      else:
+        if trial_params.spotfinder.lookup.mask is None:
+          trial_params.spotfinder.lookup.mask = self.rungroup.untrusted_pixel_mask_path
+        if trial_params.integration.lookup.mask is None:
+          trial_params.integration.lookup.mask = self.rungroup.untrusted_pixel_mask_path
+
+        if self.app.params.facility.name == 'lcls':
+          locator_path = os.path.join(configs_dir, identifier_string + ".loc")
+          write_xtc_locator(locator_path, self.app.params, self.run, self.rungroup)
+          if mode == 'rayonix':
+            from xfel.cxi.cspad_ana import rayonix_tbx
+            pixel_size = rayonix_tbx.get_rayonix_pixel_size(self.rungroup.binning)
+            extra_scope = parse("geometry { detector { panel { origin = (%f, %f, %f) } } }"%(-self.rungroup.beamx * pixel_size,
+                                                                                              self.rungroup.beamy * pixel_size,
+                                                                                             -self.rungroup.detz_parameter))
+          d['locator'] = locator_path
+        else:
+          d['locator'] = None
+
+      if self.rungroup.two_theta_low is not None or self.rungroup.two_theta_high is not None:
+        try:
+          trial_params.radial_average.two_theta_low = self.rungroup.two_theta_low
+          trial_params.radial_average.two_theta_high = self.rungroup.two_theta_high
+        except AttributeError:
+          pass # not all dispatchers support radial averaging
+
+      working_phil = phil_scope.format(python_object=trial_params)
+      if extra_scope:
+        working_phil = working_phil.fetch(extra_scope)
+      diff_phil = orig_phil_scope.fetch_diff(source=working_phil)
+
+      phil.write(diff_phil.as_str())
+    phil.close()
+
+    if config_path is not None:
+      if dispatcher != 'cxi.xtc_process':
+        d['untrusted_pixel_mask_path'] = None # Don't pass a pixel mask to mod_image_dict as it will
+                                              # will be used during dials processing directly
+
+      config_str = "[psana]\n"
+      if self.rungroup.calib_dir is not None:
+        config_str += "calib-dir=%s\n"%self.rungroup.calib_dir
+      modules = []
+      if self.rungroup.config_str is not None:
+        for line in self.rungroup.config_str.split("\n"):
+          if line.startswith('['):
+            modules.append(line.lstrip('[').rstrip(']'))
+      if dispatcher == 'cxi.xtc_process':
+        modules.insert(0, 'my_ana_pkg.mod_radial_average')
+        modules.extend(['my_ana_pkg.mod_hitfind:index','my_ana_pkg.mod_dump:index'])
+      elif image_format == 'pickle':
+        modules.insert(0, 'my_ana_pkg.mod_radial_average')
+        modules.extend(['my_ana_pkg.mod_image_dict'])
+      if self.app.params.facility.lcls.dump_shots:
+        modules.insert(0, 'my_ana_pkg.mod_dump:shot')
+
+      if len(modules) > 0:
+        config_str += "modules = %s\n"%(" ".join(modules))
+
+      if self.rungroup.config_str is not None:
+        config_str += self.rungroup.config_str + "\n"
+
+      if dispatcher == 'cxi.xtc_process' or image_format == 'pickle':
+        d['address'] = d['address'].replace('.','-').replace(':','|') # old style address
+        if dispatcher == 'cxi.xtc_process':
+          template = open(os.path.join(libtbx.env.find_in_repositories("xfel/ui/db/cfgs"), "index_all.cfg"))
+        elif image_format == 'pickle':
+          template = open(os.path.join(libtbx.env.find_in_repositories("xfel/ui/db/cfgs"), "image_dict.cfg"))
+        for line in template.readlines():
+          config_str += line.format(**d)
+        template.close()
+        d['address'] = self.rungroup.detector_address
+
+      cfg = open(config_path, 'w')
+      cfg.write(config_str)
+      cfg.close()
+
+      if dispatcher != 'cxi.xtc_process':
+        d['untrusted_pixel_mask_path'] = self.rungroup.untrusted_pixel_mask_path
+
+    submit_phil_path = os.path.join(configs_dir, identifier_string + "_submit.phil")
+    submit_root = libtbx.env.find_in_repositories("xfel/ui/db/cfgs")
+    if dispatcher in ['cxi.xtc_process', 'cctbx.xfel.xtc_process']:
+      template = open(os.path.join(submit_root, "submit_xtc_process.phil"))
+    else:
+      test_root = os.path.join(submit_root, "submit_" + dispatcher + ".phil")
+      if os.path.exists(test_root):
+        template = open(test_root)
+      else:
+        if hasattr(trial_params, 'format'):
+          template = open(os.path.join(submit_root, "submit_xtc_process.phil"))
+        else:
+          template = open(os.path.join(submit_root, "submit_xfel_process.phil"))
+    phil = open(submit_phil_path, "w")
+
+    if dispatcher == 'cxi.xtc_process':
+      d['target'] = None # any target phil will be in mod_hitfind
+
+    for line in template.readlines():
+      phil.write(line.format(**d))
+
+    d['target'] = target_phil_path
+
+    template.close()
+    phil.close()
+
+    from xfel.command_line.cxi_mpi_submit import Script as submit_script
+    args = [submit_phil_path]
+    if self.app.params.facility.name not in ['lcls']:
+      args.append(self.run.path)
+    return submit_script().run(args)
+
+  def delete(self, output_only=False):
+    if self.status not in finished_job_statuses:
+      print("Job is not finished (status = %s)"%self.status)
+      return
+
+    if self.status == "DELETED":
+      return
+
+    job_folder = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run)
+    if os.path.exists(job_folder):
+      print("Deleting job folder for job", self.id)
+      shutil.rmtree(job_folder)
+    else:
+      print("Cannot find job folder (%s)"%job_folder)
+
+    # Have to be careful to delete from the tables in the right order
+    tag = self.app.params.experiment_tag
+
+    def delete_and_commit(query):
+      cursor = self.app.execute_query(query, commit=True)
+      print("(%d)"%cursor.rowcount)
+
+    print("Deleting cell_bin entries", end=' ')
+    query = """DELETE cell_bin FROM `%s_cell_bin` cell_bin
+               JOIN `%s_crystal` crystal ON crystal.id = cell_bin.crystal_id
+               JOIN `%s_experiment` expr ON expr.crystal_id = crystal.id
+               JOIN `%s_imageset` imgset ON imgset.id = expr.imageset_id
+               JOIN `%s_imageset_event` ie_e ON ie_e.imageset_id = imgset.id
+               JOIN `%s_event` evt ON evt.id = ie_e.event_id
+               WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d""" % (
+               tag, tag, tag, tag, tag, tag, self.run.id, self.trial.id, self.rungroup.id)
+    delete_and_commit(query)
+
+    ids = {}
+    for item in "crystal", "beam", "detector":
+      print("Listing %s ids"%item, end=' ')
+      query = """SELECT %s.id FROM `%s_%s` %s
+                 JOIN `%s_experiment` expr ON expr.%s_id = %s.id
+                 JOIN `%s_imageset` imgset ON imgset.id = expr.imageset_id
+                 JOIN `%s_imageset_event` ie_e ON ie_e.imageset_id = imgset.id
+                 JOIN `%s_event` evt ON evt.id = ie_e.event_id
+                 WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d""" % (
+                 item, tag, item, item, tag, item, item, tag, tag, tag, self.run.id, self.trial.id, self.rungroup.id)
+      cursor = self.app.execute_query(query)
+      item_ids = ["%d"%i[0] for i in cursor.fetchall()]
+      print("(%d)"%len(item_ids))
+      ids[item] = ",".join(item_ids)
+
+    if len(self.trial.isoforms) == 0:
+      print("Listing bin entries", end=' ')
+      query = """SELECT bin.id FROM `%s_bin` bin
+                 JOIN `%s_cell` cell ON bin.cell_id = cell.id
+                 JOIN `%s_crystal` crystal ON crystal.cell_id = cell.id
+                 JOIN `%s_experiment` expr ON expr.crystal_id = crystal.id
+                 JOIN `%s_imageset` imgset ON imgset.id = expr.imageset_id
+                 JOIN `%s_imageset_event` ie_e ON ie_e.imageset_id = imgset.id
+                 JOIN `%s_event` evt ON evt.id = ie_e.event_id
+                 WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d
+                 AND cell.trial_id is NULL""" % (
+                 tag, tag, tag, tag, tag, tag, tag, self.run.id, self.trial.id, self.rungroup.id)
+      cursor = self.app.execute_query(query)
+      item_ids = ["%d"%i[0] for i in cursor.fetchall()]
+      print("(%d)"%len(item_ids))
+      bin_ids = ",".join(item_ids)
+
+      print("Listing cell entries", end=' ')
+      query = """SELECT cell.id FROM `%s_cell` cell
+                 JOIN `%s_crystal` crystal ON crystal.cell_id = cell.id
+                 JOIN `%s_experiment` expr ON expr.crystal_id = crystal.id
+                 JOIN `%s_imageset` imgset ON imgset.id = expr.imageset_id
+                 JOIN `%s_imageset_event` ie_e ON ie_e.imageset_id = imgset.id
+                 JOIN `%s_event` evt ON evt.id = ie_e.event_id
+                 WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d
+                 AND cell.trial_id IS NULL""" % (
+                 tag, tag, tag, tag, tag, tag, self.run.id, self.trial.id, self.rungroup.id)
+      cursor = self.app.execute_query(query)
+      item_ids = ["%d"%i[0] for i in cursor.fetchall()]
+      print("(%d)"%len(item_ids))
+      cell_ids = ",".join(item_ids)
+
+    print("Deleting experiment entries", end=' ')
+    query = """DELETE expr FROM `%s_experiment` expr
+               JOIN `%s_imageset` imgset ON imgset.id = expr.imageset_id
+               JOIN `%s_imageset_event` ie_e ON ie_e.imageset_id = imgset.id
+               JOIN `%s_event` evt ON evt.id = ie_e.event_id
+               WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d""" % (
+               tag, tag, tag, tag, self.run.id, self.trial.id, self.rungroup.id)
+    delete_and_commit(query)
+
+    for item in "crystal", "beam", "detector":
+      if len(ids[item]) > 0:
+        print("Deleting %s entries"%item, end=' ')
+        query = """DELETE %s FROM `%s_%s` %s
+                   WHERE %s.id IN (%s)""" % (
+                   item, tag, item, item, item, ids[item])
+        delete_and_commit(query)
+
+    if len(self.trial.isoforms) == 0 and len(bin_ids) > 0:
+      print("Deleting bin entries", end=' ')
+      query = """DELETE bin FROM `%s_bin` bin
+                 WHERE bin.id IN (%s)""" % (
+                 tag, bin_ids)
+      delete_and_commit(query)
+
+    if len(self.trial.isoforms) == 0 and len(cell_ids) > 0:
+      print("Deleting cell entries", end=' ')
+      query = """DELETE cell FROM `%s_cell` cell
+                 WHERE cell.id IN (%s)""" % (
+                 tag, cell_ids)
+      delete_and_commit(query)
+
+    print("Listing imageset entries", end=' ')
+    query = """SELECT imgset.id FROM `%s_imageset` imgset
+               JOIN `%s_imageset_event` ie_e ON ie_e.imageset_id = imgset.id
+               JOIN `%s_event` evt ON evt.id = ie_e.event_id
+               WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d""" % (
+               tag, tag, tag, self.run.id, self.trial.id, self.rungroup.id)
+    cursor = self.app.execute_query(query)
+    item_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    print("(%d)"%len(item_ids))
+    imageset_ids = ",".join(item_ids)
+
+    print("Deleting imageset_event entries", end=' ')
+    query = """DELETE is_e FROM `%s_imageset_event` is_e
+               JOIN `%s_event` evt ON evt.id = is_e.event_id
+               WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d""" % (
+               tag, tag, self.run.id, self.trial.id, self.rungroup.id)
+    delete_and_commit(query)
+
+    if len(imageset_ids) > 0:
+      print("Deleting imageset entries", end=' ')
+      query = """DELETE imgset FROM `%s_imageset` imgset
+                 WHERE imgset.id IN (%s)""" % (
+                 tag, imageset_ids)
+      delete_and_commit(query)
+
+    print("Deleting event entries", end=' ')
+    query = """DELETE evt FROM `%s_event` evt
+               WHERE evt.run_id = %d AND evt.trial_id = %d AND evt.rungroup_id = %d""" % (
+               tag, self.run.id, self.trial.id, self.rungroup.id)
+    delete_and_commit(query)
+
+    self.status = "DELETED"
+
+class EnsembleRefinementJob(Job):
+  def delete(self, output_only=False):
+    job_folder = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run, self.task)
+    if os.path.exists(job_folder):
+      print("Deleting job folder for job", self.id)
+      shutil.rmtree(job_folder)
+    else:
+      print("Cannot find job folder (%s)"%job_folder)
+    self.status = "DELETED"
+
+  def get_output_files(self):
+    run_path = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run, self.task)
+    return os.path.join(run_path, 'combine_experiments_t%03d'%self.trial.trial, 'intermediates', "*reintegrated*"), '.expt', '.refl', None, None
+
+  def get_log_path(self):
+    run_path = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run, self.task)
+    return os.path.join(run_path, 'combine_experiments_t%03d'%self.trial.trial, 'intermediates',
+      "combine_t%03d_rg%03d_chunk000.out"%(self.trial.trial, self.rungroup.id)) # XXX there can be multiple chunks or multiple clusters
+
+  def submit(self, previous_job = None):
+    from xfel.command_line.striping import Script
+    from xfel.command_line.cxi_mpi_submit import get_submission_id
+    from libtbx import easy_run
+    configs_dir = os.path.join(settings_dir, "cfgs")
+    identifier_string = self.get_identifier_string()
+    target_phil_path = os.path.join(configs_dir, identifier_string + "_params.phil")
+    with open(target_phil_path, 'w') as f:
+      if self.task.parameters:
+        f.write(self.task.parameters)
+
+    path = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run, self.task)
+    os.mkdir(path)
+
+    arguments = """
+    mp.queue={}
+    mp.nnodes={}
+    mp.nproc_per_node={}
+    mp.method={}
+    {}
+    {}
+    mp.wall_time={}
+    mp.use_mpi=False
+    mp.mpi_command={}
+    {}
+    mp.shifter.submit_command={}
+    mp.shifter.shifter_image={}
+    mp.shifter.sbatch_script_template={}
+    mp.shifter.srun_script_template={}
+    mp.shifter.partition={}
+    mp.shifter.jobname={}
+    mp.shifter.project={}
+    mp.shifter.reservation={}
+    mp.shifter.constraint={}
+    mp.shifter.staging={}
+    striping.results_dir={}
+    striping.trial={}
+    striping.rungroup={}
+    striping.run={}
+    {}
+    striping.chunk_size=64
+    striping.stripe=False
+    striping.dry_run=True
+    striping.output_folder={}
+    reintegration.integration.lookup.mask={}
+    mp.local.include_mp_in_command=False
+    """.format(self.app.params.mp.queue if len(self.app.params.mp.queue) > 0 else None,
+               self.app.params.mp.nnodes_tder or self.app.params.mp.nnodes,
+               self.app.params.mp.nproc_per_node,
+               self.app.params.mp.method,
+               '\n'.join(['mp.env_script={}'.format(p) for p in self.app.params.mp.env_script if p]),
+               '\n'.join(['mp.phenix_script={}'.format(p) for p in self.app.params.mp.phenix_script if p]),
+               self.app.params.mp.wall_time,
+               self.app.params.mp.mpi_command,
+               "\n".join(["mp.extra_options={}".format(opt) for opt in self.app.params.mp.extra_options]),
+               self.app.params.mp.shifter.submit_command,
+               self.app.params.mp.shifter.shifter_image,
+               self.app.params.mp.shifter.sbatch_script_template,
+               self.app.params.mp.shifter.srun_script_template,
+               self.app.params.mp.shifter.partition,
+               self.app.params.mp.shifter.jobname,
+               self.app.params.mp.shifter.project,
+               self.app.params.mp.shifter.reservation,
+               self.app.params.mp.shifter.constraint,
+               self.app.params.mp.shifter.staging,
+               self.app.params.output_folder,
+               self.trial.trial,
+               self.rungroup.id,
+               self.run.run,
+               target_phil_path,
+               path,
+               self.rungroup.untrusted_pixel_mask_path,
+               ).split('\n')
+    arguments = [arg.strip() for arg in arguments]
+
+    try:
+      commands = Script(arguments).run()
+    except Exception as e:
+      if 'no DIALS integration results found' in str(e):
+        print("No DIALS integration results found")
+        self.status = "EXIT"
+        return
+      else: raise
+    submission_ids = []
+    if self.app.params.mp.method == 'local':
+      self.status = "RUNNING"
+    for command in commands:
+      try:
+        result = easy_run.fully_buffered(command=command)
+        result.raise_if_errors()
+      except Exception as e:
+        if not "Warning: job being submitted without an AFS token." in str(e):
+          raise e
+      submission_ids.append(get_submission_id(result, self.app.params.mp.method))
+    if self.app.params.mp.method == 'local':
+      self.status = "DONE"
+    else:
+      return ",".join(submission_ids)
+
+class ScalingJob(Job):
+  def delete(self, output_only=False):
+    job_folder = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run, self.task)
+    if os.path.exists(job_folder):
+      print("Deleting job folder for job", self.id)
+      shutil.rmtree(job_folder)
+    else:
+      print("Cannot find job folder (%s)"%job_folder)
+    self.status = "DELETED"
+
+  def get_output_files(self):
+    run_path = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run, self.task)
+    return os.path.join(run_path, 'out'), ".expt", ".refl", None, None
+
+  def write_submit_phil(self, submit_phil_path, target_phil_path):
+    import libtbx.load_env
+    from xfel.ui.db.task import task_types, task_dispatchers
+
+    submit_root = libtbx.env.find_in_repositories("xfel/ui/db/cfgs")
+    d =  dict(
+      dry_run                   = self.app.params.dry_run,
+      dispatcher                = task_dispatchers[task_types.index(self.task.type)],
+      run_num                   = self.run.run,
+      output_dir                = self.app.params.output_folder,
+      trial                     = self.trial.trial,
+      rungroup                  = self.rungroup.rungroup_id,
+      task                      = self.task.id,
+      nproc                     = self.app.params.mp.nproc,
+      nproc_per_node            = self.app.params.mp.nproc_per_node,
+      queue                     = self.app.params.mp.queue or None,
+      env_script                = self.app.params.mp.env_script[0] if len(self.app.params.mp.env_script) > 0 and len(self.app.params.mp.env_script[0]) > 0 else None,
+      phenix_script                = self.app.params.mp.phenix_script[0] if len(self.app.params.mp.phenix_script) > 0 and len(self.app.params.mp.phenix_script[0]) > 0 else None,
+      method                    = self.app.params.mp.method,
+      htcondor_executable_path  = self.app.params.mp.htcondor.executable_path,
+      nersc_shifter_image       = self.app.params.mp.shifter.shifter_image,
+      sbatch_script_template    = self.app.params.mp.shifter.sbatch_script_template,
+      srun_script_template      = self.app.params.mp.shifter.srun_script_template,
+      nersc_partition           = self.app.params.mp.shifter.partition,
+      nersc_jobname             = self.app.params.mp.shifter.jobname,
+      nersc_project             = self.app.params.mp.shifter.project,
+      nersc_constraint          = self.app.params.mp.shifter.constraint,
+      nersc_reservation         = self.app.params.mp.shifter.reservation,
+      nersc_staging             = self.app.params.mp.shifter.staging,
+      target                    = target_phil_path,
+      # always use mpi for 'lcls'
+      use_mpi                   = self.app.params.mp.method != 'local' or (self.app.params.mp.method == 'local' and self.app.params.facility.name == 'lcls'),
+      mpi_command               = self.app.params.mp.mpi_command,
+      nnodes                    = self.app.params.mp.nnodes_scale or self.app.params.mp.nnodes,
+      wall_time                 = self.app.params.mp.wall_time,
+      extra_options             = "\n".join(["extra_options = %s"%opt for opt in self.app.params.mp.extra_options]),
+    )
+
+    with open(submit_phil_path, "w") as phil:
+      for line in open(os.path.join(submit_root, "submit_xfel_merge.phil")).readlines():
+        phil.write(line.format(**d))
+
+  def submit(self, previous_job = None):
+    from xfel.command_line.cxi_mpi_submit import Script as submit_script
+
+    output_path = os.path.join(get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run, self.task), 'out')
+
+    configs_dir = os.path.join(settings_dir, "cfgs")
+    if not os.path.exists(configs_dir):
+      os.makedirs(configs_dir)
+    identifier_string = self.get_identifier_string()
+    submit_phil_path = os.path.join(configs_dir, identifier_string + "_submit.phil")
+
+    target_phil_path = os.path.join(configs_dir, identifier_string + "_params.phil")
+    input_folder, expt_suffix, refl_suffix, _, _ = previous_job.get_output_files()
+
+    with open(target_phil_path, 'w') as f:
+      f.write("input.path=%s\n"%input_folder)
+      f.write("input.experiments_suffix=%s\n"%expt_suffix)
+      f.write("input.reflections_suffix=%s\n"%refl_suffix)
+      f.write("output.output_dir=%s\n"%output_path)
+      f.write("output.prefix=%s_%d\n"%(self.task.type, self.task.id))
+      f.write(self.task.parameters)
+
+    self.write_submit_phil(submit_phil_path, target_phil_path)
+
+    args = [submit_phil_path]
+    return submit_script().run(args)
+
+class MergingJob(Job):
+  def get_global_path(self):
+    if self.dataset_version is None:
+      return None
+    return self.dataset_version.output_path()
+
+  def get_log_path(self):
+    return self.get_global_path()
+
+  def get_identifier_string(self):
+    return "%s_%s%03d_v%03d"%(self.dataset.name, self.task.type, self.task.id, self.dataset_version.version)
+
+  def delete(self, output_only=False):
+    job_folder = self.get_global_path()
+    if job_folder and os.path.exists(job_folder):
+      print("Deleting job folder for job", self.id)
+      shutil.rmtree(job_folder)
+    else:
+      print("Cannot find job folder (%s)"%job_folder)
+    self.status = "DELETED"
+
+  def get_output_files(self):
+    path = self.get_global_path()
+    return path, None, None, "%s_v%03d_all.mtz"%(self.dataset.name, self.dataset_version.version), None
+
+  def submit(self, previous_job = None):
+    from xfel.command_line.cxi_mpi_submit import do_submit
+
+    output_path = self.get_global_path()
+    if not os.path.exists(output_path):
+      os.makedirs(output_path)
+    identifier_string = self.get_identifier_string()
+    target_phil_path = os.path.join(output_path, identifier_string + "_params.phil")
+
+    with open(target_phil_path, 'w') as f:
+      expt_suffix = refl_suffix = None
+      for job in self.dataset_version.jobs:
+        input_folder, _expt_suffix, _refl_suffix, _, _ = job.get_output_files()
+        if expt_suffix is None: expt_suffix = _expt_suffix
+        else: assert expt_suffix == _expt_suffix
+        if refl_suffix is None: refl_suffix = _refl_suffix
+        else: assert refl_suffix == _refl_suffix
+        f.write("input.path=%s\n"%input_folder)
+
+      f.write("input.experiments_suffix=%s\n"%expt_suffix)
+      f.write("input.reflections_suffix=%s\n"%refl_suffix)
+      f.write("output.output_dir=%s\n"%output_path)
+      f.write("output.prefix=%s_v%03d\n"%(self.dataset.name, self.dataset_version.version))
+      f.write(self.task.parameters)
+
+    command = "cctbx.xfel.merge %s"%target_phil_path
+    submit_path = os.path.join(output_path, identifier_string + "_submit.sh")
+
+    params = self.app.params.mp
+    if params.nnodes_merge:
+      params = copy.deepcopy(params)
+      params.nnodes = params.nnodes_merge
+
+    return do_submit(command, submit_path, output_path, params, log_name="out.log", err_name="err.log", job_name=identifier_string)
+
+class PhenixJob(Job):
+  def get_global_path(self):
+    return os.path.join(self.dataset_version.output_path(), self.get_identifier_string())
+
+  def get_log_path(self):
+    return self.get_global_path()
+
+  def get_identifier_string(self):
+    return "%s_%s%03d_v%03d"%(self.dataset.name, self.task.type, self.task.id, self.dataset_version.version)
+
+  def delete(self, output_only=False):
+    job_folder = self.get_global_path()
+    if os.path.exists(job_folder):
+      print("Deleting job folder for job", self.id)
+      shutil.rmtree(job_folder)
+    else:
+      print("Cannot find job folder (%s)"%job_folder)
+    self.status = "DELETED"
+
+  def get_output_files(self):
+    path = self.get_global_path()
+    return path, None, None, ".mtz", ".pdb"
+
+  def submit(self, previous_job = None):
+    from xfel.command_line.cxi_mpi_submit import do_submit
+
+    output_path = self.get_global_path()
+    if not os.path.exists(output_path):
+      os.makedirs(output_path)
+    identifier_string = self.get_identifier_string()
+    target_phil_path = os.path.join(output_path, identifier_string + "_params.phil")
+    input_folder, _, _, input_mtz, _ = previous_job.get_output_files()
+
+    def replace_keywords(input_str):
+      input_str = input_str.replace('<PREVIOUS_TASK_MTZ>', os.path.join(input_folder, input_mtz))
+      input_str = input_str.replace('<PREVIOUS_TASK_FOLDER>', input_folder)
+      input_str = input_str.replace('<DATASET_NAME>', self.dataset.name)
+      input_str = input_str.replace('<DATASET_VERSION>', str(self.dataset_version.version))
+      return input_str
+
+    command = replace_keywords(self.task.parameters.split('\n')[0])
+    phil_params = replace_keywords('\n'.join(self.task.parameters.split('\n')[1:]))
+
+    with open(target_phil_path, 'w') as f:
+      f.write(phil_params)
+
+    command = "%s %s"%(command, target_phil_path)
+    submit_path = os.path.join(output_path, identifier_string + "_submit.sh")
+
+    params = copy.deepcopy(self.app.params.mp)
+    if params.nnodes_merge:
+      params.nnodes = params.nnodes_merge
+    params.use_mpi = False
+    params.shifter.staging = None
+    if 'upload' in command or 'evaluate_anom' in command:
+      params.nnodes = 1
+      params.nproc_per_node = 1
+      #params.queue = 'shared'
+    else:
+      params.env_script = params.phenix_script
+
+    if params.method == 'shifter' and 'upload' not in command:
+       import libtbx.load_env
+       params.shifter.sbatch_script_template = os.path.join( \
+         libtbx.env.find_in_repositories("xfel/ui/db/cfgs"), "phenix_sbatch.sh")
+       params.shifter.srun_script_template = os.path.join( \
+         libtbx.env.find_in_repositories("xfel/ui/db/cfgs"), "phenix_srun.sh")
+
+    return do_submit(command, submit_path, output_path, params, log_name="out.log", err_name="err.log", job_name=identifier_string)
+
+# Support classes and functions for job submission
+
+class _job(object):
+  """Used to represent a job that may not have been submitted into the cluster or database yet"""
+  def __init__(self, trial, rungroup, run, task=None, dataset=None, dataset_version=None):
+    self.trial = trial
+    self.rungroup = rungroup
+    self.run = run
+    self.task = task
+    self.dataset = dataset
+    self.dataset_version = dataset_version
+
+  def __str__(self):
+    s = "Job: Trial %d, rg %d, run %s"%(self.trial.trial, self.rungroup.id, self.run.run)
+    if self.task:
+      s += ", task %d %s"%(self.task.id, self.task.type)
+    if self.dataset:
+      s += ", dataset %d %s"%(self.dataset.id, self.dataset.name)
+    if self.dataset_version:
+      s += ", dataset_version %d %d"%(self.dataset_version.id, self.dataset_version.version)
+    return s
+
+  @staticmethod
+  def job_hash(job):
+    ret = []
+    check = ['trial', 'rungroup', 'run', 'task', 'dataset', 'dataset_version']
+    for subitem_name in check:
+      subitem = getattr(job, subitem_name)
+      if subitem is None:
+        ret.append(None)
+      else:
+        ret.append(subitem.id)
+    return tuple(ret)
+
+  def __eq__(self, other):
+    return _job.job_hash(self) == _job.job_hash(other)
+
+def submit_all_jobs(app):
+  submitted_jobs = {_job.job_hash(j):j for j in app.get_all_jobs()}
+  if app.params.mp.method == 'local': # only run one job at a time
+    for job in submitted_jobs.values():
+      if job.status in ['RUN', 'UNKWN', 'SUBMITTED']: return
+
+  if app.params.mp.max_queued is not None:
+    running_jobs = sum([1 for job in submitted_jobs.values() if job.status in ['RUN', 'SUBMITTED', 'PEND']])
+    if running_jobs >= app.params.mp.max_queued:
+      print("Waiting for space in the queue to submit next job")
+      return
+
+  runs = app.get_all_runs()
+  trials = app.get_all_trials(only_active = True)
+
+  needed_jobs = []
+  for trial in trials:
+    for rungroup in trial.rungroups:
+      assert rungroup.active
+      for run in rungroup.runs:
+        needed_jobs.append(_job(trial, rungroup, run))
+
+  for job in needed_jobs:
+    if _job.job_hash(job) in submitted_jobs:
+      continue
+
+    print("Submitting job: trial %d, rungroup %d, run %s"%(job.trial.trial, job.rungroup.id, job.run.run))
+
+    j = JobFactory.from_args(app,
+                             trial_id = job.trial.id,
+                             rungroup_id = job.rungroup.id,
+                             run_id = job.run.id,
+                             status = "SUBMITTED")
+    j.trial = job.trial; j.rungroup = job.rungroup; j.run = job.run
+    try:
+      j.submission_id = j.submit()
+    except Exception as e:
+      print("Couldn't submit job:", str(e))
+      j.status = "SUBMIT_FAIL"
+      raise
+
+    if app.params.mp.method == 'local': # only run one job at a time
+      return
+
+    if app.params.mp.max_queued is not None:
+      running_jobs += 1
+      if running_jobs >= app.params.mp.max_queued:
+        print("Waiting for space in the queue to submit next job")
+        return
+
+  datasets = app.get_all_datasets()
+  for dataset_idx, dataset in enumerate(datasets):
+    if not dataset.active: continue
+
+    # one of the tasks will have a trial, otherwise we don't know where to save the data
+    trial = None
+    tasks = dataset.tasks
+    for task in tasks:
+      if task.trial is not None:
+        if trial is None:
+          trial = task.trial
+        else:
+          assert trial.id == task.trial.id, "Found multiple trials, don't know where to save the results"
+    assert trial, "No trial found in task list, don't know where to save the results"
+    trial_tags_ids = [t.id for t in trial.tags]
+    dataset_tags = [t for t in dataset.tags if t.id in trial_tags_ids]
+    if not dataset_tags or len(dataset_tags) < len(dataset.tags): continue
+    runs_rungroups = []
+    for rungroup in trial.rungroups:
+      runs_rungroups.extend([(run, rungroup) for run in app.get_rungroup_runs_by_tags(rungroup, dataset_tags, dataset.tag_operator)])
+
+    # Datasets always start with indexing
+    global_tasks = {}
+    for run, rungroup in runs_rungroups:
+      submit_next_task = False
+      last_task_status = ""
+      previous_job = None
+      for task_idx, task in enumerate(tasks):
+        if task.scope == 'global':
+          if previous_job.status in ["DONE", "EXIT"]:
+            key = (dataset_idx, task_idx)
+            if key not in global_tasks:
+              global_tasks[key] = []
+            global_tasks[key].append(previous_job)
+          continue
+        if task.type == 'indexing':
+          job = _job(trial, rungroup, run)
+        else:
+          job = _job(trial, rungroup, run, task)
+        try:
+          submitted_job = submitted_jobs[_job.job_hash(job)]
+        except KeyError:
+          if not submit_next_task:
+            print("Warning, expected to find submitted %s job: trial %d, rungroup %d, run %s, task %d"% \
+              (task.type, trial.trial, rungroup.id, run.run, task.id))
+            break
+        else:
+          if not task_idx+1 < len(tasks): break # no more tasks to do after this one
+          next_task = tasks[task_idx+1]
+          if submitted_job.status not in finished_job_statuses or submitted_job.status == "UNKWN":
+            print ("Task %s waiting on job %d (%s) for trial %d, rungroup %d, run %s, task %d" % \
+              (next_task.type, submitted_job.id, submitted_job.status, trial.trial, rungroup.id, run.run, next_task.id))
+            break
+          if submitted_job.status not in ["DONE"]:
+            if submitted_job.status != "EXIT":
+              print ("Task %s cannot start due to unexpected status for job %d (%s) for trial %d, rungroup %d, run %s, task %d" % \
+                (next_task.type, submitted_job.id, submitted_job.status, trial.trial, rungroup.id, run.run, next_task.id))
+            break
+          if submitted_job.status in ("SUBMIT_FAIL", "DELETED", "UNKWN") and job.task and job.task.type == "ensemble_refinement":
+            break # XXX need a better way to indicate that a job has failed and shouldn't go through the pipeline due to no data
+          submit_next_task = True
+          previous_job = submitted_job
+          continue
+
+        print("Submitting %s job: trial %d, rungroup %d, run %s, task %d"% \
+          (task.type, trial.trial, rungroup.id, run.run, task.id))
+
+        j = JobFactory.from_args(app,
+                                 trial_id = trial.id,
+                                 rungroup_id = rungroup.id,
+                                 run_id = run.id,
+                                 task_id = task.id,
+                                 status = "SUBMITTED")
+        j.trial = job.trial; j.rungroup = job.rungroup; j.run = job.run; j.task = job.task
+        try:
+          j.submission_id = j.submit(previous_job)
+        except Exception as e:
+          print("Couldn't submit job:", str(e))
+          j.status = "SUBMIT_FAIL"
+          raise
+
+        previous_job = j
+
+        if app.params.mp.method == 'local': # only run one job at a time
+          return
+        if app.params.mp.max_queued is not None:
+          running_jobs += 1
+          if running_jobs >= app.params.mp.max_queued:
+            print("Waiting for space in the queue to submit next job")
+            return
+        break # job submitted so don't look for more in this run for this dataset
+
+    versions = dataset.versions
+    for task_idx, task in enumerate(tasks):
+      if task.scope == 'local':
+        # only global tasks follow global tasks
+        if task_idx: assert tasks[task_idx-1].scope != 'global'
+        continue
+      assert task.scope == 'global' # only two task scopes
+      assert task_idx # first task cannot be global
+      prev_task = tasks[task_idx-1]
+      if prev_task.scope == 'global':
+        # Submit a job for this task for any versions where it has not been
+        for version in versions:
+          prev_j = _job(None, None, None, prev_task, dataset, version)
+          test_j = _job(None, None, None, task, dataset, version)
+          prev_job = this_job = None
+          for j in version.jobs:
+            if prev_j == j:
+              prev_job = j
+              continue
+            elif test_j == j:
+              this_job = j
+              continue
+            if prev_job and this_job: break
+
+          if not this_job and prev_job and prev_job.status == 'DONE':
+            j = JobFactory.from_args(app,
+                                     task_id = task.id,
+                                     dataset_id = dataset.id,
+                                     status = "SUBMITTED")
+            j.task = task; j.dataset = dataset; j.dataset_version = version
+
+            try:
+              j.submission_id = j.submit(prev_job)
+            except Exception as e:
+              print("Couldn't submit job:", str(e))
+              j.status = "SUBMIT_FAIL"
+              raise
+            version.add_job(j)
+
+            if app.params.mp.method == 'local': # only run one job at a time
+              return
+            if app.params.mp.max_queued is not None:
+              running_jobs += 1
+              if running_jobs >= app.params.mp.max_queued:
+                print("Waiting for space in the queue to submit next job")
+                return
+
+      key = dataset_idx, task_idx
+      if key not in global_tasks: continue # no jobs ready yet
+      latest_version = dataset.latest_version
+      next_version = None
+      if latest_version is None:
+        next_version = 0
+      else:
+        latest_version_local_jobs = [j.id for j in latest_version.jobs if j.task and j.task.scope == 'local']
+        new_jobs = [j for j in global_tasks[key] if j.id not in latest_version_local_jobs]
+        if new_jobs:
+          next_version = latest_version.version + 1
+
+      if next_version is not None:
+        latest_version = app.create_dataset_version(dataset_id = dataset.id, version=next_version)
+        print("Created a new dataset version", next_version, "with jobs", [j.id for j in global_tasks[key]])
+        for job in global_tasks[key]:
+          latest_version.add_job(job)
+
+        j = JobFactory.from_args(app,
+                                 task_id = task.id,
+                                 dataset_id = dataset.id,
+                                 status = "SUBMITTED")
+        j.task = task; j.dataset = dataset; j.dataset_version = latest_version
+
+        try:
+          j.submission_id = j.submit()
+        except Exception as e:
+          print("Couldn't submit job:", str(e))
+          j.status = "SUBMIT_FAIL"
+          raise
+        latest_version.add_job(j)
+
+        if app.params.mp.method == 'local': # only run one job at a time
+          return
+        if app.params.mp.max_queued is not None:
+          running_jobs += 1
+          if running_jobs >= app.params.mp.max_queued:
+            print("Waiting for space in the queue to submit next job")
+            return
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/merging_log_scraper.py
+from __future__ import absolute_import, division, print_function
+import os, glob
+from matplotlib import pyplot as plt
+
+"""
+Searches the cctbx.xfel.merge log files for statistics tables.
+
+Makes lots of assumptions regarding formatting.
+"""
+
+# Name of stat: (Line signal, offset to first line of table, index of value for a bin line, index of value for an 'All' line)
+types = {
+  "% accepted": ("Lattices resolution", 6, 4, 1),
+  "Multiplicity": ("Intensity Statistics (all accepted experiments)", 14, 6, 3),
+  "Completeness": ("Intensity Statistics (all accepted experiments)", 14, 5, 2),
+  "CC1/2": ("Table of Scaling Results", 6, 5, 2)
+}
+
+class Scraper(object):
+  def __init__(self, output_path, accepted):
+    self.output_path = output_path
+    assert accepted in ['%','#']
+    self.accepted = accepted
+
+  def scrape(self):
+    results = {}
+    try:
+      path = glob.glob(os.path.join(self.output_path, "*main*"))[0]
+    except IndexError: return results
+    lines = open(path).readlines()
+    for i, line in enumerate(lines):
+      for name in types:
+        signal, offset, _, _ = types[name]
+        if signal in line:
+          table = lines[i+offset:]
+          for l, dontjudgeme in enumerate(table):
+            if dontjudgeme.startswith("All"):
+              results[name] = table[:l+1]
+              break
+    for t in results:
+      parsed = []
+      for line in results[t]:
+        s = line.replace('[', ' ').replace(']', ' ').split()
+        if not s: continue
+        if s[0] == 'All':
+          value = float(s[types[t][3]].rstrip('%'))
+          parsed.append((s[0], value))
+        else:
+          bin_id = int(s[0])
+          d_max = float(s[1])
+          d_min = float(s[3])
+          value = float(s[types[t][2]].rstrip('%'))
+          if d_max < 0: d_max = 100
+          parsed.append((bin_id, d_max, d_min, value))
+      results[t] = parsed
+    if '% accepted' in results:
+      if self.accepted == '%':
+        self._num_to_percent(results, '% accepted')
+      else:
+        results['# accepted'] = results['% accepted']
+        del results['% accepted']
+      return results
+
+  def _num_to_percent(self, results, key):
+    data = results[key]
+    for line in data:
+      if line[0] == 'All':
+        denom = line[1]
+    new_data = []
+    for line in data:
+      if line[0] == 'All':
+        line = line[0], 100*line[1]/denom
+      else:
+        line = line[0], line[1], line[2], 100*line[3]/denom
+      new_data.append(line)
+    results[key] = new_data
+
+  def plot_single_results(self, results, title, xsize=30, ysize=10, interactive = True):
+    from matplotlib.ticker import FuncFormatter
+    import numpy as np
+    import math
+    fig = plt.figure()
+    ax = ax1 = fig.gca()
+    ax2 = ax1.twinx()
+
+    colors = {
+      "% accepted": 'orange',
+      "Multiplicity": 'red',
+      "Completeness": 'green',
+      "CC1/2": 'blue'
+    }
+
+    for name in results:
+      if name == 'Multiplicity':
+        ax = ax2
+      else:
+        ax = ax1
+
+      x = []; y = []
+      for data in results[name]:
+        if data[0] == 'All':
+          continue
+        bin_num, d_max, d_min, value = data
+        x.append((d_max+d_min)/2)
+        y.append(value)
+      ax.plot(1/(np.array(x)**2), y, '-', label = name, color = colors[name])
+
+    def resolution(x, pos):
+      if x <= 0:
+        return '-'
+      return "%.1f"%(1/math.sqrt(x))
+    formatter = FuncFormatter(resolution)
+    ax1.xaxis.set_major_formatter(formatter)
+    ax1.set_xlabel(r'Resolution ${\AA}$')
+    ax1.set_ylabel('%')
+    ax2.set_ylabel('Multiplicity')
+    handles, labels = ax1.get_legend_handles_labels()
+    handles.extend(ax2.get_legend_handles_labels()[0])
+    labels.extend(ax2.get_legend_handles_labels()[1])
+    fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax.transAxes)
+    plt.title(title)
+
+    if interactive:
+      plt.show()
+    else:
+      fig.set_size_inches(xsize, ysize)
+      fig.savefig("datasets_tmp.png", bbox_inches='tight', dpi=100)
+      plt.close(fig)
+      return "datasets_tmp.png"
+
+  def plot_many_results(self, all_results, title, xsize=30, ysize=10, interactive = True):
+    from matplotlib.ticker import FuncFormatter
+    import numpy as np
+    import math
+    fig, (ax1a, ax2) = plt.subplots(2,1, sharex=True)
+    ax1b = ax1a.twinx()
+
+    xvals = []
+    overall_cc = []
+    overall_mult = []
+    overall_comp = []
+    cc_cutoff = []
+    mult_cutoff = []
+    comp_cutoff = []
+    for r in all_results:
+      if r is None or '# accepted' not in r or r['# accepted'] is None: continue
+      name, value = r['# accepted'][-1]
+      assert name == 'All'
+      #if xvals: assert value >= xvals[-1]
+      xvals.append(value)
+      for key, array in zip(['CC1/2', 'Multiplicity', 'Completeness'], [overall_cc, overall_mult, overall_comp]):
+        if key in r:
+          name, value = r[key][-1]
+          assert name == 'All'
+          array.append(value)
+        else:
+          array.append(0)
+
+      if 'CC1/2' in r:
+        last = last_res = 0
+        for row in r['CC1/2']:
+          if 'All' in row:
+            break
+          row_n, d_max, d_min, cc = row
+          if cc > 0 and not last:
+            last = cc; last_res = (d_max + d_min) / 2
+          elif cc > 0 and cc <= last:
+            last = cc; last_res = (d_max + d_min) / 2
+          else:
+            break
+        cc_cutoff.append(last_res)
+      else:
+        cc_cutoff.append(0)
+
+      if 'Multiplicity' in r:
+        last = last_res = 0
+        for row in r['Multiplicity']:
+          if row[0]=='All':
+            break
+          row_n, d_max, d_min, mult = row
+          if mult >= 10:
+            last = mult; last_res = (d_max + d_min) / 2
+          else:
+            break
+        mult_cutoff.append(last_res)
+      else:
+        mult_cutoff.append(0)
+
+      if 'Completeness' in r:
+        last = last_res = 0
+        for row in r['Completeness']:
+          if row[0]=='All':
+            break
+          row_n, d_max, d_min, comp = row
+          if comp >= 90:
+            last = comp; last_res = (d_max + d_min) / 2
+          else:
+            break
+        comp_cutoff.append(last_res)
+      else:
+        comp_cutoff.append(0)
+
+
+    ax1a.plot(xvals, overall_cc, 'o-', color='blue')
+    ax1b.plot(xvals, overall_mult, 'o-', color='red')
+    ax2.plot(xvals, 1/(np.array(cc_cutoff)**2), 'o-', color='blue')
+    ax2.plot(xvals, 1/(np.array(mult_cutoff)**2), 'o-', color='red')
+    ax2.plot(xvals, 1/(np.array(comp_cutoff)**2), 'o-', color='green')
+
+    ax2.legend(["CC1/2 (monotonic)", "Multiplicity (10x)", "Completeness (90%)"])
+
+    ax2.set_xlabel("N images")
+    ax1a.set_ylabel("Overall CC1/2 (%)")
+    ax1b.set_ylabel("Overall multiplicity")
+    ax2.set_ylabel(r"Resolution ($\AA$")
+    ax1a.set_title(title)
+
+    def resolution(y, pos):
+      if y <= 0:
+        return '-'
+      return "%.2f"%(1/math.sqrt(y))
+    formatter = FuncFormatter(resolution)
+    ax2.yaxis.set_major_formatter(formatter)
+
+    #ax1a.set_xlabel
+
+    if interactive:
+      plt.show()
+    else:
+      fig.set_size_inches(xsize, ysize)
+      fig.savefig("datasets_tmp.png", bbox_inches='tight', dpi=100)
+      plt.close(fig)
+      return "datasets_tmp.png"
+
+if __name__ == "__main__":
+  import sys
+  args = sys.argv[1:]
+  if len(args) > 1:
+    all_results = []
+    for folder in args:
+      scraper = Scraper(folder, '#')
+      all_results.append(scraper.scrape())
+    scraper.plot_many_results(all_results, sys.argv[1])
+  else:
+    scraper = Scraper(args[0], '%')
+    results = scraper.scrape()
+    for t in results:
+      for j in results[t]:
+        print (t, j)
+
+    scraper.plot_single_results(results, sys.argv[1])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/run.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui.db import db_proxy
+
+class Run(db_proxy):
+  def __init__(self, app, run_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_run" % app.params.experiment_tag, id = run_id, **kwargs)
+    self.run_id = self.id
+
+  def __getattr__(self, name):
+    # Called only if the property cannot be found
+    if name == "tags":
+      return self.app.get_run_tags(self.id)
+    else:
+      return super(Run, self).__getattr__(name)
+
+  def __setattr__(self, name, value):
+    assert name != "tags"
+    super(Run, self).__setattr__(name, value)
+
+  def __str__(self):
+    try:
+      return str(int(self.run))
+    except ValueError:
+      return "%d: %s"%(self.id, self.run)
+
+  def add_tag(self, tag):
+    query = "INSERT INTO `%s_run_tag` (run_id, tag_id) VALUES (%d, %d)" % (
+      self.app.params.experiment_tag, self.id, tag.id)
+    self.app.execute_query(query, commit=True)
+
+  def remove_tag(self, tag):
+    query = "DELETE FROM `%s_run_tag` WHERE run_id = %d AND tag_id = %s" % (
+      self.app.params.experiment_tag, self.id, tag.id)
+    self.app.execute_query(query, commit=True)
+
+  def get_rungroups(self):
+   from xfel.ui.db.rungroup import Rungroup
+   tag = self.app.params.experiment_tag
+   query = """SELECT rg.id FROM `%s_rungroup` rg
+              JOIN `%s_rungroup_run` rgr on rg.id = rgr.rungroup_id
+              WHERE rgr.run_id = %d AND rg.active=True
+              """ %(tag, tag, self.id)
+   cursor = self.app.execute_query(query)
+   rungroup_ids = ["%d"%i[0] for i in cursor.fetchall()]
+   if len(rungroup_ids) == 0:
+     return []
+   return self.app.get_all_x(Rungroup, "rungroup", where = "WHERE rungroup.id IN (%s)"%",".join(rungroup_ids))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/rungroup.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui.db import db_proxy
+
+class Rungroup(db_proxy):
+  def __init__(self, app, rungroup_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_rungroup" % app.params.experiment_tag, id = rungroup_id, **kwargs)
+    self.rungroup_id = self.id
+
+  def __getattr__(self, name):
+    # Called only if the property cannot be found
+    if name == "runs":
+      return self.app.get_rungroup_runs(self.id)
+    else:
+      return super(Rungroup, self).__getattr__(name)
+
+  def __setattr__(self, name, value):
+    assert name != "runs"
+    super(Rungroup, self).__setattr__(name, value)
+
+  def get_first_and_last_runs(self):
+    use_ids = self.app.params.facility.name not in ['lcls']
+    runs = self.runs
+    if len(runs) == 0:
+      return (None, None)
+    if use_ids:
+      run_ids = [r.id for r in runs]
+      first = runs[run_ids.index(min(run_ids))]
+      if self.open:
+        last = None
+      else:
+        last = runs[run_ids.index(max(run_ids))]
+    else:
+      run_numbers = [int(r.run) for r in runs]
+      first = runs[run_numbers.index(min(run_numbers))]
+      if self.open:
+        last = None
+      else:
+        last = runs[run_numbers.index(max(run_numbers))]
+    return first, last
+
+  def sync_runs(self, first_run, last_run, use_ids = True):
+    all_runs = self.app.get_all_runs()
+    runs = self.runs
+    run_ids = [r.id for r in runs]
+    if self.open:
+      if use_ids:
+        tester = lambda x: x.id >= first_run
+      else:
+        tester = lambda x: int(x.run) >= first_run
+    else:
+      if use_ids:
+        tester = lambda x: x.id >= first_run and x.id <= last_run
+      else:
+        tester = lambda x: int(x.run) >= first_run and int(x.run) <= last_run
+
+    for run in all_runs:
+      if tester(run):
+        if not run.id in run_ids:
+          self.add_run(run.id)
+      else:
+        if run.id in run_ids:
+          self.remove_run(run.id)
+
+  def add_run(self, run_id):
+    query = "INSERT INTO `%s_rungroup_run` (rungroup_id, run_id) VALUES (%d, %d)" % ( \
+      self.app.params.experiment_tag, self.id, run_id)
+    self.app.execute_query(query, commit=True)
+
+  def remove_run(self, run_id):
+    query = "DELETE FROM `%s_rungroup_run` WHERE rungroup_id = %d AND run_id = %d" % ( \
+      self.app.params.experiment_tag, self.id, run_id)
+    self.app.execute_query(query, commit=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/stats.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from scitbx.array_family import flex
+
+class Stats(object):
+  def __init__(self, app, trial, tags = None, isigi_cutoff = None, tag_selection_mode="union", selected_runs = None, selected_rungroup = None):
+    self.app = app
+    self.trial = trial
+    if tags is None:
+      tags = []
+    self.tags = tags
+    self.tag_ids = [t.id for t in tags]
+    self.isigi_cutoff = isigi_cutoff
+    self.tag_selection_mode = tag_selection_mode
+    self.selected_runs = selected_runs
+    self.selected_rungroup = selected_rungroup
+
+  def __call__(self):
+    runs = []
+    run_numbers = []
+    if self.selected_runs is not None:
+      assert self.selected_rungroup is not None
+      selected_run_ids = [r.id for r in self.selected_runs]
+    for rungroup in self.trial.rungroups:
+      if self.selected_rungroup is not None and self.selected_rungroup.id != rungroup.id:
+        continue
+      for run in rungroup.runs:
+        if self.selected_runs is not None:
+          if run.id not in selected_run_ids:
+            continue
+        if len(self.tags) > 0:
+          tags_found = []
+          for tag in run.tags:
+            if tag.id in self.tag_ids:
+              tags_found.append(tag.id)
+          if self.tag_selection_mode == "union":
+            if len(tags_found) == 0:
+              continue
+          elif self.tag_selection_mode == "intersection":
+            if len(tags_found) < len(self.tag_ids):
+              continue
+          else:
+            assert False
+
+        if run.run not in run_numbers:
+          runs.append(run)
+          run_numbers.append(run.run)
+
+    if len(runs) == 0:
+      return []
+
+    runs_str = "(%s)"%(", ".join([str(r.id) for r in runs]))
+    tag = self.app.params.experiment_tag
+
+    # Big expensive query to avoid many small queries
+    query = """SELECT cell.id, bin.id, SUM(cell_bin.count) FROM `%s_cell_bin` cell_bin
+               JOIN `%s_bin` bin ON bin.id = cell_bin.bin_id
+               JOIN `%s_cell` cell ON cell.id = bin.cell_id
+               JOIN `%s_crystal` crystal ON crystal.id = cell_bin.crystal_id
+               JOIN `%s_experiment` exp ON exp.crystal_id = crystal.id
+               JOIN `%s_imageset` imgset ON imgset.id = exp.imageset_id
+               JOIN `%s_imageset_event` ie ON ie.imageset_id = imgset.id
+               JOIN `%s_event` evt ON evt.id = ie.event_id
+               JOIN `%s_run` run ON run.id = evt.run_id
+               JOIN `%s_rungroup` rg ON rg.id = evt.rungroup_id
+               JOIN `%s_trial_rungroup` t_rg ON t_rg.rungroup_id = rg.id
+               JOIN `%s_trial` trial ON trial.id = t_rg.trial_id AND trial.id = evt.trial_id
+               WHERE run.id IN %s
+                     AND cell_bin.avg_intensity > 0
+                     AND trial.id = %d
+                     AND rg.active = True
+                     """ % (
+      tag, tag, tag, tag, tag, tag, tag, tag, tag, tag, tag, tag, runs_str, self.trial.id)
+
+    if self.isigi_cutoff is not None and self.isigi_cutoff >= 0:
+      query += " AND cell_bin.avg_i_sigi >= %f"%self.isigi_cutoff
+    query += " GROUP BY cell.id, bin.id"
+
+    results = self.app.execute_query(query).fetchall()
+    if len(results) == 0:
+      return []
+    cell_ids = set([str(r[0]) for r in results])
+    from .experiment import Cell
+    cells = self.app.get_all_x(Cell, 'cell', where = "WHERE id IN (%s)"%", ".join(cell_ids))
+    self.app.link_cell_bins(cells)
+
+    cell_bins_d = {}
+    for cell in cells:
+      cell_bins_d[cell.id] = {}
+      for bin in cell.bins:
+        cell_bins_d[cell.id][bin.id] = bin
+
+    for cell_id, bin_id, count in results:
+      cell_bins_d[cell_id][bin_id].count = count
+
+    return cells
+
+class HitrateStats(object):
+  def __init__(self, app, run_number, trial_number, rungroup_id, d_min = None, i_sigi_cutoff = 1, raw_data_sampling = 1):
+    self.app = app
+    self.run = app.get_run(run_number = run_number)
+    self.trial = app.get_trial(trial_number = trial_number)
+    self.rungroup = app.get_rungroup(rungroup_id = rungroup_id)
+    self.d_min = d_min
+    self.i_sigi_cutoff = i_sigi_cutoff
+    self.sampling = raw_data_sampling
+
+  def __call__(self):
+    from iotbx.detectors.cspad_detector_formats import reverse_timestamp
+    from xfel.ui.components.timeit import duration
+    #import time
+    #t1 = time.time()
+    run_numbers = [r.run for r in self.trial.runs]
+    assert self.run.run in run_numbers
+    rungroup_ids = [rg.id for rg in self.trial.rungroups]
+    assert self.rungroup.id in rungroup_ids
+    if len(self.trial.isoforms) > 0:
+      cells = [isoform.cell for isoform in self.trial.isoforms]
+    else:
+      cells = self.app.get_trial_cells(self.trial.id, self.rungroup.id, self.run.id)
+
+    high_res_bin_ids = []
+    for cell in cells:
+      bins = cell.bins
+      d_mins = [float(b.d_min) for b in bins]
+      if len(d_mins) == 0: continue
+      if self.d_min is None:
+        min_bin_index = d_mins.index(min(d_mins))
+      else:
+        d_maxes = [float(b.d_max) for b in bins]
+        qualified_bin_indices = [i for i in range(len(bins)) if d_maxes[i] >= self.d_min and d_mins[i] <= self.d_min]
+        if len(qualified_bin_indices) == 0: continue
+        min_bin_index = qualified_bin_indices[0]
+      high_res_bin_ids.append(str(bins[min_bin_index].id))
+
+    resolutions = flex.double()
+    two_theta_low = flex.double()
+    two_theta_high = flex.double()
+    tag = self.app.params.experiment_tag
+    timestamps, timestamps_s = flex.double(), []
+    n_strong = flex.int()
+    n_lattices = flex.int()
+    wavelengths = flex.double()
+    if len(high_res_bin_ids) > 0:
+
+      # Get the stats in one query.
+      query = """SELECT event.timestamp, event.n_strong, MIN(bin.d_min), event.two_theta_low, event.two_theta_high, COUNT(DISTINCT crystal.id), AVG(beam.wavelength)
+                 FROM `%s_event` event
+                 JOIN `%s_imageset_event` is_e ON is_e.event_id = event.id
+                 JOIN `%s_imageset` imgset ON imgset.id = is_e.imageset_id
+                 JOIN `%s_experiment` exp ON exp.imageset_id = imgset.id
+                 JOIN `%s_crystal` crystal ON crystal.id = exp.crystal_id
+                 JOIN `%s_beam` beam ON beam.id = exp.beam_id
+                 JOIN `%s_cell` cell ON cell.id = crystal.cell_id
+                 JOIN `%s_bin` bin ON bin.cell_id = cell.id
+                 JOIN `%s_cell_bin` cb ON cb.bin_id = bin.id AND cb.crystal_id = crystal.id
+                 WHERE event.trial_id = %d AND event.run_id = %d AND event.rungroup_id = %d AND
+                       cb.avg_i_sigi >= %f
+                 GROUP BY event.id
+              """ % (tag, tag, tag, tag, tag, tag, tag, tag, tag, self.trial.id, self.run.id, self.rungroup.id, self.i_sigi_cutoff)
+      cursor = self.app.execute_query(query)
+      sample = -1
+      for row in cursor.fetchall():
+        sample += 1
+        if sample % self.sampling != 0:
+          continue
+        ts, n_s, d_min, tt_low, tt_high, n_xtal, wave = row
+        try:
+          d_min = float(d_min)
+        except ValueError:
+          d_min = None
+        try:
+          rts = reverse_timestamp(ts)
+          timestamps.append(rts[0] + (rts[1]/1000))
+        except ValueError:
+          try:
+            timestamps.append(float(ts))
+          except ValueError:
+            timestamps_s.append(ts)
+        n_strong.append(n_s)
+        two_theta_low.append(tt_low or -1)
+        two_theta_high.append(tt_high or -1)
+        resolutions.append(d_min or 0)
+        n_lattices.append(n_xtal or 0)
+        wavelengths.append(wave or 0)
+
+    # only get results that are strings or ints, not a mix of both
+    assert not (len(timestamps) > 0 and len(timestamps_s) > 0)
+
+    # This left join query finds the events with no imageset, meaning they failed to index
+    query = """SELECT event.timestamp, event.n_strong, event.two_theta_low, event.two_theta_high
+               FROM `%s_event` event
+               LEFT JOIN `%s_imageset_event` is_e ON is_e.event_id = event.id
+               WHERE is_e.event_id IS NULL AND
+                     event.trial_id = %d AND event.run_id = %d AND event.rungroup_id = %d
+            """ % (tag, tag, self.trial.id, self.run.id, self.rungroup.id)
+
+    cursor = self.app.execute_query(query)
+    for row in cursor.fetchall():
+      ts, n_s, tt_low, tt_high = row
+      try:
+        rts = reverse_timestamp(ts)
+        timestamps.append(rts[0] + (rts[1]/1000))
+      except ValueError:
+        try:
+          rts = float(ts)
+          timestamps.append(rts)
+        except ValueError:
+          timestamps_s.append(ts)
+      n_strong.append(n_s)
+      two_theta_low.append(tt_low or -1)
+      two_theta_high.append(tt_high or -1)
+      resolutions.append(0)
+      n_lattices.append(0)
+      wavelengths.append(0)
+
+    # This left join query finds the events with no imageset, meaning they failed to index
+    query = """SELECT event.timestamp, event.n_strong, event.two_theta_low, event.two_theta_high, beam.wavelength
+               FROM `%s_event` event
+               JOIN `%s_imageset_event` is_e ON is_e.event_id = event.id
+               JOIN `%s_imageset` imgset ON imgset.id = is_e.imageset_id
+               JOIN `%s_experiment` exp ON exp.imageset_id = imgset.id
+               JOIN `%s_beam` beam ON beam.id = exp.beam_id
+               WHERE exp.crystal_id IS NULL AND
+                     event.trial_id = %d AND event.run_id = %d AND event.rungroup_id = %d
+            """ % (tag, tag, tag, tag, tag, self.trial.id, self.run.id, self.rungroup.id)
+    cursor = self.app.execute_query(query)
+    for row in cursor.fetchall():
+      ts, n_s, tt_low, tt_high, wave = row
+      try:
+        rts = reverse_timestamp(ts)
+        timestamps.append(rts[0] + (rts[1]/1000))
+      except ValueError:
+        try:
+          rts = float(ts)
+          timestamps.append(rts)
+        except ValueError:
+          timestamps_s.append(ts)
+      n_strong.append(n_s)
+      two_theta_low.append(tt_low or -1)
+      two_theta_high.append(tt_high or -1)
+      resolutions.append(0)
+      n_lattices.append(0)
+      wavelengths.append(wave)
+
+
+    if len(timestamps_s) > 0:
+      timestamps = flex.double([i[0] for i in sorted(enumerate(timestamps_s), key=lambda x:x[1])])
+      order = flex.size_t([i for i in timestamps.iround()])
+      timestamps = flex.sorted(timestamps)
+    else:
+      order = flex.sort_permutation(timestamps)
+      timestamps = timestamps.select(order)
+    n_strong = n_strong.select(order)
+    two_theta_low = two_theta_low.select(order)
+    two_theta_high = two_theta_high.select(order)
+    resolutions = resolutions.select(order)
+    n_lattices = n_lattices.select(order)
+    wavelengths = wavelengths.select(order)
+
+    #t2 = time.time()
+    #print "HitrateStats took %s" % duration(t1, t2)
+    return timestamps, two_theta_low, two_theta_high, n_strong, resolutions, n_lattices, wavelengths
+
+class SpotfinderStats(object):
+  def __init__(self, app, run_number, trial_number, rungroup_id, raw_data_sampling = 1):
+    self.app = app
+    self.run = app.get_run(run_number = run_number)
+    self.trial = app.get_trial(trial_number = trial_number)
+    self.rungroup = app.get_rungroup(rungroup_id = rungroup_id)
+    self.sampling = raw_data_sampling
+
+  def __call__(self):
+    from iotbx.detectors.cspad_detector_formats import reverse_timestamp
+    from xfel.ui.components.timeit import duration
+    import time
+    t1 = time.time()
+    run_numbers = [r.run for r in self.trial.runs]
+    assert self.run.run in run_numbers
+    rungroup_ids = [rg.id for rg in self.trial.rungroups]
+    assert self.rungroup.id in rungroup_ids
+    if len(self.trial.isoforms) > 0:
+      cells = [isoform.cell for isoform in self.trial.isoforms]
+    else:
+      cells = self.app.get_trial_cells(self.trial.id, self.rungroup.id, self.run.id)
+
+    low_res_bin_ids = []
+    for cell in cells:
+      bins = cell.bins
+      d_mins = [float(b.d_min) for b in bins]
+      if len(d_mins) == 0: continue
+      low_res_bin_ids.append(str(bins[d_mins.index(max(d_mins))].id))
+
+    tag = self.app.params.experiment_tag
+    timestamps = flex.double()
+    xtal_ids = flex.double()
+    n_strong = flex.int()
+    if len(low_res_bin_ids) > 0:
+
+      # Get the spotfinding results from the selected runs
+      query = """SELECT bin.id, crystal.id, event.timestamp, event.n_strong
+                 FROM `%s_event` event
+                 JOIN `%s_imageset_event` is_e ON is_e.event_id = event.id
+                 JOIN `%s_imageset` imgset ON imgset.id = is_e.imageset_id
+                 JOIN `%s_experiment` exp ON exp.imageset_id = imgset.id
+                 JOIN `%s_crystal` crystal ON crystal.id = exp.crystal_id
+                 JOIN `%s_cell` cell ON cell.id = crystal.cell_id
+                 JOIN `%s_bin` bin ON bin.cell_id = cell.id
+                 JOIN `%s_cell_bin` cb ON cb.bin_id = bin.id AND cb.crystal_id = crystal.id
+                 WHERE event.trial_id = %d AND event.run_id = %d AND event.rungroup_id = %d AND
+                       cb.bin_id IN (%s)
+              """ % (tag, tag, tag, tag, tag, tag, tag, tag, self.trial.id, self.run.id, self.rungroup.id,
+                    ", ".join(low_res_bin_ids))
+      cursor = self.app.execute_query(query)
+      sample = -1
+      for row in cursor.fetchall():
+        b_id, xtal_id, ts, n_s = row
+        try:
+          rts = reverse_timestamp(ts)
+          rts = rts[0] + (rts[1]/1000)
+        except ValueError:
+          rts = float(ts)
+        if xtal_id not in xtal_ids:
+          sample += 1
+          if sample % self.sampling != 0:
+            continue
+          timestamps.append(rts)
+          xtal_ids.append(xtal_id)
+          n_strong.append(n_s)
+
+    # This left join query finds the events with no imageset, meaning they failed to index
+    query = """SELECT event.timestamp, event.n_strong
+               FROM `%s_event` event
+               LEFT JOIN `%s_imageset_event` is_e ON is_e.event_id = event.id
+               WHERE is_e.event_id IS NULL AND
+                     event.trial_id = %d AND event.run_id = %d AND event.rungroup_id = %d
+            """ % (tag, tag, self.trial.id, self.run.id, self.rungroup.id)
+
+    cursor = self.app.execute_query(query)
+    for row in cursor.fetchall():
+      ts, n_s = row
+      try:
+        rts = reverse_timestamp(ts)
+        timestamps.append(rts[0] + (rts[1]/1000))
+      except ValueError:
+        rts = float(ts)
+        timestamps.append(rts)
+      n_strong.append(n_s)
+
+    order = flex.sort_permutation(timestamps)
+    timestamps = timestamps.select(order)
+    n_strong = n_strong.select(order)
+
+    t2 = time.time()
+    return timestamps, n_strong
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/tag.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui.db import db_proxy
+
+class Tag(db_proxy):
+  def __init__(self, app, tag_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_tag" % app.params.experiment_tag, id = tag_id, **kwargs)
+    self.tag_id = self.id
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/task.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui.db import db_proxy
+from xfel.ui import load_phil_scope_from_dispatcher
+
+task_types = ["indexing", "ensemble_refinement", "scaling", "merging", "phenix"]
+task_dispatchers = [None, "cctbx.xfel.stripe_experiment", "cctbx.xfel.merge", "cctbx.xfel.merge", None]
+task_scope = ["local", "local", "local", "global", "global"]
+
+class Task(db_proxy):
+  def __init__(self, app, task_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_task" % app.params.experiment_tag, id = task_id, **kwargs)
+    self.task_id = self.id
+    self._trial = None
+
+  def __getattr__(self, name):
+    # Called only if the property cannot be found
+    if name == "trial":
+      if self._trial is None and self.trial_id is not None:
+        self._trial = self.app.get_trial(trial_id = self.trial_id)
+      return self._trial
+    elif name == "scope":
+      return task_scope[task_types.index(self.type)]
+    else:
+      return super(Task, self).__getattr__(name)
+
+  def __setattr__(self, name, value):
+    assert name not in ['scope']
+    if name == 'trial':
+      self.trial_id = value.trial_id
+      self._trial = value
+    else:
+      super(Task, self).__setattr__(name, value)
+
+  @staticmethod
+  def get_phil_scope(app, task_type):
+    assert task_type in task_types
+    if task_type == "indexing":
+      dispatcher = app.params.dispatcher
+      if dispatcher == 'cxi.xtc_process': #LABELIT
+        from spotfinder.applications.xfel import cxi_phil
+        return cxi_phil.cxi_versioned_extract().persist.phil_scope
+    else:
+      dispatcher = task_dispatchers[task_types.index(task_type)]
+
+    if dispatcher is None:
+      return dispatcher, None
+
+    return dispatcher, load_phil_scope_from_dispatcher(dispatcher)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/trial.py
+from __future__ import absolute_import, division, print_function
+from xfel.ui.db import db_proxy
+
+class Trial(db_proxy):
+  def __init__(self, app, trial_id = None, **kwargs):
+    db_proxy.__init__(self, app, "%s_trial" % app.params.experiment_tag, id = trial_id, **kwargs)
+    self.trial_id = self.id
+
+  def __getattr__(self, name):
+    # Called only if the property cannot be found
+    if name == "rungroups":
+      return self.app.get_trial_rungroups(self.id, only_active=True)
+    elif name == "runs":
+      return self.app.get_trial_runs(self.id)
+    elif name == "isoforms":
+      return self.app.get_trial_isoforms(self.id)
+    elif name == "tags":
+      return self.app.get_trial_tags(self.id)
+    elif name == "cell":
+      return self.app.get_trial_cell(self.id)
+    else:
+      return super(Trial, self).__getattr__(name)
+
+  def __setattr__(self, name, value):
+    assert name not in ["rungroups", "runs", "isoforms"]
+    super(Trial, self).__setattr__(name, value)
+
+  def add_rungroup(self, rungroup):
+    query = "INSERT INTO `%s_trial_rungroup` (trial_id, rungroup_id) VALUES (%d, %d)" % (
+      self.app.params.experiment_tag, self.id, rungroup.id)
+    self.app.execute_query(query, commit=True)
+
+  def remove_rungroup(self, rungroup):
+    query = "DELETE FROM `%s_trial_rungroup` WHERE trial_id = %d AND rungroup_id = %s" % (
+      self.app.params.experiment_tag, self.id, rungroup.id)
+    self.app.execute_query(query, commit=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/db/xfel_db.py
+from __future__ import absolute_import, division, print_function
+
+import os, time
+import libtbx.load_env
+from libtbx.utils import Sorry
+
+from xfel.ui.db.trial import Trial
+from xfel.ui.db.run import Run
+from xfel.ui.db.rungroup import Rungroup
+from xfel.ui.db.tag import Tag
+from xfel.ui.db.job import Job, JobFactory
+from xfel.ui.db.stats import Stats
+from xfel.ui.db.experiment import Cell, Bin, Isoform, Event
+from xfel.ui.db.dataset import Dataset, DatasetVersion
+from xfel.ui.db.task import Task
+
+from xfel.ui.db import get_db_connection
+from six.moves import range
+import six
+from six.moves import zip
+
+from xfel.command_line.experiment_manager import initialize as initialize_base
+
+CACHED_CONNECT_TIMEOUT = 300
+
+class initialize(initialize_base):
+  expected_tables = ["run", "job", "rungroup", "trial", "tag", "run_tag", "event", "trial_rungroup",
+                     "imageset", "imageset_event", "beam", "detector", "experiment",
+                     "crystal", "cell", "cell_bin", "bin", "isoform", "rungroup_run",
+                     "dataset", "dataset_version", "dataset_version_job", "dataset_tag",
+                     "dataset_task", "task"]
+
+  def __getattr__(self, prop):
+    if prop == "dbobj":
+      return get_db_connection(self.params)
+    raise AttributeError("%s not found"%prop)
+
+  def __setattr__(self, prop, val):
+    if prop == "dbobj": pass
+    return super(initialize, self).__setattr__(prop, val)
+
+  def __init__(self, params, dbobj):
+    initialize_base.__init__(self, params, dbobj, interactive = False, drop_tables = None)
+
+  def create_tables(self, sql_path = None):
+    if sql_path is None:
+      sql_path = os.path.join(libtbx.env.find_in_repositories("xfel/ui/db"), "schema.sql")
+
+    return initialize_base.create_tables(self, sql_path)
+
+  def verify_tables(self):
+    self.expected_tables.pop(self.expected_tables.index('rungroup_run'))
+    tables_ok = super(initialize, self).verify_tables()
+    self.expected_tables.append('rungroup_run')
+
+    if tables_ok:
+      # Maintain backwards compatibility with SQL tables v2: 09/24/16
+      query = "SHOW columns FROM `%s_event`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      if 'two_theta_low' not in column_names and 'two_theta_high' not in column_names:
+        query = """
+          ALTER TABLE %s_event
+          ADD COLUMN two_theta_low DOUBLE NULL,
+          ADD COLUMN two_theta_high DOUBLE NULL
+        """%self.params.experiment_tag
+        cursor.execute(query)
+      elif 'two_theta_low' in column_names and 'two_theta_high' in column_names:
+        pass
+      else:
+        assert False
+
+      # Maintain backwards compatibility with SQL tables v2: 09/28/16
+      query = "SHOW columns FROM `%s_job`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      if 'submission_id' not in column_names:
+        query = """
+          ALTER TABLE %s_job
+          ADD COLUMN submission_id VARCHAR(45) NULL
+        """%self.params.experiment_tag
+        cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v2: 12/12/16
+      query = "SHOW columns FROM `%s_rungroup`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      for needed_column, column_format in zip(['format', 'two_theta_low', 'two_theta_high'],
+                                              ["VARCHAR(45) NOT NULL DEFAULT 'pickle'",
+                                               "DOUBLE NULL", "DOUBLE NULL"]):
+        if needed_column not in column_names:
+          query = """
+            ALTER TABLE %s_rungroup
+            ADD COLUMN %s %s
+          """%(self.params.experiment_tag, needed_column, column_format)
+          cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v2: 06/23/17
+      query = "SHOW columns FROM `%s_trial`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      if 'd_min' not in column_names:
+        query = """
+          ALTER TABLE `%s_trial`
+          ADD COLUMN d_min FLOAT NULL
+        """%self.params.experiment_tag
+        cursor.execute(query)
+      query = "SHOW columns FROM `%s_cell`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      if 'trial_id' not in column_names:
+        query = """
+          ALTER TABLE `%s_cell`
+          ADD COLUMN trial_id INT NULL,
+          ADD CONSTRAINT fk_cell_trial1 FOREIGN KEY (trial_id) REFERENCES `%s_trial` (id) ON DELETE NO ACTION,
+          ADD INDEX fk_cell_trial1_idx (trial_id ASC)
+        """%(self.params.experiment_tag, self.params.experiment_tag)
+        cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v3: 02/1/19
+      query = "SHOW TABLES LIKE '%s_rungroup_run'"%(self.params.experiment_tag)
+      cursor.execute(query)
+      if cursor.rowcount == 0:
+        print("Upgrading to version 4 of mysql database schema")
+        query = """
+        CREATE TABLE IF NOT EXISTS `%s`.`%s_rungroup_run` (
+          `rungroup_id` INT NOT NULL,
+          `run_id` INT NOT NULL,
+          PRIMARY KEY (`rungroup_id`, `run_id`),
+          INDEX `fk_rungroup_has_run_run1_idx` (`run_id` ASC),
+          INDEX `fk_rungroup_has_run_rungroup1_idx` (`rungroup_id` ASC),
+          CONSTRAINT `fk_%s_rungroup_has_run_rungroup1`
+            FOREIGN KEY (`rungroup_id`)
+            REFERENCES `%s`.`%s_rungroup` (`id`)
+            ON DELETE NO ACTION
+            ON UPDATE NO ACTION,
+          CONSTRAINT `fk_%s_rungroup_has_run_run1`
+            FOREIGN KEY (`run_id`)
+            REFERENCES `%s`.`%s_run` (`id`)
+            ON DELETE NO ACTION
+            ON UPDATE NO ACTION)
+        ENGINE = InnoDB;
+        """%(self.params.db.name, self.params.experiment_tag, self.params.experiment_tag,
+             self.params.db.name, self.params.experiment_tag, self.params.experiment_tag,
+             self.params.db.name, self.params.experiment_tag)
+        cursor.execute(query)
+        # Convert from startrun/endrun to linked table connecting run and rungroup and an 'open' flag in rungroup
+        query = "ALTER TABLE `%s_rungroup` ADD COLUMN open TINYINT(1) NOT NULL DEFAULT 0"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "SELECT id, startrun, endrun FROM `%s_rungroup`"%self.params.experiment_tag
+        cursor.execute(query)
+        for rungroup_id, startrun, endrun in cursor.fetchall():
+          if endrun is None:
+            # This run is 'open', so get the last run available and update the open bit for the rungroup
+            query = 'SELECT run FROM `%s_run`'%self.params.experiment_tag
+            cursor.execute(query)
+            endrun = max(list(zip(*cursor.fetchall()))[0])
+            query = 'UPDATE `%s_rungroup` set open = 1 where id = %d'%(self.params.experiment_tag, rungroup_id)
+            cursor.execute(query)
+          # Add all thr runs to the rungroup
+          for run in range(startrun, endrun+1):
+            query = 'SELECT id FROM `%s_run` run WHERE run.run = %d'%(self.params.experiment_tag, run)
+            cursor.execute(query)
+            rows = cursor.fetchall(); assert len(rows) <= 1
+            if len(rows) > 0:
+              run_id = rows[0][0]
+              query = "INSERT INTO `%s_rungroup_run` (rungroup_id, run_id) VALUES (%d, %d)" % ( \
+                self.params.experiment_tag, rungroup_id, run_id)
+              cursor.execute(query)
+        self.dbobj.commit()
+        query = "ALTER TABLE `%s_rungroup` DROP COLUMN startrun, DROP COLUMN endrun"%self.params.experiment_tag
+        cursor.execute(query)
+        # remove NOT NULL (and default for format column)
+        query = "ALTER TABLE `%s_rungroup` MODIFY COLUMN format varchar(45)"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_rungroup` MODIFY COLUMN detector_address varchar(100)"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_rungroup` MODIFY COLUMN detz_parameter double"%self.params.experiment_tag
+        cursor.execute(query)
+        # Retype and add new columns
+        query = "ALTER TABLE `%s_run` MODIFY COLUMN run varchar(45) NOT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_run` ADD COLUMN path varchar(4097)"%self.params.experiment_tag
+        cursor.execute(query)
+        column_names = ['number', 'd_min', 'd_max', 'total_hkl']
+        column_types = ['int', 'double', 'double', 'int']
+        for column_name, column_type in zip(column_names, column_types):
+          query = "ALTER TABLE `%s_bin` MODIFY COLUMN %s %s"%(self.params.experiment_tag, column_name, column_type)
+          cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v4: 11/06/19
+      query = "SHOW columns FROM `%s_job`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      if 'dataset_id' not in column_names:
+        print("Upgrading to version 5 of mysql database schema")
+        query = "ALTER TABLE `%s_job` DROP PRIMARY KEY, ADD PRIMARY KEY (`id`)"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` MODIFY COLUMN run_id INT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` MODIFY COLUMN rungroup_id INT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` MODIFY COLUMN trial_id INT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` ADD COLUMN task_id INT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` ADD COLUMN dataset_id INT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = """
+        ALTER TABLE `%s_job`
+          ADD CONSTRAINT `fk_job_task1`
+            FOREIGN KEY (`task_id`)
+            REFERENCES `%s`.`%s_task` (`id`)
+            ON DELETE NO ACTION
+            ON UPDATE NO ACTION
+        """%(self.params.experiment_tag, self.params.db.name, self.params.experiment_tag)
+        cursor.execute(query)
+        query = """
+        ALTER TABLE `%s_job`
+          ADD CONSTRAINT `fk_job_dataset1`
+            FOREIGN KEY (`dataset_id`)
+            REFERENCES `%s`.`%s_dataset` (`id`)
+            ON DELETE NO ACTION
+            ON UPDATE NO ACTION
+        """%(self.params.experiment_tag, self.params.db.name, self.params.experiment_tag)
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` ADD INDEX `fk_job_task1_idx` (`task_id` ASC)"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` ADD INDEX `fk_job_dataset1_idx` (`dataset_id` ASC)"%self.params.experiment_tag
+        cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v5: 10/09/20
+      query = "SHOW columns FROM `%s_rungroup`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      if 'wavelength_offset' not in column_names:
+        print("Upgrading to version 5.1 of mysql database schema")
+        query = "ALTER TABLE `%s_rungroup` ADD COLUMN wavelength_offset DOUBLE NULL"%self.params.experiment_tag
+        cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v5: 12/11/20
+      query = "SHOW columns FROM `%s_rungroup`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      column_names = list(zip(*columns))[0]
+      if 'spectrum_eV_per_pixel' not in column_names:
+        print("Upgrading to version 5.2 of mysql database schema")
+        query = "ALTER TABLE `%s_rungroup` ADD COLUMN spectrum_eV_per_pixel DOUBLE NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_rungroup` ADD COLUMN spectrum_eV_offset DOUBLE NULL"%self.params.experiment_tag
+        cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v5.3: 07/23/21
+      if 'extra_format_str' not in column_names:
+        print("Upgrading to version 5.3 of mysql database schema")
+        query = "ALTER TABLE `%s_rungroup` ADD COLUMN extra_format_str TEXT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` MODIFY COLUMN submission_id TEXT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+
+      # Maintain backwards compatibility with SQL tables v5.5: 03/10/25
+      query = "SHOW columns FROM `%s_experiment`"%self.params.experiment_tag
+      cursor = self.dbobj.cursor()
+      cursor.execute(query)
+      columns = cursor.fetchall()
+      if any(['PRI' in row and 'crystal_id' in row for row in columns]):
+        print("Upgrading to version 5.5 of mysql database schema")
+        query = "ALTER TABLE `%s_experiment` MODIFY COLUMN id INT"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_experiment` DROP PRIMARY KEY"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_experiment` ADD PRIMARY KEY (`id`, `beam_id`, `imageset_id`, `detector_id`)"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_experiment` MODIFY COLUMN id INT AUTO_INCREMENT"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_experiment` MODIFY COLUMN crystal_id INT"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_experiment` MODIFY COLUMN crystal_cell_id INT"%self.params.experiment_tag
+        cursor.execute(query)
+
+    return tables_ok
+
+  def set_up_columns_dict(self, app):
+    columns_dict = {}
+    for table in self.expected_tables:
+      table_name = "%s_%s" % (self.params.experiment_tag, table)
+      query = "SHOW COLUMNS FROM `%s`" % (table_name)
+      cursor = app.execute_query(query)
+      columns_dict[table_name] = [c[0] for c in cursor.fetchall() if c[0] != 'id']
+    return columns_dict
+
+class dummy_cursor(object):
+  def __init__(self, sql_cursor):
+    self.rowcount = sql_cursor.rowcount
+    self.lastrowid = sql_cursor.lastrowid
+    self.prefetched = sql_cursor.fetchall()
+  def fetchall(self):
+    return self.prefetched
+
+class db_application(object):
+  def __init__(self, params, cache_connection = True, mode = 'execute'):
+    self.params = params
+    self.dbobj = None
+    self.dbobj_refreshed_time = None
+    self.cache_connection = cache_connection
+    self.query_count = 0
+    self.mode = mode
+    self.last_query = None
+
+  def __setattr__(self, prop, val):
+    if prop == "mode":
+      assert val in ['execute', 'cache_commits']
+    return super(db_application, self).__setattr__(prop, val)
+
+  def execute_query(self, query, commit=True):
+    from MySQLdb import OperationalError
+
+    if self.mode == 'cache_commits' and commit:
+      self.last_query = query
+      return
+
+    if self.params.db.verbose:
+      st = time.time()
+      self.query_count += 1
+
+    retry_count = 0
+    retry_max = 10
+    sleep_time = 0.1
+    while retry_count < retry_max:
+      try:
+
+        # Get the (maybe cached) connection
+        # We enable autocommit on the connection by default, to avoid stale
+        # reads arising from unclosed transactions. See:
+        # https://stackoverflow.com/questions/1617637/pythons-mysqldb-not-getting-updated-row
+        if not commit: # connection caching is not attempted if commit=False
+          dbobj = get_db_connection(self.params, autocommit=False)
+        elif (
+            self.dbobj is None
+            or time.time() - self.dbobj_refreshed_time > CACHED_CONNECT_TIMEOUT
+        ):
+          dbobj = get_db_connection(self.params, autocommit=True)
+          self.dbobj_refreshed_time = time.time()
+          if self.cache_connection:
+            self.dbobj = dbobj
+        else:
+          dbobj = self.dbobj
+
+        sql_cursor = dbobj.cursor()
+        sql_cursor.execute(query)
+        cursor = dummy_cursor(sql_cursor)
+        sql_cursor.close()
+
+        if self.params.db.verbose:
+          et = time.time() - st
+          if et > 1:
+            print('Query % 6d SQLTime Taken = % 10.6f seconds' % (self.query_count, et), query[:min(len(query),145)])
+        return cursor
+      except OperationalError as e:
+        reconnect_strings = [
+            "MySQL server has gone away",
+            "max_user_connections",
+            "is not allowed to connect to this MariaDB server",
+        ]
+        retry_strings = [
+            "Can't connect to MySQL server",
+            "Lost connection to MySQL server",
+            "Deadlock found when trying to get lock",
+            "WSREP has not yet prepared node for application use",
+        ]
+        if any([s in str(e) for s in reconnect_strings]):
+          self.dbobj = None
+        elif all([s not in str(e) for s in retry_strings]):
+          print(query)
+          raise e
+        retry_count += 1
+        print("Couldn't connect to MYSQL, retry", retry_count)
+        time.sleep(sleep_time)
+        sleep_time *= 2
+      except Exception as e:
+        print("Couldn't execute MYSQL query.  Query:")
+        print(query)
+        print("Exception:")
+        print(str(e))
+        raise e
+    raise Sorry("Couldn't execute MYSQL query. Too many reconnects. Query: %s"%query)
+
+class xfel_db_application(db_application):
+  def __init__(self, params, drop_tables = False, verify_tables = False, **kwargs):
+    super(xfel_db_application, self).__init__(params, **kwargs)
+    dbobj = get_db_connection(params)
+    init_tables = initialize(params, dbobj)
+
+    if drop_tables:
+      init_tables.drop_tables()
+
+    if verify_tables and not init_tables.verify_tables():
+      init_tables.create_tables()
+      print('Creating experiment tables...')
+      if not init_tables.verify_tables():
+        raise Sorry("Couldn't create experiment tables")
+
+    self.columns_dict = init_tables.set_up_columns_dict(self)
+
+  def list_lcls_runs(self):
+    if self.params.facility.lcls.web.location is None or len(self.params.facility.lcls.web.location) == 0:
+      from xfel.command_line.auto_submit import match_runs
+      import os
+      exp_prefix = self.params.facility.lcls.experiment[0:3].upper()
+      xtc_dir = os.path.join(os.environ.get('SIT_PSDM_DATA', '/reg/d/psdm'), exp_prefix, self.params.facility.lcls.experiment, 'xtc')
+      return [{'run':str(r.id)} for r in sorted(match_runs(xtc_dir, False), key=lambda x:x.id)]
+    else:
+      import json
+      from six.moves import urllib
+      basequery = "https://pswww.slac.stanford.edu/ws/lgbk/lgbk/%s/ws/files_for_live_mode_at_location?location=%s"
+      query = basequery%(self.params.facility.lcls.experiment, self.params.facility.lcls.web.location)
+      R = urllib.request.urlopen(query)
+      if R.getcode() != 200:
+        print ("Couldn't connect to LCLS webservice to list runs, code", R.getcode())
+        return []
+
+      j = json.loads(R.read())
+      if not j.get('success'):
+        print("Web service query to list runs failed")
+        return []
+
+      present_runs = []
+      for r in sorted(j['value'], key=lambda x:x['run_num']):
+        if r['all_present']:
+          is_good = True
+        else:
+          if not self.params.facility.lcls.web.enforce80:
+            for item_idx, item in enumerate(r['files']):
+              if '-s80-' in item['path']:
+                item['is_present'] = True
+          if not self.params.facility.lcls.web.enforce81:
+            for item_idx, item in enumerate(r['files']):
+              if '-s81-' in item['path']:
+                item['is_present'] = True
+          is_good = all([f['is_present'] for f in r['files']])
+        if is_good:
+          present_runs.append({'run':str(int(r['run_num']))})
+
+      return present_runs
+
+
+  def create_trial(self, d_min = 1.5, n_bins = 10, **kwargs):
+    # d_min and n_bins only used if isoforms are in this trial
+
+    trial = Trial(self, d_min = d_min, **kwargs)
+    if trial.target_phil_str is not None:
+      from iotbx.phil import parse
+      dispatcher = self.params.dispatcher
+      if dispatcher == 'cxi.xtc_process':
+        from spotfinder.applications.xfel import cxi_phil
+        trial_params = cxi_phil.cxi_versioned_extract().persist.phil_scope.fetch(parse(trial.target_phil_str)).extract()
+        isoforms = trial_params.isoforms
+      else:
+        from xfel.ui import load_phil_scope_from_dispatcher
+        phil_scope = load_phil_scope_from_dispatcher(self.params.dispatcher)
+        trial_params = phil_scope.fetch(parse(trial.target_phil_str)).extract()
+        isoforms = trial_params.indexing.stills.isoforms
+      if len(isoforms) > 0:
+        for isoform in isoforms:
+          print("Creating isoform", isoform.name)
+          db_isoform = Isoform(self,
+                               name = isoform.name,
+                               trial_id = trial.id)
+          a, b, c, alpha, beta, gamma = isoform.cell.parameters()
+          cell = self.create_cell(cell_a = a, cell_b = b, cell_c = c,
+                                  cell_alpha = alpha, cell_beta = beta, cell_gamma = gamma,
+                                  lookup_symbol = isoform.lookup_symbol,
+                                  isoform_id = db_isoform.id)
+          from cctbx.crystal import symmetry
+
+          cs = symmetry(unit_cell = isoform.cell,space_group_symbol=str(isoform.lookup_symbol))
+          mset = cs.build_miller_set(anomalous_flag=False, d_min=d_min)
+          binner = mset.setup_binner(n_bins=n_bins)
+          for i in binner.range_used():
+            d_max, d_min = binner.bin_d_range(i)
+            Bin(self, number = i, d_min = d_min, d_max = d_max,
+                total_hkl = binner.counts_complete()[i], cell_id = cell.id)
+      elif dispatcher == 'cxi.xtc_process':
+        pass # TODO: labelit target
+      else:
+        if trial_params.indexing.known_symmetry.unit_cell is not None and \
+            trial_params.indexing.known_symmetry.space_group is not None:
+          print("Creating target cell")
+          unit_cell = trial_params.indexing.known_symmetry.unit_cell
+          symbol = str(trial_params.indexing.known_symmetry.space_group)
+          a, b, c, alpha, beta, gamma = unit_cell.parameters()
+          cell = self.create_cell(cell_a = a, cell_b = b, cell_c = c,
+                                  cell_alpha = alpha, cell_beta = beta, cell_gamma = gamma,
+                                  lookup_symbol = symbol,
+                                  trial_id = trial.id)
+          from cctbx.crystal import symmetry
+
+          cs = symmetry(unit_cell = unit_cell, space_group_symbol = symbol)
+          mset = cs.build_miller_set(anomalous_flag=False, d_min=d_min)
+          binner = mset.setup_binner(n_bins=n_bins)
+          for i in binner.range_used():
+            d_max, d_min = binner.bin_d_range(i)
+            Bin(self, number = i, d_min = d_min, d_max = d_max,
+                total_hkl = binner.counts_complete()[i], cell_id = cell.id)
+    return trial
+
+  def get_trial_isoforms(self, trial_id):
+    where = "WHERE trial_id = %d"%trial_id
+    return self.get_all_x(Isoform, "isoform", where)
+
+  def get_trial_cell(self, trial_id):
+    where = "WHERE trial_id = %d"%trial_id
+    cells = self.get_all_x(Cell, "cell", where)
+    assert len(cells) <= 1
+    if len(cells) == 0:
+      return None
+    else:
+      return cells[0]
+
+  def get_trial_cells(self, trial_id, rungroup_id = None, run_id = None):
+    # Use big queries to assist listing lots of cells. Start with list of cells for this trial
+    tag = self.params.experiment_tag
+    if rungroup_id is not None or run_id is not None:
+      assert rungroup_id is not None and run_id is not None
+      extra_where = "AND evt.run_id = %d AND evt.rungroup_id = %d"%(run_id, rungroup_id)
+    else:
+      extra_where = ""
+
+    where  = """JOIN `%s_crystal` crystal ON crystal.cell_id = cell.id
+               JOIN `%s_experiment` expt ON expt.crystal_id = crystal.id
+               JOIN `%s_imageset` imgset ON imgset.id = expt.imageset_id
+               JOIN `%s_imageset_event` is_e ON is_e.imageset_id = imgset.id
+               JOIN `%s_event` evt ON evt.id = is_e.event_id
+               JOIN `%s_trial` trial ON evt.trial_id = trial.id
+               JOIN `%s_rungroup` rg ON evt.rungroup_id = rg.id
+               WHERE trial.id = %d AND rg.active = True %s""" % (
+               tag, tag, tag, tag, tag, tag, tag, trial_id, extra_where)
+    cells = self.get_all_x(Cell, 'cell', where)
+    where = " JOIN `%s_cell` cell ON bin.cell_id = cell.id "%(tag) + where
+    return self.link_cell_bins(cells, where = where)
+
+  def link_cell_bins(self, cells, where = None):
+    tag = self.params.experiment_tag
+    cells_d = {cell.id:cell for cell in cells}
+
+    # Get all the bin ids for bins associated with these cells and assemble the bin objects
+    if where is None:
+      cell_ids = ", ".join([str(key) for key in cells_d.keys()])
+      where = """ WHERE bin.cell_id IN (%s)""" % (cell_ids)
+    bins = self.get_all_x(Bin, 'bin', where=where)
+
+    # Link in all the bins
+    for bin in bins:
+      if bin.cell_id in cells_d: # might not be there if new data has arrived
+        cells_d[bin.cell_id]._bins.append(bin)
+
+    for cell in cells:
+      cell._bins_set = True
+
+    return cells
+
+  def create_cell(self, **kwargs):
+    return Cell(self, **kwargs)
+
+  def get_cell(self, cell_id = None, name = None):
+    assert [cell_id, name].count(None) == 1
+    if name is not None:
+      query = "SELECT id FROM `%s_cell` WHERE name = '%s'"%(self.params.experiment_tag, name)
+      cursor = self.execute_query(query)
+      results = cursor.fetchall()
+      assert len(results) in [0,1]
+      if len(results) == 0:
+        return None
+      cell_id = int(results[0][0])
+
+    return Cell(self, cell_id=cell_id)
+
+  def get_cell_bins(self, cell_id):
+    query = "SELECT id FROM `%s_bin` WHERE cell_id = %d" % \
+            (self.params.experiment_tag, cell_id)
+    cursor = self.execute_query(query)
+    ids = [str(i[0]) for i in cursor.fetchall()]
+    if len(ids) == 0:
+      return []
+    where = "WHERE id IN (%s)" % ", ".join(ids)
+    return self.get_all_x(Bin, 'bin', where)
+
+  def get_all_x(self, cls, name, where = None):
+    table_name = "%s_%s" % (self.params.experiment_tag, name)
+    columns = ["%s.%s"%(name, c) for c in self.columns_dict[table_name]]
+    query = "SELECT %s.id, %s FROM `%s` %s" % (name, ", ".join(columns), table_name, name)
+    if where is not None:
+      query += " " + where
+    cursor = self.execute_query(query)
+    results = []
+    for row in cursor.fetchall():
+      d = {key:value for key, value in zip(self.columns_dict[table_name], row[1:])}
+      d["%s_id"%name] = row[0]
+      results.append(cls(self, **d))
+    return results
+
+  def get_all_x_with_subitems(self, cls, name, where = None, sub_items = None):
+    """ Assemble a list of db_proxy objects, where each one references a sub object
+        @param cls principal class
+        @param name table name not including experiment tag
+        @param where optional constraints on what to get
+        @param sub_items: array of tuples (cls,name) of items this table references
+        @return list of assembled db_proxy objects"""
+
+    # Assemble a list of all columns to be extracted via a big join. Then entries in the
+    # columns array will be of the form "name.column", IE: tag.comment
+    table_name = "%s_%s" % (self.params.experiment_tag, name)
+    columns = ["%s.%s"%(name, c) for c in self.columns_dict[table_name]]
+    columns.append("%s.id"%name)
+
+    if sub_items is None:
+      sub_items = []
+    sub_table_names = ["%s_%s"%(self.params.experiment_tag, i[1]) for i in sub_items]
+    for i, sub_item in enumerate(sub_items):
+      scls, sname, required = sub_item
+      columns.extend(["%s.%s"%(sname, c) for c in self.columns_dict[sub_table_names[i]]])
+      columns.append("%s.id"%sname)
+
+    # the main item being extracted is in the FROM statement and is given a nickname which
+    # is the table name without the experiment tag
+    query = "SELECT %s FROM `%s` %s" % (", ".join(columns), table_name, name)
+
+    # Join statements to bring in the sub tables
+    for i, sub_item in enumerate(sub_items):
+      scls, sname, required = sub_item
+      if required:
+        join = " JOIN "
+      else:
+        join = " LEFT OUTER JOIN " # allows nulls
+      query += join + "`%s` %s ON %s.id = %s.%s_id"% (
+        sub_table_names[i], sname, sname, name, sname)
+
+    if where is not None:
+      query += " " + where
+    cursor = self.execute_query(query)
+
+    results = []
+    sub_ds = {sub_item[1]:(sub_item[0], {}) for sub_item in sub_items}
+    sub_reqds = {sub_item[1]:sub_item[2] for sub_item in sub_items}
+
+    for row in cursor.fetchall():
+      # Each row will be a complete item and sub items in column form. Assemble one
+      # dictionary (d) for the main item and a dictionary of dictionaries (sub_ds)
+      # for each of the sub items
+      d = {}
+      for key, value in zip(columns, row):
+        n, c = key.split('.') # nickname n, column name c
+        if n == name:
+          d[c] = value # this column came from the main table
+        else:
+          sub_ds[n][1][c] = value # this column came from a sub table
+
+      if 'task' in sub_ds:
+        d['task_type'] = sub_ds['task'][1]['type']
+
+      # pop the id column as it is passed as name_id to the db_proxy class (ie Job(job_id = 2))
+      _id = d.pop("id")
+      d["%s_id"%name] = _id
+      results.append(cls(self, **d)) # instantiate the main class
+      for sub_d_n, sub_d in six.iteritems(sub_ds):
+        _id = sub_d[1].pop("id")
+        if _id is None:
+          assert not sub_reqds[sub_d_n]
+          continue
+        sub_d[1]["%s_id"%sub_d_n] = _id
+        setattr(results[-1], sub_d_n, sub_d[0](self, **sub_d[1])) # instantiate the sub items
+    return results
+
+  def get_trial(self, trial_id = None, trial_number = None):
+    assert [trial_id, trial_number].count(None) == 1
+    if trial_id is None:
+      trials = [t for t in self.get_all_trials() if t.trial == trial_number]
+      assert len(trials) == 1
+      return trials[0]
+    else:
+      return Trial(self, trial_id)
+
+  def get_trial_rungroups(self, trial_id, only_active = False):
+    tag = self.params.experiment_tag
+    if only_active:
+      query = """SELECT t_rg.rungroup_id FROM `%s_trial_rungroup` t_rg
+                 JOIN `%s_rungroup` rg ON rg.id = t_rg.rungroup_id
+                 WHERE t_rg.trial_id = %d AND rg.active = True""" % (tag, tag, trial_id)
+    else:
+      query = """SELECT t_rg.rungroup_id FROM `%s_trial_rungroup` t_rg
+                 WHERE t_rg.trial_id = %d""" % (tag, trial_id)
+    cursor = self.execute_query(query)
+    rungroup_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    if len(rungroup_ids) == 0:
+      return []
+    return self.get_all_x(Rungroup, "rungroup", where = "WHERE rungroup.id IN (%s)"%",".join(rungroup_ids))
+
+  def get_trial_runs(self, trial_id):
+    tag = self.params.experiment_tag
+    query = """SELECT run.id FROM `%s_run` run
+               JOIN `%s_rungroup_run` rgr ON run.id = rgr.run_id
+               JOIN `%s_rungroup` rg ON rg.id = rgr.rungroup_id
+               JOIN `%s_trial_rungroup` t_rg on t_rg.rungroup_id = rg.id
+               JOIN `%s_trial` trial ON trial.id = t_rg.trial_id
+               WHERE trial.id=%d AND rg.active=True
+               """ %(tag, tag, tag, tag, tag, trial_id)
+    cursor = self.execute_query(query)
+    run_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    if len(run_ids) == 0:
+      return []
+
+    use_ids = self.params.facility.name not in ['lcls']
+    if use_ids:
+      key = lambda x: x.id
+    else:
+      key = lambda x: int(x.run)
+
+    return sorted(self.get_all_x(Run, "run", where = "WHERE run.id IN (%s)"%",".join(run_ids)), key=key)
+
+  def get_trial_tags(self, trial_id):
+    tag = self.params.experiment_tag
+    query = """SELECT tag.id FROM `%s_tag` tag
+               JOIN `%s_run_tag` rt ON rt.tag_id = tag.id
+               JOIN `%s_run` run ON run.id = rt.run_id
+               JOIN `%s_rungroup_run` rgr ON run.id = rgr.run_id
+               JOIN `%s_rungroup` rg ON rg.id = rgr.rungroup_id
+               JOIN `%s_trial_rungroup` t_rg ON t_rg.rungroup_id = rg.id
+               JOIN `%s_trial` trial ON trial.id = t_rg.trial_id
+               WHERE trial.id=%d AND rg.active=True
+               """ % (tag, tag, tag, tag, tag, tag, tag, trial_id)
+    cursor = self.execute_query(query)
+    tag_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    if len(tag_ids) == 0:
+      return []
+    return self.get_all_x(Tag, "tag", where = "WHERE tag.id IN (%s)"%",".join(tag_ids))
+
+  def get_all_trials(self, only_active = False):
+    if only_active:
+      return [t for t in self.get_all_x(Trial, "trial") if t.active]
+    else:
+      return self.get_all_x(Trial, "trial")
+
+  def create_run(self, **kwargs):
+    return Run(self, **kwargs)
+
+  def get_run(self, run_id = None, run_number = None):
+    assert [run_id, run_number].count(None) == 1
+    if run_id is not None:
+      return Run(self, run_id)
+    runs = [r for r in self.get_all_runs() if r.run == str(run_number)]
+    if len(runs) == 0:
+      raise Sorry("Couldn't find run %s"%run_number)
+    assert len(runs) == 1
+    return runs[0]
+
+  def get_all_runs(self):
+    return self.get_all_x(Run, "run")
+
+  def get_rungroup_runs_by_tags(self, rungroup, tags, mode):
+    tag = self.params.experiment_tag
+    tagids = [t.id for t in tags]
+    if mode == "union":
+      # Union is done by using a series of OR statements testing the tag ids
+      return self.get_all_x(Run, 'run', where = """
+        JOIN `%s_rungroup_run` rg_r ON rg_r.run_id = run.id
+        JOIN `%s_rungroup` rg ON rg.id = rg_r.rungroup_id
+        JOIN `%s_run_tag` rt ON rt.run_id = run.id
+        JOIN `%s_tag` tag ON tag.id = rt.tag_id
+        WHERE rg.id = %d AND (%s)
+         """%(tag, tag, tag, tag, rungroup.id, " OR ".join(["tag.id = %d"%i for i in tagids])))
+    elif mode == "intersection":
+      # Intersection is done using a series of INNER JOINS, one full set for each tag
+      return self.get_all_x(Run, 'run', where = """
+        %s
+        WHERE %s
+        """%("".join(["""
+                      INNER JOIN `%s_rungroup_run` rg_r%d ON rg_r%d.run_id = run.id
+                      INNER JOIN `%s_rungroup` rg%d ON rg%d.id = rg_r%d.rungroup_id
+                      INNER JOIN `%s_run_tag` rt%d ON rt%d.run_id = run.id
+                      INNER JOIN `%s_tag` tag%d ON tag%d.id = rt%d.tag_id AND tag%d.id = %d"""%(
+                      tag, i, i, tag, i, i, i, tag, i, i, tag, i, i, i, i, tid) for i, tid in enumerate(tagids)]),
+        " AND ".join(["rg%d.id = %d"%(i, rungroup.id) for i in range(len(tagids))])))
+
+  def create_rungroup(self, **kwargs):
+    return Rungroup(self, **kwargs)
+
+  def get_rungroup(self, rungroup_id):
+    return Rungroup(self, rungroup_id)
+
+  def get_rungroup_runs(self, rungroup_id):
+    query = """SELECT run.id FROM `%s_run` run
+               JOIN `%s_rungroup_run` rgr ON run.id = rgr.run_id
+               WHERE rgr.rungroup_id = %d"""%(self.params.experiment_tag,
+                 self.params.experiment_tag, rungroup_id)
+    cursor = self.execute_query(query)
+    run_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    if len(run_ids) == 0:
+      return []
+    return self.get_all_x(Run, "run", where = "WHERE run.id IN (%s)"%",".join(run_ids))
+
+  def get_all_rungroups(self, only_active = False):
+    if only_active:
+      return [rg for rg in self.get_all_x(Rungroup, "rungroup") if rg.active]
+    else:
+      return self.get_all_x(Rungroup, "rungroup")
+
+  def create_tag(self, **kwargs):
+    return Tag(self, **kwargs)
+
+  def get_tag(self, tag_id):
+    return Tag(self, tag_id)
+
+  def get_run_tags(self, run_id):
+    query = "SELECT tag_id from `%s_run_tag` WHERE `%s_run_tag`.run_id = %d" % \
+            (self.params.experiment_tag, self.params.experiment_tag, run_id)
+    cursor = self.execute_query(query)
+    tag_ids = [str(i[0]) for i in cursor.fetchall()]
+    if len(tag_ids) == 0:
+      return []
+    where = "WHERE id IN (%s)" % ", ".join(tag_ids)
+    return self.get_all_x(Tag, 'tag', where)
+
+  def get_all_tags(self):
+    return self.get_all_x(Tag, "tag")
+
+  def delete_x(self, item, item_id):
+    query = "DELETE FROM `%s` WHERE id = %d"%(item.table_name, item_id)
+    self.execute_query(query, commit = True)
+
+  def delete_tag(self, tag = None, tag_id = None):
+    assert [tag, tag_id].count(None) == 1
+
+    if tag_id is None:
+      tag_id = tag.tag_id
+    else:
+      tag = self.get_tag(tag_id)
+
+    query = "DELETE FROM `%s_run_tag` WHERE tag_id = %d" % (self.params.experiment_tag, tag_id)
+    self.execute_query(query, commit=True)
+
+    self.delete_x(tag, tag_id)
+
+  # Replaced by JobFactory in job.py
+  #def create_job(self, **kwargs):
+  #  return Job(self, **kwargs)
+
+  def get_job(self, job_id):
+    return JobFactory.from_args(self, job_id)
+
+  def get_all_jobs(self, active = False, where = None):
+    if active:
+      if where is None:
+        where = "LEFT OUTER JOIN `%s_dataset_task` dataset_task ON job.dataset_id = dataset_task.dataset_id " % self.params.experiment_tag
+        where += "WHERE (trial.active = True AND rungroup.active = True) OR (dataset.active = True AND job.task_id = dataset_task.task_id AND dataset_task.task_id IS NOT NULL)"
+    return self.get_all_x_with_subitems(JobFactory.from_args, "job", sub_items = [(Trial, 'trial', False),
+                                                                                  (Run, 'run', False),
+                                                                                  (Rungroup, 'rungroup', False),
+                                                                                  (Task, 'task', False),
+                                                                                  (Dataset, 'dataset', False)], where = where)
+
+  def delete_job(self, job = None, job_id = None):
+    assert [job, job_id].count(None) == 1
+    if job_id is None:
+      job_id = job.job_id
+    else:
+      job = self.get_job(job_id)
+
+    self.delete_x(job, job_id)
+
+  def get_all_events(self, trial = None, runs = None, only_indexed = True, isoform = None, where = None):
+    tag = self.params.experiment_tag
+    if where is None:
+      final_where = ""
+    else:
+      final_where = where.strip()
+    where = ""
+    if only_indexed or isoform is not None:
+      where = " JOIN `%s_imageset_event` is_e ON event.id = is_e.event_id"%tag
+    if trial is not None:
+      if runs is None:
+        runs = trial.runs
+      if len(runs) == 0:
+        return []
+      if isoform is None:
+        where += " WHERE"
+      else:
+        where += """ JOIN `%s_imageset` imgset ON imgset.id = is_e.imageset_id
+                     JOIN `%s_experiment` exp ON exp.imageset_id = imgset.id
+                     JOIN `%s_crystal` crystal ON crystal.id = exp.crystal_id
+                     JOIN `%s_cell` cell ON cell.id = crystal.cell_id
+                     JOIN `%s_isoform` isoform ON isoform.id = cell.isoform_id
+                     WHERE isoform.id = %s AND"""%(tag, tag, tag, tag, tag, isoform.id)
+      where += " event.trial_id = %d AND event.run_id in (%s)" % (
+        trial.id, ", ".join([str(r.id) for r in runs]))
+
+      if 'rungroup_id' in self.columns_dict["%s_%s" % (tag, 'event')]: # some backwards compatibility, as event.rungroup_id was added late to the schema
+        rungroups = ", ".join([str(rg.id) for rg in trial.rungroups])
+        if len(rungroups) > 0:
+          where += " AND event.rungroup_id in (%s)"%rungroups
+
+    if len(where) > 0 and len(final_where) > 0:
+      final_where = "AND " + final_where.lstrip("WHERE")
+    return self.get_all_x(Event, "event", where + " " + final_where)
+
+  def get_stats(self, **kwargs):
+    return Stats(self, **kwargs)
+
+  def create_dataset(self, **kwargs):
+    return Dataset(self, **kwargs)
+
+  def get_dataset(self, dataset_id):
+    return Dataset(self, dataset_id)
+
+  def get_all_datasets(self):
+    return self.get_all_x(Dataset, "dataset")
+
+  def get_dataset_tasks(self, dataset_id):
+    tag = self.params.experiment_tag
+    query = """SELECT d_t.task_id FROM `%s_dataset_task` d_t
+               WHERE d_t.dataset_id = %d""" % (tag, dataset_id)
+    cursor = self.execute_query(query)
+    task_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    if len(task_ids) == 0:
+      return []
+    return self.get_all_x(Task, "task", where = "WHERE task.id IN (%s)"%",".join(task_ids))
+
+  def create_dataset_version(self, **kwargs):
+    return DatasetVersion(self, **kwargs)
+
+  def get_dataset_version(self, dataset_version_id):
+    return DatasetVersion(self, dataset_version_id)
+
+  def get_dataset_versions(self, dataset_id, latest = False):
+    tag = self.params.experiment_tag
+    if latest:
+      query = """SELECT MAX(dv.id) FROM `%s_dataset_version` dv
+                 WHERE dv.dataset_id = %d"""%(tag, dataset_id)
+      cursor = self.execute_query(query)
+      rows = cursor.fetchall()
+      if not rows: return []
+      if rows[0][0] is None: return []
+      dataset_version_ids = [i[0] for i in rows]
+      if not dataset_version_ids : return []
+      assert len(dataset_version_ids) == 1
+      where = "WHERE dataset_version.id = %d"%dataset_version_ids[0]
+    else:
+      where = "WHERE dataset_version.dataset_id = %d"%dataset_id
+    return self.get_all_x_with_subitems(DatasetVersion, "dataset_version", where = where, sub_items=[(Dataset, "dataset", True)])
+
+  def get_job_dataset_version(self, job_id):
+    tag = self.params.experiment_tag
+    query = """SELECT dvj.dataset_version_id FROM `%s_dataset_version_job` dvj
+               WHERE dvj.job_id = %d""" % (tag, job_id)
+    cursor = self.execute_query(query)
+    dataset_version_ids = [i[0] for i in cursor.fetchall()]
+    if not dataset_version_ids:
+      return None
+    assert len(dataset_version_ids) == 1
+    return self.get_dataset_version(dataset_version_ids[0])
+
+  def get_dataset_version_jobs(self, dataset_version_id):
+    tag = self.params.experiment_tag
+    query = """SELECT dvj.job_id FROM `%s_dataset_version_job` dvj
+               WHERE dvj.dataset_version_id = %d""" % (tag, dataset_version_id)
+    cursor = self.execute_query(query)
+    job_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    if len(job_ids) == 0:
+      return []
+    return self.get_all_jobs(where = "WHERE job.id IN (%s)"%",".join(job_ids))
+
+  def get_dataset_tags(self, dataset_id):
+    tag = self.params.experiment_tag
+    query = """SELECT d_t.tag_id FROM `%s_dataset_tag` d_t
+               WHERE d_t.dataset_id = %d""" % (tag, dataset_id)
+    cursor = self.execute_query(query)
+    tag_ids = ["%d"%i[0] for i in cursor.fetchall()]
+    if len(tag_ids) == 0:
+      return []
+    return self.get_all_x(Tag, "tag", where = "WHERE tag.id IN (%s)"%",".join(tag_ids))
+
+  def create_task(self, **kwargs):
+    return Task(self, **kwargs)
+
+  def get_task(self, task_id):
+    return Task(self, task_id)
+
+  def get_all_tasks(self):
+    return self.get_all_x(Task, "task")
+
+# Deprecated, but preserved here in case it proves useful later
+"""
+class sacla_run_finder(object):
+  def __init__(self, params):
+    self.params = params
+    self.known_runs = []
+
+  def list_runs(self):
+    import dbpy
+    assert self.params.facility.sacla.start_run is not None
+    runs = []
+    run = self.params.facility.sacla.start_run
+    while True:
+      if run in self.known_runs:
+        run += 1
+        continue
+      try:
+        info = dbpy.read_runinfo(self.params.facility.sacla.beamline, run)
+      except dbpy.APIError:
+        break
+      if info['runstatus'] == 0:
+        runs.append(run)
+        self.known_runs.append(run)
+      run += 1
+
+    return self.known_runs
+"""
+
+class standalone_run_finder(object):
+  def __init__(self, params):
+    self.params = params
+
+  def list_runs(self):
+    import glob
+
+    runs = []
+    if self.params.facility.standalone.monitor_for == 'folders':
+      for foldername in sorted(os.listdir(self.params.facility.standalone.data_dir)):
+        path = os.path.join(self.params.facility.standalone.data_dir, foldername)
+        if not os.path.isdir(path): continue
+        if self.params.facility.standalone.composite_files:
+          for filepath in sorted(glob.glob(os.path.join(path, self.params.facility.standalone.template))):
+            filename = os.path.basename(filepath)
+            runs.append((foldername + "_" + os.path.splitext(filename)[0], filepath))
+        else:
+          files = sorted(glob.glob(os.path.join(path, self.params.facility.standalone.template)))
+          if len(files) >= self.params.facility.standalone.folders.n_files_needed:
+            runs.append((foldername, os.path.join(path, self.params.facility.standalone.template)))
+    elif self.params.facility.standalone.monitor_for == 'files':
+      if not self.params.facility.standalone.composite_files:
+        print("Warning, monitoring a single folder for single image files is inefficient")
+      path = self.params.facility.standalone.data_dir
+      for filepath in sorted(glob.glob(os.path.join(path, self.params.facility.standalone.template))):
+        if self.params.facility.standalone.files.last_modified > 0:
+          if time.time() - os.path.getmtime(filepath) < self.params.facility.standalone.files.last_modified:
+            continue
+        if self.params.facility.standalone.files.minimum_file_size > 0:
+          statinfo = os.stat(filepath)
+          if statinfo.st_size < self.params.facility.standalone.files.minimum_file_size:
+            continue
+        filename = os.path.basename(filepath)
+        runs.append((os.path.splitext(filename)[0], filepath))
+
+    return runs
+
+class cheetah_run_finder(standalone_run_finder):
+  def __init__(self, params):
+    super(cheetah_run_finder, self).__init__(params)
+    self.known_runs = []
+    self.known_bad_runs = []
+
+  def list_runs(self):
+    runs = super(cheetah_run_finder, self).list_runs()
+
+    good_runs = []
+    for name, path in runs:
+      if name in self.known_runs:
+        good_runs.append((name, path))
+      elif name not in self.known_bad_runs:
+        status_file = os.path.join(os.path.dirname(path), 'status.txt')
+        if not os.path.exists(status_file): continue
+        status_lines = [line for line in open(status_file).readlines() if 'Status' in line]
+        if len(status_lines) != 1: continue
+        l = status_lines[0].strip()
+        status = l.split(',')[-1].split('=')[-1]
+        print(name, status)
+        if status == 'Finished':
+          good_runs.append((name, path))
+          self.known_runs.append(name)
+        elif 'error' in status.lower():
+          self.known_bad_runs.append(name)
+
+    return good_runs
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/ui/phil_patch.py
+from __future__ import absolute_import, division, print_function
+from libtbx.utils import Sorry
+
+"""
+Jiffy code to patch phil files from v3 to v4 of XFEL gui
+"""
+
+def sync_phil(params, unused):
+  for scope in unused:
+    value = scope.object.extract()[0]
+    if scope.path == 'experiment':
+      params.facility.lcls.experiment = value
+    elif scope.path == 'web.user':
+      params.facility.lcls.web.user = value
+    elif scope.path == 'web.password':
+      params.facility.lcls.web.password = value
+    elif scope.path == 'web.enforce80':
+      params.facility.lcls.web.enforce80 = value
+    elif scope.path == 'web.enforce81':
+      params.facility.lcls.web.enforce81 = value
+    elif scope.path == 'use_ffb':
+      params.facility.lcls.use_ffb = value
+    elif scope.path == 'dump_shots':
+      params.facility.lcls.dump_shots = value
+    else:
+      raise Sorry("Cannot understand argument %s=%s"%(scope.path, value))
+
+
+ *******************************************************************************

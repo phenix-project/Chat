@@ -1,0 +1,178 @@
+
+
+ *******************************************************************************
+cctbx/masks/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+from functools import reduce
+from six.moves import range
+ext = bp.import_ext("cctbx_masks_ext")
+from cctbx_masks_ext import *
+
+import sys
+
+from cctbx.array_family import flex
+from cctbx.eltbx import van_der_waals_radii
+from scitbx import linalg
+
+# This function is still used in mmtbx/masks.py
+def vdw_radii_from_xray_structure(xray_structure, table=None):
+  return vdw_radii(xray_structure, table).atom_radii
+
+class vdw_radii:
+
+  def __init__(self, xray_structure, table=None):
+    # XXX use scattering dictionary and set_selected
+    # XXX use monomer library definitions for radii
+    unknown = []
+    if table is None:
+      self.table = {}
+    else:
+      self.table = table.copy()
+    self.atom_radii = flex.double()
+    for i_seq, scatterer in enumerate(xray_structure.scatterers()):
+      try:
+        radius = self.table.get(scatterer.element_symbol())
+        if radius is None:
+          radius = van_der_waals_radii.vdw.table[scatterer.element_symbol()]
+          self.table[scatterer.element_symbol()] = radius
+      except KeyError:
+        unknown.append(scatterer.element_symbol())
+      else:
+        self.atom_radii.append(radius)
+    if(len(unknown) > 0):
+      raise RuntimeError("Atoms with unknown van der Waals radius: ",unknown)
+
+  def show(self, log=None):
+    if log is None: log = sys.stdout
+    symbols = list(self.table.keys())
+    symbols.sort()
+    print(" ".join("%5s" %symbol for symbol in symbols), file=log)
+    print(" ".join("%5.2f" %self.table[symbol] for symbol in symbols), file=log)
+
+
+@bp.inject_into(flood_fill)
+class _():
+
+  def eigensystems_frac(self):
+    inertia_tensors = self.inertia_tensors_frac()
+    return [linalg.eigensystem_real_symmetric(tensor)
+            for tensor in inertia_tensors]
+
+  def eigensystems_cart(self):
+    inertia_tensors = self.inertia_tensors_cart()
+    return [linalg.eigensystem_real_symmetric(tensor)
+            for tensor in inertia_tensors]
+
+  def show_summary(self, log=None):
+    if log is None: log = sys.stdout
+    print("gridding: (%i,%i,%i)" %self.gridding_n_real(), file=log)
+    n_voids = self.n_voids()
+    n_grid_points = reduce(lambda x,y:x*y, self.gridding_n_real())
+    grid_points_per_void = self.grid_points_per_void()
+    centres_of_mass = self.centres_of_mass_frac()
+    eigensystems = self.eigensystems_frac()
+    if self.n_voids() == 0: return
+    print("Void #Grid points Vol/A^3 Vol/%  Centre of mass (frac)", end=' ', file=log)
+    print("  Eigenvectors (frac)", file=log)
+    for i in range(n_voids):
+      void_vol = (
+        self.unit_cell().volume() * grid_points_per_void[i]) / n_grid_points
+      formatted_site = ["%6.3f" % x for x in centres_of_mass[i]]
+      print("%4i" %(i+1), end=' ', file=log)
+      print("%12i" %(grid_points_per_void[i]), end=' ', file=log)
+      print("%7.1f" %(void_vol), end=' ', file=log)
+      print("%5.1f" %(100*void_vol/self.unit_cell().volume()), end=' ', file=log)
+      print(" (%s)" %(','.join(formatted_site)), end=' ', file=log)
+      for j in range(3):
+        formatted_eigenvector = [
+          "%6.3f" % x for x in eigensystems[i].vectors()[3*j:3*j+3]]
+        if j == 0: sep = ""
+        else: sep = " "*56
+        print(sep, "%i" %(j+1), end=' ', file=log)
+        print(" (%s)" %(','.join(formatted_eigenvector)), file=log)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/masks/tests/tst_flood_fill.py
+from __future__ import absolute_import, division, print_function
+
+from cctbx.array_family import flex
+from cctbx import maptbx, masks, uctbx
+from libtbx.test_utils import approx_equal
+from scitbx import math, matrix
+from six.moves import range
+
+def exercise_flood_fill():
+  uc = uctbx.unit_cell('10 10 10 90 90 90')
+  for uc in (uctbx.unit_cell('10 10 10 90 90 90'),
+             uctbx.unit_cell('9 10 11 87 91 95')):
+    gridding = maptbx.crystal_gridding(
+      unit_cell=uc,
+      pre_determined_n_real=(5,5,5))
+    corner_cube = (0,4,20,24,100,104,120,124) # cube across all 8 corners
+    channel = (12,37,38,39,42,43,62,63,67,68,87,112)
+    data = flex.int(flex.grid(gridding.n_real()))
+    for i in (corner_cube + channel): data[i] = 1
+    flood_fill = masks.flood_fill(data, uc)
+    assert data.count(0) == 105
+    for i in corner_cube: assert data[i] == 2
+    for i in channel: assert data[i] == 3
+    assert approx_equal(flood_fill.centres_of_mass(),
+                        ((-0.5, -0.5, -0.5), (-2.5, 7/3, 2.5)))
+    assert approx_equal(flood_fill.centres_of_mass_frac(),
+                        ((-0.1, -0.1, -0.1), (-0.5, 7/15, 0.5)))
+    assert approx_equal(flood_fill.centres_of_mass_cart(),
+                        uc.orthogonalize(flood_fill.centres_of_mass_frac()))
+    assert flood_fill.n_voids() == 2
+    assert approx_equal(flood_fill.grid_points_per_void(), (8, 12))
+    if 0:
+      from crys3d import wx_map_viewer
+      wx_map_viewer.display(raw_map=data.as_double(), unit_cell=uc, wires=False)
+    #
+    gridding = maptbx.crystal_gridding(
+      unit_cell=uc,
+      pre_determined_n_real=(10,10,10))
+    data = flex.int(flex.grid(gridding.n_real()))
+    # parallelogram
+    points = [(2,4,5),(3,4,5),(4,4,5),(5,4,5),(6,4,5),
+              (3,5,5),(4,5,5),(5,5,5),(6,5,5),(7,5,5),
+              (4,6,5),(5,6,5),(6,6,5),(7,6,5),(8,6,5)]
+    points_frac = flex.vec3_double()
+    for p in points:
+      data[p] = 1
+      points_frac.append([p[i]/gridding.n_real()[i] for i in range(3)])
+    points_cart = uc.orthogonalize(points_frac)
+    flood_fill = masks.flood_fill(data, uc)
+    assert data.count(2) == 15
+    assert approx_equal(flood_fill.centres_of_mass_frac(), ((0.5,0.5,0.5),))
+    pai_cart = math.principal_axes_of_inertia(
+      points=points_cart, weights=flex.double(points_cart.size(),1.0))
+    F = matrix.sqr(uc.fractionalization_matrix())
+    O = matrix.sqr(uc.orthogonalization_matrix())
+    assert approx_equal(
+      pai_cart.center_of_mass(), flood_fill.centres_of_mass_cart()[0])
+    assert approx_equal(
+      flood_fill.covariance_matrices_cart()[0],
+      (F.transpose() * matrix.sym(
+        sym_mat3=flood_fill.covariance_matrices_frac()[0]) * F).as_sym_mat3())
+    assert approx_equal(
+      pai_cart.inertia_tensor(), flood_fill.inertia_tensors_cart()[0])
+    assert approx_equal(pai_cart.eigensystem().vectors(),
+                        flood_fill.eigensystems_cart()[0].vectors())
+    assert approx_equal(pai_cart.eigensystem().values(),
+                        flood_fill.eigensystems_cart()[0].values())
+  return
+
+def run():
+  exercise_flood_fill()
+  print("OK")
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************

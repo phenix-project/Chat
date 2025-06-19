@@ -1,0 +1,2769 @@
+
+
+ *******************************************************************************
+scitbx/dtmin/__init__.py
+"""
+dtmin
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/auxiliary.py
+from __future__ import division
+from math import log, exp, tanh
+import sys
+
+class Auxiliary:
+  def get_reparameterized_parameters(self):
+    "Return the vector of parameters with necessary reparameterisations performed"
+    repar = self.reparameterize()
+    reparameterized_x = self.get_macrocycle_parameters()[:] #the slicing is to ensure a deep copy
+
+    if len(repar) != 0:
+      for i in range(self.nmp):
+        if repar[i].reparamed:
+          reparameterized_x[i] = log(reparameterized_x[i] + repar[i].offset)
+
+    return reparameterized_x
+
+  def set_reparameterized_parameters(self, reparameterized_x):
+    """Given reparameterized_x, find the original x and call set_macrocycle_parameters(x) set x in refineXYZ"""
+    x = reparameterized_x[:] #the slicing is to ensure a deep copy
+    repar = self.reparameterize()
+
+    if len(repar) != 0:
+      for i in range(len(repar)):
+        if repar[i].reparamed:
+          x[i] = exp(x[i]) - repar[i].offset
+
+    self.set_macrocycle_parameters(x)
+
+  def reparameterized_large_shifts(self):
+    """
+    derivation of the formula used:
+    1d unreparameterized:
+                            ls
+                          |------>|
+        0                 x       |
+      --|-----------------|-------|---->
+
+    reparameterized:
+                rls
+              |---->|
+        0    rx     |
+      --|-----|-----|------------------>
+
+      rx = log(x + offset)
+
+      rx + rls = log(x + ls + offset)
+
+      => rls = log(x + ls + offset) - log(x + offset)
+
+            = log(1 + ls/(x + offset) )
+
+            ~= ls/(x + offset) for small ls/(x + offset)
+    """
+    x = self.get_macrocycle_parameters()
+    reparameterized_ls = self.macrocycle_large_shifts()
+    repar = self.reparameterize()
+
+    if len(repar) != 0:
+      for i in range(self.nmp):
+        if repar[i].reparamed:
+          reparameterized_ls[i] = reparameterized_ls[i]/(x[i]+repar[i].offset)
+
+    return reparameterized_ls
+
+  def reparameterized_bounds(self):
+    """Returns the reparameterized bounds"""
+    unrepar_bounds = self.bounds()
+    reparameterized_bounds = self.bounds()
+    repar = self.reparameterize()
+
+    if len(reparameterized_bounds) == 0:  #no bounds case
+      return reparameterized_bounds
+    elif len(repar) == 0:  #bounds but no repar case
+      return reparameterized_bounds
+    else:  #bounds and repar case
+      for i in range(self.nmp):
+        if repar[i].reparamed:
+          if reparameterized_bounds[i].lower_bounded():
+            reparameterized_bounds[i].lower_on(log(unrepar_bounds[i].lower_limit() + repar[i].offset))
+          if reparameterized_bounds[i].upper_bounded():
+            reparameterized_bounds[i].upper_on(log(unrepar_bounds[i].upper_limit() + repar[i].offset))
+      return reparameterized_bounds
+
+  def reparameterized_target_gradient(self):
+    r"""
+    Returns the function and the reparameterized gradient
+
+    When we are finding the gradient of f with respect to the reparameterized
+    parameters rx, we can pretend that we started from rx, calculated x
+    and then calculated f. In reality we started from x then calculated rx.
+
+    x -> rx  (reparameterized x)
+     \-> f
+
+    i.e.  ' rx -> x -> f '
+
+    rx(x) = log(x+c)  => x(rx) = e^rx - c
+                        dx/drx = e^rx = x + c
+
+    we want:  df(x(rx))   df   dx    df
+              --------- = -- * --- = -- * (x+c)
+                  drx      dx   drx   dx
+    """
+    x = self.get_macrocycle_parameters()
+    reparameterized_f_g = self.target_gradient()
+    repar = self.reparameterize()
+
+    if len(repar) != 0:
+      for i in range(self.nmp):
+        if repar[i].reparamed:
+          reparameterized_f_g[1][i] *= (x[i]+repar[i].offset)
+
+    return reparameterized_f_g # dont need to do anything to f
+
+  def reparameterized_target_gradient_hessian(self):
+    """
+    Returns the function, the reparameterized gradient,
+    the reparameterized hessian and a flag to tell if
+    the hessian is diagonal
+
+     Probably easiest to understand if you write out the equation,
+       all small d's are partial differentials
+       rx means reparameterized x
+       c_i is the reparameterisation offset used in rx_i(x_i) = log(x_i + c_i)
+
+                        d^2 f         d      df     dx_j
+    reparedHessian_ij = ----------- = ----- (---- * -----)
+                        drx_i drx_j   drx_i  dx_j   drx_j
+
+      d^2 f      dx_j     df   d^2x_j
+    = ----------*-----  + ----*-----------
+      drx_i dx_j drx_j    dx_j drx_i drx_j
+
+      d^2 f     dx_i  dx_j    df   d^2 x_j
+    = ---------*-----*----- + ----*-----------
+      dx_i dx_j drx_i drx_j   dx_j drx_i drx_j
+
+      d^2f                                         df
+    = --------- * (x_i + c_i) * (x_j + c_j) + diag(----*(x_j + c_j) )
+      dx_i dx_j                                    dx_j
+    """
+
+    x = self.get_macrocycle_parameters()
+    repar = self.reparameterize()
+
+    f = None
+    reparameterized_g = None # will be populated with the unrepared gradient and ones requiring reparing will be modified accordingly
+    reparameterized_h = None # will be populated with the unrepared hessian, and ones requiring reparing will be modified accordingly
+    is_hessian_diagonal = None
+    (f, reparameterized_g, reparameterized_h, is_hessian_diagonal) = self.target_gradient_hessian() # Note reparameterized_g and reparameterized_h are not repared yet, that is what this function does
+
+    if len(repar) != 0:
+      # repararameterize the hessian first because we need the unreparameterized gradient for its calculation
+      for i in range(self.nmp):
+        for j in range(self.nmp):
+          if repar[i].reparamed or repar[j].reparamed:
+            dxidyi,dxjdyj = 1., 1.
+            if repar[i].reparamed: dxidyi = x[i]+repar[i].offset
+            if repar[j].reparamed: dxjdyj = x[j]+repar[j].offset
+            reparameterized_h[i,j] *= dxidyi*dxjdyj
+            if i==j: reparameterized_h[i,i] += reparameterized_g[i]*dxidyi #dxidyi=d2xidyi2  # note at this point 'reparameterized_g' is not actually repared
+      # repar the gradient as per reparameterized_target_gradient()
+      for i in range(self.nmp):
+        if repar[i].reparamed:
+          reparameterized_g[i] *= (x[i]+repar[i].offset)
+
+    return (f, reparameterized_g, reparameterized_h, is_hessian_diagonal)
+
+  def reparameterized_adjusted_target_gradient_hessian(self):
+    """
+    Returns the function, the reparameterized gradient,
+    the reparameterized and adjusted* hessian, a flag to tell is the hessian is diagonal
+    and a flag to say whether the hessian was adjusted or not.
+
+    *By adjusted we mean that the hessian has been through the adjust_hessian function
+    """
+    (f, reparameterized_g, reparameterized_h, is_hessian_diagonal) = self.reparameterized_target_gradient_hessian() # note reparameterized_g and reparameterized_h are not repared yet, that is what this function is for!
+
+    # adjust the hessian
+    (reparameterized_h, queue_new_hessian) = self.adjust_hessian(reparameterized_h)
+
+    return (f, reparameterized_g, reparameterized_h, is_hessian_diagonal, queue_new_hessian)
+
+  def damped_shift(self, a, old_x, p, dist, ls):
+    """
+    The overall idea is to shift x by a multiple of p, but avoid crossing boundaries
+    and dampen any shifts of parameters that would be greater than their large_shift value.
+    """
+
+    x = [0.] * self.nmp
+    bounds = self.reparameterized_bounds()
+    for i in range(self.nmp):
+      thisdist = a if (dist[i]<0.) else min(a,dist[i]) # neg dist (-1.) means outside of bound (should never happen) or unbounded.
+      rawshift = thisdist*p[i] # Undamped shift
+      relshift = abs(rawshift)/ls[i]
+      dampfac = 1. if (relshift <= 0.005) else 2.*tanh(relshift/2.)/relshift
+      shift = dampfac*rawshift
+      x[i] = old_x[i] + shift # Shift parameter only up to its bound, damped to max of 2*largeShift
+
+    if len(bounds) != 0:
+      # correct for the possibility of minutely stepping over a boundary
+      for i in range(self.nmp):
+        if bounds[i].lower_bounded() and x[i] < bounds[i].lower_limit():
+          x[i] = bounds[i].lower_limit()
+        if bounds[i].upper_bounded() and x[i] > bounds[i].upper_limit():
+          x[i] = bounds[i].upper_limit()
+    return x
+
+  #debugging
+  def study_parameters(self):
+    # Vary refined parameters and print out function, gradient and curvature
+    parameter_names = self.macrocycle_parameter_names()
+    filename = "studyParams"
+    x            = self.get_reparameterized_parameters()
+    old_x        = x[:] #slice to force deep_copy
+    g            = [0.] * self.nmp
+    unrepar_x    = self.get_macrocycle_parameters()
+    unrepar_oldx = [0.] * self.nmp
+    unrepar_g    = [0.] * self.nmp
+    bounds = self.reparameterized_bounds()
+    ls     = self.reparameterized_large_shifts()
+    bounds_present = False if (len(bounds) == 0) else True
+
+    print("")
+    print("Study behaviour of parameters near current values")
+
+    fmin = self.target() # so called because it should be at the minimum
+
+    # First check that function values from F, FG and FGH agree
+    reparameterized_f_g = self.reparameterized_target_gradient()
+    gradLogLike = reparameterized_f_g[0]
+    g           = reparameterized_f_g[1]
+    if abs(fmin-gradLogLike) >= 0.1:
+      print("Likelihoods from target() and reparameterized_f_g() disagree")
+      print("Likelihood from              target(): " + str(-fmin))
+      print("Likelihood from reparameterized_f_g(): " + str(-gradLogLike))
+
+    f_g_h = self.reparameterized_target_gradient_hessian()
+    hessLogLike = f_g_h[0]
+    is_diagonal = f_g_h[3]
+    if abs(fmin-hessLogLike) >= 0.1:
+      print("Likelihoods from target() and reparameterized_f_g_h() disagree")
+      print("Likelihood from                target(): " + str(-fmin))
+      print("Likelihood from reparameterized_f_g_h(): " + str(-hessLogLike))
+
+    assert(abs(fmin-gradLogLike) < 0.1)
+    assert(abs(fmin-hessLogLike) < 0.1)
+    fmin = gradLogLike # Use function value from gradient for consistency below
+
+    outstream = open("studyWhatAmI", "w")
+    for i in range(self.nmp):
+      outstream.write(" \"" + parameter_names[i] + " \"\n")
+    outstream.close()
+
+    LOGFILE_WIDTH = 90
+    ndiv = 6
+    dxgh = [0.] * self.nmp # Finite diff shift for grad & hess
+    for i in range(self.nmp):
+      if i+1 < 10:
+        outstream = open(filename + ".0" + str(i+1), "w")
+      else:
+        outstream = open(filename + "."  + str(i+1), "w")
+      print("\nRefined Parameter #:" + str(i+1) + " " + self.macrocycle_parameter_names()[i])
+      print("Centered on " + self.to_sci_format(old_x[i]))
+      xmin = old_x[i] - 2.*ls[i]
+      dxgh[i] = ls[i]/50 # Small compared to exploration of function value
+      if bounds_present and bounds[i].lower_bounded():
+        xmin = max(xmin,bounds[i].lower_limit()+dxgh[i]) # Allow room for FD calcs
+        print("Lower limit: " + self.to_sci_format(bounds[i].lower_limit()))
+      else: # "Unbounded" parameters may have limits depending on correlations
+        g_Fake = [0.] * self.nmp
+        g_Fake[i] = ls[i]/10. # Put in range of plausible shift
+        max_dist = self.maximum_distance(old_x,g_Fake)[0]
+        fmax = sys.float_info.max
+        ftol = sys.float_info.epsilon
+        specialLimit = old_x[i]-max_dist*g_Fake[i] if (max_dist < fmax-ftol) else -fmax
+        if specialLimit > xmin:
+          xmin = specialLimit+dxgh[i]
+          print("Special lower limit: "+ self.to_sci_format(specialLimit))
+
+      xmax = old_x[i] + 2.*ls[i]
+      if bounds_present and bounds[i].upper_bounded():
+        xmax = min(xmax,bounds[i].upper_limit()-dxgh[i])
+        print("Upper limit: "+ self.to_sci_format(bounds[i].upper_limit()))
+      else:
+        g_Fake = [0.] * self.nmp
+        g_Fake[i] = -ls[i]/10.
+        max_dist = self.maximum_distance(old_x,g_Fake)[0]
+        fmax = sys.float_info.max
+        ftol = sys.float_info.epsilon
+        specialLimit = old_x[i]-max_dist*g_Fake[i] if (max_dist < fmax-ftol) else fmax
+        if specialLimit < xmax:
+          xmax = specialLimit-dxgh[i]
+          print("Special upper limit: " + self.to_sci_format(specialLimit))
+      print("Large shift: "+ self.to_sci_format(ls[i]))
+      print("                                                                      FD curv    FD curv")
+      print(" parameter   func-min    gradient   curvature  crv*lrg^2   FD grad   from func  from grad")
+      dx = (xmax-xmin)/ndiv
+      for j in range(ndiv+1):
+        x[i] = xmin + j*dx
+        self.set_reparameterized_parameters(x)
+        f_g = self.reparameterized_target_gradient()
+        gradLogLike = f_g[0]
+        g           = f_g[1]
+        df = gradLogLike - fmin
+        f_g_h = self.reparameterized_target_gradient_hessian()
+        h           = f_g_h[2].deep_copy()
+        thisx = x[i] # Save before finite diffs
+        x[i] = x[i] + dxgh[i]
+        self.set_reparameterized_parameters(x)
+
+        f_g = self.reparameterized_target_gradient()
+        fplus = f_g[0]
+        gplus = f_g[1]
+        x[i] = x[i] - 2*dxgh[i] # Other side of original x
+        self.set_reparameterized_parameters(x)
+
+        f_g = self.reparameterized_target_gradient()
+        fminus = f_g[0]
+        gminus = f_g[1]
+
+        fdgrad = (fplus - fminus)/(2.*dxgh[i])
+        fdh_from_F = (fplus+fminus-2*gradLogLike)/(dxgh[i]**2)
+        fdh_from_g = (gplus[i] - gminus[i])/(2.*dxgh[i])
+
+        x[i] = thisx # Restore
+
+        c_str = "%+.4e %+.3e %+.4e %+.4e %+.2e %+.3e %+.3e %+.3e" % \
+                (x[i],df,g[i],h[i,i],h[i,i]*(ls[i]**2),fdgrad,fdh_from_F,fdh_from_g)
+        c_str = c_str[0:LOGFILE_WIDTH]
+        print(c_str)
+        outstream.write(str(x[i]) + " " + str(df) + " " + str(g[i]) + " " + str(h[i,i]) + " " + str(fdgrad) + " " + str(fdh_from_g) + "\n")
+
+      x[i] = old_x[i]
+      outstream.close()
+    # Finite difference tests for off-diagonal Hessian elements
+    if is_diagonal == False:
+      first = True
+      self.set_reparameterized_parameters(x)
+      f_g = self.reparameterized_target_gradient()
+      f_g_h = self.reparameterized_target_gradient_hessian()
+      h = f_g_h[2].deep_copy()
+      for i in range(self.nmp-1):
+        for j in range(i+1, self.nmp):
+          if h[i,j] != 0.: # Hessian may be sparse
+            if first == True:
+              print("\n")
+              print("Off-diagonal Hessian elements at current values")
+              print("Parameter #s   Hessian     FD from grad")
+              first = False
+            x[j] = x[j] + dxgh[j]
+            self.set_reparameterized_parameters(x)
+
+            f_g = self.reparameterized_target_gradient()
+            gplus = f_g[1]
+            x[j] = x[j] - 2*dxgh[j] # Other side of original x
+            self.set_reparameterized_parameters(x)
+
+            f_g = self.reparameterized_target_gradient()
+            gminus = f_g[1]
+            fdhess = (gplus[i] - gminus[i])/(2.*dxgh[j])
+
+            c_str = "%4i %4i    %+.4e   %+.4e" % \
+                    (i+1,j+1,h[i,j],fdhess)
+            c_str = c_str[0:LOGFILE_WIDTH]
+            print(c_str)
+            x[j] = old_x[j]
+
+    print("\n")
+    self.set_reparameterized_parameters(old_x)
+
+  def finite_difference_gradient(self, frac_large):
+    # Fraction of large shift to use for each type of function should be
+    # investigated by numerical tests, varying by, say, factors of two.
+    # Gradient is with respect to original parameters, so no reparameterisation is done
+    # the scheme is g_i(x) ~= (f(x + sz_i) - f(x))/sz_i, unless we are at an upper bound,
+    # in which case the scheme is g_i(x) ~= (f(x) - f(x - sz_i))/sz_i
+    Gradient = [0.] * self.nmp
+
+    bounds = self.bounds()
+    bounds_present = False if (len(bounds) == 0) else True
+    f = fplus = fminus = sz = 0.
+    x = self.get_macrocycle_parameters()
+    old_x = x[:] #slice to force deep_copy
+    ls = self.macrocycle_large_shifts()
+    self.set_macrocycle_parameters(x) # paranoia
+    f = self.target()
+    for i in range(self.nmp):
+      sz = frac_large*ls[i]
+
+      x[i] = old_x[i] + sz
+      if bounds_present and bounds[i].upper_bounded() and x[i] > bounds.upper_limit():
+        x[i] = old_x[i] - sz
+        if bounds[i].lower_bounded() and x[i] < bounds[i].lower_limit():
+          # if this part of the code is reached it means that x+sz is greater than the
+          # upper bound, and x-sz is lower than the lower bound, so you should reduce
+          # either the large shift for the relevant parameter or frac_large. (Or change
+          # your bounds)
+          assert(False)
+        self.set_macrocycle_parameters(x)
+        fminus = self.target()
+        Gradient[i] = (f - fminus)/sz
+      else:
+        self.set_macrocycle_parameters(x)
+        fplus = self.target()
+        Gradient[i] = (fplus - f)/sz
+
+      x[i] = old_x[i]
+    self.set_macrocycle_parameters(old_x)
+    return (f, Gradient)
+
+  def finite_difference_hessian_by_gradient(self, frac_large, do_repar): pass
+
+  def finite_difference_curvatures_by_gradient(self, frac_large, do_repar): pass
+
+  def finite_difference_hessian_by_function(self, frac_large, do_repar): pass
+
+  def finite_difference_curvature_by_function(self, frac_large, do_repar): pass
+
+  def to_sci_format(self, f):
+    """
+    Format a float as a string in scientific notation.
+    Done this way as a separate function to match the c++ code layout.
+    """
+    return str(f)
+
+  def maximum_distance(self, x, p):
+    """
+    Return:
+     The multiple of the search vector p that x can be shifted by before
+     hitting the furthest bound. Used to define the limit for line search.
+     The vector of allowed shifts for each parameter, which can be used to
+     decide which parameters can't be moved along the search direction.
+    """
+
+    max_dist, ZERO = 0., 0.
+    dist = [-1.] * self.nmp # multiple of p allowed before hitting box bound, or . -1. used to indicate can't move, i.e. at a bound
+    bounds = self.reparameterized_bounds()
+    bounded = [False] * self.nmp # given to maximum_distance_special
+
+    if len(bounds) != 0:
+      for i in range(self.nmp):
+        if (p[i] < ZERO and bounds[i].lower_bounded()) or (p[i] > ZERO and bounds[i].upper_bounded()):
+          bounded[i] = True
+          limit = bounds[i].lower_limit() if (p[i] < ZERO) else bounds[i].upper_limit()
+          dist[i] = (limit-x[i])/p[i] # if we are in bounds will positive, on bounds, is 0.
+        max_dist = max(max_dist,dist[i])
+
+    if len(bounds) == 1 and bounded[0]: #there can't be any correlations
+      return (max_dist, dist)
+    else:
+      # The rationale behind maximum_distance_special() is to provide a way to impose non-linear
+      # equality constraints.
+      # Correlated, i.e. equality constrained parameters are checked here, updating
+      # bounded and dist if relevant.
+      # If correlated parameters are also limited by overall upper and lower bounds,
+      # those can be set as well for the normal limit checks above.
+      max_dist = max(max_dist,self.maximum_distance_special(x,p,bounded,dist,max_dist))
+
+    # If any parameters are unbounded, search can carry on essentially indefinitely
+    for i in range(self.nmp):
+      if bounded[i] == False:
+        max_dist = 1000000.
+        break
+    return (max_dist, dist)
+
+  def adjust_hessian(self, h):
+    """
+    Return an "adjusted" if necessary, and a flag to say whether an
+    adjustment was necessary
+
+    Eliminate non-positive curvatures (diagonal elements of the hessian).
+    Return true if any curvatures were non-positive.
+
+    Determine mean factor by which curvatures differ from 1/largeShift^2
+    from parameters with positive curvatures.  This gives the average
+    curvature that would be obtained if all the parameters were scaled
+    so that their largeShift values were one.
+    Expected curvatures (consistent with relative largeShift values) are
+    computed from this and used to replace non-positive curvatures.
+    Corresponding off-diagonal terms are set to zero.
+    RJR Note 31/5/06: tried setting a minimum fraction of the expected
+    curvature, but this degraded convergence and depended too much on
+    accurate estimation of largeShift.
+    DHS Note 30/4/19: if this looks hacky, that's because it is. This
+    looks to be a fix implemented when only diagonal hessians were
+    considered as it is still possible to have negative eigen values
+    after this step for non-diagonal hessians.
+    To see this consider the case [1 3] which has eigen values (4,-2)
+                                  [3 1]
+    """
+
+    meanfac, ZERO = 0., 0.
+    queue_new_hessian = False
+    npos = 0  #number of positive diagonal hessian entries
+    ls = self.reparameterized_large_shifts()
+    for i in range(self.nmp):
+      if h[i,i] > ZERO:
+        npos += 1
+        meanfac += h[i,i] * ls[i]**2
+    if npos != 0:
+      meanfac /= npos
+      for i in range(self.nmp):
+        if h[i,i] <= ZERO:
+          h[i,i] = meanfac/(ls[i]**2)
+          for j in range(i+1, self.nmp):
+            h[i,j] = h[j,i] = ZERO
+    else: # Fall back on diagonal matrix based on ls shift values
+      for i in range(self.nmp):
+        h[i,i] = 100./(ls[i] ** 2)
+        for j in range(self.nmp):
+          if i != j: h[i,j] = h[j,i] = ZERO
+    if npos != self.nmp: queue_new_hessian = True
+    return (h, queue_new_hessian)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/bounds.py
+from __future__ import division
+
+class Bounds(object):
+  def __init__(self):
+    self.lower_bounded_ = False
+    self.upper_bounded_ = False
+    self.lower_limit_ = 0.
+    self.upper_limit_ = 0.
+
+  def lower_off(self):
+    self.lower_bounded_ = False
+
+  def upper_off(self):
+    self.upper_bounded_ = False
+
+  def lower_on(self, l):
+    self.lower_bounded_ = True
+    self.lower_limit_ = l
+
+  def upper_on(self, u):
+    self.upper_bounded_ = True
+    self.upper_limit_ = u
+
+  def on(self, l, u):
+    self.lower_bounded_ = self.upper_bounded_ = True
+    self.lower_limit_ = l
+    self.upper_limit_ = u
+
+  def off(self):
+    self.lower_bounded_ = self.upper_bounded_ = False
+
+  def lower_bounded(self):
+    return self.lower_bounded_
+
+  def upper_bounded(self):
+    return self.upper_bounded_
+
+  def lower_limit(self):
+    return self.lower_limit_
+
+  def upper_limit(self):
+    return self.upper_limit_
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/compulsory.py
+from __future__ import print_function
+from __future__ import division
+
+class Compulsory:
+  def target(self):
+    """
+    Return the value of the target function for the current
+    macrocycle parameter values
+    """
+    raise NotImplementedError("Please implement function target")
+
+  def get_macrocycle_parameters(self):
+    """
+    Return the current values of the parameters that are being refined this
+    macrocycle. The dtmin user can store these in their refine object however
+    they see fit.
+    """
+    raise NotImplementedError("Please implement function get_macrocycle_parameters")
+
+  def set_macrocycle_parameters(self, newx):
+    """
+    Given a list or flex array of values for the parameters that are being refined
+    this macrocycle, update the refine object's internal representation of these values.
+    Doesn't return anything.
+    """
+    raise NotImplementedError("Please implement function set_macrocycle_parameters")
+
+  def macrocycle_large_shifts(self):
+    """
+    Return a list of large shift values for the parameters that are being refined
+    this macrocycle.
+    """
+    raise NotImplementedError("Please implement function macrocycle_large_shifts")
+
+  def set_macrocycle_protocol(self, macrocycle_protocol):
+    """
+    This gives you the ability to control the subset of parameters refined in any
+    macrocycle or any other parameter that varies with macrocycle.
+    Changes to the macrocycle parameters are controlled through class member variables.
+    The RefineBase class' member variable nmp must be set in this function.
+    """
+    raise NotImplementedError("Please implement function set_macrocycle_protocol")
+
+  def macrocycle_parameter_names(self):
+    """
+    Return a list of strings naming each of the parameters being refined this macrocycle.
+    """
+    raise NotImplementedError("Please implement function macrocycle_parameter_names")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/min_logging.py
+from __future__ import print_function
+from __future__ import division
+
+DEF_TAB = 3
+
+SILENCE = 0 #
+LOGFILE = 1 #
+VERBOSE = 2 #
+FURTHER = 3 #
+TESTING = 4 #
+
+class Logging:
+  def initial_statistics(self): pass
+
+  def current_statistics(self): pass
+
+  def final_statistics(self): pass
+
+  def __init__(self):
+    self.output_level = 0 #default all output
+
+  ### printing methods
+
+  def log_output(self, depth, output_level, string, add_return):
+    if output_level <= self.output_level:
+      print(depth*DEF_TAB*' ' + string, end='\n' if add_return else '')
+
+  def log_tab_printf(self, t, output_level, text, fformat): #format is already taken
+    if output_level <= self.output_level:
+      print((t*DEF_TAB*' ' + text) % fformat, end = "")
+
+  def log_blank(self, output_level):
+    self.log_output(0,output_level,"",True)
+
+  def log_underline(self, output_level, string):
+    self.log_blank(output_level)
+    self.log_tab(1,output_level, string)
+    self.log_line(1,output_level, len(string),'-')
+
+  def log_line(self, t, output_level, len, c):
+    self.log_tab(t, output_level,len*c)
+
+  def log_protocol(self, output_level, macrocycle_protocol):
+    self.log_underline(output_level, "Protocol:")
+    if (macrocycle_protocol[0] == "off"):
+      self.log_tab(1,output_level,"No parameters to refine this macrocycle")
+      self.log_blank(output_level)
+    else:
+      for i in range(len(macrocycle_protocol)):
+        self.log_tab(2,output_level,macrocycle_protocol[i].upper() + " ON")
+      self.log_blank(output_level)
+
+  def log_tab(self, t, output_level, text, add_return=True):
+    self.log_output(t, output_level, text, add_return)
+
+  def log_ellipsis_start(self, output_level, text):
+    self.log_blank(output_level)
+    self.log_output(1,output_level,text+"...",True)
+
+  def log_ellipsis_end(self, output_level):
+    self.log_output(2,output_level,"...Done",True)
+    self.log_blank(output_level)
+
+  def log_parameters(self, output_level, macrocycle_parameter_names):
+    self.log_tab(1,output_level, "Parameters:")
+    for i in range(len(macrocycle_parameter_names)):
+      self.log_tab(1,output_level, "Refined Parameter #:" + str(i+1) + " " + macrocycle_parameter_names[i])
+
+  def log_hessian(self, output_level, hessian, macrocycle_parameter_names):
+    max_dim = 100 #very generous but not infinite
+    (n_rows, n_cols) = hessian.all()
+    assert(n_rows == n_cols)
+    self.log_tab(1,output_level,"Matrix")
+    if n_rows > max_dim:
+      self.log_tab(1,output_level,"Matrix is too large to write to log: size = "+str(n_rows))
+    for i in range(min(n_rows, max_dim-1)):
+      hess = ""
+      line = ""
+      for j in range(min(n_cols, max_dim-1)):
+        hess = ("%+3.1e " % hessian[i,j])
+        if hessian[i,j] == 0:
+          line += " ---0--- "
+        else:
+          line += hess
+      line = line[:-1] # cut the last space off for neatness
+      if n_rows >= max_dim:
+        self.log_tab_printf(1,output_level,"%3d [%s etc...]\n",(i+1,line))
+      else:
+        self.log_tab_printf(1,output_level,"%3d [%s]\n",(i+1,line))
+    if n_rows >= max_dim:
+      self.log_tab_printf(0,output_level," etc...\n",())
+    self.log_blank(output_level)
+    self.log_tab(1,output_level,"Matrix Diagonals")
+    for i in range(n_rows):
+      self.log_tab_printf(1,output_level,"%3d [% 9.4g] %s\n",
+          (i+1,hessian[i,i],
+          macrocycle_parameter_names[i] if (i < len(macrocycle_parameter_names)) else ""))
+    self.log_blank(output_level)
+
+  def log_vector(self, output_level, what, vec, macrocycle_parameter_names):
+    self.log_tab(1,output_level,what)
+    for i in range(len(vec)):
+      self.log_tab_printf(1,output_level,"%3d [% 9.4g] %s\n",
+          (i+1,vec[i],
+          macrocycle_parameter_names[i] if (i < len(macrocycle_parameter_names)) else ""))
+    self.log_blank(output_level)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/minimizer.py
+from __future__ import print_function
+from __future__ import division
+from scitbx.array_family import flex
+from scitbx.dtmin.realsymmetricpseudoinverse import RealSymmetricPseudoInverse
+from math import sqrt
+
+SILENCE = 0 #
+LOGFILE = 1 #
+VERBOSE = 2 #
+FURTHER = 3 #
+TESTING = 4 #
+
+DEF_TAB = 3
+
+class Minimizer(object):
+  def __init__(self, output_level):
+    self.output_level = output_level
+    self.func_count_ = 0 #for counting the number of function evaluations in the line search
+    self.parameter_names_ = None
+
+  def run(self, refine_object, protocol, ncyc, minimizer_type, study_params=False):
+    """Run the minimization for refine_object leaving it the minimized state
+    refine_object:  object instantiated from a class that inherits from RefineBase
+                    and that implements, at a minimum, the functions in Compulsory.py
+    protocol:       list of list of strings. e.g. [["first"],["second"],["all"]]
+    ncyc:           maximum number of microcycles to perform each macrocycle before
+                    stopping, 50 is fairly typical
+    minimizer_type: string setting the method of finding the direction to perform
+                    the line-search, must be either "bfgs" or "newton"
+    study_params:   boolean to trigger the running of the study_parameters
+                    routine at the end of each macrocycle, to allow debugging of
+                    gradient and curvature calculations by comparison with values
+                    calculated by finite differences
+    """
+
+    refine_object.output_level = self.output_level
+
+    self.check_input(protocol, ncyc, minimizer_type)
+
+    refine_object.initial_statistics()
+
+    for macro_cycle in range(len(protocol)):
+      self.log_underline(TESTING,"MACROCYCLE #" + str(macro_cycle+1) + " OF " + str(len(protocol)))
+
+      refine_object.set_macrocycle_protocol(protocol[macro_cycle])
+      self.log_protocol(LOGFILE, protocol[macro_cycle])
+      if refine_object.nmp == 0:
+        continue # skip this macrocycle
+
+      refine_object.setup()
+
+      self.parameter_names_ = refine_object.macrocycle_parameter_names()
+      self.log_parameters(VERBOSE, self.parameter_names_)
+
+      refine_object.reject_outliers()
+
+      self.log_ellipsis_start(LOGFILE,"Performing Optimisation")
+      # not implementing create_report() code in the python version
+
+      calc_new_hessian = True                                       # for bfgs
+      queue_new_hessian = False # to be set during bfgs call        # for bfgs
+      ncyc_since_hessian_calc = 0                                   # for bfgs
+      previous_x = flex.double(refine_object.nmp)                          # for bfgs
+      previous_g = flex.double(refine_object.nmp)                          # for bfgs
+      previous_h_inverse_approximation = flex.double(refine_object.nmp**2) # for bfgs
+      previous_h_inverse_approximation.resize(flex.grid(refine_object.nmp,refine_object.nmp))
+      termination_reason = ""
+
+      f, initial_f, previous_f, required_decrease = 0., 0., 0., 0.
+      EPS = 1.E-10
+      FTOL = 1.E-6
+      TWO = 2.
+      too_small_shift, too_small_decrease, zero_gradient = False, False, False
+
+      f = initial_f = previous_f = refine_object.target()
+
+      self.log_blank(VERBOSE)
+      self.log_underline(VERBOSE,"Stats before starting refinement")
+      refine_object.current_statistics()
+      self.log_tab(1,VERBOSE,"Optimisation statistics, macrocycle #" + str(macro_cycle+1))
+      self.log_tab_printf(1,VERBOSE,"Cycle     %-15s %-18s %-18s\n",("end-this-cycle","change-from-start","change-from-last"))
+      self.log_tab_printf(1,VERBOSE,"Cycle#%-2d %15.3f %18.3s %18.3s\n",(0,initial_f,"",""))
+
+      ########################### MINIMIZATION CYCLES ######################################
+      cycle = 0
+      while True:
+        self.log_underline(TESTING,"MACROCYCLE #" + str(macro_cycle+1) + ": CYCLE #" + str(cycle+1))
+
+        assert(self.check_in_bounds(refine_object))
+
+        #create_report() code goes here
+
+        previous_f = f
+        too_small_shift = too_small_decrease = zero_gradient = queue_new_hessian = False # reset
+        required_decrease = FTOL*(abs(f)+abs(previous_f)+EPS)/TWO # to not converge this cycle
+
+        if minimizer_type.lower() == "bfgs":
+          (f,ncyc_since_hessian_calc, queue_new_hessian, too_small_shift, zero_gradient, previous_x, previous_g, previous_h_inverse_approximation) = \
+            self.bfgs(refine_object,
+                    calc_new_hessian,                 # tells bfgs to calculate a new hessian
+                    ncyc_since_hessian_calc,          # reset or incremented by bfgs
+                    required_decrease,                # for the line search
+                    previous_x,                       # for bfgs to update h_inverse_approximation
+                    previous_g,                       # for bfgs to update h_inverse_approximation
+                    previous_h_inverse_approximation) # for bfgs to update h_inverse_approximation
+
+          self.log_hessian(TESTING,previous_h_inverse_approximation, self.parameter_names_)
+        elif minimizer_type.lower() == "newton":
+          (f, too_small_shift) = \
+            self.newton(refine_object,
+                        required_decrease)    # for the line search
+
+        refine_object.current_statistics()
+        self.log_tab_printf(1,VERBOSE,"Cycle#%-2d %15.3f %18.3f %18.3f\n",(cycle+1,f,(f-initial_f),(f-previous_f)))
+
+        too_small_decrease = (previous_f - f < required_decrease)
+
+        (termination_reason, calc_new_hessian) = self.check_termination_criteria(
+                            too_small_shift,
+                            too_small_decrease,
+                            zero_gradient,
+                            queue_new_hessian,
+                            ncyc_since_hessian_calc,
+                            cycle,
+                            ncyc)
+
+        #create_report()
+        #create_report()
+        #create_report()
+        #create_report()
+        #create_report()
+        #create_report()
+        #create_report()
+        #create_report()
+
+        #string is empty for continuation
+        if len(termination_reason) != 0:
+          self.log_tab(2,FURTHER, "termination reason: " + str(termination_reason))
+          break
+
+        cycle += 1
+      ################################## END OF MINIMIZATION CYCLES ####################
+
+      self.log_ellipsis_end(LOGFILE)
+      if cycle == ncyc-1:
+        self.log_tab(1,LOGFILE,"--- Iteration limit reached at cycle " + str(ncyc) + " ---")
+      else:
+        self.log_tab(1,LOGFILE,"--- Convergence before iteration limit (" + str(ncyc) +") at cycle " + str(cycle+1) + " ---")
+      self.log_tab(1,LOGFILE,"Start-this-macrocycle End-this-macrocycle Change-this-macrocycle")
+      self.log_tab_printf(1,LOGFILE,"%13.3f %21.3f %21.3f\n",(initial_f,f,(f-initial_f)))
+      self.log_blank(LOGFILE)
+      refine_object.current_statistics()
+
+      # study behaviour of function, gradient and curvature as parameters varied around minimum
+      # using mathematica file studyParams_short.nb
+      if study_params:
+        refine_object.study_parameters()
+
+      refine_object.cleanup() #clean up ready for next macrocycle
+    #end of macrocycle loop
+
+    refine_object.finalize()
+    refine_object.final_statistics()
+
+  def check_input(self, protocol, ncyc, minimizer_type):
+    """Check that the protocol, ncyc and MINIMSER arguments are valid"""
+
+    if len(protocol) == 0:
+      raise RuntimeError("No protocol for refinement")
+
+    some_refinement = False
+    for macro_cycle in range(len(protocol)):
+      if len(protocol[macro_cycle]) != 0:
+        some_refinement = True
+        break
+
+    if some_refinement == False:
+      self.log_tab(1,LOGFILE,"No refinement of parameters")
+      self.log_blank(LOGFILE)
+      return
+
+    allowed_minimizers = set(["bfgs", "newton"])
+    if minimizer_type.lower() not in allowed_minimizers:
+      raise RuntimeError("Invalid minimizer_type value: " + minimizer_type)
+
+    if ncyc < 1:
+      raise RuntimeError("NYC must be 1 or larger")
+
+  def bfgs(self, refine_object, calc_new_hessian, ncyc_since_hessian_calc, required_decrease, previous_x, previous_g, previous_h_inverse_approximation):
+    """Move the refinable parameters by one bfgs step"""
+
+    queue_new_hessian = False
+    too_small_shift = False
+    zero_gradient = False
+    x = refine_object.get_reparameterized_parameters()
+    g = flex.double(refine_object.nmp)
+    h_inverse_approximation = flex.double(refine_object.nmp**2)
+    h_inverse_approximation.resize(flex.grid(refine_object.nmp,refine_object.nmp))
+    min_dx_over_esd = 0.1
+    f = 0.
+
+    self.log_tab(1, TESTING, "== BFGS ==")
+
+    if calc_new_hessian:
+      self.log_tab(1,TESTING,"== Newton Step ==")
+
+      calc_new_hessian = False # reset
+      ncyc_since_hessian_calc = 0
+
+      self.log_tab(1,TESTING,"BFGS: Gradient and New Hessian")
+      self.log_ellipsis_start(TESTING,"BFGS: Calculating Gradient and New Hessian")
+
+      f_g_h = refine_object.reparameterized_adjusted_target_gradient_hessian()
+      starting_f               = f_g_h[0]
+      g                        = f_g_h[1]
+      h                        = f_g_h[2].deep_copy() # does this need to be a deep copy ???
+      is_hessian_diagonal      = f_g_h[3]
+      queue_new_hessian = f_g_h[0]
+
+      self.log_ellipsis_end(TESTING)
+      self.log_blank(TESTING)
+      self.log_vector(TESTING, "BFGS::Newton: Gradient", g, self.parameter_names_)
+      self.log_blank(TESTING)
+
+      self.log_hessian(TESTING, h, self.parameter_names_)
+      self.log_blank(TESTING)
+
+      if flex.double(g).all_eq(0):  #convert g to a flex.double to get the all_eq method
+        queue_new_hessian = False
+        zero_gradient = True
+        return (starting_f, ncyc_since_hessian_calc, queue_new_hessian, too_small_shift, zero_gradient, x, g, previous_h_inverse_approximation)
+
+      #Set up to repeat perturbed Newton step if insufficient progress
+      hii_rms = self.hessian_diag_rms(h)
+      filtered_last = 0
+      f = starting_f
+      previous_x = x
+      ntry = 0
+      while ntry < 3 and (starting_f-f < required_decrease) and (filtered_last < refine_object.nmp):
+        if is_hessian_diagonal:
+          for i in range(refine_object.nmp):
+            h_inverse_approximation[i,i] = 1/(h[i,i]+ntry*hii_rms)
+        else:
+          min_to_filter = 0
+          if ntry>0:
+            min_to_filter = filtered_last + max(1,refine_object.nmp/10)
+            if min_to_filter >= refine_object.nmp:
+              min_to_filter = min(filtered_last+1, refine_object.nmp-1)
+          filtered = 0
+          (h_inverse_approximation, filtered) = RealSymmetricPseudoInverse(h, filtered, min_to_filter)
+
+          if filtered:
+            self.log_tab_printf(1,TESTING,"Filtered %i small eigenvectors\n",filtered)
+          self.log_tab(1,TESTING,"Pseudoinverse Hessian")
+          self.log_hessian(TESTING,h_inverse_approximation,self.parameter_names_)
+
+          filtered_last = filtered
+
+        g = flex.double(g)
+        p = - h_inverse_approximation.matrix_multiply(g)
+        self.log_vector(TESTING,"BFGS::Newton: Search Vector, p",p,self.parameter_names_)
+        self.log_blank(TESTING)
+
+        # Figure out how far linesearch has to go to shift at least one parameter
+        # by (minimum shift/esd) * esd, using inverse Hessian to estimate covariance matrix
+        required_shift = self.required_shift(min_dx_over_esd, p, h_inverse_approximation)
+
+        (f, too_small_shift) = self.line_search(refine_object,x,f,g,p,1.,required_decrease,required_shift,too_small_shift)
+        ntry += 1
+      previous_h_inverse_approximation = h_inverse_approximation
+    else:
+      ncyc_since_hessian_calc += 1
+
+      self.log_tab(1,TESTING,"BFGS: Gradient")
+      self.log_ellipsis_start(TESTING,"BFGS: Calculating Gradient")
+
+      (f, g) = refine_object.reparameterized_target_gradient()
+
+      if flex.double(g).all_eq(0):  #convert g to a flex.double to get the all_eq method
+        calc_new_hessian      = False
+        queue_new_hessian = False
+        return (f, ncyc_since_hessian_calc, queue_new_hessian, too_small_shift, zero_gradient, x, g, previous_h_inverse_approximation)
+
+      dx = flex.double(x) - flex.double(previous_x)
+      dg = flex.double(g) - flex.double(previous_g)
+      Hdg = previous_h_inverse_approximation.matrix_multiply(dg)
+      u = refine_object.nmp * [0.]
+      dx_dot_dg  = dx.dot(dg)
+      dg_dot_Hdg = dg.dot(Hdg)
+
+      if dx_dot_dg <= 0:
+        self.log_tab(1,TESTING,"BFGS: dx_dot_dg <= 0: restarting with new Hessian")
+        queue_new_hessian = True
+        return (f, ncyc_since_hessian_calc, queue_new_hessian, too_small_shift, zero_gradient, x, g, previous_h_inverse_approximation)
+      assert(dg_dot_Hdg)
+      # BFGS update of the approximation to the inverse hessian
+      # see Numerical Recipes in Fortran, Second Ed. p. 420
+      # h_inverse_approximation contains the approximation to the inverse hessian
+      for i in range(refine_object.nmp):
+        u[i] = dx[i]/dx_dot_dg - Hdg[i]/dg_dot_Hdg
+      for i in range(refine_object.nmp):
+        for j in range(refine_object.nmp):
+          h_inverse_approximation[i,j] = previous_h_inverse_approximation[i,j] + dx[i]*dx[j]/dx_dot_dg - Hdg[i]*Hdg[j]/dg_dot_Hdg + dg_dot_Hdg*u[i]*u[j]
+
+      self.log_blank(TESTING)
+      self.log_hessian(TESTING,h_inverse_approximation, self.parameter_names_)
+      self.log_blank(TESTING)
+
+      g = flex.double(g)
+      p = - h_inverse_approximation.matrix_multiply(g)
+
+      self.log_vector(TESTING,"BFGS: Search Vector, p",p,self.parameter_names_)
+      self.log_blank(TESTING)
+
+      # Figure out how far linesearch has to go to shift at least one parameter
+      # by minimum shift/esd, using inverse Hessian to estimate covariance matrix
+      required_shift = self.required_shift(min_dx_over_esd, p, h_inverse_approximation)
+
+      (f, too_small_shift) = self.line_search(refine_object,x,f,g,p,1,required_decrease,required_shift,too_small_shift)
+
+      # Check for positive grad
+      if p.dot(g) >= 0.:
+        self.log_tab(1,TESTING, "BFGS: p.g >= 0: restart with new Hessian")
+        queue_new_hessian = True
+
+      previous_h_inverse_approximation = h_inverse_approximation
+    return (f, ncyc_since_hessian_calc, queue_new_hessian, too_small_shift, zero_gradient, x, g, previous_h_inverse_approximation)
+
+  def newton(self, refine_object, required_decrease):
+    """Move the refinable parameters by one newton step"""
+
+    too_small_shift = False
+    f = 0.
+    x = refine_object.get_reparameterized_parameters()
+    min_dx_over_esd = 0.1
+
+    # ESD is the estimated standard deviation. Why we are considering standard deviations at this
+    # point in the code may not be immediately obvious.
+    # The naming only really makes snse when we are minimising a log likelihood function
+    # If the likelihood can locally be approxmated by a
+    # multivariate normal distribution, then the log likelihood may be approximated by a multidimensional
+    # quadratic with its matrix being the inverse of the covariance matrix of the distribution.
+
+    self.log_tab(1,TESTING,"==NEWTON==")
+    self.log_tab(1,TESTING,"Newton: Gradient and Hessian")
+    self.log_ellipsis_start(TESTING,"Newton: Calculating the gradient and hessian")
+
+    f_g_h = refine_object.reparameterized_adjusted_target_gradient_hessian()
+    f                     = f_g_h[0]
+    g                     = f_g_h[1]
+    h                     = f_g_h[2]
+    is_hessian_diagonal   = f_g_h[3]
+    #queue_new_hessian = f_g_h[4] #unused
+
+    h_inv = h # (shallow copy)
+
+    if flex.double(g).all_eq(0): # convert to flex double to get all_eq method
+      self.log_tab(1,TESTING,"Newton: Zero gradient: exiting")
+      return (f, too_small_shift)
+
+    self.log_ellipsis_end(TESTING)
+    self.log_blank(TESTING)
+    self.log_vector(TESTING,"Newton: Gradient",g,self.parameter_names_)
+    self.log_blank(TESTING)
+    self.log_tab(1,TESTING,"Newton: After adjusting negative diagonals, but before Inverse")
+    self.log_hessian(TESTING,h,self.parameter_names_)
+
+    # invert hessian
+    if is_hessian_diagonal:
+      for i in range(refine_object.nmp):
+        h[i,i] = 1/h[i,i]
+    else:
+      filtered = 0
+      (h_inv, filtered) = RealSymmetricPseudoInverse(h, filtered)
+      if filtered:
+        self.log_tab_printf(1,TESTING,"Newton: Filtered %i negative or small eigenvectors\n",filtered)
+      self.log_tab(1,TESTING,"Newton: After Computing Pseudo-Inverse")
+      self.log_hessian(TESTING,h_inv,self.parameter_names_)
+
+    # search vector p found from the Newton equation: p = - h_inv * g
+    g = flex.double(g)
+    p = -h_inv.matrix_multiply(g)
+
+    self.log_vector(TESTING,"Newton: Parameters",x,self.parameter_names_)
+    self.log_vector(TESTING,"Newton: Search Vector",p,self.parameter_names_)
+    self.log_blank(TESTING)
+
+    # Figure out how far linesearch has to go to shift at least one parameter
+    # by minimum shift/esd, using inverse Hessian to estimate covariance matrix
+    required_shift = self.required_shift(min_dx_over_esd, p, h_inv)
+
+    (f, too_small_shift) = self.line_search(refine_object,x,f,g,p,1.,required_decrease,required_shift,too_small_shift)
+    self.log_tab_printf(1,TESTING,"Newton Function %10.6f\n", f)
+    return (f, too_small_shift)
+
+  def line_search(self, refine_object, oldx, f, g, p, starting_distance, required_decrease, required_shift, too_small_shift):
+    """Step along search direction p, trying to find a good enough local minimum"""
+
+    too_small_shift = False
+    self.func_count_ = 0
+
+    x = flex.double(refine_object.nmp)
+
+    ZERO, HALF, ONE, TWO, FIVE = 0., .5, 1., 2., 5.
+    GOLDEN = (FIVE**.5 + ONE) / 2
+    GOLDFRAC = (GOLDEN-ONE)/GOLDEN
+    WOLFEC1 = 1e-4
+    DTOL = 1e-5
+
+    # Check grad of function in direction of line search
+    grad = p.dot(g)
+    if grad >= ZERO:
+      self.log_tab(1,TESTING,"Grad of target in search direction >= 0: grad = " +str(grad))
+      too_small_shift = True
+      #report
+      return (f, too_small_shift)
+
+    self.log_tab(1,TESTING,"Determining Stepsize")
+    self.log_tab_printf(1,TESTING,"f(  Start  ) = %12.6f\n", f)
+    self.log_tab_printf(1,TESTING,"|",())
+
+    # Put distance each parameter can move before it hits a bound in dist array. If all parameters are
+    # bounded in search direction, need to know maxDist we can move before hitting ultimate bound.
+    (max_dist, dist) = refine_object.maximum_distance(tuple(oldx),tuple(p))
+    if starting_distance > max_dist:
+      if max_dist > ZERO:
+        self.log_tab(1,TESTING,"To avoid exceeding bounds for all parameters, starting distance reduced from "
+              + str(starting_distance) + " to " + str(max_dist))
+        starting_distance = max_dist
+      else:
+        self.log_tab(1,TESTING,"All parameters have hit a bound -- end search")
+        too_small_shift = True
+        #report
+        return (f, too_small_shift)
+
+    # Get largeShifts for damping in shift_parameters
+    macrocycle_large_shifts = refine_object.reparameterized_large_shifts()
+
+    fk, flo, fhi, dk, dlo, dhi = 0., 0., 0., 0., 0., 0.
+
+    #Sample first test point
+    self.log_tab(1,TESTING,"Unit distance = " + str(starting_distance))
+
+    dk = starting_distance
+    fk = self.shift_score(refine_object, dk, x, oldx, p, dist, macrocycle_large_shifts)
+
+    WOLFEFRAC = HALF # 0.5 slightly better in tests of 0,0.25,0.5,1
+    if (dk >= WOLFEFRAC) and (fk < f+WOLFEC1*dk*grad): # Significant fraction of (quasi-)Newton shift # Wolfe condition for first step
+      self.log_tab(1,TESTING,"Satisfied Wolfe condition for first step")
+      self.log_tab_printf(1,TESTING,"Final Target Value: %12.6f distance: %12.6f \n",(fk, dk))
+      self.log_tab(1,TESTING,"Bracketing (A) took " + str(self.func_count_) + " function evaluations")
+      if dk < required_shift:
+        too_small_shift = True
+      #report
+      return (fk, too_small_shift)
+
+    dlo = ZERO
+    flo = f
+
+    if f <= fk: # First step is too big
+      while f <= fk:
+        # Shrink shift until we find a value lower than starting point
+        # Fit quadratic to grad and f at 0 and dk, choose its minimum (but not too small)
+        if dk < starting_distance/1.E10: # Give up if shift too small
+          refine_object.set_reparameterized_parameters(oldx) # Reset x before returning
+          too_small_shift = True
+          self.log_tab(1,TESTING,"line_search: Shift too small")
+          f = fk
+          #report
+          return (f, too_small_shift)
+
+        fhi = fk
+        dhi = dk
+        denom = TWO * (grad*dk+(f-fk))
+        if denom < 0:
+          dk *= min(0.99, max(0.1,grad*dk/denom))
+        else: # unlikely but possible for vanishingly small gradient
+          dk *= 0.1
+        fk = self.shift_score(refine_object, dk, x, oldx, p, dist, macrocycle_large_shifts)
+
+      if fk < f+WOLFEC1*dk*grad:
+        self.log_tab(1,TESTING,"Satisfied Wolfe condition after backtracking")
+        self.log_tab_printf(1,TESTING,"Final Target Value: %12.6f distance: %12.6f \n", (fk, dk))
+        self.log_tab(1,TESTING,"Bracketing (B) took " + str(self.func_count_) + " function evaluations")
+        if dk < required_shift:
+          too_small_shift = True
+        #report
+        return (fk, too_small_shift)
+
+    else: # First step goes down.
+      if dk >= max_dist: # First step already hit ultimate bound
+        dhi = max_dist
+        fhi = fk
+      else:
+        dhi = min(max_dist, (ONE+GOLDEN)*dk)
+        fhi = self.shift_score(refine_object, dhi, x, oldx, p, dist, macrocycle_large_shifts)
+        if (fhi <= fk and
+            dhi >= WOLFEFRAC and       # Significant fraction of (quasi-)Newton shift
+            fhi < f+WOLFEC1*dhi*grad): # Wolfe condition for first step
+          self.log_tab(1,TESTING,"Satisfied Wolfe condition for extended step")
+          self.log_tab_printf(1,TESTING,"Final Target Value: %12.6f distance: %12.6f \n", (fhi, dhi))
+          self.log_tab(1,TESTING,"Bracketing (C) took " + str(self.func_count_) + " function evaluations")
+          if dhi < required_shift:
+            too_small_shift = True
+          #report
+          return (fhi, too_small_shift)
+
+      if (flo > fk) and (fk >= fhi):  # Still not coming up at second step
+        while (fk >= fhi) and (dhi < max_dist):
+          flo = fk
+          dlo = dk
+
+          fk = fhi
+          dk = dhi
+
+          dhi = min(max_dist, dk + GOLDEN*(dk-dlo))
+          fhi = self.shift_score(refine_object, dhi, x, oldx, p, dist, macrocycle_large_shifts)
+          if (fhi <= fk and
+              dhi >= WOLFEFRAC and # Significant fraction of (quasi-)Newton shift
+              fhi < f+WOLFEC1*dhi*grad): # Wolfe condition for first step
+            self.log_tab(1,TESTING,"Satisfied Wolfe condition for further extended step")
+            self.log_tab_printf(1,TESTING,"Final Target Value: %12.6f distance: %12.6f \n", (fhi, dhi))
+            self.log_tab(1,TESTING,"Bracketing (D) took " + str(self.func_count_) + " function evaluations")
+            if dhi < required_shift:
+              too_small_shift = True
+            #report
+            return (fhi, too_small_shift)
+
+        if (dhi >= max_dist) and (fk >= fhi):
+          # Reached boundary without defining bracket.
+          # Use finite differences to test if still going down.
+          # If so, stop this line search.  Otherwise, we've verified bracket.
+          dk = (1.-DTOL)*dhi
+          fk = self.shift_score(refine_object, dk, x, oldx, p, dist, macrocycle_large_shifts)
+          if fk >= fhi:
+            self.shift_parameters(refine_object,dhi,x,oldx,p,dist,macrocycle_large_shifts)
+            self.log_tab(1,TESTING,"Reached boundary without defining bracket")
+            if dhi < required_shift:
+              too_small_shift = True
+            #report
+            return (fhi, too_small_shift)
+      if dk >= WOLFEFRAC and fk < f+WOLFEC1*dk*grad:
+        self.log_tab(1,TESTING,"Satisfied Wolfe condition for bigger than initial step")
+        self.log_tab_printf(1,TESTING,"Final Target Value: %12.6f distance: %12.6f \n", (fk, dk))
+        self.log_tab(1,TESTING,"Bracketing (E) took " + str(self.func_count_) + " function evaluations")
+
+        self.shift_parameters(refine_object,dk,x,oldx,p,dist,macrocycle_large_shifts)  # Set to current best before returning
+        if dk < required_shift:
+          too_small_shift = True
+        #report
+        return (fk, too_small_shift)
+
+    ################### End of Bracketing ###########################
+
+
+    self.log_tab(1,TESTING,"Bracketing (target) took " + str(self.func_count_) + " function evaluations")
+    self.log_tab(1,TESTING,"xlow= " + str(dlo) + ", xhigh= " + str(dhi))
+    dmid = dk
+    fmid = fk
+
+    # BISECTING/INTERPOLATION STARTS HERE (we now know that the value is between dlo and dhi)
+
+    # let tolerance be small but not too close to zero as to ensure our algorithm tries a new value
+    # distinctly different from existing one
+    XTOL = 0.01
+
+    a, b, c = 0., 0., 0.,
+    stepsize = min(dhi-dmid, dmid-dlo)
+    lastlaststepsize = 0.
+    laststepsize = stepsize*TWO # permit first step to actually happen
+    d1, f1, d2, f2 = 0., 0., 0., 0.
+
+    self.log_tab_printf(1,TESTING,"Line Search |",())
+    for i in range(20): # fall-back upper limit on evaluations in interpolation stage
+      (quadratic_coefficients, a, b, c) = self.quadratic_coefficients(flo, fmid, fhi, dlo, dmid, dhi, a, b, c)
+      if quadratic_coefficients: # Make sure there will be quadratic with a minimum
+        self.log_tab(1, TESTING, "Quadratic interpolation used" )
+        dk = -b/(TWO*c)
+        dk = max(dk,dlo)
+        dk = min(dk,dhi)
+
+      else:
+        self.log_tab(1, TESTING, "No quadratic interpolation possible, taking interval midpoint..." )
+        c = ZERO
+        dk = dmid
+
+      lastlaststepsize = laststepsize
+      laststepsize = stepsize
+      stepsize = abs(dk-dmid)
+
+      self.log_tab_printf(0,TESTING," stepsize= %12.6f, laststepsize= %12.6f,  ",(stepsize, laststepsize))
+      if (c > ZERO and                        # i.e. the interval has a local minimum, not a local maximum so proceed.
+          dk-dlo > XTOL*(dhi-dlo) and         # New minimum is sufficiently far from previous points
+          dhi-dk > XTOL*(dhi-dlo) and         # to make quadratic convergence probable.
+          abs(dk-dmid) > XTOL*(dhi-dlo) and
+          stepsize <= HALF*lastlaststepsize): # Steps are decreasing sufficiently in size
+        self.log_tab(1,TESTING,"Use quadratic step")
+        fk = self.shift_score(refine_object, dk, x, oldx, p, dist, macrocycle_large_shifts)
+
+      else: # Golden section instead
+        dk = dmid + GOLDFRAC*(dhi-dmid) if (dhi-dmid >= dmid-dlo) else dmid - GOLDFRAC*(dmid-dlo)
+        self.log_tab(1,TESTING,"Use golden search step")
+        fk = self.shift_score(refine_object, dk, x, oldx, p, dist, macrocycle_large_shifts)
+
+      if (dk < dmid): # Get data sorted by size of shift
+        d1 = dk
+        f1 = fk
+        d2 = dmid
+        f2 = fmid
+
+      else:
+        d1 = dmid
+        f1 = fmid
+        d2 = dk
+        f2 = fk
+
+      if fk < fmid: # Keep current best at dmid
+        dmid = dk
+        fmid = fk
+
+      self.log_tab_printf(0,TESTING,"=",())
+      self.log_tab_printf(0,TESTING,"[%12.6f,%12.6f,%12.6f,%12.6f]\n",(dlo,d1,d2,dhi))
+      self.log_tab_printf(0,TESTING,"[    ----    ,%12.6f,%12.6f,    ----    ]\n",(f1,f2))
+      if f1 < f2:
+        self.log_tab_printf(0,TESTING,"          <        ^^^^        >                     \n",())
+      else:
+        self.log_tab_printf(0,TESTING,"                       <       ^^^^       >          \n",())
+
+      #convergence tests
+      if fmid < f - max(required_decrease, - WOLFEC1*dmid*grad):
+        self.log_tab(1,TESTING,"Stop linesearch: good enough for next cycle")
+        break
+
+      elif (d2-d1)/d2 < 0.01:
+        self.log_tab(1,TESTING,"Stop linesearch: fractional change in stepsize < 0.01")
+        break
+
+      # Not converged, so prepare for next loop
+      if f1 < f2:
+        dhi = d2
+        fhi = f2
+
+      else:
+        dlo = d1
+        flo = f1
+
+    # converged of limit in steps
+
+    if f < fmid: # shouldn't happen, but catch possibility that function didn't improve
+      refine_object.set_reparameterized_parameters(oldx)
+    else:
+      self.shift_parameters(refine_object,dmid,x,oldx,p,dist,macrocycle_large_shifts) # Make sure best shift has been applied.
+      f = fmid
+
+    self.log_blank(TESTING)
+    self.log_tab(1,TESTING,"This line search took " + str(self.func_count_) + " function evaluations")
+    self.log_blank(TESTING)
+    self.log_tab_printf(1,TESTING,"Final Target Value: %12.6f distance: %12.6f \n", (f, dmid))
+    self.log_tab(1,TESTING,"End distance = " +str(dmid))
+    self.log_tab(1,TESTING,"Prediction ratio = " +str(dmid/starting_distance))
+    self.log_blank(TESTING)
+    if dmid < required_shift:
+      too_small_shift = True
+    #report
+    return (f, too_small_shift)
+
+  def shift_score(self, refine_object, a, x, oldx, p, dist, macrocycle_large_shifts, bcount = True):
+    self.shift_parameters(refine_object,a,x,oldx,p,dist,macrocycle_large_shifts)
+    f = refine_object.target()
+    if bcount:
+      self.func_count_ += 1
+    self.log_tab_printf(1,TESTING,"f(%9.6f) = %10.6f\n", (a, f))
+    return f
+
+  def shift_parameters(self, refine_object, a, x, oldx, p, dist, macrocycle_large_shifts):
+    x = refine_object.damped_shift(a,tuple(oldx),tuple(p),tuple(dist),tuple(macrocycle_large_shifts))
+    refine_object.set_reparameterized_parameters(x)
+
+  def check_termination_criteria(
+    self,
+    too_small_shift,
+    too_small_decrease,
+    zero_gradient,
+    queue_new_hessian,
+    ncyc_since_hessian_calc,
+    cycle,
+    ncyc):
+
+    """
+    Test whether we should terminate the current macrocycle
+
+     Return a string containing the reason to terminate (empty if there is none)
+     Also return a bool, calc_new_hessian if it is determined that
+     the next microcycle in a bfgs minimization should start with a new hessian.
+     (naturally this only makes sense if we are not terminating the macrocycle
+     this time.)
+    """
+
+    calc_new_hessian = False
+
+    if cycle == ncyc-1:
+      return ("cycle limit", calc_new_hessian)
+
+    if zero_gradient:
+      self.log_tab(1,TESTING,"Zero gradient: exiting")
+      return ("zero_gradient", calc_new_hessian)
+    if too_small_shift or too_small_decrease:
+      if (queue_new_hessian or not too_small_decrease) and (ncyc_since_hessian_calc != 0): # queue_new_hessian is only touched by bfgs
+        self.log_tab(1,TESTING,"Recalculate Hessian and carry on")
+        calc_new_hessian = True # tell bfgs to calculate a new hessian next time rather than doing the bfgs update to the inverse hessian approximation
+        return ("", calc_new_hessian)
+      else:
+        self.log_blank(VERBOSE)
+        self.log_tab(1,VERBOSE,"---CONVERGENCE OF MACROCYCLE---")
+        self.log_blank(VERBOSE)
+        return ("converged", calc_new_hessian)
+    return ("",calc_new_hessian)
+
+  def hessian_diag_rms(self, h):
+    """Calculate root-mean-square of the hessian diagonal entries"""
+
+    hii_rms = 0.
+    N = int(round(sqrt(len(h))))
+    assert(N)
+    for i in range(N):
+      hii_rms += h[i,i]**2
+    hii_rms = sqrt(hii_rms/N)
+    return hii_rms
+
+  def required_shift(self, min_dx_over_esd, p, h_inv):
+    """
+    Figure out how far linesearch has to go to shift at least one parameter
+    by minimum shift/esd, using inverse Hessian to estimate covariance matrix
+    DHS: this was rather tricky to get my head around. The following is an attempt
+    at a graphical explanation:
+
+    Outer box is the esd estimated using sqrt(h(i,i))
+    Inner box is min_dx_over_esd * esd  ( = min_dx_over_esd * sqrt(h(i,i)))
+
+    We want to find the minimum multiple of p (the arrow/vector thing in the diagram)
+    needed to just hit the inner box (in this case it will be less than 1 and hit the 2nd parameter's limit first)
+
+    -------------------------------------
+    |                    ^              |
+    |                   /               |
+    |      -----------------------      |
+    |      |          /          |      |
+    |      -----------------------      |
+    |                                   |
+    |                                   |
+    -------------------------------------
+    """
+    required_shift = 0.
+    for i in range(len(p)):
+      if h_inv[i,i] > 0:
+        required_shift = max(required_shift,abs(p[i])/sqrt(h_inv[i,i]))
+    if required_shift > 0:
+      required_shift = min_dx_over_esd/required_shift
+    return required_shift
+
+  def quadratic_coefficients(self, y1, y2, y3, x1, x2, x3, a, b, c):
+    """Find the coefficients to a quadratic specified by three points on the quadratic
+
+    Given three points in the x-y plane get the coefficients of the corresponding
+    to the parabolic equation y(x) = a + b*x + c*x^2 that passes through them all
+    """
+
+    a, b, c = 0., 0., 0.
+
+    det = x2*x3*x3 - x3*x2*x2 - x1*(x3*x3 - x2*x2) + x1*x1*(x3 - x2)
+    if (abs(det) < 1e-7): # not sure how to replicate c++ version, just using a very small number for now
+      return (False, a, b, c)
+
+    invdet = 1./det
+
+    #  a = (y1*(x2*x3*x3 - x2*x2*x3) + y2*(x1*x3*x3 - x3*x1*x1) + y3*(x1*x2*x2 - x2*x1*x1))*invdet // correct but unstable
+    b = (y1*(x2*x2 - x3*x3) + y2*(x3*x3 - x1*x1) + y3*(x1*x1 - x2*x2))*invdet
+    c = (y1*(x3 -x2) + y2*(x1 - x3) + y3*(x2 -x1))*invdet
+    a = y1 - (b*x1 +c*x1*x1)
+
+    if c == 0:  #this is a direct translation of the c++ code, containing a floating point equality operation
+      return (False, a, b, c)
+    else:
+      return (True , a, b, c)
+
+  def check_in_bounds(self, refine_object):
+    bounds = refine_object.reparameterized_bounds()
+    if len(bounds) == 0:
+      return True
+    else:
+      x = refine_object.get_reparameterized_parameters()
+      macrocycle_large_shifts = refine_object.reparameterized_large_shifts()
+      TOL = 1.e-03 # Tolerance for deviation in bound as fraction of LargeShift
+      assert(len(bounds) == len(macrocycle_large_shifts))
+      for i in range(len(x)):
+        thistol = macrocycle_large_shifts[i]*TOL
+        if    (bounds[i].lower_bounded() and (x[i] < (bounds[i].lower_limit() - thistol) ) ) \
+          or (bounds[i].upper_bounded() and (x[i] > (bounds[i].upper_limit() + thistol) ) ) :
+          raise RuntimeError("Parameter #"  + str(i+1) + \
+            " (Lower: " + str(bounds[i].lower_bounded()) + \
+            " " + str(bounds[i].lower_limit()) + \
+            ") (Value: " + str(x[i]) + \
+            ") (Upper: " + str(bounds[i].upper_bounded()) + \
+            " " + str(bounds[i].upper_limit()) + ")")
+          return False
+      return True
+
+  ### printing methods
+
+  def log_output(self, depth, output_level, string, add_return):
+    if output_level <= self.output_level:
+      print(depth*DEF_TAB*' ' + string, end='\n' if add_return else '')
+
+  def log_tab_printf(self, t, output_level, text, fformat): #format is already taken
+    if output_level <= self.output_level:
+      print((t*DEF_TAB*' ' + text) % fformat, end = "")
+
+  def log_blank(self, output_level):
+    self.log_output(0,output_level,"",True)
+
+  def log_underline(self, output_level, string):
+    self.log_blank(output_level)
+    self.log_tab(1,output_level, string)
+    self.log_line(1,output_level, len(string),'-')
+
+  def log_line(self, t, output_level, len, c):
+    self.log_tab(t, output_level,len*c)
+
+  def log_protocol(self, output_level, macrocycle_protocol):
+    self.log_underline(output_level, "Protocol:")
+    if (macrocycle_protocol[0] == "off"):
+      self.log_tab(1,output_level,"No parameters to refine this macrocycle")
+      self.log_blank(output_level)
+    else:
+      for i in range(len(macrocycle_protocol)):
+        self.log_tab(2,output_level,macrocycle_protocol[i].upper() + " ON")
+      self.log_blank(output_level)
+
+  def log_tab(self, t, output_level, text, add_return=True):
+    self.log_output(t, output_level, text, add_return)
+
+  def log_ellipsis_start(self, output_level, text):
+    self.log_blank(output_level)
+    self.log_output(1,output_level,text+"...",True)
+
+  def log_ellipsis_end(self, output_level):
+    self.log_output(2,output_level,"...Done",True)
+    self.log_blank(output_level)
+
+  def log_parameters(self, output_level, macrocycle_parameter_names):
+    self.log_tab(1,output_level, "Parameters:")
+    for i in range(len(macrocycle_parameter_names)):
+      self.log_tab(1,output_level, "Refined Parameter #:" + str(i+1) + " " + macrocycle_parameter_names[i])
+
+  def log_hessian(self, output_level, hessian, macrocycle_parameter_names):
+    max_dim = 100 #very generous but not infinite
+    (n_rows, n_cols) = hessian.all()
+    assert(n_rows == n_cols)
+    self.log_tab(1,output_level,"Matrix")
+    if n_rows > max_dim:
+      self.log_tab(1,output_level,"Matrix is too large to write to log: size = "+str(n_rows))
+    for i in range(min(n_rows, max_dim-1)):
+      hess = ""
+      line = ""
+      for j in range(min(n_cols, max_dim-1)):
+        hess = ("%+3.1e " % hessian[i,j])
+        if hessian[i,j] == 0:
+          line += " ---0--- "
+        else:
+          line += hess
+      line = line[:-1] # cut the last space off for neatness
+      if n_rows >= max_dim:
+        self.log_tab_printf(1,output_level,"%3d [%s etc...]\n",(i+1,line))
+      else:
+        self.log_tab_printf(1,output_level,"%3d [%s]\n",(i+1,line))
+    if n_rows >= max_dim:
+      self.log_tab_printf(0,output_level," etc...\n",())
+    self.log_blank(output_level)
+    self.log_tab(1,output_level,"Matrix Diagonals")
+    for i in range(n_rows):
+      self.log_tab_printf(1,output_level,"%3d [% 9.4g] %s\n",
+          (i+1,hessian[i,i],
+          macrocycle_parameter_names[i] if (i < len(macrocycle_parameter_names)) else ""))
+    self.log_blank(output_level)
+
+  def log_vector(self, output_level, what, vec, macrocycle_parameter_names):
+    self.log_tab(1,output_level,what)
+    for i in range(len(vec)):
+      self.log_tab_printf(1,output_level,"%3d [% 9.4g] %s\n",
+          (i+1,vec[i],
+          macrocycle_parameter_names[i] if (i < len(macrocycle_parameter_names)) else ""))
+    self.log_blank(output_level)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/optional.py
+from __future__ import print_function
+from __future__ import division
+from scitbx.array_family import flex
+
+class Optional:
+  def target_gradient(self):
+    """Return a tuple of (target, gradient)"""
+    frac_large = 0.01
+    return self.finite_difference_gradient(frac_large)
+
+  def target_gradient_hessian(self):
+    """
+    Return a tuple of (target, gradient, hessian, is_diagonal)
+    target"""
+    (target, gradient) = self.target_gradient()
+
+    is_diagonal = True
+    hessian = flex.double(self.nmp * self.nmp, 0)
+    hessian.reshape(flex.grid(self.nmp, self.nmp))
+    ls = self.macrocycle_large_shifts()
+    for i in range(self.nmp):
+      hessian[i,i] = 1/(ls[i]**2)
+
+    return (target, gradient, hessian, is_diagonal)
+
+  def bounds(self):
+    """Return a list of Bounds objects, of length nmp"""
+    return []
+
+  def reparameterize(self):
+    """Return a list of Reparams objects, of length nmp"""
+    return []
+
+  def reject_outliers(self):
+    """
+    A place to put any code for rejecting outliers in your data before
+    doing any target calculations
+    """
+    pass
+
+  def setup(self): pass
+
+  def cleanup(self): pass
+
+  def finalize(self): pass
+
+  def maximum_distance_special(self, x, p, bounded, dist, start_distance):
+    return 0.
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/realsymmetricpseudoinverse.py
+from __future__ import division, print_function
+from scitbx.array_family import flex
+from scitbx.linalg import eigensystem
+from sys import float_info
+
+def RealSymmetricPseudoInverse(A_, filtered, min_to_filter=0):
+  """Compute the pseudo-inverse of a real symmetric matrix
+
+  filters (i.e. makes 0) small and negative eigen values before
+  calculating the pseudo-inverse.
+  """
+
+  A = A_.deep_copy() # make a copy to avoid changing the original when scaling
+
+  #A is a flex array, size N by N
+  (M, N) = A.all()
+  assert(M == N)
+  A_scale = []
+  for i in range(N):
+    assert(A[i,i] > 0)
+    A_scale.append(A[i,i] ** -0.5)
+  for i in range(N):
+    for j in range(N):
+      A[i,j] = A_scale[i]*A_scale[j]*A[i,j]
+
+  # Call the scitbx routine to find eigenvalues and eigenvectors
+  eigen = eigensystem.real_symmetric(A)
+
+  # Set condition number for range of eigenvalues.
+  evCondition = min(1.e9, 0.01/float_info.epsilon)
+  evMax = eigen.values()[0]       # (Eigen values are stored in descending order.)
+  evMin = evMax/evCondition
+  ZERO = 0.
+  lambdaInv = flex.double(N*N, ZERO)
+  lambdaInv.reshape(flex.grid(N,N)) # Matrix of zeros
+
+  filtered = 0
+  for i in range(N-1,-1, -1):
+    if (eigen.values()[i] < evMin) or (filtered < min_to_filter):
+      lambdaInv[i,i] = ZERO
+      filtered += 1
+    else:
+      lambdaInv[i,i] = 1.0 / eigen.values()[i]
+
+  # Compute the result that we are after - the pseudo inverse
+  # The formula from wikipedia is (A^-1) = (Q)(lam^-1)(Q^T)
+  # where Q has eigen vectors as columns
+  # eigen.vectors() has eigenvectors as rows
+  # let V be eigen.vectors(). The formula is now: (A^-1) = (V^T)(lam^-1)(V)
+
+  # get a transposed matrix
+  vectors_transposed = eigen.vectors().deep_copy()
+  vectors_transposed.matrix_transpose_in_place()
+  inverse_matrix = vectors_transposed.matrix_multiply( lambdaInv.matrix_multiply(eigen.vectors()) )
+
+  # Rescale the matrix
+  for i in range(N):
+    for j in range(N):
+      inverse_matrix[i,j] = A_scale[i]*A_scale[j]*inverse_matrix[i,j]
+
+  return (inverse_matrix, filtered)
+
+# nb here the c++ version has a debug section turned on by a #define.
+# this does not.
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/refinebase.py
+from __future__ import division
+from scitbx.dtmin.compulsory import Compulsory
+from scitbx.dtmin.optional import Optional
+from scitbx.dtmin.min_logging import Logging
+from scitbx.dtmin.auxiliary import Auxiliary
+
+class RefineBase(Compulsory, Optional, Logging, Auxiliary):
+
+  def __init__(self):
+    self.nmp = 0 # number of macrocycle parameters
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/regression/__init__.py
+"""
+dtmin/regression/__init__
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/regression/tst_dtmin_basic.py
+from __future__ import print_function
+from __future__ import division
+from scitbx.array_family import flex
+from scitbx.dtmin.minimizer import Minimizer
+from scitbx.dtmin.refinebase import RefineBase
+from scitbx.dtmin.reparams import Reparams
+from scitbx.dtmin.bounds import Bounds
+
+class RefineTG(RefineBase):
+  def __init__(self, start_x):
+    RefineBase.__init__(self)
+    self.start_x = start_x
+    self.xy = start_x
+
+  def target(self):
+    """The simplest two variable quadratic function"""
+    x = self.xy[0]
+    y = self.xy[1]
+    return x**2 + y**2
+
+  def get_macrocycle_parameters(self):
+    return self.xy
+
+  def set_macrocycle_parameters(self, newx):
+    self.xy = newx
+
+#  def target_gradient(self):
+#    f = self.target()
+#    grad_x = 2*self.xy[0]
+#    grad_y = 2*self.xy[1]
+#    g = flex.double([grad_x, grad_y])
+#    return (f, g)
+
+#  def target_gradient_hessian(self):
+#    (f,g) = self.target_gradient()
+#    h = flex.double(self.nmp * self.nmp, 0)
+#    h.reshape(flex.grid(self.nmp, self.nmp))
+#    h[0,0] = h[1,1] = 2.
+#    h[0,1] = h[1,0] = 0.
+#    return (f,g,h,True)
+
+  def macrocycle_large_shifts(self):
+    return [3., 3.]
+
+  def set_macrocycle_protocol(self, macrocycle_protocol):
+    if macrocycle_protocol == ["all"]:
+      self.nmp = 2
+
+  def macrocycle_parameter_names(self):
+    return ["x", "y"]
+
+#  def reparameterize(self):
+#    rep_x = Reparams(True, 5.)
+#    rep_y = Reparams(True, 5.)
+#    return [rep_x, rep_y]
+
+#  def bounds(self):
+#    bnd_x = Bounds()
+#    bnd_y = Bounds()
+#    bnd_x.on(-5,5)
+#    bnd_y.on(-5,5)
+#    return [bnd_x, bnd_y]
+
+  def initial_statistics(self):
+    #see min_logging.py for logging functions that roughly mirror those in
+    #phasertng's minimiser.
+    self.log_tab(1,0,"Demonstrate dtmin logging call")
+
+  def current_statistics(self):
+    print("x,f: " + str(tuple(self.get_macrocycle_parameters())) + " " + str(self.target()))
+
+def run():
+  """
+  Run the dtmin minimizer with only the target() implemented.
+  (no target_gradient or target_gradient_hessian).
+  The target function is simply x**2 + y**2.
+  Gradients are done by finite difference and the hessian is estimated
+  by one over large_shifts squared. (This is handled by the minimizer)
+  There are commented out target_gradient and target_gradient_hessian
+  implementations should you wish play around.
+  """
+
+  x = [5,8]
+  print(x, "start")
+
+  # create inputs for the minimizer's run method
+  refineTG = RefineTG(start_x=x) #refine object
+  macro1 = ["all"]               # protocol for the first macrocycle
+  protocol = [macro1, macro1, macro1] # overall minimization protocol
+  ncyc = 50                      # maximum number of microcycles per macrocycle
+  minimizer_type = "bfgs"        # minimizer, bfgs or newton
+  study_params = False           # flag for calling studyparams procedure
+
+  #create the minimizer object
+  minimizer = Minimizer(output_level=0) # 0 for MUTE output see Minimizer.py
+
+  #run the minimization
+  minimizer.run(refineTG, protocol, ncyc, minimizer_type, study_params)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/regression/tst_dtmin_booth.py
+#Simple script to refine the Booth function (a
+#two variable quadratic) using dtmin.
+#The minima of the function is [1,3].
+
+from __future__ import print_function
+from __future__ import division
+from scitbx.array_family import flex
+from scitbx.dtmin.minimizer import Minimizer
+from scitbx.dtmin.refinebase import RefineBase
+from scitbx.dtmin.reparams import Reparams
+from scitbx.dtmin.bounds import Bounds
+
+class RefineTG(RefineBase):
+  def __init__(self, start_x):
+    RefineBase.__init__(self)
+    self.start_x = start_x
+    self.xy = start_x
+
+  def target(self):
+    x = self.xy[0]
+    y = self.xy[1]
+    return (x + 2*y - 7)**2 + (2*x + y -5 )**2
+
+  def get_macrocycle_parameters(self):
+    return self.xy
+
+  def set_macrocycle_parameters(self, newx):
+    self.xy = newx
+
+  def target_gradient(self):
+    f = self.target()
+    x = self.xy[0]
+    y = self.xy[1]
+    grad_x = -34 +10*x + 8*y
+    grad_y = -38 +8*x + 10*y
+    g = flex.double([grad_x, grad_y])
+    return (f, g)
+
+  def target_gradient_hessian(self):
+    (f,g) = self.target_gradient()
+    h = flex.double(self.nmp * self.nmp, 0)
+    h.reshape(flex.grid(self.nmp, self.nmp))
+    h[0,0] = 10.
+    h[1,1] = 10.
+    h[0,1] = h[1,0] = 0.
+    return (f,g,h,False)
+
+  def macrocycle_large_shifts(self):
+    return [20, 20]
+
+  def set_macrocycle_protocol(self, macrocycle_protocol):
+    """
+    Ignore macrocycle_protocol string and refine both parameters
+    every macrocycle
+    """
+    self.nmp = 2
+
+  def macrocycle_parameter_names(self):
+    return ["x", "y"]
+
+#  def reparameterize(self):
+#    rep_x = Reparams(True, 5.)
+#    rep_y = Reparams(True, 5.)
+#    return [rep_x, rep_y]
+
+#  def bounds(self):
+#    bnd_x = Bounds()
+#    bnd_y = Bounds()
+#    bnd_x.on(-5,5)
+#    bnd_y.on(-5,5)
+#    return [bnd_x, bnd_y]
+
+  def current_statistics(self):
+    print("x,f: " + str(tuple(self.get_macrocycle_parameters())) + " " + str(self.target()))
+
+def run():
+
+  x = [5,8]
+  print(x, "start")
+
+  # create the inputs for the minimizer's run method
+  refineTG = RefineTG(start_x=x) # refine object
+  macro1 = ["all"]               # protocol for the first macrocycle
+  protocol = [macro1, macro1]    # overall minimization protocol
+  ncyc = 50                      # maximum number of microcycles per macrocycle
+  minimizer_type = "bfgs"        # minimizer: bfgs or newton
+  study_params = False           # flag for calling studyparams procedure
+
+  #create the minimizer object
+  minimizer = Minimizer(output_level=0) # 0 for MUTE output see Minimizer.py
+
+  #run the minimization
+  minimizer.run(refineTG, protocol, ncyc, minimizer_type, study_params)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/regression/tst_dtmin_twisted.py
+from __future__ import print_function
+from __future__ import division
+from scitbx.array_family import flex
+from scitbx.dtmin.minimizer import Minimizer
+from scitbx.dtmin.refinebase import RefineBase
+from scitbx.dtmin.reparams import Reparams
+from scitbx.dtmin.bounds import Bounds
+import math
+
+class RefineTG(RefineBase):
+  def __init__(self, start_x):
+    RefineBase.__init__(self)
+    self.start_x = start_x
+    self.xy = start_x
+    self.s11 = 1.0
+    self.s12 = 1.2
+    self.s22 = 2.0
+    self.twist = 0.5
+
+  def get_macrocycle_parameters(self):
+    return self.xy
+
+  def set_macrocycle_parameters(self, newx):
+    self.xy = newx
+
+  def set_macrocycle_protocol(self, macrocycle_protocol):
+    if macrocycle_protocol == ["all"]:
+      self.nmp = 2
+
+  def macrocycle_parameter_names(self):
+    return ["x", "y"]
+
+  def macrocycle_large_shifts(self):
+    return [1., 1.]
+
+  def target(self):
+    return twisted_gauss2d0(self.xy, self.s11, self.s12, self.s22, self.twist)
+
+  def target_gradient(self):
+    f = self.target()
+    grad_x = analytic_grad_x(self.xy, self.s11, self.s12, self.s22, self.twist)
+    grad_y = analytic_grad_y(self.xy, self.s11, self.s12, self.s22, self.twist)
+    g = flex.double([grad_x, grad_y])
+    return (f, g)
+
+  def target_gradient_hessian(self):
+    (f,g) = self.target_gradient()
+    h = flex.double(self.nmp * self.nmp, 0)
+    h.reshape(flex.grid(self.nmp, self.nmp))
+    h[0,0] = analytic_curv_xx(self.xy, self.s11, self.s12, self.s22, self.twist)
+    h[1,1] = analytic_curv_yy(self.xy, self.s11, self.s12, self.s22, self.twist)
+    h[0,1] = analytic_curv_xy(self.xy, self.s11, self.s12, self.s22, self.twist)
+    h[1,0] = h[0,1]
+    return (f,g,h,False)
+
+  def current_statistics(self):
+    print("x,f: " + str(tuple(self.get_macrocycle_parameters())) + " " + str(self.target()))
+
+#  def final_statistics(self):
+#    print(self.start_x)
+#    print(tuple(self.get_macrocycle_parameters()), "final")
+
+#  def reparameterize(self):
+#    rep_x = Reparams(True, 5.)
+#    rep_y = Reparams(True, 5.)
+#    return [rep_x, rep_y]
+
+#  def bounds(self):
+#    bnd_x = Bounds()
+#    bnd_y = Bounds()
+#    bnd_x.on(-5,5)
+#    bnd_y.on(-5,5)
+#    return [bnd_x, bnd_y]
+
+def gauss2d0(xy, s11, s12, s22):
+  (x,y) = xy
+#  return -math.log(1/math.sqrt(4*math.pi**2*(s11*s22-s12**2))
+#           *math.exp(-(s22*x**2-2*s12*x*y+s11*y**2)/(2*(s11*s22-s12**2))))
+  return -math.log(1/math.sqrt(4*math.pi**2*(s11*s22-s12**2))) + \
+           (s22*x**2-2*s12*x*y+s11*y**2)/(2*(s11*s22-s12**2))
+
+def twisted_gauss2d0(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  arg = twist*math.sqrt(x**2+y**2)
+  c = math.cos(arg)
+  s = math.sin(arg)
+  xt = x*c - y*s
+  yt = y*c + x*s
+  return gauss2d0((xt,yt), s11, s12, s22)
+
+Cos = math.cos
+Sin = math.sin
+Sqrt = math.sqrt
+Pi = math.pi
+
+def analytic_grad_x(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return 0.
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def analytic_grad_y(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return 0.
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_xx(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 +
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 +
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(Cos(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+               (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2
+             + 2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**3*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (3*twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**3*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (3*twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           4*s12*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                Sqrt(x**2 + y**2) + Sin(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2)
+          /(2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_yy(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                  Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2\
+            - 4*s12*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(Cos(twist*Sqrt(x**2 + y**2)) +
+               (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+               (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2
+           )/(2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_xy(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/
+               Sqrt(x**2 + y**2) + Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def run():
+  """"""
+
+  x = [5,7]
+  print(x, "start")
+
+  # create inputs for the minimizer's run method
+  refine_tg = RefineTG(start_x=x) # refine object
+  macro1 = ["all"]                # protocol for the first macrocycle
+  protocol = [macro1]             # overall minimization protocol
+  ncyc = 50                       # maximum number of microcycles per macrocycle
+  minimizer_type = "bfgs"         # minimizer, bfgs or newton
+  study_params = True            # flag for calling studyparams procedure
+
+  #create the minimizer object
+  minimizer = Minimizer(output_level=0) # 0 for MUTE output see Minimizer.py
+
+  #run the minimization
+  minimizer.run(refine_tg, protocol, ncyc, minimizer_type, study_params)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/reparams.py
+from __future__ import division
+import math
+
+class Reparams(object):
+    def __init__(self, reparamed_=False, offset_=0.):
+        self.reparamed = reparamed_
+        self.offset = offset_
+
+    def off(self):
+        self.reparamed = False
+        self.offset = 0.
+
+    def on(self, f):
+        self.reparamed = True
+        self.offset = f
+
+    def param(self, par):
+        return math.log(par + self.offset) if self.reparamed else par
+
+    def unparam(self, par):
+        return math.exp(par) - self.offset if self.reparamed else par
+
+    def gradient(self, par, grad):
+        return grad*(par + self.offset) if self.reparamed else par
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/dtmin/twisted_gaussian.py
+#This file is broadly comparable to scitbx/lbfgs/dev/twisted_gaussian.py
+#so may be a useful as a way for someone familiar with scitbx.lbfgs to
+#see how to do things in dtmin.
+
+from __future__ import print_function
+from __future__ import division
+from __future__ import absolute_import
+
+from scitbx.array_family import flex
+from scitbx.dtmin.minimizer import Minimizer
+from scitbx.dtmin.reparams import Reparams
+from scitbx.dtmin.bounds import Bounds
+from scitbx.dtmin.refinebase import RefineBase
+
+import math
+import random
+
+class RefineTG(RefineBase):
+  def __init__(self, start_x, use_curvatures):
+    RefineBase.__init__(self)
+    self.start_x = start_x
+    self.xy = start_x
+    self.use_curvatures = use_curvatures
+    self.s11 = 1.0
+    self.s12 = 1.2
+    self.s22 = 2.0
+    self.twist = 0.5
+
+  def target(self):
+    return twisted_gauss2d0(self.xy, self.s11, self.s12, self.s22, self.twist)
+
+  def get_macrocycle_parameters(self):
+    return self.xy
+
+  def set_macrocycle_parameters(self, newx):
+    self.xy = newx
+
+  def target_gradient(self):
+    f = twisted_gauss2d0(self.xy, self.s11, self.s12, self.s22, self.twist)
+    grad_x = analytic_grad_x(self.xy, self.s11, self.s12, self.s22, self.twist)
+    grad_y = analytic_grad_y(self.xy, self.s11, self.s12, self.s22, self.twist)
+    g = flex.double([grad_x, grad_y])
+    return (f, g)
+
+  def target_gradient_hessian(self):
+    (f,g) = self.target_gradient()
+    h = flex.double(self.nmp * self.nmp, 0)
+    h.reshape(flex.grid(self.nmp, self.nmp))
+    if self.use_curvatures == False:
+      h[0,0] = h[1,1] = 0.
+      h[0,1] = h[1,0] = 1.
+    elif self.use_curvatures == True:
+      h[0,0] = analytic_curv_xx(self.xy, self.s11, self.s12, self.s22, self.twist)
+      h[1,1] = analytic_curv_yy(self.xy, self.s11, self.s12, self.s22, self.twist)
+      h[0,1] = h[1,0] = 0.
+    return (f,g,h,True)
+
+  def macrocycle_large_shifts(self):
+    return [5., 5.]
+
+  def set_macrocycle_protocol(self, macrocycle_protocol):
+    if macrocycle_protocol == ["all"]:
+      self.nmp = 2
+    else:
+      self.nmp = 0
+
+  def macrocycle_parameter_names(self):
+    return ["parameter 1", "parameter 2"]
+
+#  def reparameterize(self):
+#    rep_x = Reparams(True, 5.)
+#    rep_y = Reparams(True, 5.)
+#    return [rep_x, rep_y]
+
+#  def bounds(self):
+#    bnd_x = Bounds()
+#    bnd_y = Bounds()
+#    bnd_x.on(-5,5)
+#    bnd_y.on(-5,5)
+#    return [bnd_x, bnd_y]
+
+  def current_statistics(self):
+    if self.use_curvatures == False:
+      print("x,f: " + str(tuple(self.get_macrocycle_parameters())) + " " + str(self.target()))
+
+  def final_statistics(self):
+    print(self.start_x)
+    print(tuple(self.get_macrocycle_parameters()), "final")
+    if (abs(self.get_macrocycle_parameters()[0]) > 1.e-4 or abs(self.get_macrocycle_parameters()[1]) > 1.e-4):
+      print(tuple(self.get_macrocycle_parameters()), "failure, use_curvatures="+str(self.use_curvatures))
+    #print("iter,exception:", m.minimizer.iter(), m.minimizer.error)
+    #print("n_calls:", m.minimizer.n_calls)
+    print()
+
+def gauss2d0(xy, s11, s12, s22):
+  (x,y) = xy
+  return -math.log(1/math.sqrt(4*math.pi**2*(s11*s22-s12**2))
+           *math.exp(-(s22*x**2-2*s12*x*y+s11*y**2)/(2*(s11*s22-s12**2))))
+
+def twisted_gauss2d0(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  arg = twist*math.sqrt(x**2+y**2)
+  c = math.cos(arg)
+  s = math.sin(arg)
+  xt = x*c - y*s
+  yt = y*c + x*s
+  return gauss2d0((xt,yt), s11, s12, s22)
+
+Cos = math.cos
+Sin = math.sin
+Sqrt = math.sqrt
+Pi = math.pi
+
+def analytic_grad_x(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return 0.
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def analytic_grad_y(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return 0.
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_xx(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 +
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 +
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(Cos(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+               (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2
+             + 2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**3*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (3*twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**3*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (3*twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           4*s12*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                Sqrt(x**2 + y**2) + Sin(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2)
+          /(2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_yy(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                  Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2\
+            - 4*s12*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(Cos(twist*Sqrt(x**2 + y**2)) +
+               (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+               (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2
+           )/(2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_xy(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/
+               Sqrt(x**2 + y**2) + Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def run():
+  # create inputs for the minimizer's run method
+  macro1 = ["all"]            # protocol for the first macrocycle
+  MACRO2 = ["all"]            # protocol for the second macrocycle
+  protocol = [macro1, MACRO2] # overall minimization protocol
+  ncyc = 50                   # maximum number of microcycles per macrocycle
+  minimizer_type = "bfgs"     # minimizer, bfgs or newton
+  study_params = False        # flag for calling studyparams procedure
+
+  #run the minimization
+  random.seed(0)
+  for iteration in range(100):
+    scale = 2
+    x = [random.random()*scale for i in (0,1)]
+    print(x, "start")
+    for use_curvatures in (False, True):
+      refineTG = RefineTG(start_x=x, use_curvatures=use_curvatures)
+      minimizer = Minimizer(0) # 0 for MUTE output see Minimizer.py
+      minimizer.run(refineTG, protocol, ncyc, minimizer_type, study_params)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************

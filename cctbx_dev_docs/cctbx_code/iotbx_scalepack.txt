@@ -1,0 +1,1030 @@
+
+
+ *******************************************************************************
+iotbx/scalepack/__init__.py
+"""Tools for manipulation of scalepack formatted data files
+"""
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/scalepack/crystal_symmetry_from_hkl.py
+from __future__ import absolute_import, division, print_function
+from iotbx.scalepack import merge
+from iotbx.scalepack import no_merge_original_index
+from cctbx import crystal
+
+def extract_from_merge(file):
+  return merge.reader(file, header_only=True).crystal_symmetry()
+
+def extract_from_no_merge_original_index(file_name):
+  scalepack_file = no_merge_original_index.reader(file_name, header_only=True)
+  return crystal.symmetry(
+    unit_cell=None,
+    space_group_info=scalepack_file.space_group_info())
+
+def extract_from(file_name):
+  try:
+    with open(file_name) as f:
+      result = extract_from_merge(f)
+    return result
+  except merge.FormatError: pass
+  return extract_from_no_merge_original_index(file_name)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/scalepack/merge.py
+"Reading and writing of scalepack merge reflection files."
+from __future__ import absolute_import, division, print_function
+
+# Sample scalepack OUTPUT FILE
+#    1
+# -987
+#    34.698    71.491    54.740    90.000   106.549    90.000 p21
+#   0   0   4  3617.6   287.2
+#   0   1   6 12951.7  1583.6 12039.2  1665.8
+#
+# Format: (3I4, 4F8.1)
+
+from cctbx import uctbx
+from cctbx import sgtbx
+from cctbx import crystal
+from cctbx import miller
+from cctbx.array_family import flex
+from libtbx.math_utils import iround
+from libtbx import easy_pickle
+import os
+import sys
+from six.moves import range
+from six.moves import zip
+
+class FormatError(Exception): pass
+
+class reader(object):
+
+  def __init__(self, file_handle, header_only=False):
+    line = file_handle.readline()
+    if (line.rstrip() != "    1"):
+      raise FormatError("line 1: expecting '    1'")
+    file_handle.readline() # ignore line 2
+    line_error = "line 3: expecting unit cell parameters and space group label"
+    line = file_handle.readline()
+    if (len(line) < 63 or line[60] != ' '):
+      raise FormatError(line_error)
+    try:
+      uc_params = [float(line[i * 10 : (i + 1) * 10]) for i in range(6)]
+    except KeyboardInterrupt: raise
+    except Exception:
+      raise FormatError(line_error)
+    self.unit_cell = uctbx.unit_cell(uc_params)
+    self.space_group_symbol = line[61:].strip()
+    if (len(self.space_group_symbol) == 0):
+      raise FormatError(line_error)
+    try:
+      self.space_group_info = sgtbx.space_group_info(self.space_group_symbol)
+    except KeyboardInterrupt: raise
+    except Exception:
+      self.space_group_info = None
+    if (header_only): return
+    self.miller_indices = flex.miller_index()
+    self.i_obs = flex.double()
+    self.sigmas = flex.double()
+    self.anomalous = False
+    line_count = 3
+    while 1:
+      line = file_handle.readline()
+      line_count += 1
+      line_error = "line %d: expecting (3I4, 4F8.1)" % line_count
+      if (line == ""): break
+      line = line.rstrip()
+      if (len(line) == 0): continue
+      line += (" " * 44)
+      flds = []
+      used = 0
+      for width in (4,4,4,8,8,8,8):
+        next_used = used + width
+        flds.append(line[used:next_used].strip())
+        used = next_used
+      try:
+        h = [int(flds[i]) for i in range(3)]
+      except KeyboardInterrupt: raise
+      except Exception:
+        raise FormatError(line_error)
+      for i in (0,1):
+        j = 3+2*i
+        if (len(flds[j])):
+          try:
+            i_obs, sigma = (float(flds[j]), float(flds[j+1]))
+          except KeyboardInterrupt: raise
+          except Exception:
+            if (flds[j] == "*"*len(flds[j])) : # XXX overload
+              continue
+            raise FormatError(line_error)
+          # XXX scalepack uses I=0, sigmaI=-1 to denote a missing Friedel
+          # mate
+          if (i_obs == 0) and (sigma == -1):
+            continue
+          if (i):
+            h = [-e for e in h]
+            self.anomalous = True
+          if (sigma != 0 or (i_obs != 0 and i_obs != 1)):
+            self.miller_indices.append(h)
+            self.i_obs.append(i_obs)
+            self.sigmas.append(sigma)
+
+  def show_summary(self, out=None, prefix=""):
+    if (out is None): out = sys.stdout
+    self.unit_cell.show_parameters(f=out, prefix=prefix+"Unit cell: ")
+    print(prefix + "Space group symbol:", self.space_group_symbol, file=out)
+    print(prefix + "Anomalous flag:", self.anomalous, file=out)
+    print(prefix + "Number of reflections:", self.miller_indices.size(), file=out)
+
+  def crystal_symmetry(self):
+    def have_r_with_axes_info():
+      s = self.space_group_symbol.upper()
+      return (s.startswith("R") and (s.endswith("R") or s.endswith("H")))
+    return crystal.symmetry(
+      unit_cell=self.unit_cell,
+      space_group_info=self.space_group_info,
+      correct_rhombohedral_setting_if_necessary=not have_r_with_axes_info())
+
+  def as_miller_array(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=None):
+    if base_array_info is None:
+      base_array_info = miller.array_info(source_type="scalepack_merge")
+    crystal_symmetry_from_file = self.crystal_symmetry()
+    if anomalous or self.anomalous:
+      labels = ["I(+)", "SIGI(+)", "I(-)", "SIGI(-)"]
+    else:
+      labels = ["I", "SIGI"]
+    return (miller.array(
+      miller_set=miller.set(
+        crystal_symmetry=crystal_symmetry_from_file.join_symmetry(
+          other_symmetry=crystal_symmetry,
+          force=force_symmetry),
+        indices=self.miller_indices,
+        anomalous_flag=anomalous or self.anomalous),
+      data=self.i_obs,
+      sigmas=self.sigmas)
+      .set_info(base_array_info.customized_copy(
+        labels=labels,
+        crystal_symmetry_from_file=crystal_symmetry_from_file))
+      .set_observation_type_xray_intensity())
+
+  def as_miller_arrays(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=None):
+    return [self.as_miller_array(
+      crystal_symmetry=crystal_symmetry,
+      force_symmetry=force_symmetry,
+      merge_equivalents=merge_equivalents,
+      base_array_info=base_array_info,
+      anomalous=anomalous,
+    )]
+
+def format_f8_1_or_i8(h, label, value):
+  if (value < 1.e6): return "%8.1f" % value
+  result = "%8d" % iround(value)
+  if (len(result) > 8):
+    raise ValueError(
+      "Value is too large for scalepack merge format: hkl=%s, %s=%.6g" % (
+        str(h).replace(" ",""), label, value))
+  return result
+
+def scale_intensities_if_necessary(miller_array,out=sys.stdout):
+    value=miller_array.data().min_max_mean().max
+    max_value=0.9999e+08
+    if value > max_value: # scale it
+      miller_array=miller_array.deep_copy().apply_scaling(target_max=max_value)
+      print("NOTE: Scaled array (max=%s) to fit in Scalepack format" %(
+         str(max_value)), file=out)
+    return miller_array
+
+def write(file_name=None, file_object=None, miller_array=None,
+          space_group_symbol=None,
+          line_1="    1",
+          line_2=" -987",
+          scale_intensities_for_scalepack_merge=False,
+          out=sys.stdout):
+
+  assert [file_name, file_object].count(None) == 1
+  assert miller_array.is_xray_intensity_array() or \
+    miller_array.is_xray_amplitude_array(), \
+    "Input data must be amplitudes or intensities."
+  assert miller_array.sigmas() is not None
+  if (file_object is None):
+    file_object = open(file_name, "w")
+  if (not miller_array.is_xray_intensity_array()):
+    miller_array = miller_array.f_as_f_sq()
+  if (space_group_symbol is None):
+    space_group_symbol = str(miller_array.space_group_info())
+    if (not space_group_symbol.endswith(")")): # not universal Hermann-Mauguin
+      space_group_symbol = space_group_symbol.replace(" ", "").lower()
+
+  if scale_intensities_for_scalepack_merge: # 2014-01-07 TT
+    miller_array=scale_intensities_if_necessary(miller_array,out=out)
+
+  print(line_1, file=file_object)
+  print(line_2, file=file_object)
+  print(("%10.3f"*6) % miller_array.unit_cell().parameters(), end=' ', file=file_object)
+  print(space_group_symbol, file=file_object)
+  if (not miller_array.anomalous_flag()):
+    for h,f,s in zip(miller_array.indices(),
+                     miller_array.data(),
+                     miller_array.sigmas()):
+      print(((("%4d"*3) % h)
+        + format_f8_1_or_i8(h, "intensity", f)
+        + format_f8_1_or_i8(h, "sigma", s)), file=file_object)
+  else:
+    asu, matches = miller_array.match_bijvoet_mates()
+    sel_pairs_plus = matches.pairs_hemisphere_selection("+")
+    sel_pairs_minus = matches.pairs_hemisphere_selection("-")
+    indices = asu.indices().select(sel_pairs_plus)
+    data_plus = asu.data().select(sel_pairs_plus)
+    data_minus = asu.data().select(sel_pairs_minus)
+    sigmas_plus = asu.sigmas().select(sel_pairs_plus)
+    sigmas_minus = asu.sigmas().select(sel_pairs_minus)
+    for h,fp,sp,fm,sm in zip(indices, data_plus, sigmas_plus,
+                                      data_minus, sigmas_minus):
+      print(((("%4d"*3) % h)
+        + format_f8_1_or_i8(h, "intensity", fp)
+        + format_f8_1_or_i8(h, "sigma", sp)
+        + format_f8_1_or_i8(h, "intensity", fm)
+        + format_f8_1_or_i8(h, "sigma", sm)), file=file_object)
+    sel_singles = matches.singles_hemisphere_selection("+")
+    indices = asu.indices().select(sel_singles)
+    data = asu.data().select(sel_singles)
+    sigmas = asu.sigmas().select(sel_singles)
+    for h,f,s in zip(indices, data, sigmas):
+      print(((("%4d"*3) % h)
+        + format_f8_1_or_i8(h, "intensity", f)
+        + format_f8_1_or_i8(h, "sigma", s)), file=file_object)
+    sel_singles = matches.singles_hemisphere_selection("-")
+    indices = -asu.indices().select(sel_singles)
+    data = asu.data().select(sel_singles)
+    sigmas = asu.sigmas().select(sel_singles)
+    for h,f,s in zip(indices, data, sigmas):
+      print(((("%4d"*3) % h) + (" "*16)
+        + format_f8_1_or_i8(h, "intensity", f)
+        + format_f8_1_or_i8(h, "sigma", s)), file=file_object)
+  file_object.close()
+
+def run(args):
+  to_pickle = "--pickle" in args
+  for file_name in args:
+    if (file_name.startswith("--")): continue
+    s = reader(open(file_name, "r"))
+    miller_array = s.as_miller_array(info="From file: "+file_name)
+    miller_array.show_summary()
+    if (to_pickle):
+      pickle_file_name = os.path.split(file_name)[1] + ".pickle"
+      print("Writing:", pickle_file_name)
+      easy_pickle.dump(pickle_file_name, miller_array)
+    print()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/scalepack/no_merge_original_index.py
+from __future__ import absolute_import, division, print_function
+from cctbx import miller
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from libtbx.str_utils import show_string
+import warnings
+import sys, os
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+scalepack_ext = bp.import_ext("iotbx_scalepack_ext")
+
+# scalepack manual, edition 5, page 132
+# no merge
+# original index
+# the output will also contain the original (not unique) hkl for each
+# reflection. This is designed for MAD/local scaling work. The
+# original index modifier only works with the default INCLUDE
+# NO PARTIALS. The output will consist of the original hkl, unique
+# hkl, batch number, a flag (0 = centric, 1 = I+, 2 = I-), another flag
+# (0 = hkl reflecting above the spindle, 1 = hkl reflecting below the
+# spindle), the asymmetric unit of the reflection, I (scaled, Lorentz
+# and Polarization corrected), and the s of I. The format is
+# (6i4, i6, 2i2, i3, 2f8.1).
+#
+#    orig. hkl   uniq. hkl    b# c s  a       I    sigI
+#    0   0   3   0   0   3    14 0 0  1    -1.8     1.3
+
+def writer(
+    i_obs,
+    file_object=None,
+    file_name=None,
+    batch_numbers=None,
+    spindle_flags=None,
+    scale_intensities_for_scalepack_merge=False,
+    out=sys.stdout):
+  n_refl = len(i_obs.indices())
+  #assert (not i_obs.is_unique_set_under_symmetry()) # TT 2014-01-12 not necessary?
+  assert i_obs.is_xray_intensity_array() and i_obs.sigmas() is not None
+  # create substitute for batch number and spindle flag - these are impossible
+  # to determine from the input array
+  if (type(batch_numbers).__name__ == "array"):
+    assert batch_numbers.indices().all_eq(i_obs.indices())
+    batch_numbers = batch_numbers.data()
+  elif (batch_numbers is None):
+    batch_numbers = flex.int(n_refl, 0)
+  if (type(spindle_flags).__name__ == "array"):
+    assert spindle_flags.indices().all_eq(i_obs.indices())
+    spindle_flags = spindle_flags.data()
+  elif (spindle_flags is None):
+    spindle_flags = flex.int(n_refl, 0)
+  assert len(batch_numbers) == len(spindle_flags) == n_refl
+  assert ([file_object, file_name].count(None) == 1)
+  if (file_object is None):
+    file_object = open(file_name, "w")
+  space_group = i_obs.space_group()
+  # generate array for the centric/I+/I- flag
+  centric_flags = i_obs.centric_flags().data()
+  i_obs_asu = i_obs.as_non_anomalous_array().map_to_asu()
+  i_obs_asu_anom = i_obs.map_to_asu()
+  friedel_mate_flags = ~(i_obs_asu.indices() == i_obs_asu_anom.indices())
+  centric_tags = flex.int(n_refl, 1)
+  centric_tags.set_selected(friedel_mate_flags.iselection(), 2)
+  centric_tags.set_selected(centric_flags.iselection(), 0)
+  # generate isym array
+  uniq_indices = i_obs.indices().deep_copy()
+  #uniq_indices_anom = i_obs.indices().deep_copy()
+  isym = flex.int(n_refl, 0)
+  miller.map_to_asu_isym(space_group.type(), False, uniq_indices, isym)
+  #miller.map_to_asu_isym(space_group.type(), False, uniq_indices_anom,
+  #  isym)
+  # write out symmetry operators
+  n_smx = space_group.n_smx()
+  file_object.write("%5d %s\n" % (n_smx, i_obs.space_group_info()))
+  for smx in space_group.smx():
+    smx_rot = smx.as_int_array()[0:9]
+    smx_tra = smx.as_int_array()[9:]
+    for r in smx_rot :
+      file_object.write("%3d" % r)
+    file_object.write("\n")
+    for t in smx_tra :
+      file_object.write("%3d" % t)
+    file_object.write("\n")
+  # write out reflections
+  if scale_intensities_for_scalepack_merge: # 2014-01-07 TT
+    from iotbx.scalepack.merge import scale_intensities_if_necessary
+    i_obs=scale_intensities_if_necessary(i_obs,out=out)
+
+  from iotbx.scalepack.merge import format_f8_1_or_i8 # Sorry if out of range
+  for i_refl, (h,k,l) in enumerate(i_obs.indices()):
+    (h_asu, k_asu, l_asu) = uniq_indices[i_refl]
+    c_flag = centric_tags[i_refl]
+    asu_number = abs(isym[i_refl]) + 1 # XXX is this correct?
+    spindle_flag = spindle_flags[i_refl]
+    batch = batch_numbers[i_refl]
+    i_formatted=format_f8_1_or_i8((h,k,l),"intensity",i_obs.data()[i_refl])
+    s_formatted=format_f8_1_or_i8((h,k,l),"sigma",i_obs.sigmas()[i_refl])
+
+    file_object.write("%4d%4d%4d%4d%4d%4d%6d%2d%2d%3d%s%s\n" %
+      (h, k, l, h_asu, k_asu, l_asu, batch, c_flag, spindle_flag,
+      asu_number, i_formatted,s_formatted,))
+  file_object.close()
+
+class reader(object):
+  def __init__(self, file_name, header_only=False):
+    self.file_name = os.path.normpath(file_name)
+    with open(file_name) as f:
+      line = f.readline()
+      assert line[5] == " "
+      n_sym_ops_from_file = int(line[:5].strip())
+      assert n_sym_ops_from_file > 0
+      self.space_group_symbol = line[6:].strip()
+      self.space_group_from_ops = sgtbx.space_group()
+      for i in range(n_sym_ops_from_file):
+        line = f.readline().rstrip()
+        assert len(line) == 27
+        r = sgtbx.rot_mx([int(line[j*3:(j+1)*3]) for j in range(9)], 1)
+        line = f.readline().rstrip()
+        assert len(line) == 9
+        t = sgtbx.tr_vec([int(line[j*3:(j+1)*3]) for j in range(3)], 12)
+        self.space_group_from_ops.expand_smx(sgtbx.rt_mx(r, t))
+    if (header_only):
+      self.original_indices = None
+      return
+    all_arrays = scalepack_ext.no_merge_original_index_arrays(
+      file_name, n_sym_ops_from_file*2+1)
+    self.original_indices = all_arrays.original_indices()
+    self.unique_indices = all_arrays.unique_indices()
+    self.batch_numbers = all_arrays.batch_numbers()
+    self.centric_tags = all_arrays.centric_tags()
+    self.spindle_flags = all_arrays.spindle_flags()
+    self.asymmetric_unit_indices = all_arrays.asymmetric_unit_indices()
+    self.i_obs = all_arrays.i_obs()
+    self.sigmas = all_arrays.sigmas()
+
+  def space_group_info(self):
+    return combine_symops_and_symbol(
+      space_group_from_ops=self.space_group_from_ops,
+      space_group_symbol=self.space_group_symbol)
+
+  def show_summary(self, out=None, prefix=""):
+    if (out is None): out = sys.stdout
+    print(prefix + "File name:", show_string(self.file_name), file=out)
+    print(prefix + "Space group symbol:", \
+      show_string(self.space_group_symbol), file=out)
+    try: space_group_info = self.space_group_info()
+    except KeyboardInterrupt: raise
+    except Exception: pass
+    else:
+      space_group_info.show_summary(
+        f=out, prefix=prefix+"Space group from operations: ")
+    if (self.original_indices is not None):
+      print(prefix + "Number of original indices:", \
+        self.original_indices.size(), file=out)
+
+  def crystal_symmetry(self):
+    return crystal.symmetry(
+      unit_cell=None,
+      space_group_info=self.space_group_info())
+
+  def unmerged_miller_set(self,
+                          crystal_symmetry=None,
+                          force_symmetry=False,
+                          anomalous=True):
+    if anomalous is None:
+      anomalous = True
+    if (not force_symmetry
+        or crystal_symmetry is None
+        or crystal_symmetry.space_group_info() is None):
+      space_group_info = self.space_group_info()
+    else:
+      space_group_info = None
+    return miller.set(
+      crystal_symmetry=self.crystal_symmetry().join_symmetry(
+        other_symmetry=crystal_symmetry,
+        force=force_symmetry),
+      indices=self.original_indices,
+      anomalous_flag=anomalous)
+
+  def as_miller_array(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=True):
+    if (base_array_info is None):
+      base_array_info = miller.array_info(
+        source_type="scalepack_no_merge_original_index")
+    crystal_symmetry_from_file = self.crystal_symmetry()
+    crystal_symmetry = crystal_symmetry_from_file.join_symmetry(
+      other_symmetry=crystal_symmetry,
+      force=force_symmetry)
+    result = miller.array(
+      miller_set=self.unmerged_miller_set(
+        crystal_symmetry=crystal_symmetry,
+        force_symmetry=True,
+        anomalous=anomalous),
+      data=self.i_obs,
+      sigmas=self.sigmas)
+    if (merge_equivalents):
+      result = result.merge_equivalents().array()
+    return (result
+      .set_info(base_array_info.customized_copy(
+        labels=["I(+)", "SIGI(+)", "I(-)", "SIGI(-)"],
+        merged=merge_equivalents,
+        crystal_symmetry_from_file=crystal_symmetry_from_file))
+      .set_observation_type_xray_intensity())
+
+  def as_miller_arrays(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=True):
+    return [
+      self.as_miller_array(
+        crystal_symmetry=crystal_symmetry,
+        force_symmetry=force_symmetry,
+        merge_equivalents=merge_equivalents,
+        base_array_info=base_array_info,
+        anomalous=anomalous,
+      ),
+      self.batch_as_miller_array(
+        crystal_symmetry=crystal_symmetry,
+        force_symmetry=force_symmetry,
+        base_array_info=base_array_info,
+        anomalous=anomalous,
+      ),
+    ]
+
+  def batch_as_miller_array(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        base_array_info=None,
+        anomalous=True):
+    if (base_array_info is None):
+      base_array_info = miller.array_info(
+        source_type="scalepack_no_merge_original_index")
+    crystal_symmetry_from_file = self.crystal_symmetry()
+    crystal_symmetry = crystal_symmetry_from_file.join_symmetry(
+      other_symmetry=crystal_symmetry,
+      force=force_symmetry)
+    return miller.array(
+      miller_set=self.unmerged_miller_set(
+        crystal_symmetry=crystal_symmetry,
+        force_symmetry=True,
+        anomalous=anomalous),
+      data=self.batch_numbers).set_info(
+        base_array_info.customized_copy(
+          labels=["BATCH"],
+          crystal_symmetry_from_file=crystal_symmetry_from_file))
+
+def combine_symops_and_symbol(space_group_from_ops, space_group_symbol):
+  space_group_symbol = space_group_symbol.replace(" ","").upper()
+  z = space_group_symbol[:1]
+  if ("PABCIFRH".find(z) < 0):
+    raise RuntimeError(
+      "Cannot determine lattice centring type given space group symbol"
+      " %s" % show_string(space_group_symbol))
+  if (z == "P"):
+    return sgtbx.space_group_info(group=space_group_from_ops)
+  if (z == "H"):
+    space_group_symbol = "R" + space_group_symbol[1:] + ":H"
+    z = "R"
+  elif (z == "R" and not space_group_symbol.endswith(":H")):
+    if (space_group_symbol.endswith(":R")):
+      z = None
+    else:
+      for s in space_group_from_ops:
+        r_info = s.r().info()
+        if (abs(r_info.type()) == 3):
+          if (r_info.ev() == (0,0,1)):
+            space_group_symbol = "R" + space_group_symbol[1:] + ":H"
+            break
+          elif (r_info.ev() == (1,1,1)):
+            space_group_symbol += ":R"
+            z = None
+            break
+  space_group_exp = sgtbx.space_group(space_group_from_ops)
+  if (z is not None):
+    try:
+      space_group_exp.expand_conventional_centring_type(z)
+    except RuntimeError:
+      space_group_exp = None
+  if (space_group_exp is not None):
+    try:
+      space_group_from_symbol = sgtbx.space_group_info(
+        symbol=space_group_symbol).group()
+    except RuntimeError:
+      space_group_from_symbol = None
+  if (   space_group_exp is None
+      or space_group_from_symbol is None
+      or space_group_exp != space_group_from_symbol):
+    if space_group_from_symbol:
+      warnings.warn("""
+WARNING:
+  Symmetry operations in input file are for space group %(space_group_exp)s
+  However space group symbol is: %(space_group_symbol)s
+  This may be a format error in the Scalepack file!
+  Using %(space_group_symbol)s
+""" % {"space_group_exp" : str(space_group_exp.info()),
+       "space_group_symbol" : show_string(space_group_symbol), },
+        UserWarning, stacklevel=10)
+      space_group_exp = space_group_from_symbol
+    else:
+      raise RuntimeError(
+      "Symmetry operations in unmerged SCALEPACK file incompatible with"
+      " space group symbol %s"
+        % show_string(space_group_symbol))
+  return sgtbx.space_group_info(group=space_group_exp)
+
+def exercise_combine_symops_and_symbol():
+  for symbols in sgtbx.space_group_symbol_iterator():
+    space_group = sgtbx.space_group_info(
+      symbol="Hall: %s" % symbols.hall()).group()
+    space_group_from_ops = sgtbx.space_group()
+    for s in list(space_group)[:space_group.order_p()]:
+      space_group_from_ops.expand_smx(s)
+    combined = combine_symops_and_symbol(
+      space_group_from_ops=space_group_from_ops,
+      space_group_symbol=symbols.universal_hermann_mauguin())
+    assert combined.group() == space_group
+    if (symbols.extension() in ["R", "H"]):
+      combined = combine_symops_and_symbol(
+        space_group_from_ops=space_group_from_ops,
+        space_group_symbol=symbols.hermann_mauguin())
+      assert combined.group() == space_group
+      if (symbols.extension() == "H"):
+        combined = combine_symops_and_symbol(
+          space_group_from_ops=space_group_from_ops,
+          space_group_symbol="H "+symbols.hermann_mauguin()[2:])
+        assert combined.group() == space_group
+
+def quick_test(file_name):
+  from libtbx.utils import user_plus_sys_time
+  t = user_plus_sys_time()
+  s = reader(file_name)
+  print("Time read:", t.delta())
+  s.show_summary()
+  print(tuple(s.original_indices[:3]))
+  print(tuple(s.unique_indices[:3]))
+  print(tuple(s.batch_numbers[:3]))
+  print(tuple(s.centric_tags[:3]))
+  print(tuple(s.spindle_flags[:3]))
+  print(tuple(s.asymmetric_unit_indices[:3]))
+  print(tuple(s.i_obs[:3]))
+  print(tuple(s.sigmas[:3]))
+  print(tuple(s.original_indices[-3:]))
+  print(tuple(s.unique_indices[-3:]))
+  print(tuple(s.batch_numbers[-3:]))
+  print(tuple(s.centric_tags[-3:]))
+  print(tuple(s.spindle_flags[-3:]))
+  print(tuple(s.asymmetric_unit_indices[-3:]))
+  print(tuple(s.i_obs[-3:]))
+  print(tuple(s.sigmas[-3:]))
+  m = s.as_miller_array(merge_equivalents=False).merge_equivalents()
+  print("min redundancies:", flex.min(m.redundancies().data()))
+  print("max redundancies:", flex.max(m.redundancies().data()))
+  print("mean redundancies:", flex.mean(m.redundancies().data().as_double()))
+  s.as_miller_arrays()[0].show_summary()
+  print()
+
+def run(args):
+  exercise_combine_symops_and_symbol()
+
+  file_names = """
+p9/infl.sca
+p9/peak.sca
+p9/high.sca
+rh-dehalogenase/auki_rd_1.sca
+rh-dehalogenase/hgi2_rd_1.sca
+rh-dehalogenase/hgki_rd_1.sca
+rh-dehalogenase/ndac_rd_1.sca
+rh-dehalogenase/rt_rd_1.sca
+rh-dehalogenase/smac_1.sca
+vmp/infl.sca
+vmp/peak.sca
+vmp/high.sca""".split()
+  for file_name in file_names:
+    for root_dir in args:
+      fn = root_dir + "/" + file_name
+      if (os.path.isfile(fn)):
+        print("File name:", fn)
+        quick_test(fn)
+  print("OK")
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/scalepack/space_group_dictionary.py
+"""
+scalepack manual, edition 5, page 141
+The space group may be entered as a name (e.g. P212121) or as a number (e.g. 19, for the same space group). Most of the numbers correspond to those of the International Tables. The numbers above 230 are non-standard definitions of space groups.
+
+1 P1
+3 P2
+4 P21
+5 C2
+16 P222
+17 P2221
+18 P21212
+19 P212121
+20 C2221
+21 C222
+22 F222
+23 I222
+24 I212121
+75 P4
+76 P41
+77 P42
+78 P43
+79 I4
+80 I41
+89 P422
+90 P4212
+91 P4122
+92 P41212
+93 P4222
+94 P42212
+95 P4322
+96 P43212
+97 I422
+98 I4122
+143 P3
+144 P31
+145 P32
+146 R3
+149 P312
+150 P321
+151 P3112
+152 P3121
+153 P3212
+154 P3221
+155 R32
+168 P6
+169 P61
+170 P65
+171 P62
+172 P64
+173 P63
+177 P622
+178 P6122
+179 P6522
+180 P6222
+181 P6422
+182 P6322
+195 P23
+196 F23
+197 I23
+198 P213
+199 I213
+207 P432
+208 P4232
+209 F432
+210 F4132
+211 I432
+212 P4332
+213 P4132
+214 I4132
+303 P2C
+305 B2
+318 P21221
+401 C1
+403 P21C
+446 H3
+455 H32
+501 I1
+503 I2
+505 C21
+Notes to particular space groups:
+146 R3 R3 in hexagonal setting
+446 H3 R3 in primitive setting
+155 R32 R32 in hexagonal setting
+455 H32 R32 in primitive setting
+401 C1 Non-standard, but useful to make angles close to 90.
+501 I1 Non-standard, but useful to make angles close to 90.
+303 P2C P2, C axis unique
+403 P21C P21, C axis unique
+305 B2 like C2, B face centered, c axis unique
+503 I2 Non-standard, but useful to make beta angle close to 90.
+"""
+from __future__ import absolute_import, division, print_function
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/scalepack/tst_merge.py
+from __future__ import absolute_import, division, print_function
+from iotbx.scalepack import merge
+from iotbx.regression.utils import random_f_calc
+from cctbx import miller
+from cctbx.array_family import flex
+from cctbx.development import debug_utils
+from libtbx.test_utils import approx_equal
+import sys
+
+def recycle(miller_array):
+  merge.write(file_name="tmp.sca", miller_array=miller_array)
+  with open("tmp.sca") as f:
+    read_back_file = merge.reader(file_handle=f)
+  read_back_arrays = read_back_file.as_miller_arrays()
+  assert len(read_back_arrays) == 1
+  read_back_array = read_back_arrays[0]
+  read_back_input_indexing = read_back_array.adopt_set(miller_array)
+  if (miller_array.is_xray_amplitude_array()):
+    read_back_input_indexing = read_back_input_indexing.f_sq_as_f()
+  regression = flex.linear_regression(
+    miller_array.data(),
+    read_back_input_indexing.data())
+  assert approx_equal(regression.slope(), 1, eps=1.e-3)
+  assert abs(regression.y_intercept()) < 1
+  regression = flex.linear_regression(
+    miller_array.sigmas(),
+    read_back_input_indexing.sigmas())
+  if (miller_array.is_xray_intensity_array()):
+    assert approx_equal(regression.slope(), 1, eps=1.e-3)
+  else:
+    assert approx_equal(regression.slope(), 1, eps=1.e-1)
+  assert abs(regression.y_intercept()) < 1
+
+def exercise(space_group_info, n_scatterers=8, d_min=2.5,
+             anomalous_flag=False, verbose=0):
+  f_calc = random_f_calc(
+    space_group_info=space_group_info,
+    n_scatterers=n_scatterers,
+    d_min=d_min,
+    anomalous_flag=anomalous_flag,
+    verbose=verbose)
+  if (f_calc is None): return
+  data = flex.norm(f_calc.data())
+  scale_factor = 9999998/flex.max(data)
+  data = data * scale_factor + 1
+  f_calc = miller.array(
+    miller_set=f_calc,
+    data=data,
+    sigmas=data/10).set_observation_type_xray_intensity()
+  f_calc = f_calc.select(flex.random_permutation(size=data.size()))
+  recycle(miller_array=f_calc)
+  recycle(miller_array=f_calc.f_sq_as_f())
+
+def run_call_back(flags, space_group_info):
+  for anomalous_flag in (False, True):
+    exercise(
+      space_group_info,
+      anomalous_flag=anomalous_flag,
+      verbose=flags.Verbose)
+
+def exercise_overloads():
+  with open("overloads.sca", "w") as f:
+    f.write("""\
+    1
+ -987
+    50.000    50.000    80.000    90.000    90.000   120.000 p3121
+  19   2   3 ******* 47482.6 ******* 26861.1
+  19   2   2 16333.4 17143.9 38472.0 22574.8
+  19   2   1 49448.5 24728.9 28427.6 18873.9
+  19   2   0 34296.1 24479.1 25846.4 22660.4
+  19   2  -1 27513.6 23318.8 30341.0 19273.1""")
+  with open("overloads.sca") as f:
+    file_in = merge.reader(file_handle=f)
+  arrays = file_in.as_miller_arrays()
+  assert (len(arrays[0].indices()) == 8)
+
+def run():
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], run_call_back)
+  exercise_overloads()
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/scalepack/tst_no_merge_original_index.py
+
+from __future__ import absolute_import, division, print_function
+from libtbx.test_utils import show_diff
+import warnings
+
+def exercise():
+  from iotbx.scalepack import no_merge_original_index
+  from cctbx import crystal
+  # input from xia2 with one slight modification to the (44,0,-25) observation,
+  # as pointless/aimless seem to have a slightly different convention for ASU
+  # mapping.  (Scalepack itself is even more deviant.)
+  sca_raw = """\
+    2 P 1 21 1
+  1  0  0  0  1  0  0  0  1
+  0  0  0
+ -1  0  0  0  1  0  0  0 -1
+  0  6  0
+  44   0 -25 -44   0  25   316 0 0  2    91.7   108.2
+ -44   1  11 -44   1  11    35 1 0  1   110.2   112.9
+ -44  -1  11 -44   1  11    34 2 0  2    28.7   115.0
+ -44   1  12 -44   1  12    34 1 0  1   129.1   116.3
+ -44  -1  12 -44   1  12    33 2 0  2   133.1   118.2
+ -44   1  14 -44   1  14    31 1 0  1   159.7   116.1
+ -44  -1  14 -44   1  14    30 2 0  2   136.8    90.9
+ -44   1  15 -44   1  15    30 1 0  1   106.4    85.8
+ -44  -1  15 -44   1  15    29 2 0  2    39.1    87.4
+ -44   1  17 -44   1  17    27 1 0  1   115.9    87.0
+ -44  -1  17 -44   1  17    26 2 0  2   138.1    89.8
+ -44  -1  18 -44   1  18    25 2 0  2    10.3    84.4
+ -38   2  53 -38   2  53   212 1 0  1   246.7   141.4
+  38  -2 -53 -38   2  53   272 2 0  1     6.1   157.7
+  38   2 -53 -38   2  53   272 1 0  2   322.5   159.5
+  38  -2 -54 -38   2  54   271 2 0  1   -68.4   152.1
+  38   2 -54 -38   2  54   271 1 0  2   211.0   153.3
+  38  -2 -55 -38   2  55   270 2 0  1    78.6   153.6
+  38   2 -55 -38   2  55   270 1 0  2   220.4   157.0
+  38  -2 -56 -38   2  56   269 2 0  1   -25.5   148.6
+  38   2 -56 -38   2  56   269 1 0  2   -55.1   143.6
+  38   2 -57 -38   2  57   268 1 0  2   -32.3    89.2
+  38  -2 -57 -38   2  57   268 2 0  1  -265.7   138.8
+  38   2 -58 -38   2  58   267 1 0  2    69.6    92.7
+  38  -2 -58 -38   2  58   267 2 0  1  -153.1   132.2
+"""
+  hkl_in = "tst_scalepack_unmerged_writer.sca"
+  hkl_out = "tst_scalepack_unmerged_writer_out.sca"
+  with open(hkl_in, "w") as f:
+    f.write(sca_raw)
+  reader = no_merge_original_index.reader(hkl_in)
+  symm = crystal.symmetry(
+    space_group_symbol="P21",
+    unit_cell=(80.882, 51.511, 141.371, 90., 106.588, 90.))
+  i_obs = reader.as_miller_array(
+    crystal_symmetry=symm,
+    merge_equivalents=False)
+  i_obs.export_as_scalepack_unmerged(
+    file_name=hkl_out,
+    batch_numbers=reader.batch_numbers,
+    spindle_flags=reader.spindle_flags)
+  with open(hkl_out) as f:
+    sca_recycled = f.read()
+  assert not show_diff(sca_recycled, sca_raw)
+  batches = reader.batch_as_miller_array(crystal_symmetry=symm)
+  assert batches.indices().all_eq(i_obs.indices())
+  assert (batches.data()[0] == 316)
+  mas = reader.as_miller_arrays()
+  assert len(mas) == 2
+  assert mas[0].info().labels == ["I(+)", "SIGI(+)", "I(-)", "SIGI(-)"]
+  assert mas[1].info().labels == ["BATCH"]
+  # space group symbol and symops conflict (Scalepack bug?)
+  sca_bad = """\
+   24 f4132
+  1  0  0  0  1  0  0  0  1
+  0  0  0
+  0  0  1  1  0  0  0  1  0
+  0  0  0
+  0  1  0  0  0  1  1  0  0
+  0  0  0
+ -1  0  0  0  0 -1  0 -1  0
+  9  9  9
+  0 -1  0 -1  0  0  0  0 -1
+  9  9  9
+  0  0 -1  0 -1  0 -1  0  0
+  9  9  9
+  1  0  0  0 -1  0  0  0 -1
+  6  6  0
+  0  0  1 -1  0  0  0 -1  0
+  6  6  0
+  0  1  0  0  0 -1 -1  0  0
+  6  6  0
+ -1  0  0  0  0  1  0  1  0
+  3  9  3
+  0 -1  0  1  0  0  0  0  1
+  3  9  3
+  0  0 -1  0  1  0  1  0  0
+  3  9  3
+ -1  0  0  0  1  0  0  0 -1
+  0  6  6
+  0  0 -1  1  0  0  0 -1  0
+  0  6  6
+  0 -1  0  0  0  1 -1  0  0
+  0  6  6
+  1  0  0  0  0 -1  0  1  0
+  3  3  9
+  0  1  0 -1  0  0  0  0  1
+  3  3  9
+  0  0  1  0 -1  0  1  0  0
+  3  3  9
+ -1  0  0  0 -1  0  0  0  1
+  6  0  6
+  0  0 -1 -1  0  0  0  1  0
+  6  0  6
+  0 -1  0  0  0 -1  1  0  0
+  6  0  6
+  1  0  0  0  0  1  0 -1  0
+  9  3  3
+  0  1  0  1  0  0  0  0 -1
+  9  3  3
+  0  0  1  0  1  0 -1  0  0
+  9  3  3
+  -2  -2  -2   2   2   2   658 0 0  4  3624.3   344.2
+  -2  -2   2   2   2   2   582 0 0  8  3220.1   344.8
+   2   2  -2   2   2   2   579 0 1 12  3376.5   344.3
+   1   3   1   3   1   1   320 0 0  3   544.3    55.1
+   1   3   1   3   1   1   677 0 1  3   476.8    53.8
+  -3  -1  -1   3   1   1   217 0 1  4   588.2    53.9
+  -3  -1  -1   3   1   1   579 0 0  4   552.4    53.9
+"""
+  hkl_in = "tst_scalepack_unmerged_writer2.sca"
+  hkl_out = "tst_scalepack_unmerged_writer2_out.sca"
+  with open(hkl_in, "w") as f:
+    f.write(sca_bad)
+  reader = no_merge_original_index.reader(hkl_in)
+  with warnings.catch_warnings(record=True) as w:
+    space_group_info = reader.space_group_info()
+    assert (len(w) == 1)
+    assert (str(space_group_info) == "F 41 3 2")
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************

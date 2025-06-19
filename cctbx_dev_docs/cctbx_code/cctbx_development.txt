@@ -1,0 +1,4804 @@
+
+
+ *******************************************************************************
+cctbx/development/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/approx_amplitude_vs_resolution.py
+from __future__ import absolute_import, division, print_function
+
+import sys, math
+from cctbx.array_family import flex
+from six.moves import range
+from six.moves import zip
+from libtbx.utils import null_out
+from iotbx.map_model_manager import map_model_manager
+
+# Binned rms amplitude for beta-galactosidase calculated from 1 A - inf
+# with k_sol=0  (no solvent)
+
+rms_fc_list = """
+d_min   rmsFc
+14.8935 27428.7
+8.7965  9656.1
+7.3874  8589.7
+6.5955  8439.5
+6.0632  8732.1
+5.6666  9441.4
+5.3566  9666.1
+5.1085  10218.7
+4.897   10634.3
+4.7177  10939.9
+4.5664  10926.3
+4.4289  10606.2
+4.3077  10309.6
+4.1972  9365.6
+4.1     8950.7
+4.0098  8536.7
+3.9278  8025.5
+3.8517  8133.3
+3.7793  7798.6
+3.7141  7398
+3.6529  7173.5
+3.5949  6839.8
+3.5413  6978
+3.4908  6838
+3.4416  6525.5
+3.3965  6349.7
+3.3533  6226.1
+3.3119  6216
+3.2726  6040.4
+3.2348  6097.3
+3.1994  5721.7
+3.1652  5771.8
+3.1317  5756.4
+3.101   5480.2
+3.0702  5583.7
+3.0421  5317.7
+3.0136  5460.2
+2.9864  5207.4
+2.9606  5259.4
+2.9356  5089.8
+2.9111  5273.6
+2.8873  5087
+2.8645  5111.6
+2.8425  5260.2
+2.8208  4967.6
+2.8002  5052.1
+2.7796  5086.5
+2.7601  5217.9
+2.741   4970.3
+2.7226  5013.3
+2.7045  5067.9
+2.6865  5120.5
+2.6693  4810.8
+2.6529  5161.3
+2.6364  5038.5
+2.6206  4812.4
+2.6046  4980.8
+2.5899  4894.3
+2.5752  4907.6
+2.5607  5007.3
+2.5465  5057.8
+2.5323  5053.6
+2.5185  4956.8
+2.5056  5037.1
+2.4928  4719.8
+2.4798  5245.1
+2.4672  4924.7
+2.455   4913.6
+2.4431  4872.6
+2.4313  4843.4
+2.4197  4934.3
+2.4085  4828.5
+2.3974  4837.6
+2.3864  5012.5
+2.3756  4823.7
+2.3652  4851
+2.3548  4848.3
+2.3445  4925
+2.3344  4794.6
+2.3249  5099.7
+2.3149  4886.7
+2.3058  4938.6
+2.2963  4831.9
+2.2869  4932.6
+2.2778  4955
+2.269   4834
+2.2603  4922.9
+2.2515  4629
+2.243   4956.5
+2.2346  4622.5
+2.2263  4760.7
+2.2185  4681.7
+2.2103  4740.7
+2.2024  4687.5
+2.1945  4845.7
+2.1868  4684.2
+2.1793  4711.9
+2.1719  4687.6
+2.1646  4789.3
+2.1571  4857.2
+2.1499  4775
+2.1429  4578.3
+2.136   4638.5
+2.1291  4589.6
+2.1222  4639.6
+2.1154  4688.8
+2.1088  4538.1
+2.1023  4759.4
+2.0957  4541.6
+2.0893  4467.1
+2.0829  4494.1
+2.0769  4556.1
+2.0707  4522.1
+2.0646  4391.1
+2.0587  4372.9
+2.0526  4492.9
+2.0466  4369.9
+2.0408  4305.6
+2.0351  4429.5
+2.0294  4311.8
+2.0239  4458.9
+2.0182  4340.4
+2.0126  4479.6
+2.0073  4293
+2.0019  4444.5
+1.9966  4024.8
+1.9913  4402.5
+1.9861  4320.9
+1.9809  4264.3
+1.9758  4272.1
+1.9707  4193.8
+1.9657  4306.6
+1.9609  4192.2
+1.9559  4224
+1.951   4105.9
+1.9462  3959.2
+1.9413  4212.7
+1.9366  4207.6
+1.9321  4119.3
+1.9274  3971.2
+1.9227  3997.4
+1.9183  4088
+1.9137  4017.2
+1.9093  4027.2
+1.9048  3956.5
+1.9004  3789.9
+1.8962  3892.8
+1.8919  3960
+1.8877  3801.2
+1.8834  3710.2
+1.8791  3909.5
+1.8752  3969.3
+1.871   3778.8
+1.867   3806.7
+1.8628  3664.6
+1.8589  3777.6
+1.8549  3754.3
+1.8509  3740
+1.8471  3669.2
+1.8432  3591.1
+1.8394  3707.7
+1.8355  3570.3
+1.8318  3626.8
+1.8281  3601.8
+1.8243  3585.9
+1.8207  3595.2
+1.817   3704.4
+1.8134  3664.5
+1.8098  3442.9
+1.8062  3517.1
+1.8027  3507.4
+1.7992  3522.2
+1.7956  3543.2
+1.7923  3477.4
+1.7889  3553.9
+1.7854  3459.4
+1.782   3488.1
+1.7787  3489.7
+1.7753  3329.4
+1.7721  3591.5
+1.7688  3320.3
+1.7656  3352.5
+1.7623  3365.4
+1.7591  3370.3
+1.7559  3425.1
+1.7527  3332.2
+1.7495  3309.9
+1.7465  3350.8
+1.7433  3408
+1.7403  3342.2
+1.7372  3306.2
+1.7343  3275.2
+1.7312  3367.8
+1.7282  3301.3
+1.7252  3216.8
+1.7223  3385.3
+1.7193  3231.7
+1.7165  3230.7
+1.7137  3379.6
+1.7108  3270.5
+1.7078  3375.6
+1.705   3328.2
+1.7022  3040.2
+1.6994  3256.9
+1.6966  3125.6
+1.6939  3225.9
+1.6911  3186.4
+1.6884  3206.2
+1.6857  3163.7
+1.683   3151.8
+1.6804  3162.4
+1.6777  3150.6
+1.6751  3103.6
+1.6725  3096.7
+1.6699  3117.2
+1.6673  3136.9
+1.6647  3081.4
+1.6622  3044.6
+1.6596  3034.3
+1.657   3017.7
+1.6546  2990.9
+1.6521  3068.2
+1.6496  3066.4
+1.6471  2975.2
+1.6447  2970.8
+1.6423  3040.8
+1.6399  3072.4
+1.6374  2919.9
+1.6351  3023.2
+1.6327  3071.4
+1.6303  3005.4
+1.6279  2933.8
+1.6256  3095.9
+1.6233  3045.8
+1.621   2909.1
+1.6187  2930.7
+1.6164  3036.3
+1.6141  2937.7
+1.6119  2938.1
+1.6097  2953.6
+1.6074  3058.2
+1.6051  2904.5
+1.6029  2953.9
+1.6008  2823.3
+1.5986  3006.7
+1.5965  2942.5
+1.5943  3016
+1.5921  2916.4
+1.59    3037.2
+1.5878  3006.2
+1.5857  2819.5
+1.5836  2896.3
+1.5815  2828.3
+1.5795  2819.2
+1.5773  2872.6
+1.5753  3014.2
+1.5733  2907.1
+1.5712  2809
+1.5691  2910
+1.5672  2752.1
+1.5651  3028.9
+1.5631  2778.4
+1.5612  2803.5
+1.5592  2845.2
+1.5573  2919.3
+1.5553  2885
+1.5533  2805.4
+1.5514  2833.2
+1.5494  2851.3
+1.5475  2737.8
+1.5456  2865.3
+1.5438  2876.5
+1.5418  2815.8
+1.54    2717.8
+1.5381  2785.3
+1.5362  2786.2
+1.5344  2911.6
+1.5325  2770.4
+1.5307  2848.2
+1.5289  2785.3
+1.527   2760.1
+1.5252  2698.8
+1.5234  2886.7
+1.5216  2820.9
+1.5199  2703.3
+1.5181  2721.4
+1.5163  2663.4
+1.5145  2761.1
+1.5128  2787.6
+1.511   2814.4
+1.5093  2821.9
+1.5076  2732.4
+1.5059  2715.3
+1.5042  2806.9
+1.5025  2734.3
+1.5008  2849.6
+1.4991  2671.9
+1.4974  2671.6
+1.4957  2830.2
+1.4941  2703.5
+1.4924  2797.7
+1.4907  2711.3
+1.4891  2751.4
+1.4875  2850.9
+1.4858  2750.8
+1.4842  2575.8
+1.4826  2731.3
+1.4809  2837.1
+1.4793  2763.9
+1.4778  2697.9
+1.4761  2785.9
+1.4746  2686.2
+1.473   2719
+1.4714  2672.9
+1.4699  2829.7
+1.4683  2807.6
+1.4668  2685.9
+1.4653  2672.9
+1.4637  2642.8
+1.4622  2815
+1.4606  2531.2
+1.4592  2728.3
+1.4577  2725.9
+1.4561  2752.1
+1.4547  2723.1
+1.4531  2710
+1.4517  2713.8
+1.4502  2712.2
+1.4487  2589.5
+1.4472  2636.1
+1.4457  2755.8
+1.4444  2637.9
+1.4429  2606
+1.4414  2704.1
+1.44    2690.4
+1.4386  2722.4
+1.4371  2599.4
+1.4358  2731.4
+1.4343  2628.3
+1.4329  2707.3
+1.4315  2662.9
+1.4301  2769.2
+1.4287  2605.1
+1.4273  2542
+1.4259  2689.2
+1.4245  2608.5
+1.4232  2638.8
+1.4218  2630.3
+1.4205  2686.3
+1.4191  2728.7
+1.4178  2589.5
+1.4164  2681.2
+1.415   2650.8
+1.4137  2606.4
+1.4124  2711.1
+1.4111  2729.2
+1.4097  2563.5
+1.4084  2671.9
+1.4071  2645.3
+1.4058  2642.2
+1.4045  2745.9
+1.4032  2679
+1.4019  2746.6
+1.4006  2642.5
+1.3993  2634.9
+1.3981  2615.7
+1.3968  2686
+1.3955  2604.9
+1.3943  2688.5
+1.393   2708.4
+1.3918  2647.7
+1.3905  2635.1
+1.3892  2584.1
+1.388   2524.6
+1.3868  2767.5
+1.3856  2769.5
+1.3843  2528.1
+1.3831  2709.6
+1.3818  2670.2
+1.3807  2533.2
+1.3795  2599.6
+1.3782  2587.2
+1.377   2654.2
+1.3758  2619.5
+1.3746  2608.1
+1.3735  2618.2
+1.3723  2669.2
+1.3711  2731.1
+1.3699  2449.7
+1.3687  2624.4
+1.3676  2667.5
+1.3664  2577.7
+1.3653  2548.4
+1.3641  2687.9
+1.3629  2638.9
+1.3618  2616.6
+1.3607  2545.5
+1.3595  2515.1
+1.3584  2552.9
+1.3573  2484.9
+1.3561  2638.1
+1.355   2656.9
+1.3539  2468.9
+1.3527  2563.8
+1.3516  2685.5
+1.3505  2622.2
+1.3494  2591.8
+1.3483  2645.3
+1.3472  2580.5
+1.3461  2525.2
+1.345   2549.1
+1.3439  2530.4
+1.3428  2648.4
+1.3417  2545.7
+1.3407  2644
+1.3396  2646.4
+1.3385  2511.4
+1.3374  2670.6
+1.3364  2575.9
+1.3353  2573.5
+1.3343  2526.2
+1.3332  2585
+1.3322  2531
+1.3311  2589.2
+1.33    2563.7
+1.329   2637.5
+1.328   2499.9
+1.3269  2551.8
+1.3259  2562.9
+1.3249  2641.1
+1.3238  2636.9
+1.3228  2606.8
+1.3218  2635
+1.3208  2497.1
+1.3198  2479.9
+1.3188  2625.3
+1.3178  2602.3
+1.3168  2608.4
+1.3157  2668.2
+1.3147  2575.8
+1.3137  2555
+1.3128  2542.9
+1.3118  2521.9
+1.3108  2592.6
+1.3098  2574.2
+1.3088  2668.4
+1.3078  2552.5
+1.3069  2588.9
+1.3059  2578.1
+1.3049  2560.1
+1.3039  2565.2
+1.303   2571
+1.302   2509.6
+1.301   2515.5
+1.3001  2613.3
+1.2992  2593.9
+1.2982  2495.1
+1.2973  2442.2
+1.2963  2587.1
+1.2954  2629.3
+1.2945  2494.6
+1.2935  2588.5
+1.2926  2563.5
+1.2916  2493.9
+1.2907  2685.4
+1.2898  2585.1
+1.2889  2526.5
+1.288   2557.2
+1.287   2485.5
+1.2861  2621.4
+1.2852  2561.2
+1.2843  2505
+1.2834  2627.7
+1.2825  2476.7
+1.2816  2558.4
+1.2807  2537.7
+1.2798  2591.6
+1.2789  2618.9
+1.278   2500.3
+1.2771  2537.7
+1.2762  2556.8
+1.2754  2545.5
+1.2745  2604.9
+1.2736  2568
+1.2727  2565.1
+1.2718  2393.1
+1.2709  2639.1
+1.2701  2639
+1.2692  2504.1
+1.2684  2567.8
+1.2675  2546.4
+1.2666  2548.4
+1.2658  2559
+1.2649  2571.1
+1.2641  2546.4
+1.2632  2528.5
+1.2624  2526.8
+1.2615  2553.9
+1.2607  2475.2
+1.2598  2561.4
+1.259   2565.5
+1.2581  2509.1
+1.2573  2511.7
+1.2565  2609.8
+1.2556  2482.8
+1.2548  2560.8
+1.254   2490.3
+1.2532  2482.6
+1.2524  2586.7
+1.2515  2529.6
+1.2507  2475
+1.2499  2623.4
+1.2491  2541.3
+1.2483  2503.7
+1.2475  2560.6
+1.2467  2524.9
+1.2459  2575.7
+1.2451  2516.9
+1.2443  2463.2
+1.2434  2504.6
+1.2427  2654.8
+1.2419  2519
+1.2411  2470.4
+1.2403  2518.7
+1.2395  2584.5
+1.2387  2614.3
+1.2379  2571.4
+1.2372  2534.8
+1.2364  2567.5
+1.2356  2440.5
+1.2348  2448.3
+1.234   2659
+1.2333  2437.7
+1.2325  2504.7
+1.2317  2560
+1.2309  2621.9
+1.2302  2558.5
+1.2294  2400.1
+1.2286  2572.5
+1.2279  2507.4
+1.2272  2430.2
+1.2264  2539.4
+1.2256  2555.1
+1.2249  2543.6
+1.2241  2524.4
+1.2234  2677.1
+1.2226  2538.8
+1.2219  2472.2
+1.2211  2617.8
+1.2204  2445.6
+1.2197  2494.7
+1.2189  2593.7
+1.2182  2514.1
+1.2175  2517.6
+1.2167  2579.7
+1.216   2587.4
+1.2153  2427.5
+1.2145  2545.1
+1.2138  2499.2
+1.2131  2624.3
+1.2124  2453.6
+1.2116  2552
+1.2109  2557.1
+1.2102  2516.5
+1.2095  2495.7
+1.2088  2520.6
+1.2081  2550.2
+1.2074  2467.5
+1.2067  2480.4
+1.206   2581
+1.2052  2571.5
+1.2045  2460.8
+1.2039  2560.4
+1.2031  2505.6
+1.2024  2563.7
+1.2017  2579.5
+1.201   2529.6
+1.2004  2475.8
+1.1997  2558.8
+1.199   2530.2
+1.1983  2553.2
+1.1976  2519.2
+1.1969  2499.2
+1.1962  2583.7
+1.1955  2492.7
+1.1949  2590.1
+1.1942  2476.8
+1.1935  2458.8
+1.1928  2527.4
+1.1922  2536.9
+1.1915  2576.7
+1.1908  2437.7
+1.1901  2480.7
+1.1895  2601
+1.1888  2528.4
+1.1881  2622.2
+1.1875  2519.4
+1.1868  2546.6
+1.1861  2613.2
+1.1855  2516.3
+1.1848  2371.9
+1.1842  2571.1
+1.1835  2525.4
+1.1829  2481.9
+1.1822  2507.7
+1.1816  2510.8
+1.1809  2542.3
+1.1803  2560.3
+1.1796  2528
+1.179   2537
+1.1783  2411.3
+1.1777  2520.2
+1.177   2554.6
+1.1764  2468.4
+1.1758  2485.9
+1.1751  2584.6
+1.1745  2487.6
+1.1738  2600
+1.1732  2522.2
+1.1726  2530.8
+1.172   2669
+1.1713  2473.5
+1.1707  2507.8
+1.1701  2492.3
+1.1694  2356.6
+1.1688  2594.2
+1.1682  2558.9
+1.1676  2387.9
+1.167   2558.6
+1.1663  2524.4
+1.1657  2556.6
+1.1651  2611.1
+1.1645  2509.1
+1.1639  2457.6
+1.1633  2578
+1.1627  2650.5
+1.1621  2407.5
+1.1615  2507.3
+1.1608  2404.1
+1.1602  2540.5
+1.1596  2467.9
+1.159   2418.2
+1.1584  2484.1
+1.1578  2558.3
+1.1572  2432.4
+1.1566  2555
+1.156   2512.2
+1.1554  2465.6
+1.1548  2567.6
+1.1542  2512.8
+1.1537  2551.8
+1.1531  2527.5
+1.1525  2576.5
+1.1519  2394.6
+1.1513  2468.9
+1.1507  2508.9
+1.1501  2624.5
+1.1495  2597.2
+1.1489  2392.1
+1.1484  2516.8
+1.1478  2526.2
+1.1472  2453.9
+1.1467  2562.5
+1.1461  2543.5
+1.1455  2490.4
+1.1449  2480.3
+1.1443  2482.4
+1.1438  2492.9
+1.1432  2513.9
+1.1426  2519.7
+1.1421  2517.1
+1.1415  2422.5
+1.1409  2440.6
+1.1404  2560.7
+1.1398  2584
+1.1392  2573.1
+1.1387  2454
+1.1381  2453.5
+1.1376  2591.1
+1.137   2490
+1.1364  2467.5
+1.1359  2454.5
+1.1353  2578.7
+1.1348  2528.4
+1.1342  2422.8
+1.1337  2562.1
+1.1331  2480.5
+1.1326  2544.9
+1.132   2496.6
+1.1315  2482.9
+1.1309  2458.8
+1.1304  2457
+1.1298  2444.8
+1.1293  2386.7
+1.1288  2536.1
+1.1282  2529.2
+1.1277  2477.7
+1.1271  2461.6
+1.1266  2494.9
+1.1261  2507.8
+1.1255  2478
+1.125   2451.5
+1.1245  2436.3
+1.1239  2368.3
+1.1234  2424.9
+1.1229  2431.1
+1.1223  2521.9
+1.1218  2470.9
+1.1213  2460.5
+1.1207  2516.8
+1.1202  2475.5
+1.1197  2405.4
+1.1192  2439
+1.1186  2441
+1.1181  2496.2
+1.1176  2446.5
+1.1171  2330.1
+1.1166  2475.1
+1.116   2415.3
+1.1155  2480.8
+1.115   2350
+1.1145  2333.8
+1.114   2451.5
+1.1135  2326.5
+1.113   2340.7
+1.1124  2489.9
+1.1119  2588.4
+1.1114  2392.3
+1.1109  2361
+1.1104  2463.2
+1.1099  2437.4
+1.1094  2378.8
+1.1089  2395.3
+1.1084  2387.1
+1.1079  2367.3
+1.1074  2405.4
+1.1069  2374.7
+1.1064  2255.9
+1.1059  2446.1
+1.1054  2405.4
+1.1049  2516.1
+1.1044  2350.1
+1.1039  2480.7
+1.1034  2356.2
+1.1029  2326.6
+1.1024  2395.5
+1.1019  2344.2
+1.1014  2496.7
+1.1009  2332.3
+1.1004  2494.9
+1.1     2320
+1.0995  2390.3
+1.099   2377.8
+1.0985  2368.8
+1.098   2425.6
+1.0975  2404.4
+1.097   2336.8
+1.0966  2464.6
+1.0961  2356.6
+1.0956  2430.1
+1.0951  2284.9
+1.0946  2427
+1.0942  2386.6
+1.0937  2374.1
+1.0932  2294.3
+1.0927  2355.8
+1.0923  2439.6
+1.0918  2422.4
+1.0913  2226.2
+1.0908  2281.2
+1.0903  2320.4
+1.0899  2427.3
+1.0894  2357.9
+1.0889  2417.8
+1.0885  2316.3
+1.088   2363.3
+1.0875  2290.5
+1.0871  2464.4
+1.0866  2299.1
+1.0861  2374.1
+1.0857  2304.2
+1.0852  2315.3
+1.0848  2351.3
+1.0843  2300.2
+1.0838  2324.1
+1.0834  2334
+1.0829  2263
+1.0825  2315.3
+1.082   2334.8
+1.0815  2345.9
+1.0811  2264.1
+1.0806  2274
+1.0802  2403.2
+1.0797  2287
+1.0793  2312.9
+1.0788  2178.6
+1.0784  2341.7
+1.0779  2301.3
+1.0775  2251.4
+1.077   2234.9
+1.0766  2273.2
+1.0761  2356.6
+1.0757  2277.6
+1.0752  2215
+1.0748  2230.5
+1.0743  2271.5
+1.0739  2204.3
+1.0734  2284.8
+1.073   2287.5
+1.0726  2259.1
+1.0721  2259.2
+1.0717  2207.4
+1.0712  2213.1
+1.0708  2232.9
+1.0704  2187.6
+1.0699  2312.8
+1.0695  2414.7
+1.069   2190.7
+1.0686  2210.9
+1.0682  2188.3
+1.0677  2219.1
+1.0673  2218.6
+1.0669  2181.9
+1.0664  2144.1
+1.066   2286
+1.0656  2194.8
+1.0652  2248.8
+1.0647  2174.8
+1.0643  2185.5
+1.0639  2096.8
+1.0634  2247.4
+1.063   2249.1
+1.0626  2164.5
+1.0622  2162.2
+1.0617  2188.6
+1.0613  2181.3
+1.0609  2204.4
+1.0605  2183.7
+1.06    2202.1
+1.0596  2203.2
+1.0592  2176
+1.0588  2172.2
+1.0584  2212.9
+1.0579  2239.1
+1.0575  2057.6
+1.0571  2170
+1.0567  2146.5
+1.0563  2134.2
+1.0559  2181.7
+1.0554  2181.9
+1.055   2180.9
+1.0546  2160.3
+1.0542  2124.1
+1.0538  2115.9
+1.0534  2158.2
+1.053   2068.1
+1.0526  2118.6
+1.0522  2140.4
+1.0518  2083.1
+1.0513  2108
+1.0509  2137.2
+1.0505  2123.3
+1.0501  2115.2
+1.0497  2164.7
+1.0493  2038.6
+1.0489  2134.2
+1.0485  2019.4
+1.0481  2174.9
+1.0477  2076.7
+1.0473  2134.1
+1.0469  2034.2
+1.0465  2094.4
+1.0461  2082.2
+1.0457  2120.5
+1.0453  2015.8
+1.0449  2089.4
+1.0445  2073.7
+1.0441  2115.3
+1.0437  1993.2
+1.0433  2117.1
+1.0429  2067
+1.0425  2051.2
+1.0421  2008.4
+1.0417  2036
+1.0413  2118.7
+1.041   2031.3
+1.0406  2081.8
+1.0402  2083.1
+1.0398  2084.4
+1.0394  1964.5
+1.039   2013.8
+1.0386  2010.1
+1.0382  1971.5
+1.0378  2044
+1.0374  1964.5
+1.0371  1985.2
+1.0367  2044.1
+1.0363  2065.4
+1.0359  1980.4
+1.0355  2026.5
+1.0351  1993.5
+1.0348  2062.8
+1.0344  1927
+1.034   1956.2
+1.0336  1910.5
+1.0332  1948.3
+1.0329  2017.1
+1.0325  2020.7
+1.0321  1916.6
+1.0317  1926.7
+1.0313  1920.9
+1.031   2015.1
+1.0306  1923.3
+1.0302  1962.7
+1.0298  2004.8
+1.0294  1967.4
+1.0291  1987.2
+1.0287  1978.1
+1.0283  1907.8
+1.028   1934.1
+1.0276  1893.9
+1.0272  1910.7
+1.0268  1940.4
+1.0265  1889.2
+1.0261  1920
+1.0257  1986.7
+1.0254  1951.8
+1.025   1901.3
+1.0246  1910.8
+1.0243  1928.7
+1.0239  1849.4
+1.0235  1893.2
+1.0232  1871.1
+1.0228  1934
+1.0224  1926.5
+1.0221  1782.2
+1.0217  1895.1
+1.0213  1838
+1.021   1840.8
+1.0206  1814.7
+1.0202  1875.3
+1.0199  1919.6
+1.0195  1804.4
+1.0192  1807.9
+1.0188  1865.9
+1.0184  1839.4
+1.0181  1835
+1.0177  1823.3
+1.0174  1776.3
+1.017   1767
+1.0167  1847.1
+1.0163  1838.4
+1.0159  1738.2
+1.0156  1785.1
+1.0152  1809
+1.0149  1689.4
+1.0145  1839.2
+1.0142  1795.6
+1.0138  1704
+1.0135  1762.3
+1.0131  1726.4
+1.0128  1751.6
+1.0124  1702.1
+1.0121  1706.2
+1.0117  1748.2
+1.0114  1695.8
+1.011   1678
+1.0107  1719.9
+1.0103  1580.7
+1.01    1746.7
+1.0096  1685.2
+1.0093  1637.4
+1.0089  1594.6
+1.0086  1592.8
+1.0083  1581.1
+1.0079  1491.4
+1.0076  1526.5
+1.0072  1506.9
+1.0069  1528.4
+1.0065  1507.8
+1.0062  1504.3
+1.0058  1438.5
+1.0055  1458.2
+1.0052  1411.7
+1.0048  1424.4
+1.0045  1437.9
+1.0041  1365.2
+1.0038  1373.5
+1.0035  1346.5
+1.0031  1341.3
+1.0028  1294.2
+1.0024  1334.1
+1.0021  1351
+1.0018  1291.3
+1.0014  1333.7
+1.0011  1196.1
+1.0008  1269.1
+1.0004  1245.6
+1.0001  1213.5
+0.9998  1206.6
+"""
+
+def get_expected_ssqr_list(
+      n_bins = None,
+      d_min = None, # minimum resolution of data to use
+      expected_ssqr_list_rms = None,
+      map_model_manager = None,
+      out = sys.stdout):
+
+  assert n_bins is not None
+  assert d_min is not None
+  assert expected_ssqr_list_rms is not None
+
+  if str(expected_ssqr_list_rms) == 'Auto':
+    expected_ssqr_list_rms = 0.25 * d_min
+
+  # Estimate E**2 vs resolution based on rms error expected_ssqr_list_rms
+  # Assume constant total error, amplitudes fall off exp(-b_eff sthol2)
+  #  b_eff = (8 * 3.14159**2/3.) * expected_ssqr_list_rms**2
+  #  sigmaa = exp(-b_eff sthol2)
+  #  E**2 = 1/(1-sigmaa**2)
+
+  map_coeffs = map_model_manager.get_any_map_manager(
+     ).map_as_fourier_coefficients(d_min = d_min)
+  from iotbx.map_model_manager import get_map_coeffs_as_fp_phi
+  f_array_info = get_map_coeffs_as_fp_phi(
+    map_coeffs, d_min= d_min, n_bins = n_bins)
+  f_array = f_array_info.f_array
+  # Approx fall-off with resolution based on rms in A ...as in sigmaa
+  b_eff = (8 * 3.14159**2/3.) * expected_ssqr_list_rms**2
+
+  dsd = f_array.d_spacings().data()
+  ssqr_list = flex.double()
+  for i_bin in f_array.binner().range_used():
+    sel       = f_array.binner().selection(i_bin)
+    d         = dsd.select(sel)
+    d_avg     = flex.mean(d)
+
+    sthol2 = 0.25/d_avg**2
+    sigmaa = math.exp(max(-20.,min(20., -b_eff * sthol2)))
+    ssqr = (1-sigmaa**2)/max(1.e-10,sigmaa**2)
+    ssqr_list.append(ssqr)
+  return ssqr_list
+
+class approx_amplitude_vs_resolution:
+  def __init__(self,
+      n_bins = 1000,
+      d_min = None, # minimum resolution of data to use
+      resolution = None,  # nominal resolution
+      map_model_manager = None,
+      model = None,
+      generate_mock_rms_fc_list = True,
+      k_sol = None,
+      b_sol = None,
+      find_k_sol_b_sol = True,
+      map_id_for_optimization = 'map_manager',
+      out = sys.stdout):
+    #  If d_min and map_model_manager supplied and generate_mock_rms_fc_list,
+    #  generate a  model-based map in that cell and calculate binned values
+    # If model, use it to generate fc instead of mock.  Set B-iso = 0
+
+    self.rms_fc_list = None
+    if generate_mock_rms_fc_list:
+      if model:
+        model = model.deep_copy()
+        model.set_b_iso(flex.double(model.get_b_iso().size(),0.)) # XXX
+        u_cart=model.get_xray_structure().scatterers().extract_u_cart(model.get_xray_structure().crystal_symmetry().unit_cell())
+        model.get_xray_structure().set_u_cart(u_cart)
+        model.set_xray_structure(model.get_xray_structure())
+
+      assert d_min and map_model_manager
+      if find_k_sol_b_sol and map_model_manager.get_map_manager_by_id(
+         map_id_for_optimization):
+        from cctbx.maptbx.refine_sharpening import get_effective_b
+        rms_fo_info = map_model_manager.get_rms_f_list(
+          map_id = map_id_for_optimization,
+          n_bins = n_bins,
+          resolution = resolution,
+          d_min = d_min)
+        n_bins_use = rms_fo_info.n_bins_use
+
+        # Figure out k_sol and b_sol so that rms_f vs resolution from model
+        #  is related by simple Wilson B to rms_f vs resolution from map
+        #  Use grid search to not take very long and get approx answer
+        if (k_sol is None) and (b_sol is None):
+          kb_list= [ [0,0], [0.1,20], [0.1,50],
+                      [0.2,20], [0.2,50],
+                      [0.3,20], [0.3,50],
+                   ]
+
+          best_rms = None
+          best_kb = None
+          best_rms_fc_list = None
+          for k_sol,b_sol in kb_list:
+            self.generate_mock_rms_fc_list(n_bins, d_min , map_model_manager,
+              model = model,
+              k_sol = k_sol,
+              b_sol = b_sol,)
+
+            ratio_list = rms_fo_info.rms_f_list/self.rms_fc_list
+            info = get_effective_b(values = ratio_list,
+              sthol2_values = rms_fo_info.sthol2_list)
+            scaled_fc_list = self.rms_fc_list * info.calc_values
+            rms = ((flex.pow2(rms_fo_info.rms_f_list[:n_bins_use] -
+              scaled_fc_list[:n_bins_use])).min_max_mean().mean)**0.5
+            if best_rms is None or rms < best_rms:
+              best_rms_fc_list = rms_fc_list
+              best_rms = rms
+              best_kb = [k_sol,b_sol]
+          k_sol, b_sol = best_kb
+          if len(kb_list) > 1:  # redo calculation
+            self.generate_mock_rms_fc_list(n_bins, d_min , map_model_manager,
+              model = model,
+              k_sol = k_sol,
+              b_sol = b_sol,)
+          print("Overall approximate B-value: "+
+             "%.2f A**2 \n(rms = %.1f, k_sol=%.2f  b_sol=%.2f)" %(
+             info.effective_b, rms,k_sol,b_sol,
+              ), file = out)
+          self.k_sol = k_sol
+          self.b_sol = b_sol
+          self.rms_fc_list = best_rms_fc_list
+
+      # Othewise just generate the list
+      self.generate_mock_rms_fc_list(n_bins, d_min , map_model_manager,
+        model = model,
+        k_sol = k_sol,
+        b_sol = b_sol,
+        n_bins_use = n_bins_use)
+      self.k_sol = k_sol
+      self.b_sol = b_sol
+
+
+    else:
+      self.set_up_bins(n_bins=n_bins)
+
+  def generate_mock_rms_fc_list(self, n_bins = None, d_min =None,
+       map_model_manager = None, model = None,
+       k_sol = None,
+       b_sol = None,
+       n_bins_use = None,
+       out = null_out()):
+    mmm = map_model_manager
+    if not model:
+      from cctbx.development.create_models_or_maps import generate_model
+      model = generate_model(n_residues = 100, b_iso = 0, log = null_out())
+    # shift the model and return it with new crystal_symmetry
+    from cctbx.maptbx.box import shift_and_box_model
+    model = shift_and_box_model(model = model,
+       crystal_symmetry = mmm.crystal_symmetry())
+    model.set_shift_cart((0,0,0))
+    model = mmm.remove_model_outside_map(model = model,
+       boundary = 0,  return_as_new_model=True)
+    map_id_model_map = 'map_for_mock_data'
+    out_sav = mmm.log
+    mmm.set_log(null_out())
+    mmm.generate_map(model=model,
+       gridding=mmm.get_any_map_manager().map_data().all(),
+       d_min=d_min,
+       k_sol = k_sol,
+       b_sol = b_sol,
+       map_id = map_id_model_map)
+
+    self.rms_fc_list = mmm.get_rms_f_list(map_id = map_id_model_map,
+       d_min = d_min,
+       n_bins = n_bins).rms_f_list
+    self.n_bins_use = n_bins_use  # just save it
+    mmm.remove_map_manager_by_id(map_id = map_id_model_map)
+    mmm.set_log(out_sav)
+
+  def set_up_bins(self, n_bins = None):
+
+    d_min_input_values = []
+    rms_fc_values = []
+
+    found=False
+    for line in rms_fc_list.splitlines():
+      if found:  # read the data
+        spl=line.strip().split()
+        if len(spl) != 2: continue
+        d_min_input_values.append(float(spl[0]))
+        rms_fc_values.append(float(spl[1]))
+
+      elif line.strip().startswith("d_min"):
+        found=True
+
+    d_min_input_values.reverse()
+    rms_fc_values.reverse()
+    self.d_min_input_values=flex.double(d_min_input_values)
+    self.rms_fc_values=flex.double(rms_fc_values)
+
+    # Make a little table of values we can just use
+    self.d_min = self.d_min_input_values.min_max_mean().min
+    self.d_max = self.d_min_input_values.min_max_mean().max
+    self.n_bins = n_bins
+    self.delta_d = (self.d_max - self.d_min)/(n_bins - 1)
+    self.d_min_values = flex.double()
+    self.values = flex.double()
+    for i in range(self.n_bins):
+      self.d_min_values.append(self.d_min + i*self.delta_d)
+      self.values.append(0)  # no value yet
+
+    for d_min_1,value_1,d_min_2,value_2 in zip(
+        d_min_input_values,rms_fc_values,
+        d_min_input_values[1:],rms_fc_values[1:],):
+
+      i_bin_real_1 = self.get_i_bin_real(d_min_1) # goes with value_1
+      i_bin_real_2 = self.get_i_bin_real(d_min_2) # goes with value_2
+      for i_bin in range(self.get_i_bin_below(d_min_1),
+        self.get_i_bin_above(d_min_2)+1):
+        x = (i_bin - i_bin_real_1)/max(1.e-10,i_bin_real_2 - i_bin_real_1)
+        if x < -1.e-6: continue  # outside range
+        if x > 1+1.e-6: continue  #
+        value = value_1 + (value_2 - value_1) * x
+        self.values[i_bin] = value
+    assert self.values.min_max_mean().min > 0
+
+  def maximum_d_value(self):
+    return self.d_min_values[-1]
+
+  def get_k_sol_b_sol(self):
+    if not hasattr(self,'k_sol'):
+      return None,None
+    else:
+      return self.k_sol,self.b_sol
+
+  def get_target_scale_factors(self, f_array = None):
+    if self.rms_fc_list:
+      return self.rms_fc_list
+
+    target_scale_factors = flex.double()
+    for i_bin in f_array.binner().range_used():
+      d_1, d_2 = f_array.binner().bin_d_range(i_bin)
+      if d_1 < 0: d_1 = max(d_2 + 10, self.maximum_d_value())
+      assert d_1 >= d_2
+      shell_scale = self.get_expected_value_in_bin(d_2,d_1)
+      target_scale_factors.append( shell_scale)
+    target_scale_factors = target_scale_factors * (
+        1000./max(1.e-10,target_scale_factors.min_max_mean().max))
+    return target_scale_factors
+
+  def get_expected_value_in_bin(self,d_min = None, d_max = None):
+    # Return the expected value for a bin from d_min to d_max
+    #  d_max = -1 for infinity
+    if d_max < 0:
+      d_max = self.d_max
+    values = flex.double()
+    for i in range(101):
+      d_value = d_min + (i/100)*(d_max - d_min)
+      values.append(self.get_value(d_value))
+    return values.min_max_mean().mean
+
+  def get_value(self,d_value):
+    value_below = self.values[self.get_i_bin_below(d_value)]
+    value_above = self.values[self.get_i_bin_above(d_value)]
+    d_value_below = self.get_d_value_below(d_value)
+    d_value_above = self.get_d_value_above(d_value)
+    x = max(0., min(1.,(
+      d_value - d_value_below)/max(1.e-10,d_value_above - d_value_below)))
+    value = value_below + (value_above - value_below) * x
+    return value
+
+  def get_d_value_below(self,d_value):
+    i_bin = self.get_i_bin_below(d_value)
+    return self.d_min_values[i_bin]
+
+  def get_d_value_above(self,d_value):
+    i_bin = self.get_i_bin_above(d_value)
+    return self.d_min_values[i_bin]
+
+  def get_i_bin_real(self,d_value):
+    return  max(0, min(self.n_bins-1,
+       (self.n_bins - 1) * (d_value-self.d_min)/(self.d_max - self.d_min)))
+
+  def get_i_bin_below(self,d_value):
+    return max(0,min(self.n_bins-2, int(self.get_i_bin_real(d_value))))
+
+  def get_i_bin_above(self,d_value):
+    return max(1,min(self.n_bins-1,1 + self.get_i_bin_below(d_value)))
+
+  def exercise(self):
+    print("Exercising approx_amplitude_vs_resolution")
+
+    for d_value in range(20):
+      print ("D-min %s  rms FC  %s " %(d_value,aavr.get_value(d_value)))
+
+    for d_min,d_max in ( (1.1,1.3), (2.7,3.0), (3.5,3.6), (10,18)):
+      print ("D_min %s D_max %s  RMS FC: %s " %(
+        d_min,d_max,self.get_expected_value_in_bin(d_min,d_max)))
+if __name__ == "__main__":
+  aavr = approx_amplitude_vs_resolution()
+  aavr.exercise()
+
+  from iotbx.map_model_manager import map_model_manager
+  mmm = map_model_manager()
+  mmm.generate_map()
+  new_aavr = approx_amplitude_vs_resolution(d_min = 3, n_bins = 20,
+    map_model_manager = mmm)
+  print(list(new_aavr.get_target_scale_factors()))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/cl_template/cl_app.py
+#
+# Here we define one common way of constructing command-line tools which is
+# defined here, so everybody could finally forget how to parse command-line,
+# read model file etc.
+# They should have common (consistent):
+# - way of parsing command-line
+# - output help
+# - reading files, check and react for e.g. IO errors, wrong formats, etc.
+#
+# This file will end up somewhere like libtbx/command_line/base_cl_app.py
+#
+
+from __future__ import absolute_import, division, print_function
+
+import sys
+import iotbx.phil
+import iotbx.pdb
+import six
+
+input_model_phil_str = """\
+input_model_fname = None
+  .type = path
+"""
+input_model_phil = iotbx.phil.parse(input_model_phil_str)
+
+
+class cl_app(object):
+  def __init__(self,
+      cl_args):
+    self.cl_args = cl_args
+    self.new_master_par_str = self.master_params_str
+    self.pdbf_def = None
+    for k, v in six.iteritems(self.needed_info):
+      setattr(self, v, None)
+      # adjust params_str for files
+      if k == "model":
+        self.new_master_par_str = input_model_phil_str + self.new_master_par_str
+        self.pdbf_def = "input_model_fname"
+      # other options to follow:
+      if k == "xray_data":
+        pass
+
+  def parse_cl(self):
+    print("In parent, running parse_cl")
+    print("  ", self.needed_info)
+    # processing and parsing cl_args
+    self.new_master_par = iotbx.phil.parse(self.new_master_par_str, process_includes=True)
+    self.params = self.new_master_par.extract()
+    if self.log is None:
+      self.log = sys.stdout
+
+    # this should go to command-line processing class, but for now:
+    if len(self.cl_args) <= 1 or "--help" in self.cl_args or "-h" in self.cl_args:
+      self.show_help()
+      return 1
+    input_objects = iotbx.phil.process_command_line_with_files(
+      args=self.cl_args[1:],
+      master_phil=self.new_master_par,
+      pdb_file_def=self.pdbf_def,
+      )
+    self.work_params = input_objects.work.extract()
+    # If everything looks fine:
+    return 0
+
+  def show_help(self):
+    print(self.help_message, file=self.log)
+    self.new_master_par.show(self.log)
+
+  def read_and_validate_inputs(self):
+    # some generic validation, read model and data
+    print("In parent, running validate inputs")
+    if self.pdbf_def is not None:
+      self.read_model_file()
+    return 0
+
+  def read_model_file(self):
+    pdb_inp = iotbx.pdb.input(file_name=getattr(self.work_params, self.pdbf_def))
+    setattr(self, self.needed_info["model"], pdb_inp.construct_hierarchy())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/cl_template/cut_cl_app.py
+#
+# This is a template for command-line callable script.
+# It is a plain script because nothing else should import it anywhere.
+# Ideology:
+# Inherit application from base application class (cl_app), where
+# majority of common functionality is defined.
+# Specify needs of particular application here:
+# - help message
+# - need for model, data, restraints etc in a simple form (see self.needed_info)
+# - Nothing should be validated here, because it will not be accessible in
+#     other parts, e.g. GUI, pipeline.
+# - Define run() method, call actual functionality with available info
+# - output results.
+#
+# Unique things here are:
+# - help message
+# - what functionality it should run
+# - what is needed for the functionality: model, restraints, data (what kind)?
+#
+# This kind of files will be in */command_line/<name>.py
+#
+#
+
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME phenix.cl_app_example
+
+import sys
+from cutter import cutter
+from cl_app import cl_app
+import iotbx.phil
+
+# Note that we just including existing scope here, which is wrapped in
+# single name "cutter" and will be easily passed to the actual class
+master_params_str = """\
+include scope cutter.master_params
+
+output_prefix = "outp"
+  .type = str
+"""
+
+# def master_params():
+#   return iotbx.phil.parse(master_params_str, process_includes=True)
+
+class cl_cutter(cl_app):
+  def __init__(self, cl_args):
+    # Set up particular application needs here
+    self.help_message = """\
+This tool will cut out range of residues from chain. Usage:
+  %s model.pdb chain_id='A' start_resid=10, end_resid=20  """ % cl_args[0]
+    self.log = sys.stdout
+
+    self.master_params_str = master_params_str
+    self.needed_info = {
+      "model" : "rmodel", # model-predefined word to indicate the meaning of parameter, rmodel-desired name of class attribute
+    }
+
+    # and then just call parent's __init__ to take care of the rest:
+    super(cl_cutter, self).__init__(
+      cl_args=cl_args)
+
+  def run(self):
+    # call parent's function to parse CL. Examine results -> fast failing for
+    # typos in parameters etc, IOErrors.
+    r = self.parse_cl()
+    if r != 0:
+      return
+    # call parent's function to actually construct objects -> not so fast,
+    # could be doing restraints etc.
+    r = self.read_and_validate_inputs()
+    if r != 0:
+      return
+
+    # Now we should have all necessary parsed objects in internal structures
+    # like pdb_h etc
+    print("Parsed model in form of pdb_hierarchy:", self.rmodel, file=self.log)
+
+    #
+    # So do the job like we are in pipeline
+    # If needed, this could be wrapped in try...except to catch errors.
+    c = cutter(self.rmodel, self.work_params.cutter, self.log) # super-fast init
+    # validation if the work can be done.
+    # The outcome is to be determined.
+    c.validate_inputs()
+    c.run() # actually work, may be time-consuming, maybe call-backs are needed
+    result = c.get_results()
+    # implementation of run() could be long and complicated, so let's do
+    # results preparation separately, so everybody could understand what's there
+    # at a glance.
+    # If something is not there - go to the class and implement new function like:
+    # extra_result_value = c.get_extra_result_value()
+    # Or use cutting-edge technology:
+    # inherit from cutter, overload get_results() and adjust them for your needs.
+
+    #
+    # That's it. We got result, now we just need to display it
+    # and the job of CL-tool is over.
+    print("Result, in form of pdb_hierarchy", result.answer, file=self.log)
+    result.answer.write_pdb_file(file_name="%s.pdb" % self.work_params.output_prefix)
+
+cutter_app = cl_cutter(
+    cl_args=sys.argv)
+cutter_app.run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/cl_template/cutter.py
+#
+# This is functionality implementation. It should be easily callable from inside
+# other, bigger functions/pipelines.
+#
+# This file is not supposed to be executed. So no if __name__ == "__main__" here.
+#
+# It should not care about:
+# - CL parsing
+# - Basic validation (like file is not there)
+# - No filenames available here at all - everything is handled outside.
+# - In a rare cases, when absolutely necessary it is still OK to write
+#   _INTERMEDIATE_ files to disc here.
+# - Results should be in internal objects so they could be used differently
+#   by CL-tool, GUI or calling script (pipeline).
+#
+#
+# It should get:
+# - parsed and filled out phil parameters
+# - objects to work with (model, data, GRM, etc) as internal structures,
+#   preferably consistent between each other, passed as arguments
+#
+# It should do:
+# - Specific quck validation: e.g. cannot work with model with alternative
+#   conformations to determine beforehand if the job can be done and fail
+#   quckly and in uniform way. The result of such validation is up for
+#   discussion (raising exception, returning value, etc).
+# - The job
+#
+#
+# This kind of files sit in regular places according to functionality:
+# cctbx/..., mmtbx/..., etc
+#
+
+from __future__ import absolute_import, division, print_function
+import iotbx.phil
+from libtbx import group_args
+from libtbx.utils import Sorry
+
+
+# Parameters are wrapped with unique top-level name so they could be
+# easily imported in higher-level procedures and passed from there
+# to this functionality
+master_params_str = """
+cutter {
+  start_resid = None
+    .type = int
+  end_resid = None
+    .type = int
+  chain_id = None
+    .type = str
+}
+"""
+
+
+def master_params():
+  return iotbx.phil.parse(master_params_str, process_includes=True)
+
+class cutter():
+  """ This class is for cutting out pieces of chain out of hierarchy provided
+  chain id, start resid and end resid."""
+  def __init__(self, pdb_h, params, log):
+    # just basic setup.
+    self.pdb_h = pdb_h
+    self.params = params
+    self.log = log
+
+  def validate_inputs(self):
+    # Very specific validation goes here:
+    # How validation fails need to be determined.
+    # Sorry, return value, assertions allowed?
+    if self.params.start_resid is None or self.params.end_resid is None:
+      raise Sorry("Need to specify start_resid and start_resid params")
+    if len(self.params.chain_id) > 3:
+      raise Sorry("Do not support long chain ids yet.")
+
+  def run(self):
+    # here goes actual work
+    asc = self.pdb_h.atom_selection_cache()
+    sel = asc.selection("chain %s and resid %d through %d" % (
+        self.params.chain_id, self.params.start_resid, self.params.end_resid))
+    self.answer = self.pdb_h.select(sel)
+
+  def get_results(self):
+    # small, easy to understand function preparing results. This way other
+    # developers will not have to read run() to figure out what is returning.
+    # On top of that, this function could be overloaded if necessary!
+    return group_args(
+        answer = self.answer)
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/cns_density_modification.py
+from __future__ import absolute_import, division, print_function
+from libtbx import easy_run, group_args
+from iotbx.cns.space_group_symbols import cns_format
+import os, shutil, time
+
+def run(params, fo, hl_coeffs):
+  cur_dir = os.path.abspath(os.path.curdir)
+  if os.path.exists("tmp_cns"):
+    shutil.rmtree("tmp_cns")
+  os.mkdir("tmp_cns")
+  os.chdir(os.path.abspath("tmp_cns"))
+  try:
+    result = do_dirty_work(params, fo, hl_coeffs)
+  finally:
+    # make sure we always end up back here no matter what happens
+    os.chdir(cur_dir)
+  return result
+
+def do_dirty_work(params, fo, hl_coeffs):
+  fo.export_as_cns_hkl(
+    file_object=open("f_obs.hkl", "wb"),
+    file_name="f_obs.hkl")
+  hl_coeffs.export_as_cns_hkl(
+    file_object=open("hl_coeffs.hkl", "wb"),
+    file_name="hl_coeffs.hkl")
+
+  cns_solve_dir = os.environ.get("CNS_SOLVE")
+  if cns_solve_dir is None:
+    raise RuntimeError("Environment variable CNS_SOLVE is not defined")
+
+  shutil.copyfile(
+    "%s/inputs/xtal_phase/density_modify.inp" % cns_solve_dir, "tmp.inp")
+
+  cns_params = {}
+  cns_params.setdefault("space_group", cns_format(
+    space_group_info=params.input.space_group))
+  uc_params = params.input.unit_cell.parameters()
+  cns_params["a"] = uc_params[0]
+  cns_params["b"] = uc_params[1]
+  cns_params["c"] = uc_params[2]
+  cns_params["alpha"] = uc_params[3]
+  cns_params["beta"] = uc_params[4]
+  cns_params["gamma"] = uc_params[5]
+
+  if params.d_min is None:
+    if params.phase_extension:
+      params.d_min = fo.d_min()
+    else:
+      params.d_min = hl_coeffs_start.d_min()
+  if params.initial_d_min is None:
+    params.initial_d_min = params.d_min
+  assert params.initial_d_min >= params.d_min
+  cns_params["d_min"] = params.d_min
+  cns_params["initial_d_min"] = params.initial_d_min
+  cns_params["phase_extend"] = str(params.phase_extension).lower()
+  cns_params["prot_to_solv"] = params.protein_solvent_ratio
+  cns_params["trunc_min"] = params.density_truncation.fraction_min
+  cns_params["trunc_max"] = params.density_truncation.fraction_max
+  cns_params["trunc_max"] = 1
+  cns_params["solcon"] = params.solvent_fraction
+  if params.solvent_mask.averaging_radius.final is None:
+    params.solvent_mask.averaging_radius.final = params.d_min
+  if params.solvent_mask.averaging_radius.initial is None:
+    params.solvent_mask.averaging_radius.initial \
+          = params.solvent_mask.averaging_radius.final + 1
+  cns_params["start_ave_radius"] = params.solvent_mask.averaging_radius.initial
+  cns_params["finish_ave_radius"] = params.solvent_mask.averaging_radius.final
+  cns_params["initial_steps"] = params.initial_steps
+  cns_params["shrink_steps"] = params.shrink_steps
+  cns_params["final_steps"] = params.final_steps
+  cns_params["grid_resolution_factor"] = params.grid_resolution_factor
+  cns_params["averaging"] = "false"
+  cns_params["ncs_infile"] = "ncs.def"
+
+  params_file = open("params.inp", "wb")
+  params_file.write(cns_density_modify_inp_template % cns_params)
+  params_file.close()
+
+  cmd = "%s/bin/cns_transfer -def params.inp -inp tmp.inp -out density_modify.inp" %(
+    cns_solve_dir)
+  print(cmd)
+  result = easy_run.fully_buffered(command=cmd).raise_if_errors_or_output()
+
+  cmd = "cns_solve < density_modify.inp > density_modify.out"
+  print(cmd)
+  t0 = time.time()
+  result = easy_run.fully_buffered(command=cmd).raise_if_errors()
+  print("CNS time: %.2f" %(time.time()-t0))
+
+  result.show_stdout()
+  import iotbx.xplor.map
+  modified_map = iotbx.xplor.map.reader(file_name="density_modify.map")
+  modified_map = modified_map.data[:-1,:-1,:-1]
+
+  return group_args(modified_map=modified_map)
+
+cns_density_modify_inp_template = """\
+{- begin block parameter definition -} define(
+{===>} sg="%(space_group)s";
+
+{===>} a=%(a)f;
+{===>} b=%(b)f;
+{===>} c=%(c)f;
+{===>} alpha=%(alpha)f;
+{===>} beta=%(beta)f;
+{===>} gamma=%(gamma)f;
+
+{===>} reflection_infile_1="f_obs.hkl";
+{===>} reflection_infile_2="hl_coeffs.hkl";
+
+{===>} obs_f="FOBS";
+{===>} obs_sigf="SIGMA";
+{===>} obs_pa="PA";
+{===>} obs_pb="PB";
+{===>} obs_pc="PC";
+{===>} obs_pd="PD";
+{===>} low_res=500.0;
+{===>} high_res=%(d_min)f;
+
+{================== non-crystallographic symmetry ====================}
+
+{===>} averaging=%(averaging)s;
+{===>} ncs_mask_infile="";
+{===>} ncs_infile="%(ncs_infile)s";
+
+{======================= density truncation ==========================}
+
+{===>} truncation=true;
+{===>} prot_to_solv=%(prot_to_solv)f;
+{===>} trunc_min=%(trunc_min)f;
+{===>} trunc_max=%(trunc_max)f;
+
+{====================== solvent modification =========================}
+
+{===>} solvent_mod=true;
+{===>} solvent_method="flip";
+{===>} scale_flip=true;
+
+{========================== solvent adjust ===========================}
+
+{===>} solvent_adjust=true;
+
+{=========================== solvent mask ============================}
+
+{===>} mask_sol_type="rms";
+{===>} solvent_mask_infile="";
+{===>} mask_complete=true;
+{===>} solcon=%(solcon)f;
+{===>} start_ave_radius=%(start_ave_radius)f;
+{===>} finish_ave_radius=%(finish_ave_radius)f;
+
+{======================= modification scheme =========================}
+
+{===>} initial_steps=%(initial_steps)i;
+{===>} shrink_steps=%(shrink_steps)i;
+{===>} final_steps=%(final_steps)i;
+
+{========================= phase extension ===========================}
+
+{===>} phase_extend=%(phase_extend)s;
+{===>} initial_highres=%(initial_d_min)f;
+
+{===================== modification parameters =======================}
+
+{===>} map_mode="unit_cell";
+
+{========================= output arrays =============================}
+
+{===>} out_f="full_mod";
+{===>} out_fom="fom_mod";
+{===>} out_pa="pa_mod";
+{===>} out_pb="pb_mod";
+{===>} out_pc="pc_mod";
+{===>} out_pd="pd_mod";
+
+{=========================== output files ============================}
+
+{===>} output_root="density_modify";
+{===>} write_map=true;
+{===>} write_mask=false;
+
+ ) {- end block parameter definition -}
+"""
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/create_models_or_maps.py
+from __future__ import absolute_import, division, print_function
+import sys,os
+import iotbx.phil
+from scitbx.array_family import flex
+
+
+'''
+ Utilities to generate models and maps from standard or user-selected PDB files
+
+ Use map_model_manager to access these utilities
+
+'''
+
+def get_map_manager(map_data,wrapping,
+     unit_cell_dimensions=None,crystal_symmetry=None,):
+  '''
+      Get a minimal map_manager in SG p1 from any map_data and
+      if unit_cell_dimensions.  Assume cell angles are 90,90,90
+      Shift origin to (0,0,0)
+  '''
+  assert unit_cell_dimensions or crystal_symmetry
+  assert isinstance(wrapping, bool)
+  from iotbx.map_manager import map_manager
+  map_data = map_data.shift_origin()
+
+  if not crystal_symmetry:
+    from cctbx import crystal
+    crystal_symmetry=crystal.symmetry(
+        tuple(list(unit_cell_dimensions[:3])+[90,90,90]), 1)
+  mm=map_manager(map_data=map_data,
+    unit_cell_grid = map_data.all(),
+    unit_cell_crystal_symmetry = crystal_symmetry,
+    origin_shift_grid_units = (0,0,0),
+    wrapping = wrapping)
+  return mm
+
+def read_map_and_model(file_name_1,file_name_2, regression_directory = None,
+    prefix = None):
+  '''
+    Identify which file is map and which is model, read in and
+    create map_model_manager
+    If regression_directory is specified, look there for these files, assuming
+    prefix of $PHENIX/modules/phenix_regression/
+  '''
+
+  if regression_directory and not prefix:
+    import libtbx.load_env
+    prefix = libtbx.env.under_dist(
+      module_name="phenix_regression",
+      path=regression_directory,
+      test=os.path.isdir)
+
+  if prefix:
+    file_name_1 = os.path.join(prefix,file_name_1)
+    file_name_2 = os.path.join(prefix,file_name_2)
+
+  map_file_name = None
+  model_file_name = None
+  for f in [file_name_1,file_name_2]:
+    for ending in ['.ccp4','.mrc','.map']:
+      if f.endswith(ending):
+        map_file_name = f
+    for ending in ['.pdb','.cif']:
+      if f.endswith(ending):
+        model_file_name = f
+  if not map_file_name or not model_file_name:
+    raise Sorry("Unable to guess map and model from %s and %s" %(
+     file_name_1, file_name_2))
+
+  from iotbx.data_manager import DataManager
+  from iotbx.map_model_manager import map_model_manager
+  dm = DataManager()
+  dm.process_real_map_file(map_file_name)
+  mm = dm.get_real_map(map_file_name)
+
+  dm.process_model_file(model_file_name)
+  model = dm.get_model(model_file_name)
+  mam = map_model_manager(model=model,map_manager=mm)
+  return mam
+
+def generate_model(
+      file_name=None,
+      n_residues=None,
+      start_res=None,
+      b_iso=30,
+      box_cushion=5,
+      space_group_number=1,
+      output_model_file_name=None,
+      shake=None,
+      random_seed=None,
+      log=sys.stdout):
+
+  '''
+    generate_model: Simple utility for generating a model for testing purposes.
+
+    This function typically accessed and tested through map_model_manager
+
+     Summary
+    -------
+
+    Generate a model from a user-specified file or from some examples available
+    in the cctbx.  Cut out specified number of residues, shift to place on
+    positive side of origin, optionally set b values to b_iso,
+    place in box with buffering of box_cushion on all
+    edges, optionally randomly shift (shake) atomic positions by rms of shake A,
+    and write out to output_model_file_name and return model object.
+
+    Parameters:
+
+      file_name (string, None):  File containing model (PDB, CIF format)
+      n_residues (int, 10):      Number of residues to include
+      start_res (int, None):     Starting residue number
+      b_iso (float, 30):         B-value (ADP) to use for all atoms
+      box_cushion (float, 5):     Buffer (A) around model
+      space_group_number (int, 1):  Space group to use
+      output_model_file_name (string, None):  File for output model
+      shake (float, None):       RMS variation to add (A) in shake
+      random_seed (int, None):    Random seed for shake
+
+    Returns:
+      model.manager object (model) in a box defined by a crystal_symmetry object
+
+  '''
+
+  # Get the parameters
+
+  space_group_number=int(space_group_number)
+  if n_residues is not None:
+    n_residues=int(n_residues)
+  box_cushion=float(box_cushion)
+  if start_res:
+    start_res=int(start_res)
+  if shake:
+    shake=float(shake)
+  if random_seed:
+    random_seed=int(random_seed)
+    import random
+    random.seed(random_seed)
+    random_seed=random.randint(1,714717)
+    flex.set_random_seed(random_seed)
+
+  # Choose file with coordinates
+
+  if not file_name:
+    if not n_residues:
+      n_residues = 10 # default
+    import libtbx.load_env
+    iotbx_regression = os.path.join(libtbx.env.find_in_repositories("iotbx"),
+      'regression')
+    if n_residues < 25:
+      file_name=os.path.join(iotbx_regression,'secondary_structure', # PDB OK
+         '5a63_chainBp.pdb')  # starts at 219
+      if not start_res: start_res=219
+    elif n_residues < 167:
+      file_name=os.path.join(iotbx_regression,'secondary_structure', # PDB OK
+         '3jd6_noh.pdb') # starts at 58
+      if not start_res:start_res=58
+    else:
+      file_name=os.path.join(iotbx_regression,'secondary_structure', # PDB OK
+         '4a7h_chainC.pdb') # starts at 9
+      if not start_res:start_res=9
+  else: # have file_name                              # PDB OK
+    if start_res is None:
+      start_res=1
+    if not n_residues:
+      n_residues = 100000 #  a big number
+
+  # Read in coordinates and cut out the part of the model we want
+
+  from iotbx.data_manager import DataManager
+
+  dm = DataManager(['model'])
+  dm.process_model_file(file_name)
+  model = dm.get_model(file_name)
+
+  if not model.crystal_symmetry() or not model.crystal_symmetry().unit_cell():
+    from cctbx.maptbx.box import shift_and_box_model
+    model = shift_and_box_model(model = model,
+      box_cushion = box_cushion)
+
+  selection=model.selection('resseq %s:%s' %(start_res,start_res+n_residues-1))
+  model=model.select(selection)
+
+  # shift the model and return it with new crystal_symmetry
+  from cctbx.maptbx.box import shift_and_box_model
+  model = shift_and_box_model(model = model,
+    box_cushion = box_cushion)
+
+  if b_iso is not None:
+    b_values=flex.double(model.get_sites_cart().size(), b_iso)
+    ph = model.get_hierarchy()
+    ph.atoms().set_b(b_values)
+
+  # Optionally shake model
+  if shake:
+    model=shake_model(model,shake=shake)
+
+  if output_model_file_name:
+    f=open(output_model_file_name,'w')
+    print ("%s" %(model.model_as_pdb()),file=f)  # PDB OK
+    f.close()
+    print ("Writing model with %s residues and b_iso=%s from %s to %s" %(
+      n_residues,b_iso,file_name,output_model_file_name),file=log)
+  else:
+    print ("Generated model with %s residues and b_iso=%s from %s " %(
+      n_residues,b_iso,file_name),file=log)
+  return model
+
+def shake_model(model,shake=None,log=sys.stdout):
+  # Shake model with rmsd of shake
+  from mmtbx.pdbtools import master_params_str
+  params=iotbx.phil.parse(master_params_str).extract()
+  params.modify.sites[0].shake=shake
+  from mmtbx.pdbtools import modify
+  new_model = modify(
+      model  = model,
+      params = params.modify,
+      log    = log).get_results().model
+  return new_model
+
+def generate_map_coefficients(
+      model=None,  # Required model
+      output_map_coeffs_file_name=None,
+      d_min=3,
+      k_sol = None,
+      b_sol = None,
+      scattering_table='electron',
+      f_obs_array = None,
+      log=sys.stdout):
+  '''
+    Convenience function to create map coefficients from a model.
+
+    This function typically accessed and tested through map_model_manager
+
+    Summary:  Supply model.manager object or parameters for generate_model,
+    high_resolution limit of d_min and optional scattering_table ("electron"
+    for cryo-EM, "n_gaussian" for x-ray) and optional
+    output_map_coeffs_file_name.
+
+    Writes map coefficients and returns miller_array object
+    containing the map coefficients
+
+    Parameters:
+    -----------
+
+      model (model.manager object, None):    model to use.
+         contains crystal_symmetry
+      output_map_coeffs_file_name (string, None): output model file name
+      d_min (float, 3):   High-resolution limit for map coeffs (A)
+      scattering_table (choice, 'electron'): choice of scattering table
+           All choices: wk1995 it1992 n_gaussian neutron electron
+      f_obs_array:  array used to match indices of fcalc
+      crystal_symmetry:  used for crystal symmetry (overrides model value but
+        not f_obs)
+
+  '''
+
+  assert model is not None
+
+  # get map coefficients
+  from mmtbx.utils import fmodel_from_xray_structure
+  import iotbx.phil
+  from mmtbx.programs.fmodel import master_phil
+  fmodel_params=master_phil.extract()
+
+  if f_obs_array:
+    assert f_obs_array.crystal_symmetry().is_similar_symmetry(
+      model.crystal_symmetry())
+
+  assert model.crystal_symmetry() is not None # Need crystal_symmetry in model
+
+  xrs=model.get_xray_structure()
+
+  fmodel_params.high_resolution=float(d_min)
+  fmodel_params.scattering_table=scattering_table
+  if k_sol is not None and b_sol is not None:
+    fmodel_params.fmodel.k_sol = k_sol
+    fmodel_params.fmodel.b_sol = b_sol
+  if f_obs_array:
+     fmodel_params.high_resolution=f_obs_array.d_min()-0.0001 # different cut
+  fmodel=fmodel_from_xray_structure(
+    xray_structure = xrs,
+    params         = fmodel_params,
+    f_obs          = f_obs_array,
+    out            = log)
+  f_model=fmodel.f_model
+  if output_map_coeffs_file_name:
+    f_model.as_mtz_dataset(column_root_label='FWT').mtz_object().write(
+      file_name=output_map_coeffs_file_name)
+    print("Writing map coefficients to resolution of %s A to %s" %(
+       d_min,output_map_coeffs_file_name),file=log)
+  else:
+    print("Generated map coefficients to resolution of %s A " %(
+      d_min),file=log)
+  return f_model
+
+def generate_map(
+      output_map_file_name=None,
+      map_coeffs=None,  # Required
+      d_min=None,
+      map_manager = None, # source of info, not map
+      gridding=None,
+      wrapping=False,
+      resolution_factor=None,
+      origin_shift_grid_units=None,
+      low_resolution_fourier_noise_fraction=0,
+      high_resolution_fourier_noise_fraction=0,
+      low_resolution_real_space_noise_fraction=0,
+      high_resolution_real_space_noise_fraction=0,
+      low_resolution_noise_cutoff=None,
+      random_seed = None,
+      log=sys.stdout):
+
+
+  '''
+      Generate map from map_coefficients and add noise in Fourier or real space
+
+      This function typically accessed and tested through map_model_manager
+
+      Summary:
+      --------
+
+      Calculate a map and optionally add noise to it.  Supply map
+      coefficients (miller_array object) and types of noise to add,
+      along with optional gridding (nx,ny,nz), and origin_shift_grid_units.
+      Optionally create map coefficients from a model and optionally
+      generate a model.
+
+      Unique aspect of this noise generation is that it can be specified
+      whether the noise is local in real space (every point in a map
+      gets a random value before Fourier filtering), or local in Fourier
+      space (every Fourier coefficient gets a complex random offset).
+      Also the relative contribution of each type of noise vs resolution
+      can be controlled.
+
+      Parameters:
+      -----------
+
+
+      output_map_file_name (string, None):  Output map file (MRC/CCP4 format)
+      map_coeffs (miller.array object, None) : map coefficients
+      d_min(float):      high_resolution limit (A)
+      gridding (tuple (nx,ny,nz), None):  Gridding of map (optional)
+      origin_shift_grid_units (tuple (ix,iy,iz), None):  Move location of
+          origin of resulting map to (ix,iy,iz) before writing out
+      low_resolution_fourier_noise_fraction (float, 0): Low-res Fourier noise
+      high_resolution_fourier_noise_fraction (float, 0): High-res Fourier noise
+      low_resolution_real_space_noise_fraction(float, 0): Low-res
+          real-space noise
+      high_resolution_real_space_noise_fraction (float, 0): High-res
+          real-space noise
+      low_resolution_noise_cutoff (float, None):  Low resolution where noise
+          starts to be added
+
+  '''
+
+  if random_seed:
+    random_seed=int(random_seed)
+    import random
+    random.seed(random_seed)
+    random_seed=random.randint(1,714717)
+    flex.set_random_seed(random_seed)
+
+  if map_manager:
+    origin_shift_grid_units=map_manager.origin_shift_grid_units
+    gridding=map_manager.map_data().all()
+    wrapping=map_manager.wrapping()
+  if gridding:
+    if type(gridding) in [type((1,2,3)), type([1,2,3])] and type(gridding[0])==type(1):
+      pass # already fine
+    else:
+      new_gridding=[]
+      for x in str(gridding).replace("(","").replace(")","").replace("[","").replace("]","").replace(",","").split():
+        new_gridding.append(int(x))
+      gridding = new_gridding
+  low_resolution_fourier_noise_fraction=float(
+     low_resolution_fourier_noise_fraction)
+  high_resolution_fourier_noise_fraction=float(
+     high_resolution_fourier_noise_fraction)
+  low_resolution_real_space_noise_fraction=float(
+     low_resolution_real_space_noise_fraction)
+  high_resolution_real_space_noise_fraction=float(
+     high_resolution_real_space_noise_fraction)
+  if low_resolution_noise_cutoff:
+     low_resolution_noise_cutoff=float(low_resolution_noise_cutoff)
+
+  if d_min:
+    d_min=float(d_min)
+    map_coeffs=map_coeffs.resolution_filter(d_min=d_min)
+
+  # Calculate a map from Fourier coefficients:
+  map_data=get_map_from_map_coeffs(
+     map_coeffs=map_coeffs,
+     crystal_symmetry=map_coeffs.crystal_symmetry(),
+     n_real=gridding,
+     resolution_factor=resolution_factor,
+     apply_sigma_scaling=False)
+
+  # Optionally add noise to this map as an additive noise map
+  # Noise can be added in Fourier space (leads to correlated errors
+  #    in real space)  or in real space (leads to correlated errors
+  #    in Fourier space).
+  # Noise is Fourier-weighted as function of resolution.
+  # RMS noise to add at low-resolution (Fourier based noise) as fraction of RMS
+  #   value in map at low-resolution is: low_resolution_fourier_noise_fraction
+  # RMS Fourier high-res noise:is high_resolution_fourier_noise_fraction
+  # RMS real-space low-res noise:is low_resolution_real_space_noise_fraction
+  # RMS real-space high-res noise:is high_resolution_real_space_noise_fraction
+  # Low-resolution where noise begins to be added is low_resolution_noise_cutoff
+
+  if (low_resolution_fourier_noise_fraction or
+      high_resolution_fourier_noise_fraction):
+    fourier_noise_map=get_fourier_noise_map(n_real=map_data.all(),
+     map_coeffs=map_coeffs,
+     low_resolution_fourier_noise_fraction=
+        low_resolution_fourier_noise_fraction,
+     high_resolution_fourier_noise_fraction=
+        high_resolution_fourier_noise_fraction,
+     d_min=d_min,
+     low_resolution_noise_cutoff=low_resolution_noise_cutoff,
+     log=log)
+  else:
+    fourier_noise_map=None
+
+  if (low_resolution_real_space_noise_fraction or
+      high_resolution_real_space_noise_fraction):
+    real_space_noise_map=get_real_space_noise_map(map_data=map_data,
+     map_coeffs=map_coeffs,
+     low_resolution_real_space_noise_fraction=
+        low_resolution_real_space_noise_fraction,
+     high_resolution_real_space_noise_fraction=
+        high_resolution_real_space_noise_fraction,
+     d_min=d_min,
+     low_resolution_noise_cutoff=low_resolution_noise_cutoff,
+     log=log)
+  else:
+    real_space_noise_map=None
+
+  if fourier_noise_map:
+    map_data+=fourier_noise_map
+  if real_space_noise_map:
+    map_data+=real_space_noise_map
+
+  if map_manager:
+    mm=map_manager.customized_copy(map_data=map_data)
+  else:
+    # Create a map_manager object directly (unusual use of map_manager)
+    from iotbx.map_manager import map_manager
+    mm=map_manager(map_data=map_data,
+      unit_cell_grid=map_data.all(),
+      unit_cell_crystal_symmetry=map_coeffs.crystal_symmetry(),
+      origin_shift_grid_units=origin_shift_grid_units,
+      wrapping=wrapping)
+
+  if output_map_file_name:
+    mm.write_map(output_map_file_name)
+  else:
+    print("Generated map with origin at %s and size of %s" %(
+      mm.map_data().origin(),mm.map_data().all()),file=log)
+
+  return mm
+
+def squares_of_complex(m1):
+  a1=flex.pow2(m1.parts()[0])
+  a2=flex.pow2(m1.parts()[1])
+  a3=a1+a2
+  return a3
+
+def norm(m1):
+  a3=squares_of_complex(m1)
+  return a3.min_max_mean().mean**0.5
+
+
+def map_coeffs_as_fp_phi(map_coeffs):
+  amplitudes=map_coeffs.amplitudes()
+  amplitudes.set_observation_type_xray_amplitude()
+  assert amplitudes.is_real_array()
+  phases=map_coeffs.phases(deg=True)
+  return amplitudes,phases
+
+def fp_phi_as_map_coeffs(fp,phi):
+  return fp.phase_transfer(phase_source=phi,deg=True)
+
+def get_real_space_noise_map(map_data=None,
+     map_coeffs=None,
+     low_resolution_real_space_noise_fraction=None,
+     high_resolution_real_space_noise_fraction=None,
+     d_min=None,
+     low_resolution_noise_cutoff=None,
+     log=sys.stdout):
+
+  '''
+    Procedure for generating a map with noise in real space
+
+    NOTE: only applies for space group P1
+
+    Parameters:
+    -----------
+
+    map_data (map_data object, None): map_data with current values in map
+
+    map_coeffs (miller.array object, None): map coefficients assumed to
+      match map_data. Used to get RMS values in Fourier representation of
+      map vs resolution and used to specify which Fourier coefficients to
+      calculate
+    low_resolution_real_space_noise_fraction (float, None): ratio of
+      RMS value in output map to input map at low resolution
+    high_resolution_real_space_noise_fraction (float, None): ratio of
+      RMS value in output map to input map at high resolution
+    low_resolution_noise_cutoff (float, None): resolution where noise is added
+  '''
+
+  # Get random values at grid points in map.  Then obtain Fourier
+  #  coefficients by back-transformation.  Then scale Fourier coefficients to
+  #  yield low_resolution_real_space_noise_fraction at low resolution and
+  #    high_resolution_real_space_noise_fraction at high resolution and
+  #    linear in 1/d in between.
+
+  assert map_coeffs.crystal_symmetry().space_group_number() in [
+    0,1]
+
+  print ("\nGenerating random map in real space, then Fourier filtering",
+     file=log)
+
+  # Create a map with mean zero and rms 1 with random values
+  random_values=flex.random_double(map_data.size())
+  acc=map_data.accessor()
+  random_values.reshape(acc)  # map with random values rms 1 mean zero
+
+  # Get map as fourier coefficients
+  from cctbx import miller
+  randomized_map_coeffs=map_coeffs.structure_factors_from_map(random_values)
+
+  return scale_map_coeffs(
+    n_real=map_data.all(),
+    randomized_map_coeffs=randomized_map_coeffs,
+    map_coeffs=map_coeffs,
+    high_resolution_noise_fraction=high_resolution_real_space_noise_fraction,
+    low_resolution_noise_fraction=low_resolution_real_space_noise_fraction,
+    random_selection_within_bins=False,
+    low_resolution_noise_cutoff=low_resolution_noise_cutoff,
+    log=log)
+
+def get_fourier_noise_map(n_real=None,
+     map_coeffs=None,
+     low_resolution_fourier_noise_fraction=None,
+     high_resolution_fourier_noise_fraction=None,
+     d_min=None,
+     low_resolution_noise_cutoff=None,
+     log=sys.stdout):
+
+  '''
+    Procedure for generating a map with noise in Fourier space
+
+    NOTE: only applies for space group P1
+
+    Parameters:
+    -----------
+
+    n_real (tuple (nx,ny,nz), None):  Gridding of output map. Usually
+      obtained from map_data.all()
+    map_coeffs (miller.array object, None): map coefficients assumed to
+      match n_real used to get RMS values in Fourier representation of
+      map vs resolution and used to specify which Fourier coefficients to
+      calculate
+    low_resolution_fourier_noise_fraction (float, None): ratio of
+      RMS value in output map to input map at low resolution
+    high_resolution_fourier_noise_fraction (float, None): ratio of
+      RMS value in output map to input map at high resolution
+    low_resolution_noise_cutoff (float, None): resolution where noise is added
+  '''
+
+  # Get random values of Fourier coefficients with rms values scaled to
+  #  yield low_resolution_fourier_noise_fraction at low resolution and
+  #    high_resolution_fourier_noise_fraction at high resolution and
+  #    linear in 1/d in between.
+
+  assert map_coeffs.crystal_symmetry().space_group_number() in [
+    0,1]
+
+  return scale_map_coeffs(
+    n_real=n_real,
+    map_coeffs=map_coeffs,
+    high_resolution_noise_fraction=high_resolution_fourier_noise_fraction,
+    low_resolution_noise_fraction=low_resolution_fourier_noise_fraction,
+    random_selection_within_bins=True,
+    low_resolution_noise_cutoff=low_resolution_noise_cutoff,
+    log=log)
+
+def scale_map_coeffs(
+   n_real=None,
+   randomized_map_coeffs=None,
+   map_coeffs=None,
+   high_resolution_noise_fraction=None,
+   low_resolution_noise_fraction=None,
+   random_selection_within_bins=False,
+   low_resolution_noise_cutoff=None,
+   log=sys.stdout):
+
+  '''
+    Scale map coefficients to target value vs resolution, optionally randomize
+
+    Scales map coefficients in resolution bins, scale factor adjusted
+    to yield high_resolution_noise_fraction at high-resolution limit
+    and low_resolution_noise_fraction at low_resolution_noise_cutoff and
+    linearly between in 1/resolution.
+
+    Optionally randomizes amplitudes and phases by shuffling within bins
+
+  '''
+
+  assert random_selection_within_bins or randomized_map_coeffs
+
+  if not hasattr(map_coeffs,'binner') or not map_coeffs.binner():
+    map_coeffs.setup_binner(auto_binning=True)
+
+  d_max,d_min=map_coeffs.d_max_min()
+  if d_max < 0: d_max = 1.e+10
+
+  if random_selection_within_bins:
+    new_map_coeffs=map_coeffs.customized_copy(
+      data=flex.complex_double(map_coeffs.size(),(0+0.j)))
+    print ("\nGenerating map randomized in Fourier space",file=log)
+  else:
+    new_map_coeffs=randomized_map_coeffs
+  print ("Relative error added at high-resolution: %.3f" %(
+     high_resolution_noise_fraction),file=log)
+  print ("Relative error added at low-resolution: %.3f" %(
+     low_resolution_noise_fraction),file=log)
+
+  print("Resolution  Noise ratio   RMS original            RMS error ",file=log)
+
+  for i_bin in map_coeffs.binner().range_used():
+    sel=map_coeffs.binner().selection(i_bin)
+    dd=map_coeffs.d_spacings().data().select(sel)
+    local_d_mean     = dd.min_max_mean().mean
+    local_s_mean=1/local_d_mean
+    s_max=1/max(1.e-10,d_min)
+    if low_resolution_noise_cutoff:
+      s_min=1/max(1.e-10,min(d_max,low_resolution_noise_cutoff))
+    else:
+      s_min=1/max(1.e-10,d_max)
+    fraction_high= max(0.,min(1.,
+       (local_s_mean-s_min)/max(1.e-10,s_max-s_min)))
+
+    noise_ratio=low_resolution_noise_fraction+\
+      fraction_high * (
+       high_resolution_noise_fraction-
+        low_resolution_noise_fraction)
+
+    mc=map_coeffs.select(sel)
+    rms_original=norm(mc.data())
+    if random_selection_within_bins: # randomize, normalize, scale
+      fp,phi=map_coeffs_as_fp_phi(mc)
+      sel_fp=flex.random_permutation(fp.size())
+      new_fp=fp.select(sel_fp)
+      data=new_fp.data()
+      data*=noise_ratio
+      sel_phi=flex.random_permutation(phi.size())
+      new_phi=phi.select(sel_phi)
+      new_mc=fp_phi_as_map_coeffs(new_fp,new_phi)
+    else:  # just normalize and scale
+      randomized_mc=randomized_map_coeffs.select(sel)
+      rms_new=norm(randomized_mc.data())
+      scale=rms_original/max(1.e-10,rms_new)
+      new_fp,new_phi=map_coeffs_as_fp_phi(randomized_mc)
+      data=new_fp.data()
+      data*=noise_ratio*scale
+      new_mc=fp_phi_as_map_coeffs(new_fp,new_phi)
+
+    rms_new=norm(new_mc.data())
+    new_map_coeffs.data().set_selected(sel,new_mc.data())
+    print ("  %.3f         %.3f         %.3f               %.3f " %(
+      local_d_mean, noise_ratio,rms_original,rms_new),file=log)
+
+  # Convert to map
+  from cctbx import maptbx
+  return maptbx.map_coefficients_to_map(
+      map_coeffs       = new_map_coeffs,
+      crystal_symmetry = new_map_coeffs.crystal_symmetry(),
+      n_real           = n_real)
+
+def get_map_from_map_coeffs(map_coeffs = None, crystal_symmetry = None,
+     n_real = None, resolution_factor = None, apply_sigma_scaling = True):
+    if resolution_factor is None:
+      resolution_factor = 0.25
+    from cctbx import maptbx
+    from cctbx.maptbx import crystal_gridding
+    if not crystal_symmetry:
+      crystal_symmetry = map_coeffs.crystal_symmetry()
+    if map_coeffs.crystal_symmetry().space_group_info()!=  \
+       crystal_symmetry.space_group_info():
+      assert str(map_coeffs.crystal_symmetry().space_group_info()
+          ).replace(" ", "").lower() == 'p1'
+      # use map_coeffs.crystal_symmetry
+      crystal_symmetry = map_coeffs.crystal_symmetry()
+    if n_real:
+      cg = crystal_gridding(
+        unit_cell = crystal_symmetry.unit_cell(),
+        space_group_info = crystal_symmetry.space_group_info(),
+        pre_determined_n_real = n_real)
+    else:
+      cg = None
+    fft_map = map_coeffs.fft_map( resolution_factor = resolution_factor,
+       crystal_gridding = cg,
+       symmetry_flags = maptbx.use_space_group_symmetry)
+    if apply_sigma_scaling:
+      fft_map.apply_sigma_scaling()
+    else:
+      fft_map.apply_volume_scaling()
+    map_data = fft_map.real_map_unpadded()
+    return map_data
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/debug_utils.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+from scitbx.python_utils.command_line import parse_options
+from libtbx.utils import format_cpu_times
+import libtbx.load_env
+import sys, os, random
+from six.moves import range
+
+def get_test_space_group_symbols(flag_AllSpaceGroups,
+                                 flag_ChiralSpaceGroups,
+                                 flag_AllSettings,
+                                 flag_UnusualSettings):
+  if (flag_UnusualSettings):
+    namespace = {}
+    exec(open(os.path.join(
+      libtbx.env.find_in_repositories(
+        "phenix_regression"), "settings.py")).read(), namespace)
+    return namespace["settings"]
+  if (flag_AllSettings):
+    return [symbols.universal_hermann_mauguin()
+            for symbols in sgtbx.space_group_symbol_iterator()]
+  if (flag_AllSpaceGroups):
+    sg_numbers = range(1, 231)
+  elif (flag_ChiralSpaceGroups):
+    sg_numbers = (1, 3, 4, 5, 16, 17, 18, 19, 20, 21, 22, 23, 24, 75,
+                  76, 77, 78, 79, 80, 89, 90, 91, 92, 93, 94, 95, 96,
+                  97, 98, 143, 144, 145, 146, 149, 150, 151, 152, 153,
+                  154, 155, 168, 169, 170, 171, 172, 173, 177, 178,
+                  179, 180, 181, 182, 195, 196, 197, 198, 199, 207,
+                  208, 209, 210, 211, 212, 213, 214)
+  else:
+    sg_numbers = (1,2,3,15,16,74,75,76,142,143,144,157,167,168,194,195,230)
+  return [sgtbx.space_group_symbols(n).universal_hermann_mauguin()
+          for n in sg_numbers] + ["Hall: -F 4 21 (1,5,3)"]
+
+def random_origin_shift(space_group_info, grid=12):
+  xyz = []
+  for i in range(3):
+    xyz.append("%s+%d/%d" % ("xyz"[i], random.randrange(grid), grid))
+  xyz = ",".join(xyz)
+  return space_group_info.change_basis(sgtbx.change_of_basis_op(xyz))
+
+def loop_space_groups(
+      argv,
+      flags,
+      call_back,
+      symbols_to_stdout=True,
+      symbols_to_stderr=False,
+      show_cpu_times=True,
+      **kwds):
+  call_back_results = []
+  chunk_size = 1
+  chunk_member = 0
+  if (flags.ChunkSize != False):
+    chunk_size = int(flags.ChunkSize)
+  if (flags.ChunkMember != False):
+    chunk_member = int(flags.ChunkMember)
+  assert chunk_size > 0 and chunk_member < chunk_size
+  n_threads = int(flags.Threads)
+  if n_threads > 1:
+    print("** Warning: multi-threaded space-group looping disabled **")
+  if (not flags.RandomSeed): random.seed(0)
+  if (len(argv) > 0 + flags.n):
+    symbols = argv
+  else:
+    symbols = get_test_space_group_symbols(
+      flags.AllSpaceGroups,
+      flags.ChiralSpaceGroups,
+      flags.AllSettings,
+      flags.UnusualSettings)
+  i_loop = -1
+  for symbol in symbols:
+    if (symbol.startswith("--")): continue
+    i_loop += 1
+    if (i_loop % chunk_size != chunk_member): continue
+    space_group_info = sgtbx.space_group_info(symbol)
+    sys.stdout.flush()
+    if symbols_to_stderr:
+      print(space_group_info, file=sys.stderr)
+    sys.stderr.flush()
+    if (symbols_to_stdout):
+      print(space_group_info)
+      sys.stdout.flush()
+    call_back_result = call_back(flags, space_group_info, **kwds)
+    sys.stdout.flush()
+    try:
+      continue_flag, call_back_result = call_back_result
+    except TypeError:
+      continue_flag, call_back_result = call_back_result, None
+    call_back_results.append(call_back_result)
+    if (continue_flag == False): break
+  if (show_cpu_times):
+    print(format_cpu_times())
+  sys.stdout.flush()
+  return call_back_results
+
+def parse_options_loop_space_groups(
+      argv,
+      call_back,
+      keywords=(),
+      symbols_to_stdout=True,
+      symbols_to_stderr=False,
+      show_cpu_times=True,
+      **kwds):
+  flags = parse_options(
+    argv=argv,
+    keywords=(
+      "Verbose",
+      "Debug",
+      "Threads",
+      "ChunkSize",
+      "ChunkMember",
+      "RandomSeed",
+      "AllSpaceGroups",
+      "ChiralSpaceGroups",
+      "AllSettings",
+      "UnusualSettings") + keywords,
+    case_sensitive=False)
+  return loop_space_groups(
+    argv, flags, call_back, symbols_to_stdout, symbols_to_stderr,
+    show_cpu_times, **kwds)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/direct_or_fft.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx import adptbx
+from cctbx import miller
+from cctbx import crystal
+from cctbx.development import debug_utils
+from cctbx.array_family import flex
+from libtbx.utils import user_plus_sys_time
+import sys
+from six.moves import range
+
+def dummy_structure(space_group_info, volume, n_scatterers):
+  structure = xray.structure(
+    special_position_settings=crystal.special_position_settings(
+      crystal_symmetry=crystal.symmetry(
+        unit_cell=space_group_info.any_compatible_unit_cell(volume=volume),
+        space_group_info=space_group_info)))
+  b_iso = 20
+  u_iso = adptbx.b_as_u(b_iso)
+  u_star = adptbx.u_iso_as_u_star(structure.unit_cell(), u_iso)
+  scatterer = xray.scatterer(label="C", site=(0.123,0.234,0.345), u=u_star)
+  for i in range(n_scatterers):
+    structure.add_scatterer(scatterer)
+  return structure
+
+def dummy_miller_set(crystal_symmetry, log_n_reflections):
+  indices = flex.miller_index(((1,2,3),))
+  for i in range(log_n_reflections):
+    indices.append(indices)
+  return miller.set(
+    crystal_symmetry=crystal_symmetry,
+    indices=indices,
+    anomalous_flag=False)
+
+def get_times(space_group_info, volume=100000, d_min=1.5):
+  crystal_symmetry = dummy_structure(space_group_info, volume, 0)
+  crystal_symmetry.show_summary()
+  structure_factors_from_scatterers = xray.structure_factors.from_scatterers(
+    crystal_symmetry=crystal_symmetry,
+    d_min=d_min)
+  for log_n_reflections in range(15,16):
+    miller_set = dummy_miller_set(crystal_symmetry, log_n_reflections)
+    for log_n_scatterers in range(1,10):
+      structure = dummy_structure(space_group_info,volume,2**log_n_scatterers)
+      timer = user_plus_sys_time()
+      f_calc = structure_factors_from_scatterers(
+        xray_structure=structure,
+        miller_set=miller_set)
+      print("%6d %6d %10.3f direct=%10.3f fft=%10.3f" % (
+        2**log_n_scatterers, 2**log_n_reflections, timer.delta(),
+        structure_factors_from_scatterers.estimate_time_direct(
+          2**log_n_scatterers * 2**log_n_reflections),
+        structure_factors_from_scatterers.estimate_time_fft(
+          2**log_n_scatterers, 2**log_n_reflections)))
+  e = structure_factors_from_scatterers.estimate_time_fft
+  print("time_sampling:", e.time_sampling)
+  print("time_fft:", e.time_fft)
+  print("time_from_or_to_map:", e.time_from_or_to_map)
+  print("time_apply_u_extra:", e.time_apply_u_extra)
+
+def run_call_back(flags, space_group_info):
+  get_times(space_group_info)
+
+def run():
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], run_call_back)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/electron_density_sampling.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx import miller
+from cctbx.command_line.structure_factor_timings import read_structure
+import sys
+
+def timings(structure, wing_cutoff=1.e-3):
+  print("wing_cutoff for following fft calculations: %3.1e"%wing_cutoff)
+  for calc_type,exp_table_one_over_step_size in (("exp function:",0),
+                                                 ("exp table:",-100)):
+    print(calc_type)
+    for d_min in [4,3,2,1]:
+      structure_ng = structure.deep_copy_scatterers()
+      structure_ng.scattering_type_registry(d_min=d_min, table="n_gaussian")
+      structure_4g = structure.deep_copy_scatterers()
+      structure_4g.scattering_type_registry(table="it1992")
+      miller_set = miller.build_set(
+        crystal_symmetry=structure,
+        d_min=d_min,
+        anomalous_flag=False)
+      miller_set.show_summary()
+      times = []
+      for structure in (structure_ng, structure_4g):
+        structure.scattering_type_registry().show_summary()
+        f_calc_object = xray.structure_factors.from_scatterers(
+        miller_set=miller_set,
+        wing_cutoff=wing_cutoff,
+        exp_table_one_over_step_size=exp_table_one_over_step_size)(
+          xray_structure=structure,
+          miller_set=miller_set,
+          algorithm="fft")
+        times.append(f_calc_object.manager().estimate_time_fft.time_sampling)
+        print("  %.2f seconds," % times[-1])
+      print("d_min=%d: %.2f s / %.2f s" % (d_min, times[0], times[1]), end=' ')
+      if (times[1] != 0):
+        print("= %.2f" % (times[0] / times[1]), end=' ')
+      print()
+      sys.stdout.flush()
+  print()
+
+def run(args):
+  assert len(args) == 1
+  structure = read_structure(args[0])
+  structure.show_summary()
+  print()
+  timings(structure=structure)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/fmt_utils.py
+from __future__ import absolute_import, division, print_function
+def dot6g_list(l):
+  s = ""
+  for x in l: s += (" %.6g" % (x,))
+  return s[1:]
+
+def dot6gdot(x):
+  s = ("%.6g" % (x,)).upper()
+  if ("E" in s): return "%.10f" % (x,)
+  if ("." in s): return s
+  return s + "."
+
+def dot6gdot_list(l):
+  s = ""
+  for x in l: s += " " + dot6gdot(x)
+  return s[1:]
+
+def dot6fdot(x):
+  s = "%.6f" % (x,)
+  if ("." in s): return s
+  return "." + s
+
+def dot6fdot_list(l):
+  s = ""
+  for x in l: s += " " + dot6fdot(x)
+  return s[1:]
+
+def xtal6g(x):
+  import string
+  s = "%.6g" % (x,)
+  i = string.find(s, "e")
+  if (i < 0): return s
+  return s[:i] + s[i+1:]
+
+def xtal6g_list(l):
+  s = ""
+  for x in l: s += " " + xtal6g(x)
+  return s[1:]
+
+def MathFormVec3(V):
+  return ("{%.6g,%.6g,%.6g}" % tuple(V)).replace("e", "*^")
+
+def MathFormMx33(M):
+  return ("{{%.6g,%.6g,%.6g},{%.6g,%.6g,%.6g},{%.6g,%.6g,%.6g}}"
+          % tuple(M)).replace("e", "*^")
+
+def MathForm_adp(adp):
+  return MathFormMx33((adp[0], adp[3], adp[4],
+                       adp[3], adp[1], adp[5],
+                       adp[4], adp[5], adp[2]))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/github.py
+from __future__ import absolute_import, division, print_function
+
+import json
+import os
+import requests
+import time
+
+from libtbx.program_template import ProgramTemplate
+
+class Program(ProgramTemplate):
+
+  description = '''
+Create an issue on GitHub via their REST API.
+'''
+
+  master_phil_str = '''
+  org = None
+    .type = str
+    .help = GitHub organization
+    .short_caption = GitHub organization
+  repo = None
+    .type = str
+    .help = GitHub repository
+    .short_caption = GitHub repository
+'''
+
+def create_github_issue(org=None, repo=None, title='title', body='body', token=None):
+  assert token is not None
+  url = 'https://api.github.com/repos/{org}/{repo}/issues'.format(org=org, repo=repo)
+
+  # headers with authenticating token
+  headers = {
+    'Accept': 'application/vnd.github.v3+json',
+    'Authorization': 'token {token}'.format(token=token),
+  }
+
+  # issue
+  issue = {
+            'title': title,
+            'body': body,
+          }
+  data = json.dumps(issue)
+
+  # create issue
+  response = requests.post(url, data=data, headers=headers)
+  if response.status_code == 201:
+    print('Successfully created issue')
+  else:
+    print('Issue was not created')
+
+  return response
+
+if __name__ == '__main__':
+  org = 'phenix-lbl'
+  repo = 'testing'
+  title = 'test {}'.format(time.asctime())
+  body = 'This is a test {}'.format(time.asctime())
+  home = os.path.expanduser('~')
+  with open('{home}/github.token'.format(home=home), 'r') as f:
+    token = f.read()
+  response = create_github_issue(org=org, repo=repo, title=title, body=body, token=token)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/make_cns_input.py
+from __future__ import absolute_import, division, print_function
+import cctbx.eltbx.xray_scattering
+from cctbx import adptbx
+from cctbx import eltbx
+from cctbx.development import random_structure
+from cctbx.development import debug_utils
+from libtbx import adopt_init_args
+import sys
+from six.moves import range
+
+def tst_run_requiring_cns(args, call_back):
+  import libtbx.path
+  if (libtbx.path.full_command_path(command="cns") is None):
+    print("Skipping tests: cns not available.")
+  else:
+    debug_utils.parse_options_loop_space_groups(
+      argv=args, call_back=call_back, show_cpu_times=False)
+  from libtbx.utils import format_cpu_times
+  print(format_cpu_times())
+
+def write(file_name, cns_input):
+  f = open(file_name, "w")
+  for line in cns_input:
+    print(line, file=f)
+  f.close()
+
+def topology(scatterers):
+  cns_input = []
+  a = cns_input.append
+  a("topology")
+  for scatterer in scatterers:
+    name = scatterer.label.replace(" ","")[-4:]
+    a("  residue %s" % name)
+    a("    atom %s mass=1 charge=0 {chemical}type=%s end" % (name, name))
+    a("  end")
+  a("end")
+  a("")
+  a("segment")
+  a("  name=A")
+  for scatterer in scatterers:
+    name = scatterer.label.replace(" ","")[-4:]
+    a("  molecule {res}name=%s number=1 end" % name)
+  a("end")
+  a("")
+  return cns_input
+
+def coordinates(scatterers, xyz_only=False):
+  cns_input = []
+  a = cns_input.append
+  resid = 1
+  for scatterer in scatterers:
+    x = scatterer.site
+    q = scatterer.occupancy
+    assert scatterer.flags.use_u_iso_only()
+    b = adptbx.u_as_b(scatterer.u_iso)
+    gaussian = eltbx.xray_scattering.it1992(scatterer.scattering_type).fetch()
+    fp = scatterer.fp
+    fdp = scatterer.fdp
+    for i in range(3):
+      a("do (%s=%.12g) (resid=%d)" % ("xyz"[i], x[i], resid))
+    if (not xyz_only):
+      a("do (q=%.12g) (resid=%d)" % (q, resid))
+      a("do (b=%.12g) (resid=%d)" % (b, resid))
+      a("xray")
+      a("  scatter (chemical=%s)" % scatterer.label.replace(" ","")[-4:])
+      for i in range(4):
+        a("    %.6g %.6g" %
+          (gaussian.array_of_a()[i], gaussian.array_of_b()[i]))
+      a("    %.6g" % (gaussian.c(),))
+      a("end")
+      a("do (scatter_fp=%.12g) (resid=%d)" % (fp, resid))
+      a("do (scatter_fdp=%.12g) (resid=%d)" % (fdp, resid))
+    a("")
+    resid += 1
+  a("coordinates orthogonalize end")
+  a("show (name) (all)")
+  a("show (chemical) (all)")
+  if (not xyz_only):
+    a("show (scatter_fp) (all)")
+    a("show (scatter_fdp) (all)")
+  a("")
+  return cns_input
+
+def xray_unit_cell(unit_cell):
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  a("  a=%.12g b=%.12g c=%.12g alpha=%.12g beta=%.12g gamma=%.12g"
+    % unit_cell.parameters())
+  a("end")
+  a("")
+  return cns_input
+
+def xray_symmetry(space_group):
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  for s in space_group:
+    a("  symm=(" + s.mod_positive().as_xyz() + ")")
+  a("end")
+  a("")
+  return cns_input
+
+def xray_structure(structure):
+  cns_input = xray_unit_cell(structure.unit_cell())
+  e = cns_input.extend
+  e(xray_symmetry(structure.space_group()))
+  e(topology(structure.scatterers()))
+  e(coordinates(structure.scatterers()))
+  return cns_input
+
+def xray_anomalous(flag):
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  if (flag):
+    a("  anomalous=true")
+  else:
+    a("  anomalous=false")
+  a("end")
+  a("")
+  return cns_input
+
+def xray_declare(names, miller_array):
+  assert len(names) in (1,2)
+  if (len(names) == 2): assert miller_array.sigmas() is not None
+  if (miller_array.is_complex_array()):
+    type = "complex"
+  else:
+    type = "real"
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  a("  declare name=%s domain=reciprocal type=%s end" % (names[0], type))
+  if (len(names) == 2):
+    a("  declare name=%s domain=reciprocal type=real end" % names[1])
+  a("end")
+  a("")
+  return cns_input
+
+def xray_reflection(names, miller_array):
+  assert len(names) in (1,2)
+  if (len(names) == 2): assert miller_array.sigmas() is not None
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  a("  nreflections %d" % miller_array.indices().size())
+  a("  reflection")
+  data = miller_array.data()
+  sigmas = miller_array.sigmas()
+  for i,h in enumerate(miller_array.indices()):
+    s = "    index %d %d %d" % h + " %s %s" % (names[0], str(data[i]))
+    if (sigmas is not None):
+      s += " %s %s" % (names[1], str(sigmas[i]))
+    a(s)
+  a("  end")
+  a("end")
+  a("")
+  return cns_input
+
+def xray_generate(d_max, d_min):
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  a("  generate %s %s" % (str(d_max), str(d_min)))
+  a("end")
+  a("")
+  return cns_input
+
+def xray_mapresolution(d_min):
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  a("  mapresolution %s" % str(d_min))
+  a("end")
+  a("")
+  return cns_input
+
+def xray_method(method):
+  assert method in ["direct", "fft"]
+  cns_input = []
+  a = cns_input.append
+  a("xray")
+  a("  method %s" % method)
+  a("end")
+  a("")
+  return cns_input
+
+def xray_predict(reciprocal_space_array):
+  cns_input = []
+  a = cns_input.append
+  a("""\
+xray
+  declare name=%(reciprocal_space_array)s domain=reciprocal type=complex end
+  predict
+    mode=reciprocal
+    to=%(reciprocal_space_array)s
+    selection=(all)
+    atomselection=(all)
+  end
+end
+""" % vars())
+  return cns_input
+
+def script_predict_methods_comparison(d_min, structure, f_obs):
+  cns_input = xray_structure(structure)
+  a,e = cns_input.append,cns_input.extend
+  e(xray_anomalous(f_obs.anomalous_flag()))
+  e(xray_declare(["fobs"], f_obs))
+  e(xray_reflection(["fobs"], f_obs))
+  e(xray_mapresolution(d_min))
+  e(xray_method("direct"))
+  e(xray_predict("fcalc_dir"))
+  e(xray_method("fft"))
+  e(xray_predict("fcalc_fft"))
+  a("xray")
+  a("  write reflections output=tmp.hkl fcalc_dir fcalc_fft end")
+  a("end")
+  a("")
+  a("stop")
+  return cns_input
+
+def xray_gradients():
+  return ["""\
+xray
+  declare name=fcalc domain=reciprocal type=complex end
+  declare name=fpart domain=reciprocal type=complex end
+  declare name=weight domain=reciprocal type=real end
+  do (weight=1) (all)
+  do (fpart=0) (all)
+  associate reset
+  associate fcalc (all)
+  target=(resi(amplitude(fobs),(fcalc+fpart), weight))
+  dtarget=(dresi(amplitude(fobs),(fcalc+fpart), weight))
+  tselection (all)
+end
+
+flags exclude * include xref end
+
+energy end
+
+show (dx) (all)
+show (dy) (all)
+show (dz) (all)
+"""]
+
+def script_xray_gradients(d_min, f_obs, structure, method):
+  cns_input = xray_structure(structure)
+  a,e = cns_input.append,cns_input.extend
+  e(xray_anomalous(f_obs.anomalous_flag()))
+  e(xray_declare(["fobs"], f_obs))
+  e(xray_reflection(["fobs"], f_obs))
+  e(xray_mapresolution(d_min))
+  e(xray_method(method))
+  e(xray_gradients())
+  a("stop")
+  return cns_input
+
+class parameter_nbonds(object):
+
+  def __init__(self, ctofnb=7.5,
+                     ctonnb=6.5,
+                     cutnb=8.5,
+                     irexponent=2,
+                     nbxmod=5,
+                     rconst=100,
+                     repel=0,
+                     rexponent=2,
+                     tolerance=0.5,
+                     wmin=1.5):
+    adopt_init_args(self, locals())
+
+class parameter_nonb(object):
+
+  def __init__(self, epsilon=0.1,
+                     sigma=1.5,
+                     epsilon14=0.1,
+                     sigma14=1.3):
+    adopt_init_args(self, locals())
+
+def script_vdw_energy(structure, param_nbonds=None, param_nonb=None):
+  if (param_nbonds is None): param_nbonds = parameter_nbonds()
+  if (param_nonb is None): param_nonb = parameter_nonb()
+  cns_input = xray_unit_cell(structure.unit_cell())
+  a,e = cns_input.append,cns_input.extend
+  e(xray_symmetry(structure.space_group()))
+  e(topology(structure.scatterers()))
+  e(coordinates(structure.scatterers(), xyz_only=True))
+  a("""\
+param
+  nbonds
+    ctofnb=%(ctofnb).6g
+    ctonnb=%(ctonnb).6g
+    cutnb=%(cutnb).6g
+    irexponent=%(irexponent).6g
+    nbxmod=%(nbxmod).6g
+    rconst=%(rconst).6g
+    repel=%(repel).6g
+    rexponent=%(rexponent).6g
+    tolerance=%(tolerance).6g
+    wmin=%(wmin).6g
+  end
+""" % vars(param_nbonds))
+  a("  nonb (all) %(epsilon).6g %(sigma).6g %(epsilon14).6g %(sigma14).6g" %
+    vars(param_nonb))
+  a("""\
+
+  nbonds
+    ?
+  end
+end
+
+flags exclude * include vdw pvdw end
+
+energy end
+
+show (dx) (all)
+show (dy) (all)
+show (dz) (all)
+
+distance
+  from=(all)
+  to=(all)
+  cuton=0
+  cutoff=%(cutnb).6g
+  disp=print
+end
+
+stop""" % vars(param_nbonds))
+  return cns_input
+
+def exercise(space_group_info,
+             anomalous_flag=False,
+             d_min=2.,
+             verbose=0):
+  structure = random_structure.xray_structure(
+    space_group_info,
+    elements=("N", "C", "C", "O"),
+    random_f_prime_d_min=1.0,
+    random_f_double_prime=anomalous_flag,
+    random_u_iso=True,
+    random_occupancy=True)
+  if (0 or verbose):
+    structure.show_summary()
+  f_calc = structure.structure_factors(
+    d_min=d_min,
+    algorithm="direct").f_calc()
+  for f_obs in [f_calc, abs(f_calc)]:
+    script_predict_methods_comparison(d_min, structure, f_obs)
+    script_xray_gradients(d_min, f_obs, structure, method="direct")
+  script_vdw_energy(structure=structure)
+
+def run_call_back(flags, space_group_info):
+  for anomalous_flag in (False, True):
+    exercise(space_group_info, anomalous_flag,
+             verbose=flags.Verbose)
+
+def run():
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], run_call_back)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/make_settings.py
+from __future__ import absolute_import, division, print_function
+# This script generates a list of non-standard space group settings.
+# The settings are used for testing.
+#
+# usage: python make_settings.py > settings.py
+
+from cctbx import sgtbx
+from six.moves import range
+
+def run():
+  settings = [0]
+  for i in range(1, 231): settings.append({})
+
+  list_cb_op = []
+  for xyz in ("x,y,z", "z,x,y", "y,z,x"):
+    list_cb_op.append(sgtbx.change_of_basis_op(sgtbx.rt_mx(xyz)))
+
+  n_built = 0
+  for i in sgtbx.space_group_symbol_iterator():
+    hall_symbol = i.hall()
+    for z in "PABCIRHF":
+      hall_z = hall_symbol[0] + z + hall_symbol[2:]
+      for cb_op in list_cb_op:
+        group = sgtbx.space_group(hall_z).change_basis(cb_op)
+        sg_type = group.type()
+        settings[sg_type.number()][sg_type.lookup_symbol()] = 0
+        n_built += 1
+  print("# n_built =", n_built)
+
+  n_non_redundant = 0
+  print("settings = (")
+  for i in range(1, 231):
+    print("#", i)
+    symbols = list(settings[i].keys())
+    symbols.sort()
+    for s in symbols:
+      print("'" + s + "',")
+      n_non_redundant += 1
+  print(")")
+  print("# n_non_redundant =", n_non_redundant)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/random_structure.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+from cctbx import crystal
+from cctbx import adptbx
+from cctbx import xray
+import cctbx.eltbx.xray_scattering
+from cctbx import eltbx
+from cctbx.array_family import flex
+from libtbx import adopt_init_args
+import random
+from six.moves import range
+from six.moves import zip
+
+def random_modify_adp_and_adp_flags(scatterers,
+                                    random_u_iso_scale = 0.3,
+                                    random_u_iso_min = 0.0,
+                                    parameter_name = None,
+                                    neg_u_aniso = (-1.,-1.,-1.,-1.,-1.,-1.),
+                                    neg_u_iso = -9999.99):
+  u_isos = []
+  for scatterer in scatterers:
+    u_iso = random.random() * random_u_iso_scale + random_u_iso_min
+    u_isos.append( u_iso )
+    assert u_iso > 0.0 and scatterer.u_star != (-1.,-1.,-1.,-1.,-1.,-1.)
+  sc = scatterers
+  us6 = sc[6].u_star
+  us7 = sc[7].u_star
+  us8 = sc[8].u_star
+  nv = neg_u_aniso
+  sc[0].u_iso = u_isos[0]
+  sc[0].flags.set_use_u(iso=True,  aniso=True)
+  sc[1].u_iso = u_isos[1]
+  sc[1].flags.set_use_u(iso=False, aniso=False)
+  sc[2].u_iso = u_isos[2]
+  sc[2].flags.set_use_u(iso=True,  aniso=False)
+  sc[3].u_iso = u_isos[3]
+  sc[3].flags.set_use_u(iso=False, aniso=True)
+  sc[4].u_iso =  neg_u_iso
+  sc[4].flags.set_use_u(iso=False, aniso=False)
+  sc[5].u_iso =  neg_u_iso
+  sc[5].flags.set_use_u(iso=False, aniso=True)
+  sc[6].u_iso = u_isos[6]
+  sc[6].u_star = nv
+  sc[6].flags.set_use_u(iso=False, aniso=False)
+  sc[7].u_iso = u_isos[7]
+  sc[7].u_star = nv
+  sc[7].flags.set_use_u(iso=True,  aniso=False)
+  sc[8].u_iso =  neg_u_iso
+  sc[8].u_star = nv
+  sc[8].flags.set_use_u(iso=False, aniso=False)
+  if (parameter_name == "u_iso"):
+    sc[1].u_iso = u_isos[1]
+    sc[1].flags.set_use_u(iso=True, aniso=False)
+    sc[3].u_iso = u_isos[3]
+    sc[3].flags.set_use_u(iso=True, aniso=True)
+    sc[4].u_iso = u_isos[4]
+    sc[4].flags.set_use_u(iso=True, aniso=False)
+    sc[5].u_iso = u_isos[5]
+    sc[5].flags.set_use_u(iso=True, aniso=True)
+    sc[6].u_iso = u_isos[6]
+    sc[6].u_star = nv
+    sc[6].flags.set_use_u(iso=True, aniso=False)
+    sc[8].u_iso = u_isos[8]
+    sc[8].u_star = nv
+    sc[8].flags.set_use_u(iso=True, aniso=False)
+  elif (parameter_name == "u_star"):
+    sc[1].u_iso = u_isos[1]
+    sc[1].flags.set_use_u(iso=False, aniso=True)
+    sc[2].u_iso = u_isos[2]
+    sc[2].flags.set_use_u(iso=True , aniso=True)
+    sc[4].u_iso =  neg_u_iso
+    sc[4].flags.set_use_u(iso=False, aniso=True)
+    sc[6].u_iso = u_isos[6]
+    sc[6].u_star = us6
+    sc[6].flags.set_use_u(iso=False, aniso=True)
+    sc[7].u_iso = u_isos[7]
+    sc[7].u_star = us7
+    sc[7].flags.set_use_u(iso=True , aniso=True)
+    sc[8].u_iso =  neg_u_iso
+    sc[8].u_star = us8
+    sc[8].flags.set_use_u(iso=False, aniso=True)
+
+def random_modify_adp_and_adp_flags_2(
+                                    scatterers,
+                                    use_u_iso,
+                                    use_u_aniso,
+                                    allow_mix,
+                                    random_u_iso_scale = 0.3,
+                                    random_u_iso_min = 0.0,
+                                    parameter_name=None):
+  for sc in scatterers:
+    u_iso = random.random() * random_u_iso_scale + random_u_iso_min
+    sc.u_iso = u_iso
+    assert sc.u_iso > 0.0 and sc.u_star != (-1.,-1.,-1.,-1.,-1.,-1.)
+    if(allow_mix):
+      choice = random.random()
+      if(choice < 0.5):
+        sc.flags.set_use_u_iso(True)
+        if(parameter_name != "u_star"):
+          sc.flags.set_use_u_aniso(False)
+        else:
+          sc.flags.set_use_u_aniso(use_u_aniso)
+      else:
+        if(parameter_name != "u_iso"):
+          sc.flags.set_use_u_iso(False)
+        else:
+          sc.flags.set_use_u_iso(use_u_iso)
+        sc.flags.set_use_u_aniso(True)
+    else:
+      sc.flags.set_use_u_iso(use_u_iso)
+      sc.flags.set_use_u_aniso(use_u_aniso)
+    if(not sc.flags.use_u_aniso()):
+      choice = random.random()
+      if(choice < 0.5): sc.u_star = (-10.0,-10.0,-10.0,-10.0,-10.0,-10.0)
+    if(not sc.flags.use_u_iso()):
+      choice = random.random()
+      if(choice < 0.5): sc.u_iso = -10.0
+    if(not sc.flags.use_u_iso() and not sc.flags.use_u_aniso()):
+      choice = random.random()
+      if(choice < 0.5):
+        sc.u_iso = -10.0
+        sc.u_star = (-10.0,-10.0,-10.0,-10.0,-10.0,-10.0)
+
+
+def have_suitable_hetero_distance(existing_sites,
+                                  sym_equiv_sites_of_other_site,
+                                  min_hetero_distance):
+  for existing_site in existing_sites:
+    if (sgtbx.min_sym_equiv_distance_info(
+          sym_equiv_sites_of_other_site, existing_site).dist()
+        < min_hetero_distance):
+      return False
+  return True
+
+def random_site(special_position_settings,
+                existing_sites,
+                min_hetero_distance=1.5,
+                general_position_only=False,
+                grid=None,
+                t_centre_of_inversion=None,
+                max_trials=100):
+  for trial in range(max_trials):
+    if (grid is None):
+      site = (random.random(), random.random(), random.random())
+    else:
+      site = [random.randrange(g) / float(g) for g in grid]
+    site_symmetry = special_position_settings.site_symmetry(site)
+    if (general_position_only and not site_symmetry.is_point_group_1()):
+      continue
+    sym_equiv_sites = sgtbx.sym_equiv_sites(site_symmetry)
+    if (not have_suitable_hetero_distance(
+              existing_sites, sym_equiv_sites, min_hetero_distance)):
+      continue
+    site = site_symmetry.exact_site()
+    if (t_centre_of_inversion is None):
+      return site
+    site_inv = [-x+t for x,t in zip(site, t_centre_of_inversion)]
+    site_symmetry_inv = special_position_settings.site_symmetry(site_inv)
+    if (general_position_only and not site_symmetry_inv.is_point_group_1()):
+      continue
+    sym_equiv_sites_inv = sgtbx.sym_equiv_sites(site_symmetry_inv)
+    if (not have_suitable_hetero_distance(
+              existing_sites + [site],
+              sym_equiv_sites_inv, min_hetero_distance)):
+      continue
+    return site, site_symmetry_inv.exact_site()
+  return None
+
+def random_sites(special_position_settings,
+                 existing_sites,
+                 n_new,
+                 min_hetero_distance=1.5,
+                 general_positions_only=False,
+                 grid=None,
+                 t_centre_of_inversion=None,
+                 max_trials=100,
+                 max_back_track=100):
+  n_loop = n_new
+  if (t_centre_of_inversion is not None):
+    assert n_new % 2 == 0
+    n_loop /= 2
+  for i_back_track in range(max_back_track):
+    all_sites = existing_sites[:]
+    for i_new in range(n_loop):
+      site = random_site(special_position_settings,
+                         all_sites,
+                         min_hetero_distance,
+                         general_positions_only,
+                         grid,
+                         t_centre_of_inversion,
+                         max_trials)
+      if (site is None):
+        break
+      if (t_centre_of_inversion is None):
+        all_sites.append(site)
+      else:
+        all_sites.extend(site)
+    if (len(all_sites) == len(existing_sites) + n_new):
+      return all_sites
+  raise RuntimeError("Cannot find sites matching all constraints.")
+
+def random_modify_site(special_position_settings, site, gauss_sigma,
+                       max_distance=0,
+                       vary_z_only=False,
+                       max_trials=100):
+  site_symmetry = special_position_settings.site_symmetry(site)
+  assert site_symmetry.distance_moved() < 1.e-5
+  unit_cell = special_position_settings.unit_cell()
+  site_cart = list(unit_cell.orthogonalize(site))
+  for trial in range(max_trials):
+    if (vary_z_only):
+      modified_site_cart = site_cart[:2] \
+                         + [random.gauss(site_cart[2], gauss_sigma)]
+    else:
+      modified_site_cart = [random.gauss(x, gauss_sigma) for x in site_cart]
+    modified_site = site_symmetry.special_op() \
+                  * unit_cell.fractionalize(modified_site_cart)
+    if (max_distance > 0):
+      distance = unit_cell.distance(site, modified_site)
+      if (distance > max_distance): continue
+    modified_site_symmetry = special_position_settings.site_symmetry(
+      modified_site)
+    if (modified_site_symmetry.special_op() != site_symmetry.special_op()):
+      continue
+    return modified_site
+  raise RuntimeError("Cannot find suitable site.")
+
+def random_elements(size, choices=["O", "Mg", "Si", "Ca"]):
+  return flex.select(
+    sequence=choices,
+    permutation=flex.random_size_t(size=size) % len(choices))
+
+class xray_structure(xray.structure):
+
+  def __init__(self,
+               space_group_info=None,
+               space_group_symbol=None,
+               unit_cell=None,
+               elements=None,
+               sites_frac=None,
+               n_scatterers=None,
+               volume_per_atom=50.,
+               min_distance=1.5,
+               min_distance_sym_equiv=None,
+               general_positions_only=False,
+               random_f_prime_d_min=0,
+               random_f_prime_scale=0.6,
+               random_f_double_prime=0,
+               random_f_double_prime_scale=0.6,
+               random_u_iso=False,
+               random_u_iso_min=0,
+               random_u_iso_scale=0.3,
+               u_iso=0,
+               use_u_iso = True,
+               use_u_aniso = False,
+               random_u_cart_scale=0.3,
+               random_occupancy=False,
+               random_occupancy_min=0.1):
+    """Initialise the random xray_structure class.
+
+    :param space_group_info: a space group descriptor
+    :type space_group_info: sgtbx.space_group_info
+    :param space_group_symbol: international space group symbol or number
+    :type space_group_symbol: string or integer
+    :param unit_cell: the cell parameters of the random structure
+    :type unit_cell: uctbx.unit_cell or tuple(a, b, c, alpha, beta, gamma)
+    :param elements: A list of elements to use. \
+    Example: "['Si', 'Si', 'O', 'Al']" \
+    If elements='const' then ???. \
+    If elements='random' then random scatterers will be used.
+    :type elements: list(strings)
+    :param sites_frac: a list of the fractional coordinates for all scatterers
+    :type sites_frac: scitbx.array_family.flex.vec3_double
+    :param n_scatterers: number of scatterers
+    :type n_scatterers: integer
+    :param volume_per_atom: the volume an atom should occupy in cubic angstroms
+    :type volume_per_atom: float
+    :param min_distance: minimal distance between atoms
+    :type min_distance: float
+    :param min_distance_sym_equiv: minimal distance between symmetrical \
+    equivalent atoms
+    :type min_distance_sym_equiv: float
+    :param general_positions_only: if 'True' atoms will be placed on general \
+    positions only
+    :type general_positions_only: boolean
+    :param random_f_prime_d_min: ???
+    :type random_f_prime_d_min: float
+    :param random_f_prime_scale: ???
+    :type random_f_prime_scale: float
+    :param random_f_double_prime: ???
+    :type random_f_double_prime: float
+    :param random_f_double_prime_scale: ???
+    :type random_f_double_prime_scale: float
+    :param random_u_iso: if 'True' the isotropic temperature factors of all \
+    atoms will be randomised
+    :type random_u_iso: boolean
+    :param random_u_iso_min: minimum value of u_iso for random u values
+    :type random_u_iso: float
+    :param random_u_iso_scale: ???
+    :type random_u_iso_scale: float
+    :param u_iso: a fixed value of u_iso to apply to all atoms
+    :type u_iso: float
+    :param use_u_iso: if 'True' the atoms will have isotropic temperature factors
+    :type use_u_iso: boolean
+    :param use_u_aniso: if 'True' the atoms will have anisotropic temperature factors
+    :type use_u_aniso: boolean
+    :param random_u_cart_scale: ???
+    :type random_u_cart_scale: float
+    :param random_occupancy: if 'True' the atom sites will have a random occupancy
+    :type random_occupancy: boolean
+    :param random_occupancy_min: minimal occupancy for a site
+    :type random_occupancy_min: float
+    """
+    adopt_init_args(self, locals(),
+      exclude=(
+        "space_group_info",
+        "unit_cell",
+        "min_distance_sym_equiv",
+        "sites_frac",
+        "use_u_iso"))
+    if (space_group_info is None):
+      if (space_group_symbol is None):
+        space_group_info = sgtbx.space_group_info(symbol="P 1")
+      else:
+        space_group_info = sgtbx.space_group_info(symbol=space_group_symbol)
+    else:
+      assert space_group_symbol is None # only one of those should be set
+    self.use_u_iso_ = use_u_iso
+    if (sites_frac is not None):
+      assert self.elements is not None
+      assert self.n_scatterers is None
+      self.n_scatterers = len(sites_frac)
+    if (self.elements is not None):
+      if (self.elements in ["const", "random"]):
+        assert self.n_scatterers is not None
+        if (self.elements == "const"):
+          self.elements = ["const"] * self.n_scatterers
+        else:
+          self.elements = random_elements(size=self.n_scatterers)
+      elif (self.n_scatterers is None):
+        self.n_scatterers = len(self.elements)
+      else:
+        assert len(self.elements) == self.n_scatterers
+    if (unit_cell is None):
+      unit_cell = space_group_info.any_compatible_unit_cell(
+        self.n_scatterers
+        * volume_per_atom
+        * space_group_info.group().order_z())
+    crystal_symmetry = crystal.symmetry(
+      unit_cell=unit_cell,
+      space_group_info=space_group_info)
+    if (min_distance_sym_equiv is None):
+      min_distance_sym_equiv = min_distance
+    special_position_settings = crystal.special_position_settings(
+      crystal_symmetry,
+      min_distance_sym_equiv=min_distance_sym_equiv,
+      u_star_tolerance=0,
+      assert_min_distance_sym_equiv=True)
+    xray.structure.__init__(self, special_position_settings)
+    if (self.elements is not None):
+      self.build_scatterers(self.elements, sites_frac)
+
+  def build_scatterers(self,
+        elements,
+        sites_frac=None,
+        grid=None,
+        t_centre_of_inversion=None):
+    existing_sites = [scatterer.site for scatterer in self.scatterers()]
+    if (sites_frac is None):
+      all_sites = random_sites(
+        special_position_settings=self,
+        existing_sites=existing_sites,
+        n_new=len(elements),
+        min_hetero_distance=self.min_distance,
+        general_positions_only=self.general_positions_only,
+        grid=grid,
+        t_centre_of_inversion=t_centre_of_inversion)
+    else:
+      assert len(sites_frac) == len(elements)
+      all_sites = existing_sites + list(sites_frac)
+    assert len(all_sites) <= self.n_scatterers
+    sf_dict = {}
+    for element in elements:
+      if (element not in sf_dict):
+        sf_dict[element] = eltbx.xray_scattering.best_approximation(element)
+    fp = 0
+    fdp = 0
+    n_existing = self.scatterers().size()
+    i_label = n_existing
+    for element,site in zip(elements, all_sites[n_existing:]):
+      i_label += 1
+      scatterer = xray.scatterer(
+        label=element + str(i_label),
+        scattering_type=element,
+        site=site)
+      site_symmetry = scatterer.apply_symmetry(
+        self.unit_cell(),
+        self.space_group(),
+        self.min_distance_sym_equiv())
+      if (self.random_f_prime_d_min):
+        f0 = sf_dict[element].at_d_star_sq(1./self.random_f_prime_d_min**2)
+        assert f0 > 0
+        fp = -f0 * random.random() * self.random_f_prime_scale
+      if (self.random_f_double_prime):
+        f0 = sf_dict[element].at_d_star_sq(0)
+        fdp = f0 * random.random() * self.random_f_double_prime_scale
+      scatterer.fp = fp
+      scatterer.fdp = fdp
+      if (self.use_u_iso_):
+        scatterer.flags.set_use_u_iso_only()
+        u_iso = self.u_iso
+        if (not u_iso and self.random_u_iso):
+          u_iso = random.random() * self.random_u_iso_scale \
+                + self.random_u_iso_min
+        scatterer.u_iso = u_iso
+      if (self.use_u_aniso):
+        scatterer.flags.set_use_u_aniso_only()
+        run_away_counter = 0
+        while 1:
+          run_away_counter += 1
+          assert run_away_counter < 100
+          u_cart = adptbx.random_u_cart(u_scale=self.random_u_cart_scale)
+          scatterer.u_star = site_symmetry.average_u_star(
+                               adptbx.u_cart_as_u_star(
+                                 self.unit_cell(), u_cart))
+          u_cart = adptbx.u_star_as_u_cart(self.unit_cell(), scatterer.u_star)
+          eigenvalues = adptbx.eigenvalues(u_cart)
+          if (min(eigenvalues) > 0.001):
+            break
+      if (self.random_occupancy):
+        scatterer.occupancy = self.random_occupancy_min \
+                            + (1-self.random_occupancy_min)*random.random()
+      self.add_scatterer(scatterer)
+
+  def random_modify_site(self, site, gauss_sigma,
+                         max_distance=0,
+                         vary_z_only=False,
+                         max_trials=100):
+    return random_modify_site(
+      self, site, gauss_sigma, max_distance, vary_z_only, max_trials)
+
+  def random_modify_u_iso(self, u_iso, gauss_sigma):
+    return max(0.1, random.gauss(u_iso, gauss_sigma))
+
+  def random_modify_u_star(self, u_star, gauss_sigma,
+                                 max_relative_difference=1./3,
+                                 max_trials=100):
+    for trial in range(max_trials):
+      modified_u_star = []
+      for i in range(len(u_star)):
+        u = u_star[i]
+        max_diff = u * max_relative_difference
+        modified_u = random.gauss(u, gauss_sigma)
+        if (modified_u - u > u + max_diff):
+          modified_u = u + max_diff
+        elif (u - modified_u > u + max_diff):
+          modified_u = u - max_diff
+        modified_u_star.append(modified_u)
+      u_cart = adptbx.u_star_as_u_cart(self.unit_cell(), modified_u_star)
+      eigenvalues = adptbx.eigenvalues(u_cart)
+      if (min(eigenvalues) > 0.001):
+        return modified_u_star
+    raise RuntimeError("Cannot find suitable u_star.")
+
+  def random_modify_occupancy(self, occupancy, gauss_sigma):
+    return max(0.1, occupancy - abs(random.gauss(0, gauss_sigma)))
+
+  def random_modify_fp(self, fp, gauss_sigma):
+    assert fp < 0
+    return min(-0.1, random.gauss(fp, gauss_sigma))
+
+  def random_modify_fdp(self, fdp, gauss_sigma):
+    assert fdp > 0
+    return max(0.1, random.gauss(fdp, gauss_sigma))
+
+  def random_modify_parameters(self, parameter_name, gauss_sigma=0.1,
+                                     vary_z_only=False):
+    modified_structure = self.deep_copy_scatterers()
+    for scatterer in modified_structure.scatterers():
+      if (parameter_name == "site"):
+        scatterer.site = \
+          self.random_modify_site(scatterer.site, gauss_sigma,
+                                  vary_z_only=vary_z_only)
+      elif (parameter_name == "u_iso" and scatterer.flags.use_u_iso()):
+        scatterer.u_iso = \
+          self.random_modify_u_iso(scatterer.u_iso, gauss_sigma)
+      elif (parameter_name == "u_star" and scatterer.flags.use_u_aniso()):
+        scatterer.u_star = \
+          self.random_modify_u_star(scatterer.u_star, gauss_sigma)
+      elif (parameter_name == "occupancy"):
+        scatterer.occupancy = \
+          self.random_modify_occupancy(scatterer.occupancy, gauss_sigma)
+      elif (parameter_name == "fp"):
+        scatterer.fp = self.random_modify_fp(scatterer.fp, gauss_sigma)
+      elif (parameter_name == "fdp"):
+        scatterer.fdp = self.random_modify_fdp(scatterer.fdp, gauss_sigma)
+      else:
+        raise RuntimeError
+    return modified_structure
+
+class wyckoff_pair_generator(object):
+
+  def __init__(self,
+        space_group_info,
+        unit_cell_volume=1000,
+        min_distance_sym_equiv=1,
+        min_cross_distance=1,
+        scattering_type="const",
+        max_trials_per_position=10):
+    adopt_init_args(self, locals())
+    self.special_position_settings = crystal.special_position_settings(
+      crystal_symmetry=crystal.symmetry(
+        unit_cell=space_group_info.any_compatible_unit_cell(
+          volume=unit_cell_volume),
+        space_group_info=space_group_info),
+      min_distance_sym_equiv=min_distance_sym_equiv)
+    self.wyckoff_table = space_group_info.wyckoff_table()
+
+  def loop(self):
+    for i_position in range(self.wyckoff_table.size()):
+      site_symmetry_i = self.wyckoff_table.random_site_symmetry(
+        special_position_settings=self.special_position_settings,
+        i_position=i_position)
+      equiv_sites_i = sgtbx.sym_equiv_sites(site_symmetry_i)
+      for j_position in range(self.wyckoff_table.size()):
+        for n_trial in range(self.max_trials_per_position):
+          site_j = self.wyckoff_table.random_site_symmetry(
+            special_position_settings=self.special_position_settings,
+            i_position=j_position).exact_site()
+          dist_info = sgtbx.min_sym_equiv_distance_info(equiv_sites_i, site_j)
+          if (dist_info.dist() > self.min_cross_distance):
+            structure = xray.structure(
+              special_position_settings=self.special_position_settings,
+              scatterers=flex.xray_scatterer(
+               [xray.scatterer(scattering_type=self.scattering_type, site=site)
+                for site in [site_symmetry_i.exact_site(), site_j]]))
+            yield structure, dist_info.dist()
+            break
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/run_shelx.py
+from __future__ import absolute_import, division, print_function
+from cctbx import adptbx
+from cctbx import eltbx
+import cctbx.eltbx.xray_scattering
+from cctbx.development import random_structure
+from cctbx.development import debug_utils
+from cctbx.development.fmt_utils import dot6fdot_list, dot6gdot, dot6gdot_list
+from iotbx.shelx.write_ins import LATT_SYMM
+from scitbx.python_utils import dicts
+import libtbx.path
+from libtbx import easy_run
+from six.moves import cStringIO as StringIO
+import sys, os
+from six.moves import range
+
+def calculate_cell_content(xray_structure):
+  result = dicts.with_default_value(0)
+  for sc in xray_structure.scatterers():
+    result[sc.scattering_type] += sc.occupancy * sc.multiplicity()
+  return result
+
+def SFAC_DISP_UNIT(xray_structure, short_sfac):
+  lines = []
+  l = lines.append
+  UNIT = []
+  if (short_sfac):
+    celcon = calculate_cell_content(xray_structure)
+    l("SFAC " + " ".join(celcon))
+    for sf in celcon.keys():
+      l("DISP %s 0 0 0" % (sf,))
+      UNIT.append(str(max(1, int(celcon[sf] + 0.5))))
+  else:
+    for scatterer in xray_structure.scatterers():
+      gaussian=eltbx.xray_scattering.it1992(scatterer.scattering_type).fetch()
+      a = gaussian.array_of_a()
+      b = gaussian.array_of_b()
+      l("SFAC %s %.8f %.8f %.8f %.8f %.8f %.8f =" %
+        (scatterer.label,
+         a[0], b[0],
+         a[1], b[1],
+         a[2], b[2]))
+      l("     %.8f %.8f %.8f %.8f %.8f 0 1 1" %
+        (a[3], b[3], gaussian.c(),
+         scatterer.fp, scatterer.fdp))
+      UNIT.append(
+        str(max(1, int(scatterer.occupancy * scatterer.multiplicity() + 0.5))))
+  l("UNIT " + " ".join(UNIT))
+  return lines
+
+def NOFIX(x):
+  assert x > -5
+  assert x < 5
+  return x
+
+def FIX(x):
+  assert x > -5
+  assert x < 5
+  return 10. + x
+
+def atoms(xray_structure, short_sfac):
+  if (short_sfac):
+    celcon = list(calculate_cell_content(xray_structure).keys())
+  lines = []
+  l = lines.append
+  i = 0
+  for scatterer in xray_structure.scatterers():
+    i += 1
+    lbl = scatterer.scattering_type + str(i)
+    if (short_sfac):
+      sfac = celcon.index(scatterer.scattering_type) + 1
+    else:
+      sfac = i
+    coor = []
+    for x in scatterer.site: coor.append(NOFIX(x))
+    coor = dot6fdot_list(coor)
+    sof = NOFIX(scatterer.weight())
+    if (not scatterer.flags.use_u_aniso()):
+      l("%-4s %d %s %s %s" % (lbl, sfac, coor, dot6gdot(sof),
+        dot6gdot(NOFIX(scatterer.u_iso))))
+    else:
+      u = adptbx.u_star_as_u_cif(xray_structure.unit_cell(), scatterer.u_star)
+      u_fix = []
+      for c in u: u_fix.append(NOFIX(c))
+      u = u_fix
+      l("%-4s %d %s %s %s =" % (lbl, sfac, coor, dot6gdot(sof),
+        dot6gdot_list(u[:2])))
+      l("    %s" % dot6gdot_list((u[2], u[5], u[4], u[3])))
+  return lines
+
+def HKLF(lapp, f_calc, skip_zeros=False):
+  lapp("HKLF -3")
+  for i,h in enumerate(f_calc.indices()):
+    f = abs(f_calc.data()[i])
+    s = "%8.2f" % (f,)
+    assert  len(s) == 8, "structure factor does not fit f8.2 format."
+    if (not skip_zeros or s != "    0.00"):
+      lapp("%4d%4d%4d%s%8.2f" % (h + (s, 0.01)))
+  lapp("   0   0   0    0.00    0.00")
+
+def pre_check(xray_structure):
+  if (len(xray_structure.scatterers()) > 99):
+    # SHELX WPDB will mess up atom labels.
+    raise RuntimeError("Cannot handle more than 99 scatterer.")
+  for scatterer in xray_structure.scatterers():
+    if (scatterer.occupancy > 1.1):
+      raise RuntimeError("Error: occupancy too large: %s: %.6g" % (
+        scatterer.label, scatterer.occupancy))
+    if (scatterer.u_iso > 1.0):
+      raise RuntimeError("Error: u_iso too large: %s: %.6g" % (
+        scatterer.label, scatterer.u_iso))
+
+def check_r1(miller_set, shelx_lst, verbose):
+  for l in shelx_lst:
+    if (l.find("R1 = ") >= 0):
+      flds = l.split()
+      R1 = float(flds[9])
+      n_data = int(flds[12])
+      if (len(miller_set.indices()) != n_data):
+        raise RuntimeError("Shelx lost Miller indices.")
+      if (0 or verbose):
+        print("R1", R1, miller_set.space_group_info())
+      if (R1 > 0.01):
+        raise RuntimeError("Error: " + l[:-1])
+      return
+  raise RuntimeError("R1 not found in Shelx .lst file.")
+
+def check_anisou(shelx_titl, xray_structure, shelx_pdb, verbose):
+  # SHELXL WPDB does not include H atoms. Therefore we
+  # need a dictionary of labels to map back to the index
+  # in the xray_structure.scatterers() list.
+  lbl_dict = {}
+  i = 0
+  for scatterer in xray_structure.scatterers():
+    i += 1
+    lbl = (scatterer.scattering_type + str(i)).upper()
+    lbl_dict[lbl] = i - 1
+  TotalANISOU = 0
+  TotalMismatches = 0
+  for l in shelx_pdb[4:]:
+    if (l[:6] == "ANISOU"):
+      TotalANISOU += 1
+      lbl = l[11:16].strip()
+      i = lbl_dict[lbl]
+      assert xray_structure.scatterers()[i].flags.use_u_aniso()
+      u = l[28:70]
+      u_cart = adptbx.u_star_as_u_cart(
+        xray_structure.unit_cell(), xray_structure.scatterers()[i].u_star)
+      mismatch = 0
+      s = ""
+      for i in range(6):
+        u_shelx = int(u[i*7:(i+1)*7])
+        u_adptbx = int(round(u_cart[i] * 1.e+4,))
+        s += "%7d" % u_adptbx
+        if (abs(u_shelx - u_adptbx) > 1): mismatch = 1
+      if (mismatch != 0):
+        print(l[:-1])
+        print(u)
+        print(s)
+        print("Error: ANISOU mismatch.")
+        TotalMismatches += 1
+  if (0 or verbose or TotalMismatches > 0):
+    print(shelx_titl + (": ANISOU mismatches: %d of %d" % (
+      TotalMismatches, TotalANISOU)))
+  assert TotalMismatches == 0
+
+def run_shelx(shelx_titl, structure_factors, short_sfac=False, verbose=0):
+  run_shelx.counter += 1
+  xray_structure = structure_factors.xray_structure()
+  assert xray_structure.scatterers().size() > 0
+  pre_check(xray_structure)
+  f_calc = structure_factors.f_calc()
+  lines = []
+  l = lines.append
+  l("TITL " + shelx_titl)
+  l("CELL 1.0 " + dot6gdot_list(xray_structure.unit_cell().parameters()))
+  l("ZERR 1 0.01 0.01 0.01 0 0 0")
+  s = StringIO()
+  LATT_SYMM(s, xray_structure.space_group())
+  l(s.getvalue()[:-1])
+  lines += SFAC_DISP_UNIT(xray_structure, short_sfac)
+  l("FVAR 1.")
+  l("L.S. 1")
+  l("BLOC 0")
+  l("SPEC -0.1")
+  l("WPDB 2")
+  lines += atoms(xray_structure, short_sfac)
+  HKLF(l, f_calc)
+  with open("tmp%02d.ins" % run_shelx.counter, "w") as f:
+    for l in lines:
+      if (0 or verbose): print(l)
+      f.write(l + "\n")
+  sys.stdout.flush()
+  sys.stderr.flush()
+  try: os.unlink("tmp%02d.lst" % run_shelx.counter)
+  except KeyboardInterrupt: raise
+  except Exception: pass
+  shelxl_out = easy_run.fully_buffered(command="shelxl tmp%02d" % run_shelx.counter) \
+    .raise_if_errors() \
+    .stdout_lines
+  if (0 or verbose):
+    for l in shelxl_out: print(l)
+  sys.stderr.flush()
+  with open("tmp%02d.lst" % run_shelx.counter, "r") as f:
+    shelx_lst = f.readlines()
+  with open("tmp%02d.pdb" % run_shelx.counter, "r") as f:
+    shelx_pdb = f.readlines()
+  if (0 or verbose):
+    for l in shelx_lst: print(l[:-1])
+  sys.stdout.flush()
+  check_r1(f_calc, shelx_lst, verbose)
+  check_anisou(shelx_titl, xray_structure, shelx_pdb, verbose)
+run_shelx.counter = 0
+
+def exercise(space_group_info,
+             anomalous_flag=False,
+             use_u_aniso=False,
+             d_min=2.,
+             verbose=0):
+  structure_factors = random_structure.xray_structure(
+    space_group_info,
+    elements=("N", "C", "C", "O"),
+    use_u_aniso=use_u_aniso,
+    use_u_iso = (not use_u_aniso),
+    random_f_prime_d_min=1.0,
+    random_f_double_prime=anomalous_flag,
+    random_u_iso=True,
+    random_occupancy=True
+    ).structure_factors(
+        anomalous_flag=anomalous_flag, d_min=d_min, algorithm="direct")
+  if (0 or verbose):
+    structure_factors.xray_structure().show_summary()
+  shelx_titl = str(space_group_info) \
+             + ", anomalous=" + str(anomalous_flag) \
+             + ", use_u_aniso=" + str(use_u_aniso)
+  run_shelx(shelx_titl, structure_factors, verbose=verbose)
+
+def run_call_back(flags, space_group_info):
+  sg = space_group_info.group()
+  if (sg.is_centric() and not sg.is_origin_centric()):
+    print("Skipping space group: centre of inversion is not at origin.")
+    return
+  for anomalous_flag in (False, True):
+    for use_u_aniso in (False, True):
+      exercise(space_group_info, anomalous_flag, use_u_aniso,
+               verbose=flags.Verbose)
+
+def run(args):
+  if (libtbx.path.full_command_path(command="shelxl") is None):
+    print("shelxl not available.")
+    return
+  debug_utils.parse_options_loop_space_groups(args, run_call_back)
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/run_shelx76.py
+from __future__ import absolute_import, division, print_function
+from cctbx import adptbx
+from cctbx.development import random_structure
+from cctbx.development import debug_utils
+from cctbx.development.fmt_utils import dot6fdot_list, dot6gdot, dot6gdot_list
+from cctbx.development.run_shelx import FIX, NOFIX, HKLF
+from iotbx.shelx.write_ins import LATT_SYMM
+from libtbx.test_utils import is_below_limit
+import libtbx.path
+from libtbx import easy_run
+from six.moves import cStringIO as StringIO
+import sys
+from six.moves import zip
+
+def sfac_unit(lapp, xray_structure):
+  reg = xray_structure.scattering_type_registry()
+  unit_cell_occupancy_sums = reg.unit_cell_occupancy_sums(
+    xray_structure.scatterers())
+  st_sorted = sorted(reg.as_type_gaussian_dict().keys())
+  lapp("     scattering types: %s" % " ".join(st_sorted))
+  sfac_indices = {}
+  unit = []
+  for i_st,st in enumerate(st_sorted):
+    sfac_indices[st] = i_st+1
+    gaussian = reg.gaussian(st)
+    assert gaussian.n_terms() == 4
+    assert gaussian.use_c()
+    a = gaussian.array_of_a()
+    b = gaussian.array_of_b()
+    lapp("SFAC %.8f %.8f %.8f %.8f %.8f %.8f =" % (
+      a[0], b[0],
+      a[1], b[1],
+      a[2], b[2]))
+    lapp("     %.8f %.8f %.8f 0 0 0 1" % (
+      a[3], b[3], gaussian.c()))
+    unit.append("%.0f" % unit_cell_occupancy_sums[reg.unique_index(st)])
+  lapp("UNIT " + " ".join(unit))
+  return sfac_indices
+
+def atoms(lapp, sfac_indices, xray_structure, encoded_sites):
+  spis = xray_structure.special_position_indices()
+  if (encoded_sites is None):
+    enc_dict = {}
+  else:
+    assert len(encoded_sites) == spis.size()
+    enc_dict = dict(zip(spis, encoded_sites))
+  ss = xray_structure.space_group_info().structure_seminvariants()
+  if (ss.number_of_continuous_allowed_origin_shifts() == 0):
+    caosh_flags = None
+    caosh_i_sc = None
+  else:
+    assert ss.continuous_shifts_are_principal()
+    caosh_flags = ss.principal_continuous_shift_flags()
+    reg = xray_structure.scattering_type_registry()
+    w_max = None
+    for i_sc,sc in enumerate(xray_structure.scatterers()):
+      gaussian = reg.gaussian(sc.scattering_type)
+      w = abs(sc.weight() * gaussian.at_stol(0))
+      if (w_max is None or w_max < w):
+        w_max = w
+        caosh_i_sc = i_sc
+    assert w_max is not None
+  for i_sc,sc in enumerate(xray_structure.scatterers()):
+    st = sc.scattering_type
+    lbl = "%s%02d" % (st, i_sc+1)
+    sfac = sfac_indices[st]
+    enc_site = enc_dict.get(i_sc)
+    coor = []
+    if (caosh_i_sc is None or i_sc != caosh_i_sc):
+      if (enc_site is None):
+        for x in sc.site: coor.append(NOFIX(x))
+      else:
+        coor = enc_site
+    else:
+      if (enc_site is None):
+        for x,f in zip(sc.site, caosh_flags):
+          if (f): fix = FIX
+          else:   fix = NOFIX
+          coor.append(fix(x))
+      else:
+        for x,f in zip(enc_site, caosh_flags):
+          if (f):
+            coor.append(FIX(x))
+          else:
+            coor.append(x)
+    coor = dot6fdot_list(coor)
+    sof = FIX(sc.weight())
+    if (not sc.flags.use_u_aniso()):
+      lapp("%-4s %d %s %s %s" % (lbl, sfac, coor, dot6gdot(sof),
+        dot6gdot(NOFIX(sc.u_iso))))
+    else:
+      u = adptbx.u_star_as_u_cif(xray_structure.unit_cell(), sc.u_star)
+      u_fix = []
+      for c in u: u_fix.append(NOFIX(c))
+      u = u_fix
+      lapp("%-4s %d %s %s %s =" % (lbl, sfac, coor, dot6gdot(sof),
+        dot6gdot_list(u[:2])))
+      lapp("    %s" % dot6gdot_list((u[2], u[5], u[4], u[3])))
+
+def write_shelx76_ls(
+      f_obs,
+      xray_structure,
+      titl=None,
+      l_s_parameters="0",
+      fvars=None,
+      encoded_sites=None):
+  assert xray_structure.scatterers().size() > 0
+  assert (fvars is None) == (encoded_sites is None)
+  lines = []
+  lapp = lines.append
+  if (titl is None):
+    titl = str(xray_structure.space_group_info())
+  lapp("TITL " + titl)
+  lapp("CELL 0.7 " + dot6gdot_list(xray_structure.unit_cell().parameters()))
+  s = StringIO()
+  LATT_SYMM(s, xray_structure.space_group(), decimal=True)
+  lapp(s.getvalue()[:-1])
+  sfac_indices = sfac_unit(lapp, xray_structure)
+  if (fvars is None):
+    lapp("FVAR 1.0")
+  else:
+    for fv in fvars:
+      lapp("FVAR %.6f" % fv)
+  lapp("L.S. %s" % l_s_parameters)
+  atoms(lapp, sfac_indices, xray_structure, encoded_sites)
+  HKLF(lapp, f_obs, skip_zeros=True)
+  lapp("END")
+  print("\n".join(lines), file=open("tmp.ins", "w"))
+
+def run_shelx76(titl, xray_structure, f_obs):
+  write_shelx76_ls(f_obs, xray_structure, titl)
+  shelx_out = easy_run.fully_buffered(command="shelx76 < tmp.ins") \
+    .raise_if_errors() \
+    .stdout_lines
+  reflections_key = "REFLEXIONS READ, OF WHICH"
+  residuals_key = "RESIDUALS BEFORE CYCLE   1 FOR"
+  r = None
+  lines = iter(shelx_out)
+  for line in lines:
+    if (line.find(reflections_key) >= 0):
+      flds = line.split()
+      assert len(flds) == 7
+      assert flds[6] == "REJECTED"
+      assert flds[5] == "0"
+    elif (line.find(residuals_key) >= 0):
+      assert len(lines.next().strip()) == 0
+      flds = lines.next().split()
+      assert len(flds) == 12
+      r = float(flds[2])
+  if (r is None):
+    raise RuntimeError("Not found in shelx76 output: %s" % residuals_key)
+  assert is_below_limit(value=r, limit=0.005)
+
+def exercise(space_group_info, d_min=1.):
+  xray_structure = random_structure.xray_structure(
+    space_group_info,
+    elements=("N", "C", "C", "O"),
+    random_u_iso=True)
+  xray_structure.scattering_type_registry(table="it1992")
+  f_obs = xray_structure.structure_factors(
+    anomalous_flag=False,
+    d_min=d_min,
+    algorithm="direct",
+    cos_sin_table=False).f_calc().amplitudes()
+  titl = str(space_group_info)
+  run_shelx76(titl, xray_structure, f_obs)
+
+def run_call_back(flags, space_group_info):
+  sg = space_group_info.group()
+  if (sg.is_centric() and not sg.is_origin_centric()):
+    print("Skipping space group: centre of inversion is not at origin.")
+    return
+  exercise(space_group_info)
+
+def run(args):
+  if (libtbx.path.full_command_path(command="shelx76") is None):
+    print("shelx76 not available.")
+    return
+  debug_utils.parse_options_loop_space_groups(args, run_call_back)
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/space_group_option_parser.py
+from __future__ import absolute_import, division, print_function
+import os, sys
+import libtbx.option_parser
+from cctbx.development import debug_utils
+from cctbx import sgtbx
+
+class space_group_processed_options(libtbx.option_parser.processed_options):
+
+  def loop_over_space_groups(self, f, **kwds):
+    kwds.update(self.options.__dict__)
+    for sgi in self.space_group_info_list:
+      f(space_group_info=sgi, **kwds)
+
+
+class space_group_option_parser(libtbx.option_parser.option_parser):
+
+  space_group_sets = ['all', 'chiral', 'all_settings', 'unusual_settings']
+  processed_options_type = space_group_processed_options
+
+  def __init__(self, cmd=None, usage_insertion='', description_extension=''):
+    if cmd is None:
+      frame = sys._getframe(1)
+      cmd = frame.f_code.co_filename
+      root, ext = os.path.splitext(os.path.basename(cmd))
+      cmd = root
+    libtbx.option_parser.option_parser.__init__(self,
+      usage="\n\t%s %s --space_group_set=SET"
+            "\n\t%s %s SPACE_GROUP_SYMBOL"
+            "\n\t%s %s" % ((cmd, usage_insertion, )*3),
+      description="The 3rd form selects a predefined set of representative "
+                  "spacegroups (c.f. module cctbx.development.debug_utils)"
+                  + description_extension
+    )
+    self.option('-v', '--verbose', type="int", default=0)
+    self.option('--space_group_set',
+                metavar=' ' + ' | '.join(self.space_group_sets))
+    self.option('-s', '--n_scatterers', default=None)
+    self.option(None, '--general_positions_only',
+                action="store_true", default=False)
+
+  def process(self, args):
+    adjusted_args = []
+    for arg in args:
+      if (arg == "--Verbose"): arg = "--verbose=1"
+      adjusted_args.append(arg)
+    command_line = libtbx.option_parser.option_parser.process(
+      self, adjusted_args)
+    opts = command_line.options
+    if opts.n_scatterers is not None:
+      opts.n_scatterers = [ int(x) for x in opts.n_scatterers.split(',') ]
+    sg_set_flags = [ opts.space_group_set == x
+                     for x in self.space_group_sets ]
+    if sg_set_flags.count(True) == 0 and command_line.args:
+      sg_symbols = command_line.args
+    else:
+      sg_symbols = debug_utils.get_test_space_group_symbols(*sg_set_flags)
+    command_line.space_group_info_list = [
+      sgtbx.space_group_info(symbol) for symbol in sg_symbols ]
+    del command_line.options.space_group_set
+    # convert to list since attributes are deleted in the loop
+    for attr in list(command_line.options.__dict__.keys()):
+      if getattr(command_line.options, attr) in ('', None):
+        delattr(command_line.options, attr)
+    command_line.args = ()
+    return command_line
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/structure_factor_utils.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+import scitbx.math
+from libtbx.complex_math import abs_arg
+from libtbx import adopt_init_args
+import math
+
+def check_regression(x, y, label, min_correlation=0, verbose=0):
+  xy_regr = flex.linear_regression(x, y)
+  xy_corr = flex.linear_correlation(x, y)
+  assert xy_regr.is_well_defined()
+  if (0 or verbose):
+    print(label, "correlation: %.4f slope: %.3f" % (
+      xy_corr.coefficient(), xy_regr.slope()))
+  assert min_correlation == 0 or xy_corr.coefficient() >= min_correlation
+
+class collector(object):
+
+  def __init__(self, label, min_corr_ampl=0, max_mean_w_phase_error=0,
+               verbose=0):
+    adopt_init_args(self, locals())
+    self.amp1 = flex.double()
+    self.amp2 = flex.double()
+    self.sum_amp1_minus_amp2_sq = 0
+    self.sum_amp1_sq = 0
+    self.sum_w_phase_error = 0
+    self.sum_w = 0
+
+  def add(self, h, f1, f2):
+    a1, p1 = abs_arg(f1, deg=True)
+    a2, p2 = abs_arg(f2, deg=True)
+    if (0 or self.verbose):
+      print(h)
+      print(" ", a1, p1)
+      print(" ", a2, p2)
+      print(" " * 20, "%.2f" % scitbx.math.phase_error(
+        phi1=p1, phi2=p2, deg=True))
+    self.amp1.append(a1)
+    self.amp2.append(a2)
+    self.sum_amp1_minus_amp2_sq += (a1 - a2)**2
+    self.sum_amp1_sq += a1**2
+    self.sum_w_phase_error += (a1 + a2) * scitbx.math.phase_error(
+      phi1=p1, phi2=p2, deg=True)
+    self.sum_w += (a1 + a2)
+
+  def report(self):
+    if (self.sum_amp1_sq):
+      r = self.sum_amp1_minus_amp2_sq / self.sum_amp1_sq
+      if (0 or self.verbose):
+        print(self.label, "R-factor: %.3f" % (r,))
+    if (self.sum_w):
+      self.mean_w_phase_error = self.sum_w_phase_error / self.sum_w
+    check_regression(
+      self.amp1, self.amp2, self.label + " ampl", self.min_corr_ampl,
+      self.verbose)
+    if (0 or self.verbose):
+      print(self.label + (" mean weighted phase error: %.2f" % (
+        self.mean_w_phase_error,)))
+    if (self.max_mean_w_phase_error):
+      assert self.mean_w_phase_error <= self.max_mean_w_phase_error
+
+def check_correlation(label, h1, match, f1, f2,
+                      min_corr_ampl=0,
+                      max_mean_w_phase_error=0,
+                      verbose=0):
+  coll = collector(
+    label, min_corr_ampl, max_mean_w_phase_error, verbose)
+  if (match == 0):
+    assert f1.size() == f2.size()
+    for i,f1_i in enumerate(f1):
+      coll.add(h1[i], f1_i, f2[i])
+  else:
+    for i,j in match.pairs():
+      coll.add(h1[i], f1[i], f2[j])
+  coll.report()
+
+def check_phase_restrictions(miller_array, epsilon=1.e-10, verbose=0):
+  space_group = miller_array.space_group()
+  phases = flex.arg(miller_array.data())
+  for i,h in enumerate(miller_array.indices()):
+    f = miller_array.data()[i]
+    if (verbose):
+      print(h, f, abs(f), phases[i]*180/math.pi)
+    if (abs(f.real) > epsilon and abs(f.imag) > epsilon):
+      assert space_group.is_valid_phase(h, phases[i])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/tst_cns_epsilon.py
+from __future__ import absolute_import, division, print_function
+from cctbx import miller
+from cctbx import crystal
+from cctbx.development import make_cns_input
+from iotbx.cns import reflection_reader
+from libtbx import easy_run
+import sys, os
+
+def verify(crystal_symmetry, anomalous_flag, reflection_file):
+  assert reflection_file.anomalous == anomalous_flag
+  cns_m = reflection_file.reciprocal_space_objects["CNS_M"]
+  cns_e = reflection_file.reciprocal_space_objects["CNS_E"]
+  cns_c = reflection_file.reciprocal_space_objects["CNS_C"]
+  cns_a = reflection_file.reciprocal_space_objects["CNS_A"]
+  cns_p = reflection_file.reciprocal_space_objects["CNS_P"]
+  for cns_x in (cns_e, cns_c, cns_a, cns_p):
+    assert cns_x.indices.id() == cns_m.indices.id()
+  space_group = crystal_symmetry.space_group()
+  for i,h in enumerate(cns_m.indices):
+    m_i = cns_m.data[i]
+    e_i = cns_e.data[i]
+    c_i = cns_c.data[i]
+    a_i = cns_a.data[i]
+    p_i = cns_p.data[i]
+
+    if (p_i < 0 and p_i != -1.): p_i += 180.
+
+    assert (c_i == 0) == (a_i != 0)
+    assert (c_i == 0 and p_i == -1.) or (c_i != 0 and p_i != -1.), \
+           'c_i = %d, p_i = %g' % (c_i, p_i)
+
+    m = space_group.multiplicity(h, anomalous_flag)
+    e = space_group.epsilon(h)
+    c = space_group.is_centric(h)
+    p = space_group.phase_restriction(h).ht_angle(True)
+
+    if (c or anomalous_flag):
+      assert e == space_group.order_p() // m
+    else:
+      assert e == (2 * space_group.order_p()) // m
+
+    try:
+      assert m_i == m, 'multiplicity mismatch'
+      assert e_i == e, 'epsilon mismatch'
+      assert c_i == c, 'centric mismatch'
+      assert p_i == p, 'restricted phase mismatch'
+    except AssertionError as exc:
+      print(crystal_symmetry.space_group_info())
+      print('index=', h)
+      print('m:', m_i, m)
+      print('e:', e_i, e)
+      print('c:', c_i, c)
+      print('p:', p_i, p)
+      raise AssertionError(exc)
+
+    assert (not space_group.is_sys_absent(h))
+    assert (e == space_group.order_p() // space_group.multiplicity(h, True))
+    eq = miller.sym_equiv_indices(space_group, h)
+    assert (eq.multiplicity(anomalous_flag) == m)
+    assert (eq.epsilon() == e)
+    assert (eq.is_centric() == c)
+    assert (eq.phase_restriction().ht_angle(True) == p)
+
+def write_cns_input(crystal_symmetry, anomalous_flag, d_min):
+  cns_input = make_cns_input.xray_unit_cell(crystal_symmetry.unit_cell())
+  cns_input += make_cns_input.xray_symmetry(crystal_symmetry.space_group())
+  cns_input += make_cns_input.xray_anomalous(anomalous_flag)
+  cns_input += make_cns_input.xray_generate(10000, d_min)
+  l = cns_input.append
+  l("xray")
+  l("  declare name=cns_m domain=reciprocal type=integer end")
+  l("  declare name=cns_e domain=reciprocal type=integer end")
+  l("  declare name=cns_c domain=reciprocal type=integer end")
+  l("  declare name=cns_a domain=reciprocal type=integer end")
+  l("  declare name=cns_p domain=reciprocal type=real    end")
+  l("  do (cns_m = mult) (all)")
+  l("  do (cns_e = epsilon) (all)")
+  l("  do (cns_c = 0) (all)")
+  l("  do (cns_c = 1) (centric)")
+  l("  do (cns_a = 0) (all)")
+  l("  do (cns_a = 1) (acentric)")
+  l("  do (cns_p = -1) (all)")
+  l("  do (cns_p = centric_phase) (centric)")
+  l("  write reflections output=\"tmp_cns_input.hkl\" end")
+  l("end")
+  l("stop")
+  f = open("tmp_cns_input.cns", "w")
+  for l in cns_input:
+    print(l, file=f)
+  f.close()
+
+def exercise(space_group_info, anomalous_flag=False, d_min=2., verbose=0):
+  crystal_symmetry = crystal.symmetry(
+    space_group_info.any_compatible_unit_cell(1000),
+    space_group_info=space_group_info)
+  write_cns_input(crystal_symmetry, anomalous_flag, d_min)
+  try: os.unlink("tmp_cns_input.hkl")
+  except KeyboardInterrupt: raise
+  except Exception: pass
+  easy_run.fully_buffered(
+    command="cns < tmp_cns_input.cns > tmp_cns_input.out") \
+      .raise_if_errors_or_output()
+  f = open("tmp_cns_input.hkl", "r")
+  reflection_file = reflection_reader.cns_reflection_file(f)
+  f.close()
+  if (0 or verbose):
+    print(reflection_file.show_summary())
+  verify(crystal_symmetry, anomalous_flag, reflection_file)
+
+def run_call_back(flags, space_group_info):
+  for anomalous_flag in (False, True):
+    exercise(space_group_info, anomalous_flag, verbose=flags.Verbose)
+
+if (__name__ == "__main__"):
+  make_cns_input.tst_run_requiring_cns(
+    args=sys.argv[1:], call_back=run_call_back)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/development/tst_cns_hl.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from cctbx import miller
+from cctbx.development import make_cns_input
+from cctbx.development import random_structure
+from cctbx.regression.tst_miller import generate_random_hl
+from iotbx.cns import reflection_reader
+from libtbx.complex_math import abs_arg
+from libtbx.test_utils import approx_equal
+from libtbx import easy_run
+import sys, os
+from six.moves import zip
+
+def verify(sg_fcalc, sg_hl, sg_cns, p1_cns):
+  sg_phase_integrals = miller.array(
+    miller_set=miller.set(
+      crystal_symmetry=sg_fcalc,
+      indices=sg_cns.miller_indices,
+      anomalous_flag=sg_fcalc.anomalous_flag()),
+    data=sg_cns.hl).phase_integrals()
+  for h, cns_pi, miller_pi in zip(sg_cns.miller_indices,
+                                  sg_cns.pi.data,
+                                  sg_phase_integrals.data()):
+    if (abs(cns_pi - miller_pi) > 1.e-2):
+      print("Error:", h, cns_pi, miller_pi)
+      if (0): return
+      raise AssertionError
+  #
+  p1_phase_integrals = miller.array(
+    miller_set=miller.set(
+      crystal_symmetry=sg_fcalc.cell_equivalent_p1(),
+      indices=p1_cns.miller_indices,
+      anomalous_flag=sg_fcalc.anomalous_flag()),
+    data=p1_cns.hl).phase_integrals()
+  for h, cns_pi, miller_pi in zip(p1_cns.miller_indices,
+                                  p1_cns.pi.data,
+                                  p1_phase_integrals.data()):
+    if (abs(cns_pi - miller_pi) > 1.e-2):
+      print("Error:", h, cns_pi, miller_pi)
+      if (0): return
+      raise AssertionError
+  #
+  space_group = sg_fcalc.space_group()
+  asu = sg_fcalc.space_group_info().reciprocal_space_asu()
+  lookup_dict = miller.make_lookup_dict(sg_fcalc.indices())
+  for p1_i, h in enumerate(p1_cns.miller_indices):
+    h_asu = miller.asym_index(space_group, asu, h)
+    h_eq = h_asu.one_column(sg_fcalc.anomalous_flag())
+    fcalc_asu = h_eq.complex_eq(p1_cns.fcalc.data[p1_i])
+    hl_asu = h_eq.hendrickson_lattman_eq(p1_cns.hl[p1_i])
+    sg_i = lookup_dict[h_eq.h()]
+    assert abs(sg_fcalc.data()[sg_i] - fcalc_asu) < 1.e-2
+    if (not approx_equal(sg_hl[sg_i], hl_asu, eps=1.e-2)):
+      print("Error:", sg_fcalc.space_group_info())
+      print(sg_fcalc.indices()[sg_i])
+      print("i:", sg_hl[sg_i])
+      print("o:", hl_asu)
+      if (0): return
+      raise AssertionError
+
+def write_cns_input(fcalc_array, hl, test_merge=False):
+  assert fcalc_array.data().size() == hl.size()
+  cns_input = make_cns_input.xray_unit_cell(fcalc_array.unit_cell())
+  cns_input += make_cns_input.xray_symmetry(fcalc_array.space_group())
+  cns_input += make_cns_input.xray_anomalous(fcalc_array.anomalous_flag())
+  l = cns_input.append
+  l("xray")
+  l("  declare name=fcalc domain=reciprocal type=complex end")
+  l("  declare name=pa domain=reciprocal type=real end")
+  l("  declare name=pb domain=reciprocal type=real end")
+  l("  declare name=pc domain=reciprocal type=real end")
+  l("  declare name=pd domain=reciprocal type=real end")
+  l("  group type hl")
+  l("    object pa")
+  l("    object pb")
+  l("    object pc")
+  l("    object pd")
+  l("  end")
+  l("  reflection")
+  for i,h in enumerate(fcalc_array.indices()):
+    l(  ("    index %d %d %d" % h)
+      + (" fcalc=%.6g %.6g\n" % abs_arg(fcalc_array.data()[i], deg=True))
+      + ("    pa=%.6g pb=%.6g pc=%.6g pd=%.6g" % hl[i]))
+  l("  end")
+  if (not test_merge):
+    l("  declare name=pi domain=reciprocal type=complex end")
+    l("  do (pi=get_fom[phistep=5,CEN360=false](pa,pb,pc,pd)) (all)")
+    l("  write reflections output=\"tmp_sg.hkl\" end")
+    l("  expand")
+    l("  do (pi=get_fom[phistep=5,CEN360=false](pa,pb,pc,pd)) (all)")
+    l("  write reflections output=\"tmp_p1.hkl\" end")
+  else:
+    l("  anomalous=false")
+    l("  write reflections output=\"tmp_merged.hkl\" end")
+  l("end")
+  l("stop")
+  f = open("tmp.cns", "w")
+  for l in cns_input:
+    print(l, file=f)
+  f.close()
+
+class read_reflection_arrays(object):
+
+  def __init__(self, file_name, anomalous_flag, verbose):
+    reflection_file = reflection_reader.cns_reflection_file(open(file_name))
+    if (0 or verbose):
+      print(reflection_file.show_summary())
+    assert reflection_file.anomalous == anomalous_flag
+    names, self.miller_indices, self.hl = reflection_file.join_hl_group()
+    self.fcalc = reflection_file.reciprocal_space_objects["FCALC"]
+    self.pi = reflection_file.reciprocal_space_objects["PI"]
+    assert not miller.match_indices(
+      self.miller_indices, self.fcalc.indices).have_singles()
+    assert not miller.match_indices(
+      self.miller_indices, self.pi.indices).have_singles()
+
+def exercise(space_group_info, anomalous_flag=False, d_min=2., verbose=0):
+  sg_fcalc = random_structure.xray_structure(
+    space_group_info,
+    elements=("N", "C", "C", "O"),
+    random_f_double_prime=anomalous_flag,
+    random_u_iso=True,
+    random_occupancy=True
+    ).structure_factors(
+      anomalous_flag=anomalous_flag, d_min=d_min, algorithm="direct").f_calc()
+  sg_hl = generate_random_hl(sg_fcalc)
+  write_cns_input(sg_fcalc, sg_hl.data())
+  try: os.unlink("tmp_sg.hkl")
+  except OSError: pass
+  try: os.unlink("tmp_p1.hkl")
+  except OSError: pass
+  easy_run.fully_buffered(command="cns < tmp.cns > tmp.out") \
+    .raise_if_errors_or_output()
+  sg_cns = read_reflection_arrays("tmp_sg.hkl", anomalous_flag, verbose)
+  p1_cns = read_reflection_arrays("tmp_p1.hkl", anomalous_flag, verbose)
+  verify(sg_fcalc, sg_hl.data(), sg_cns, p1_cns)
+  if (anomalous_flag):
+    hl_merged = sg_hl.average_bijvoet_mates()
+    fc_merged = sg_fcalc.average_bijvoet_mates()
+    write_cns_input(sg_fcalc, sg_hl.data(), test_merge=True)
+    try: os.unlink("tmp_merged.hkl")
+    except OSError: pass
+    easy_run.fully_buffered(command="cns < tmp.cns > tmp.out") \
+      .raise_if_errors_or_output()
+    reflection_file = reflection_reader.cns_reflection_file(
+      open("tmp_merged.hkl"))
+    if (not sg_fcalc.space_group().is_centric()):
+      fc_merged_cns = reflection_file.reciprocal_space_objects["FCALC"]
+      fc_merged_cns = fc_merged.customized_copy(
+        indices=fc_merged_cns.indices,
+        data=fc_merged_cns.data).map_to_asu().common_set(fc_merged)
+      assert fc_merged_cns.indices().all_eq(fc_merged.indices())
+      fc_merged_a = fc_merged.select_acentric()
+      fc_merged_cns_a = fc_merged_cns.select_acentric()
+      for part in [flex.real, flex.imag]:
+        cc = flex.linear_correlation(
+          part(fc_merged_a.data()),
+          part(fc_merged_cns_a.data())).coefficient()
+        if (cc < 1-1.e-6):
+          print("FAILURE acentrics", sg_fcalc.space_group_info())
+          if (0): return
+          raise AssertionError
+    names, miller_indices, hl = reflection_file.join_hl_group()
+    assert names == ["PA", "PB", "PC", "PD"]
+    hl_merged_cns = hl_merged.customized_copy(indices=miller_indices, data=hl)\
+      .map_to_asu().common_set(hl_merged)
+    assert hl_merged_cns.indices().all_eq(hl_merged.indices())
+    for h,a,b in zip(hl_merged.indices(),
+                     hl_merged.data(),
+                     hl_merged_cns.data()):
+      if (not approx_equal(a, b, eps=5.e-3)):
+        print(h)
+        print("cctbx:", a)
+        print("  cns:", b)
+        if (0): return
+        raise AssertionError
+
+def run_call_back(flags, space_group_info):
+  for anomalous_flag in (False, True):
+    exercise(space_group_info, anomalous_flag, verbose=flags.Verbose)
+
+if (__name__ == "__main__"):
+  make_cns_input.tst_run_requiring_cns(
+    args=sys.argv[1:], call_back=run_call_back)
+
+
+ *******************************************************************************

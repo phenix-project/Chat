@@ -1,0 +1,1844 @@
+
+
+ *******************************************************************************
+iotbx/examples/__init__.py
+"""Examples for use of iotbx tools
+"""
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/direct_methods_light.py
+"""Example of how to use direct methods"""
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from six.moves import zip
+import sys
+
+#
+# Required input files:
+#   http://journals.iucr.org/c/issues/2001/05/00/vj1132/vj1132Isup2.hkl
+#   http://journals.iucr.org/c/issues/2001/05/00/vj1132/vj1132sup1.cif
+#
+# Command to run this example:
+#   iotbx.python direct_methods_light.py vj1132Isup2.hkl vj1132sup1.cif
+#
+
+def run(args):
+  reflection_file_name = args[0]
+  import iotbx.cif
+  miller_arrays = iotbx.cif.reader(
+    file_path=reflection_file_name).as_miller_arrays()
+  for miller_array in miller_arrays:
+    s = str(miller_array.info())
+    if '_meas' in s:
+      if miller_array.is_xray_intensity_array():
+        break
+      elif miller_array.is_xray_amplitude_array():
+        break
+  if not ('_meas' in str(miller_array.info())
+          and (miller_array.is_xray_amplitude_array()
+               or miller_array.is_xray_intensity_array())):
+    print("Sorry: CIF does not contain an appropriate miller array")
+    return
+  miller_array.show_comprehensive_summary()
+  print()
+
+  if (miller_array.is_xray_intensity_array()):
+    print("Converting intensities to amplitudes.")
+    miller_array = miller_array.as_amplitude_array()
+    print()
+
+  miller_array.setup_binner(auto_binning=True)
+  miller_array.binner().show_summary()
+  print()
+
+  all_e_values = miller_array.quasi_normalize_structure_factors().sort(
+    by_value="data")
+  large_e_values = all_e_values.select(all_e_values.data() > 1.2)
+  print("number of large_e_values:", large_e_values.size())
+  print()
+
+  from cctbx import dmtbx
+  triplets = dmtbx.triplet_generator(large_e_values)
+  from cctbx.array_family import flex
+  print("triplets per reflection: min,max,mean: %d, %d, %.2f" % (
+    flex.min(triplets.n_relations()),
+    flex.max(triplets.n_relations()),
+    flex.mean(triplets.n_relations().as_double())))
+  print("total number of triplets:", flex.sum(triplets.n_relations()))
+  print()
+
+  input_phases = large_e_values \
+    .random_phases_compatible_with_phase_restrictions()
+  tangent_formula_phases = input_phases.data()
+  for i in range(10):
+    tangent_formula_phases = triplets.apply_tangent_formula(
+      amplitudes=large_e_values.data(),
+      phases_rad=tangent_formula_phases,
+      selection_fixed=None,
+      use_fixed_only=False,
+      reuse_results=True)
+
+  e_map_coeff = large_e_values.phase_transfer(
+    phase_source=tangent_formula_phases)
+  from cctbx import maptbx
+  e_map = e_map_coeff.fft_map(
+    symmetry_flags=maptbx.use_space_group_symmetry)
+  e_map.apply_sigma_scaling()
+  e_map.statistics().show_summary(prefix="e_map ")
+  print()
+
+  peak_search = e_map.peak_search(parameters=maptbx.peak_search_parameters(
+    min_distance_sym_equiv=1.2))
+  peaks = peak_search.all(max_clusters=10)
+  print("e_map peak list")
+  print("       fractional coordinates       peak height")
+  for site,height in zip(peaks.sites(), peaks.heights()):
+    print("  (%9.6f, %9.6f, %9.6f)" % site, "%10.3f" % height)
+  print()
+
+  if (len(args) > 1):
+    coordinate_file_name = args[1]
+    from cctbx import xray
+    # xray_structure = xray.structure.from_cif(file_path=coordinate_file_name,
+        # data_block_name="I")
+    xray_structure = iotbx.cif.reader(
+      file_path=coordinate_file_name).build_crystal_structures(
+        data_block_name="I")
+    xray_structure.show_summary().show_scatterers()
+    print()
+
+    f_calc = abs(miller_array.structure_factors_from_scatterers(
+      xray_structure=xray_structure,
+      algorithm="direct").f_calc())
+    correlation = flex.linear_correlation(f_calc.data(), miller_array.data())
+    assert correlation.is_well_defined()
+    print("correlation of f_obs and f_calc: %.4f" % correlation.coefficient())
+    print()
+
+    reference_model = xray_structure.as_emma_model()
+    assert reference_model.unit_cell().is_similar_to(e_map.unit_cell())
+    assert reference_model.space_group() == e_map.space_group()
+    from cctbx import euclidean_model_matching as emma
+    peak_model = emma.model(special_position_settings=reference_model)
+    for i,site in enumerate(peaks.sites()):
+      peak_model.add_position(emma.position(label="peak%02d" % i, site=site))
+    matches = emma.model_matches(
+      model1=reference_model,
+      model2=peak_model,
+      tolerance=1.,
+      models_are_diffraction_index_equivalent=True)
+    for match in matches.refined_matches:
+      match.show()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/libtbx_phil_examples.py
+"""Examples of use of the PHIL command syntax"""
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+if (__name__ == "__main__"):
+
+  # ---- line 197 -------------------------------------------------------------
+
+  from libtbx.phil import parse
+
+  master_phil = parse("""
+    minimization.input {
+      file_name = None
+        .type = path
+      label = None
+        .type = str
+    }
+    """)
+
+  user_phil = parse("""
+    minimization.input {
+      file_name = experiment.dat
+    }
+    """)
+
+  command_line_phil = parse(
+    "minimization.input.label=set2")
+
+  working_phil = master_phil.fetch(
+    sources=[user_phil, command_line_phil])
+  working_phil.show()
+
+  # ---- line 241 -------------------------------------------------------------
+
+  argument_interpreter = master_phil.command_line_argument_interpreter(
+    home_scope="minimization")
+
+  command_line_phil = argument_interpreter.process(
+    arg="minimization.input.label=set2")
+
+  # ---- line 281 -------------------------------------------------------------
+
+  working_params = working_phil.extract()
+
+  # ---- line 289 -------------------------------------------------------------
+
+  print(working_params.minimization.input.file_name)
+  print(working_params.minimization.input.label)
+
+  # ---- line 311 -------------------------------------------------------------
+
+  working_params.minimization.input.label = "set3"
+  modified_phil = master_phil.format(python_object=working_params)
+  modified_phil.show()
+
+  # ---- line 343 -------------------------------------------------------------
+
+  master_phil = parse("""
+    minimization.input {
+      file_name = None
+        .type = path
+        .multiple = True
+    }
+    """)
+
+  # ---- line 357 -------------------------------------------------------------
+
+  user_phil = parse("""
+    minimization.input {
+      file_name = experiment1.dat
+      file_name = experiment2.dat
+      file_name = experiment3.dat
+    }
+    """)
+
+  # ---- line 377 -------------------------------------------------------------
+
+  working_params = master_phil.fetch(source=user_phil).extract()
+  print(working_params.minimization.input.file_name)
+
+  # ---- line 390 -------------------------------------------------------------
+
+  master_phil = parse("""
+    minimization {
+      input
+        .multiple = True
+      {
+        file_name = None
+          .type = path
+        label = None
+          .type = str
+      }
+    }
+    """)
+
+  # ---- line 409 -------------------------------------------------------------
+
+  user_phil = parse("""
+    minimization {
+      input {
+        file_name = experiment1.dat
+        label = set2
+      }
+      input {
+        file_name = experiment2.dat
+        label = set1
+      }
+    }
+    """)
+
+  # ---- line 428 -------------------------------------------------------------
+
+  working_params = master_phil.fetch(source=user_phil).extract()
+  for input in working_params.minimization.input:
+    print(input.file_name)
+    print(input.label)
+
+  # ---- line 448 -------------------------------------------------------------
+
+  master_phil = parse("""
+    minimization {
+      input
+        .multiple = True
+      {
+        file_name = None
+          .type = path
+        label = None
+          .type = str
+          .multiple = True
+      }
+    }
+    """)
+
+  # ---- line 468 -------------------------------------------------------------
+
+  user_phil = parse("""
+    minimization {
+      input {
+        file_name = experiment1.dat
+        label = set1
+        label = set2
+        label = set3
+      }
+      input {
+        file_name = experiment2.dat
+        label = set2
+        label = set3
+      }
+    }
+    """)
+
+  # ---- line 490 -------------------------------------------------------------
+
+  working_params = master_phil.fetch(source=user_phil).extract()
+  for input in working_params.minimization.input:
+    print(input.file_name)
+    print(input.label)
+
+  # ---- line 519 -------------------------------------------------------------
+
+  master_phil = parse("""
+    minimization.parameters {
+      method = *bfgs conjugate_gradient
+        .type = choice
+      max_iterations = 10
+        .type = int
+    }
+    """)
+
+  user_phil = parse("""
+    minimization.parameters {
+      method = bfgs *conjugate_gradient
+    }
+    """)
+
+  working_phil = master_phil.fetch(source=user_phil)
+  diff_phil = master_phil.fetch_diff(source=working_phil)
+  diff_phil.show()
+
+  # ---- line 599 -------------------------------------------------------------
+
+  var_phil = parse("""
+    root_name = peak
+    file_name = $root_name.mtz
+    full_path = $HOME/$file_name
+    related_file_name = $(root_name)_data.mtz
+    message = "Reading $file_name"
+    as_is = ' $file_name '
+    """)
+  var_phil.fetch(source=var_phil).show()
+
+  # ---- line 649 -------------------------------------------------------------
+
+  import libtbx.phil
+  from libtbx.phil import tokenizer
+
+  class upper_converters:
+
+    phil_type = "upper"
+
+    def __str__(self): return self.phil_type
+
+    def from_words(self, words, master):
+      s = libtbx.phil.str_from_words(words=words)
+      if (s is None): return None
+      return s.upper()
+
+    def as_words(self, python_object, master):
+      if (python_object is None):
+        return [tokenizer.word(value="None")]
+      return [tokenizer.word(value=python_object.upper())]
+
+  converter_registry = libtbx.phil.extended_converter_registry(
+    additional_converters=[upper_converters])
+
+  # ---- line 678 -------------------------------------------------------------
+
+  master_phil = parse("""
+    value = None
+      .type = upper
+    """,
+      converter_registry=converter_registry)
+  user_phil = parse("value = extracted")
+  working_params = master_phil.fetch(source=user_phil).extract()
+  print(working_params.value)
+
+  # ---- line 694 -------------------------------------------------------------
+
+  working_params.value = "formatted"
+  working_phil = master_phil.format(python_object=working_params)
+  working_phil.show()
+
+  # ---- line 727 -------------------------------------------------------------
+
+  master_phil = parse("""
+    random_integers = None
+      .type = ints
+    euler_angles = None
+      .type = floats(size=3)
+    unit_cell_parameters = None
+      .type = floats(size_min=1, size_max=6)
+    rotation_part = None
+      .type = ints(size=9, value_min=-1, value_max=1)
+    """)
+
+  user_phil = parse("""
+    random_integers = 3 18 5
+    euler_angles = 10 -20 30
+    unit_cell_parameters = 10,20,30
+    rotation_part = "1,0,0;0,-1,0;0,0,-1"
+    """)
+
+  working_phil = master_phil.fetch(source=user_phil)
+  working_phil.show()
+  print()
+  working_params = working_phil.extract()
+  print(working_params.random_integers)
+  print(working_params.euler_angles)
+  print(working_params.unit_cell_parameters)
+  print(working_params.rotation_part)
+  print()
+  working_phil = master_phil.format(python_object=working_params)
+  working_phil.show()
+
+  # ---- line 805 -------------------------------------------------------------
+
+  master_phil = parse("""
+    gender = male female
+      .type = choice
+    favorite_sweets = ice_cream chocolate candy_cane cookies
+      .type = choice(multi=True)
+    """)
+
+  jims_choices = parse("""
+    gender = *male female
+    favorite_sweets = *ice_cream chocolate candy_cane *cookies
+    """)
+
+  jims_phil = master_phil.fetch(source=jims_choices)
+  jims_phil.show()
+  jims_params = jims_phil.extract()
+  print(jims_params.gender, jims_params.favorite_sweets)
+
+  # ---- line 845 -------------------------------------------------------------
+
+  ignorant_choices = parse("""
+    gender = male female
+    favorite_sweets = ice_cream chocolate candy_cane cookies
+    """)
+
+  ignorant_params = master_phil.fetch(source=ignorant_choices).extract()
+  print(ignorant_params.gender, ignorant_params.favorite_sweets)
+
+  # ---- line 880 -------------------------------------------------------------
+
+  greedy_choices = parse("""
+    favorite_sweets=ice_cream+chocolate+cookies
+    """)
+
+  greedy_params = master_phil.fetch(source=greedy_choices).extract()
+  print(greedy_params.favorite_sweets)
+
+  # ---- line 898 -------------------------------------------------------------
+
+  no_thanks_choices = parse("""
+    favorite_sweets=None
+    """)
+
+  no_thanks_params = master_phil.fetch(source=no_thanks_choices).extract()
+  print(no_thanks_params.favorite_sweets)
+
+  # ---- line 920 -------------------------------------------------------------
+
+  master_phil = parse("""
+    minimization.input {
+      file_name = None
+        .type = path
+    }
+    minimization.parameters {
+      max_iterations = 10
+        .type = int
+    }
+    """)
+
+  user_phil = parse("""
+    minimization.input.file_name = experiment.dat
+    minimization.parameters.max_iterations = 5
+    """)
+
+  working_params = master_phil.fetch(source=user_phil).extract()
+  print(working_params)
+  print(working_params.minimization.input.file_name)
+  print(working_params.minimization.parameters.max_iterations)
+
+  # ---- line 956 -------------------------------------------------------------
+
+  print(working_params.minimization.input.__phil_path__())
+  print(working_params.minimization.parameters.__phil_path__())
+
+  # ---- line 1014 ------------------------------------------------------------
+
+  master_phil = parse("""
+    plot
+      .multiple = True
+    {
+      style = line bar pie_chart
+        .type=choice
+      title = None
+        .type = str
+    }
+    plot {
+      style = line
+      title = Line plot (default in master)
+    }
+    """)
+
+  user_phil = parse("""
+    plot {
+      style = bar
+      title = Bar plot (provided by user)
+    }
+    """)
+
+  working_phil = master_phil.fetch(source=user_phil)
+  working_phil.show()
+
+  # ---- line 1056 ------------------------------------------------------------
+
+  working_params = working_phil.extract()
+  print(working_params.plot)
+
+  # ---- line 1073 ------------------------------------------------------------
+
+  master_phil = parse("""
+    plot
+      .multiple = True
+      .optional = False
+    {
+      style = line bar pie_chart
+        .type=choice
+      title = None
+        .type = str
+    }
+    plot {
+      style = line
+      title = Line plot (default in master)
+    }
+    """)
+
+  # ---- line 1096 ------------------------------------------------------------
+
+  working_phil = master_phil.fetch(source=user_phil)
+  working_phil.show()
+  print(working_phil.extract().plot)
+
+  # ---- line 1144 ------------------------------------------------------------
+
+  master_phil = parse("""
+    input {
+      file_name = None
+        .type = path
+    }
+    """)
+
+  user_phil = parse("""
+    input {
+      file_name = experiment.dat
+      label = set1
+      lable = set2
+    }
+    """)
+
+  working_phil, unused = master_phil.fetch(
+    source=user_phil, track_unused_definitions=True)
+  working_phil.show()
+  for object_locator in unused:
+    print("unused:", object_locator)
+
+  # ---- line 1189 ------------------------------------------------------------
+
+  phil_scope = parse("""
+     quick .multiple=true;.optional=false{and=very;.type=str;dirty=use only on command-lines, please!;.type=str}
+     """)
+
+  phil_scope.show(attributes_level=2)
+
+  # ---- line 1232 ------------------------------------------------------------
+
+  master_phil = parse("""
+    !input {
+      file_name = None
+        .type = path
+        .multiple = True
+    }
+    """)
+  master_phil.show()
+
+  # ---- line 1254 ------------------------------------------------------------
+
+  user_phil = parse("""
+    input.file_name = experiment.dat
+    """)
+  print(len(master_phil.fetch(source=user_phil).as_str()))
+
+  # ---- line 1316 ------------------------------------------------------------
+
+  master_phil = parse("""
+    minimization {
+      input
+        .help = "File names and data labels."
+        .multiple = True
+      {
+        file_name = None
+          .type = path
+        label = None
+          .help = "A unique substring of the data label is sufficient."
+          .type = str
+      }
+    }
+    """)
+
+  for attributes_level in range(4):
+    master_phil.show(attributes_level=attributes_level)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/mtz_convert_free_to_work.py
+"""Conversion of reflections from free to work by changing R-free flags"""
+
+from __future__ import absolute_import, division, print_function
+import iotbx.mtz
+from cctbx.array_family import flex
+import sys, os
+
+def run(args, label="R-free-flags", convert_fraction=0.5, random_seed=0):
+  assert len(args) == 1
+  input_file_name = args[0]
+  output_file_name = "less_free_"+os.path.basename(input_file_name)
+  print("Reading file:", input_file_name)
+  mtz_obj = iotbx.mtz.object(file_name=input_file_name)
+  column = mtz_obj.get_column(label=label)
+  selection_valid = column.selection_valid()
+  flags = column.extract_values()
+  def get_and_report(what):
+    free_indices = ((flags != 0) & selection_valid).iselection()
+    work_indices = ((flags == 0) & selection_valid).iselection()
+    if (  free_indices.size()
+        + work_indices.size() != selection_valid.count(True)):
+      raise RuntimeError("""\
+Unexpected array of R-free flags:
+  Expected: 0 for work reflections, 1 for test reflections.""")
+    print(what, "number of free reflections:", free_indices.size())
+    print(what, "number of work reflections:", work_indices.size())
+    return free_indices
+  free_indices = get_and_report("Input")
+  mt = flex.mersenne_twister(seed=random_seed)
+  permuted_indices = free_indices.select(
+    mt.random_permutation(size=free_indices.size()))
+  n_convert = int(permuted_indices.size() * convert_fraction + 0.5)
+  print("Number of reflections converted from free to work:", n_convert)
+  flags.set_selected(permuted_indices[:n_convert], 0)
+  get_and_report("Output")
+  column.set_values(values=flags, selection_valid=selection_valid)
+  print("Writing file:", output_file_name)
+  mtz_obj.write(file_name=output_file_name)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/mtz_free_flipper.py
+"""Flip test set and working set"""
+from __future__ import absolute_import, division, print_function
+import iotbx.mtz
+import sys, os
+
+def run(args, label="R-free-flags"):
+  assert len(args) == 1
+  input_file_name = args[0]
+  output_file_name = "free_flipped_"+os.path.basename(input_file_name)
+  print("Reading file:", input_file_name)
+  mtz_obj = iotbx.mtz.object(file_name=input_file_name)
+  column = mtz_obj.get_column(label=label)
+  selection_valid = column.selection_valid()
+  flags = column.extract_values()
+  sel_0 = (flags == 0)
+  print("Number of 0:", ( sel_0 & selection_valid).count(True))
+  print("Number of 1:", (~sel_0 & selection_valid).count(True))
+  flags.set_selected( sel_0 & selection_valid, 1)
+  flags.set_selected(~sel_0 & selection_valid, 0)
+  column.set_values(values=flags, selection_valid=selection_valid)
+  print("Writing file:", output_file_name)
+  mtz_obj.write(file_name=output_file_name)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_hierarchy.py
+"""
+Examples of the structure and use of the PDB hierarchy object
+"""
+
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import random
+import sys
+
+def run(args):
+  """
+    Views of the hierarchy:
+
+      Primary:  model, chain, residue_group, atom_group, atom
+
+      Secondary (read-only): model, chain, residue_group, atom_group, atom
+
+      Special case: if there are no alt. conf. you can eliminate one
+      level of the hierarchy: model, chain, residue, atom
+
+      Third view: model, chain, residue_group, conformer, residue, atom
+
+    Adding and removing elements of the hierarchy
+
+    Printing the hierarchy
+
+  """
+  for file_name in args:
+    pdb_inp = iotbx.pdb.input(file_name=file_name)
+    #
+    hierarchy = pdb_inp.construct_hierarchy()
+    #
+    hierarchy.overall_counts().show()
+    #
+    print("""
+    # Primary "view" of hierarchy:
+    #   model, chain, residue_group, atom_group, atom""")
+    for model in hierarchy.models():
+      print('model: "%s"' % model.id)
+      for chain in model.chains():
+        print('chain: "%s"' % chain.id)
+        for residue_group in chain.residue_groups():
+          print('  residue_group: resseq="%s" icode="%s"' % (
+            residue_group.resseq, residue_group.icode))
+          for atom_group in residue_group.atom_groups():
+            print('    atom_group: altloc="%s" resname="%s"' % (
+              atom_group.altloc, atom_group.resname))
+            for atom in atom_group.atoms():
+              print('     ', atom.format_atom_record())
+              print("        atom.xyz:  ", atom.xyz)
+              print("        atom.occ:  ", atom.occ)
+              print("        atom.b:    ", atom.b)
+              print('        atom.segid: "%s"' % atom.segid)
+    #
+    print("""
+    # Secondary (read-only) "view" of the hierarchy:
+    #   model, chain, conformer, residue, atom""")
+    for model in hierarchy.models():
+      print('model: "%s"' % model.id)
+      for chain in model.chains():
+        print('chain: "%s"' % chain.id)
+        for conformer in chain.conformers():
+          print('  conformer: "%s"' % conformer.altloc)
+          for residue in conformer.residues():
+            print('    residue: resname="%s" resseq="%s" icode="%s"' % (
+              residue.resname, residue.resseq, residue.icode))
+            for atom in residue.atoms():
+              print('     ', atom.format_atom_record())
+    #
+    print("""
+    # Special case: if there are no alt. conf. you can eliminate one
+    # level of the hierarchy (which may be more intuitive at first).""")
+    for model in hierarchy.models():
+      print('model: "%s"' % model.id)
+      for chain in model.chains():
+        print('chain: "%s"' % chain.id)
+        # The next line will fail (AssertionError) if there are alt. conf.
+        for residue in chain.residues():
+          print('    residue: resname="%s" resseq="%s" icode="%s"' % (
+            residue.resname, residue.resseq, residue.icode))
+          for atom in residue.atoms():
+            print('     ', atom.format_atom_record())
+    #
+    print("""
+    # A third "view" of the hierarchy:
+    #   model, chain, residue_group, conformer, residue, atom
+    # This is useful for handling all conformers of a given residue_group
+    # together.
+    # All meaningful PDB files will only have one residue per conformer.""")
+    for model in hierarchy.models():
+      print('model: "%s"' % model.id)
+      for chain in model.chains():
+        print('chain: "%s"' % chain.id)
+        for residue_group in chain.residue_groups():
+          print('  residue_group: resseq="%s" icode="%s"' % (
+            residue_group.resseq, residue_group.icode))
+          for conformer in residue_group.conformers():
+            print('    conformer: altloc="%s"' % (
+              conformer.altloc))
+            residue = conformer.only_residue()
+            print('    residue: resname="%s"' % residue.resname)
+            for atom in residue.atoms():
+              print('     ', atom.format_atom_record())
+    #
+    # Pick a random atom and trace back to its parents.
+    # (each time you run the script the result is different!)
+    pdb_atoms = hierarchy.atoms()
+    atom = random.choice(pdb_atoms)
+    atom_group = atom.parent()
+    residue_group = atom_group.parent()
+    chain = residue_group.parent()
+    model = chain.parent()
+    root = model.parent()
+    #
+    # To expose a bit how it works internally:
+    #   - root is a reference to the original hierarchy:
+    assert root.is_similar_hierarchy(other=hierarchy)
+    #   - it actually is a reference pointing to the same piece of memory
+    assert root.memory_id() == hierarchy.memory_id()
+    #
+    # Modify arbitrarily.
+    atom.name = "XY"
+    atom_group.altloc = "Z"
+    atom_group.resname = "NOP"
+    residue_group.resseq = "9999"
+    residue_group.icode = "I"
+    chain.id = "Q"
+    model.id = "9"
+    #
+    # Add an atom to the atom_group
+    atom = iotbx.pdb.hierarchy.atom()
+    atom.name = "NEW"
+    atom_group.append_atom(atom=atom)
+    # need for more complicated functions such as selections
+    hierarchy.reset_atom_i_seqs()
+    #
+    print("""
+    # Format entire hierarchy as pdb string and pdb file.""")
+    print(hierarchy.as_pdb_or_mmcif_string(append_end=True))
+    fname = hierarchy.write_pdb_or_mmcif_file(target_filename="junk.pdb", append_end=True)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_shake.py
+"""Example of how to shake (randomize) a model"""
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+from cctbx.array_family import flex
+import mmtbx.model
+import sys
+
+def run(args):
+  assert len(args) == 1
+  # Read file into pdb_input class
+  inp = iotbx.pdb.input(file_name=args[0])
+
+  # create a model manager
+  model = mmtbx.model.manager(
+      model_input = inp)
+
+  # get number of atoms in the input model
+  n_atoms = model.get_number_of_atoms()
+
+  # extract atom coordinates
+  old_sites_cart = model.get_sites_cart()
+  # generate random additions
+  random_addition = flex.vec3_double(
+    flex.random_double(size=n_atoms*3)-0.5)
+  # actually add them to old coordinates
+  new_xyz = old_sites_cart + random_addition
+
+  # Update coordinates in model manager
+  model.set_sites_cart(sites_cart=new_xyz)
+
+  # get xray structure
+  xrs = model.get_xray_structure()
+
+  # reset B-factors (min=1, max=20)
+  # generate array of new B-factors
+  new_b = flex.random_double(size=n_atoms, factor=19) + 1
+  # set them in xray structure
+  xrs.set_b_iso(values=new_b)
+  # update model manager with this xray structure
+  model.set_xray_structure(xrs)
+  # output result in PDB format to the screen
+  print(model.as_pdb_or_mmcif_string())
+  print("END")
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_split_chains.py
+"""Example of how to split a model by chains into new models"""
+from __future__ import absolute_import, division, print_function
+
+import libtbx.phil
+from libtbx.utils import Sorry, Usage
+import iotbx.pdb
+from iotbx.pdb.hierarchy import new_hierarchy_from_chain
+
+import os
+import sys
+
+master_phil = libtbx.phil.parse("""
+split_chains
+{
+  pdb_file = None
+    .type = path
+    .short_caption = PDB file
+    .style = file_type:pdb input_file
+  output_dir = None
+    .type = path
+    .short_caption = Output directory
+    .style = directory
+  output_base = None
+    .type = str
+    .short_caption = Base file name
+  exclude_heteroatoms = True
+    .type = bool
+  preserve_symmetry = True
+    .type = bool
+}
+""")
+
+def run(args=(), params=None, out=None):
+  if (out is None) : out = sys.stdout
+  if (params is None):
+    if (len(args) == 0):
+      raise Usage("pdb_split_chains.py model.pdb")
+    import iotbx.phil
+    cmdline = iotbx.phil.process_command_line_with_files(
+      args=args,
+      master_phil=master_phil,
+      pdb_file_def="split_chains.pdb_file")
+    params = cmdline.work.extract()
+  validate_params(params)
+  params = params.split_chains
+  if (params.output_dir is None):
+    params.output_dir = os.getcwd()
+  if (params.output_base is None):
+    params.output_base = os.path.basename(os.path.splitext(params.pdb_file)[0])
+  # from iotbx import file_reader
+  pdb_in = iotbx.pdb.input(params.pdb_file)
+  cs = None
+  if params.preserve_symmetry:
+    cs = pdb_in.crystal_symmetry()
+  hierarchy = pdb_in.construct_hierarchy()
+  if (len(hierarchy.models()) > 1):
+    raise Sorry("Multi-model PDB files are not supported.  You can use "+
+      "iotbx.pdb.split_models to break the structure into individual model "+
+      "files.")
+  id_counts = {}
+  outputs = []
+  for chain in hierarchy.models()[0].chains():
+    if (params.exclude_heteroatoms):
+      if not chain.is_protein() and not chain.is_na():
+        continue
+      elif (len(chain.residue_groups()) == 1):
+        continue
+    id = chain.id
+    if (id == " "):
+      id = "_"
+    if (id_counts.get(id, 0) > 0):
+      suffix = "%s-%d" % (id, id_counts[id] + 1)
+    else :
+      suffix = id
+    if (not id in id_counts):
+      id_counts[id] = 0
+    id_counts[id] += 1
+    output_file = os.path.join(params.output_dir, "%s_%s.pdb" %
+      (params.output_base, suffix))
+    new_hierarchy = new_hierarchy_from_chain(chain)
+    ofname = new_hierarchy.write_pdb_or_mmcif_file(target_filename=output_file, crystal_symmetry=cs)
+    outputs.append(ofname)
+    print("Wrote chain '%s' to %s" % (chain.id, ofname), file=out)
+  return outputs
+
+def validate_params(params):
+  if (params.split_chains.pdb_file is None):
+    raise Sorry("PDB file not defined!")
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_symmetry_copies.py
+"""
+Symmetry copies of atoms in pdb input file.
+Uses two-character chain ids in output pdb file.
+Therefore it only works for space groups with less than
+ten symmetry operations.
+"""
+from __future__ import absolute_import, division, print_function
+
+def run(args):
+  assert len(args) == 1, "pdb_file_name"
+  import iotbx.pdb
+  pdb_inp = iotbx.pdb.input(file_name=args[0])
+  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  cs = pdb_inp.crystal_symmetry()
+  frac_mx = cs.unit_cell().fractionalization_matrix()
+  orth_mx = cs.unit_cell().orthogonalization_matrix()
+  sites_frac = frac_mx * pdb_inp.atoms().extract_xyz()
+  pdb_hierarchies = [pdb_hierarchy]
+  for i_sym_op,sym_op in enumerate(cs.space_group()):
+    if (sym_op.is_unit_mx()): continue
+    print(str(sym_op))
+    pdb_hierarchy_copy = pdb_hierarchy.deep_copy()
+    pdb_hierarchy_copy.atoms().set_xyz(
+      new_xyz=orth_mx * (sym_op.as_rational().as_float() * sites_frac))
+    pdb_hierarchies.append(pdb_hierarchy_copy)
+  combined_pdb_hierarchies = iotbx.pdb.hierarchy.join_roots(
+    roots=pdb_hierarchies)
+  output_file_name = "symmetry_copies.pdb"
+  print("Writing file:", output_file_name)
+  print("""\
+REMARK input file name: %s
+REMARK original space group: %s
+REMARK using two-character chain ids""" % (args[0], str(cs.space_group_info())), file=open(output_file_name, "w"))
+  from cctbx import sgtbx
+  combined_pdb_hierarchies.write_pdb_or_mmcif_file(
+    target_filename=output_file_name,
+    crystal_symmetry=cs.customized_copy(
+      space_group_info=sgtbx.space_group_info(symbol="P1")),
+    append_end=True)
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_tardy_conf_sampling_simple.py
+"""Analyze a tardy tree from a model"""
+from __future__ import absolute_import, division, print_function
+import math
+import time
+import os
+from six.moves import range
+op = os.path
+
+def build_clash_detector(n_sites, bond_list, threshold):
+  import scitbx.r3_utils
+  result = scitbx.r3_utils.clash_detector_simple(
+    n_sites=n_sites, threshold=threshold)
+  from scitbx.graph import utils
+  bond_sets = utils.construct_edge_sets(
+    n_vertices=n_sites, edge_list=bond_list)
+  def add_exclusions(edge_sets):
+    for i,edge_set in enumerate(edge_sets):
+      for j in edge_set:
+        if (i < j):
+          result.add_exclusion(i=i, j=j)
+  add_exclusions(edge_sets=bond_sets)
+  angle_sets = utils.bond_bending_edge_sets(edge_sets=bond_sets)
+  add_exclusions(edge_sets=angle_sets)
+  for i,j in utils.potential_implied_edge_list(
+               edge_sets=bond_sets, bond_bending_edge_sets=angle_sets):
+    result.add_exclusion(i=i, j=j)
+  return result
+
+def run(args):
+  time_start = time.time()
+  import iotbx.pdb
+  from cctbx.crystal.distance_based_connectivity import \
+    build_simple_two_way_bond_sets
+  import scitbx.rigid_body
+  import scitbx.graph.tardy_tree
+  from scitbx.graph.utils import extract_edge_list
+  from scitbx.array_family import flex
+  print("Time importing extensions: %.2f" % (time.time() - time_start))
+  #
+  def process(file_name, clash_threshold=2.0):
+    time_start = time.time()
+    pdb_inp = iotbx.pdb.input(file_name=file_name)
+    pdb_atoms = pdb_inp.atoms()
+    print("Time reading pdb file: %.2f" % (time.time() - time_start))
+    print("Number of atoms:", pdb_atoms.size())
+    pdb_atoms.set_chemical_element_simple_if_necessary()
+    sites_cart = pdb_atoms.extract_xyz()
+    #
+    time_start = time.time()
+    bond_list = extract_edge_list(edge_sets=build_simple_two_way_bond_sets(
+      sites_cart=sites_cart,
+      elements=pdb_atoms.extract_element()))
+    print("Time building bond list: %.2f" % (time.time() - time_start))
+    print("Number of bonds:", len(bond_list))
+    #
+    time_start = time.time()
+    tardy_tree = scitbx.graph.tardy_tree.construct(
+      sites=sites_cart,
+      edge_list=bond_list)
+    print("Time building tardy tree: %.2f" % (time.time() - time_start))
+    #
+    time_start = time.time()
+    tardy_model = scitbx.rigid_body.tardy_model(
+      labels=[atom.id_str() for atom in pdb_atoms],
+      sites=sites_cart,
+      masses=[1]*sites_cart.size(),
+      tardy_tree=tardy_tree,
+      potential_obj=None)
+    q_size_each_joint = tardy_model.q_size_each_joint()
+    q_fixed = tardy_model.pack_q()[:q_size_each_joint[0]]
+    assert q_size_each_joint[1:].all_eq(1) # must all be revolute joints
+    q_size_moving = q_size_each_joint.size() - 1
+    print("Time building tardy model: %.2f" % (time.time() - time_start))
+    print("Degrees of freedom:", q_size_moving)
+    #
+    mt = flex.mersenne_twister()
+    two_pi = 2 * math.pi
+    clash_detector = build_clash_detector(
+      n_sites=sites_cart.size(),
+      bond_list=bond_list,
+      threshold=clash_threshold)
+    time_start = time.time()
+    n_conf = 10000
+    n_clash_conf = 0
+    for i_conf in range(n_conf):
+      q = q_fixed.deep_copy()
+      q.extend(mt.random_double(size=q_size_moving)*two_pi)
+      tardy_model.unpack_q(q_packed=q)
+      conf_sites_cart = tardy_model.sites_moved()
+      if (clash_detector.has_clash(sites_cart=conf_sites_cart)):
+        n_clash_conf += 1
+    time_diff = time.time() - time_start
+    print("time / %d conf: %.2f seconds" % (n_conf, time_diff))
+    print("time / conf: %.3f milli seconds" % (time_diff / n_conf * 1000))
+    if (time_diff != 0):
+      print("conf / second: %.2f" % (n_conf / time_diff))
+    print("Fraction of conformations with clashes: %d / %d = %.2f %%" % (
+      n_clash_conf, n_conf, 100. * n_clash_conf / n_conf))
+  #
+  if (len(args) != 0):
+    for file_name in args:
+      process(file_name=file_name) # PDB OK
+  else:
+    import libtbx.load_env
+    if not libtbx.env.has_module("phenix_regression"):
+      print("skipping test: phenix_regression not available.")
+      return
+    file_name = libtbx.env.find_in_repositories(
+      relative_path="phenix_regression/pdb/atp.pdb",
+      test=op.isfile)
+    if (file_name is None):
+      from libtbx.utils import Sorry
+      raise Sorry("Missing command-line argument: pdb file name")
+    print("Using file:", file_name)
+    process(file_name=file_name)
+    print("OK")
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_to_map_simple.py
+"""input pdb -> structure factors -> x-plor map files"""
+from __future__ import absolute_import, division, print_function
+
+import iotbx.pdb
+import iotbx.xplor.map
+from libtbx.math_utils import ifloor, iceil
+import libtbx.option_parser
+import sys
+from six.moves import zip
+
+def run(args):
+  if (len(args) == 0): args = ["--help"]
+  command_line = (libtbx.option_parser.option_parser(
+    usage="iotbx.python pdb_to_map_simple.py [options] pdb_file...")
+    .option(None, "--d_min",
+      type="float",
+      default=3,
+      help="high-resolution limit for structure-factor calculation",
+      metavar="FLOAT")
+  ).process(args=args)
+  d_min = command_line.options.d_min
+  assert d_min > 0
+  for file_name in command_line.args:
+    pdb_inp = iotbx.pdb.input(file_name=file_name)
+    xray_structure = pdb_inp.xray_structure_simple()
+    xray_structure.show_summary()
+    print()
+    print("d_min:", d_min)
+    f_calc = xray_structure.structure_factors(d_min=d_min).f_calc()
+    f_calc.show_summary()
+    print()
+    fft_map = f_calc.fft_map()
+    n = fft_map.n_real()
+    print("unit cell gridding:", n)
+    fft_map.as_xplor_map(file_name="unit_cell.map")
+    print()
+    block_first = tuple([ifloor(i*0.2) for i in n])
+    block_last = tuple([max(f+10, iceil(i*0.7)) for f,i in zip(block_first, n)])
+    print("block first:", block_first)
+    print("block last: ", block_last)
+    fft_map.as_xplor_map(
+      file_name="block.map",
+      gridding_first=block_first,
+      gridding_last=block_last)
+    print()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_truncate_to_ala/__init__.py
+"""Examples of manipulation of models. Conversion to ALA"""
+from __future__ import absolute_import, division, print_function
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_truncate_to_ala/tst.py
+from __future__ import absolute_import, division, print_function
+import v0_getting_started
+import v1_loop_over_atoms
+import v2_simple
+import v3_better
+import v4_with_bells_and_whistles
+from libtbx.path import is_same_file
+import libtbx.load_env
+import sys, os
+
+def run(args):
+  assert len(args) == 0
+  tutorial_dir = libtbx.env.under_dist(
+    module_name="iotbx",
+    path="examples/pdb_truncate_to_ala",
+    test=os.path.isdir)
+  if ("set" not in libtbx.forward_compatibility.__builtins__):
+    libtbx.forward_compatibility.__builtins__["set"] = list
+  for file_name in ["crambin_pieces.pdb", "resname_mix.pdb"]: # PDB OK
+    file_path = os.path.join(tutorial_dir, file_name)
+    if (   not os.path.isfile(file_name)
+        or not is_same_file(file_names=[file_path, file_name])):
+      libtbx.utils.copy_file(source=file_path, target=file_name)
+    for vx in [v0_getting_started,
+               v1_loop_over_atoms,
+               v2_simple,
+               v3_better,
+               v4_with_bells_and_whistles]:
+      vx.run(args=[file_name])
+  print("OK")
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_truncate_to_ala/v0_getting_started.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import sys
+
+def run(args):
+  if (len(args) == 0):
+    raise RuntimeError("Please specify one or more pdb file names.")
+  for file_name in args:
+    pdb_obj = iotbx.pdb.input(file_name=file_name)
+    pdb_obj.construct_hierarchy().overall_counts().show()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_truncate_to_ala/v1_loop_over_atoms.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import sys
+
+def run(args):
+  if (len(args) == 0):
+    raise RuntimeError("Please specify one or more pdb file names.")
+  for file_name in args:
+    pdb_obj = iotbx.pdb.input(file_name=file_name)
+    hierarchy = pdb_obj.construct_hierarchy()
+    hierarchy.overall_counts().show()
+    for model in hierarchy.models():
+      for chain in model.chains():
+        for rg in chain.residue_groups():
+          print('resid: "%s"' % rg.resid())
+          for ag in rg.atom_groups():
+            print('  altloc: "%s", resname: "%s"' % (ag.altloc, ag.resname))
+            for atom in ag.atoms():
+              print('    ', atom.name)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_truncate_to_ala/v2_simple.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import iotbx.pdb.amino_acid_codes
+import sys
+
+def run(args):
+  if (len(args) == 0):
+    raise RuntimeError("Please specify one or more pdb file names.")
+  aa_resnames = iotbx.pdb.amino_acid_codes.one_letter_given_three_letter
+  ala_atom_names = set([" N  ", " CA ", " C  ", " O  ", " CB "])
+  for file_name in args:
+    pdb_obj = iotbx.pdb.input(file_name=file_name)
+    hierarchy = pdb_obj.construct_hierarchy()
+    hierarchy.overall_counts().show()
+    for model in hierarchy.models():
+      for chain in model.chains():
+        for rg in chain.residue_groups():
+          for ag in rg.atom_groups():
+            if (ag.resname in aa_resnames):
+              for atom in ag.atoms():
+                if (atom.name not in ala_atom_names):
+                  ag.remove_atom(atom=atom)
+    output_pdb = "v2_truncated_to_ala_"+file_name
+    hierarchy.write_pdb_or_mmcif_file(target_filename=output_pdb)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_truncate_to_ala/v3_better.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import iotbx.pdb.amino_acid_codes
+import sys
+
+def run(args):
+  if (len(args) == 0):
+    raise RuntimeError("Please specify one or more pdb file names.")
+  aa_resnames = iotbx.pdb.amino_acid_codes.one_letter_given_three_letter
+  ala_atom_names = set([" N  ", " CA ", " C  ", " O  ", " CB "])
+  for file_name in args:
+    pdb_obj = iotbx.pdb.input(file_name=file_name)
+    hierarchy = pdb_obj.construct_hierarchy()
+    hierarchy.overall_counts().show()
+    for model in hierarchy.models():
+      for chain in model.chains():
+        for rg in chain.residue_groups():
+          def have_amino_acid():
+            for ag in rg.atom_groups():
+              if (ag.resname in aa_resnames):
+                return True
+            return False
+          if (have_amino_acid()):
+            for ag in rg.atom_groups():
+              for atom in ag.atoms():
+                if (atom.name not in ala_atom_names):
+                  ag.remove_atom(atom=atom)
+    output_pdb = "v3_truncated_to_ala_"+file_name
+    hierarchy.write_pdb_or_mmcif_file(target_filename=output_pdb)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdb_truncate_to_ala/v4_with_bells_and_whistles.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import iotbx.pdb.amino_acid_codes
+import sys, os
+
+def run(args):
+  if (len(args) == 0):
+    raise RuntimeError("Please specify one or more pdb file names.")
+  aa_resnames = iotbx.pdb.amino_acid_codes.one_letter_given_three_letter
+  ala_atom_names = set([" N  ", " CA ", " C  ", " O  ", " CB "])
+  for file_name in args:
+    pdb_obj = iotbx.pdb.input(file_name=file_name)
+    hierarchy = pdb_obj.construct_hierarchy()
+    hierarchy.overall_counts().show()
+    n_amino_acid_residues = 0
+    n_other_residues = 0
+    n_atoms_removed = 0
+    for model in hierarchy.models():
+      for chain in model.chains():
+        for rg in chain.residue_groups():
+          def have_amino_acid():
+            for ag in rg.atom_groups():
+              if (ag.resname in aa_resnames):
+                return True
+            return False
+          if (not have_amino_acid()):
+            n_other_residues += 1
+          else:
+            n_amino_acid_residues += 1
+            for ag in rg.atom_groups():
+              for atom in ag.atoms():
+                if (atom.name not in ala_atom_names):
+                  ag.remove_atom(atom=atom)
+                  n_atoms_removed += 1
+    print("Number of amino acid residues:", n_amino_acid_residues)
+    print("Number of other residues:", n_other_residues)
+    print("Number of atoms removed:", n_atoms_removed)
+    if (n_atoms_removed != 0):
+      output_pdb = "v4_truncated_to_ala_"+os.path.basename(file_name)
+      if (output_pdb.endswith(".gz")): output_pdb = output_pdb[:-3]
+      print("Writing file:", output_pdb)
+      hierarchy.write_pdb_or_mmcif_file(
+        target_filename=output_pdb,
+        crystal_symmetry=pdb_obj.crystal_symmetry(),
+        append_end=True)
+    print()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/pdbx_mmcif_tutorial.py
+"""Examples of how to work with PDB and mmCIF files"""
+from __future__ import absolute_import, division, print_function
+#
+# Command to run this example:
+#   iotbx.python pdbx_mmcif_tutorial.py
+#
+# See also:
+#   http://cctbx.sourceforge.net/iotbx_cif
+#
+import os
+from six.moves import range
+from libtbx.utils import Sorry
+from iotbx.pdb.fetch import valid_pdb_id, fetch_and_write
+
+def run(args):
+  if len(args) == 0:
+    args = ["1hbb"]
+
+  for arg in args:
+    if os.path.isfile(arg):
+      mmcif_file = arg
+      pdb_id = os.path.splitext(os.path.basename(mmcif_file))[0]
+      if not valid_pdb_id(pdb_id):
+        raise Sorry("Not valid pdb id")
+    else:
+      # download pdbx/mmcif file from the PDB
+      pdb_id = arg
+      mirror = "pdbe"
+      mmcif_file = fetch_and_write(
+        pdb_id, entity="model_cif", mirror=mirror, log=sys.stdout)
+
+    # read the cif file and get an iotbx.cif object
+    import iotbx.cif
+    cif_reader = iotbx.cif.reader(file_path=mmcif_file)
+    cif_object = cif_reader.model()
+    cif_block = cif_object[pdb_id]
+    # get single items from cif_block
+    print("PDB id:", cif_block["_entry.id"])
+    # get a looped item from cif_block
+    print("Authors:")
+    for author in cif_block.get_looped_item("_citation_author.name"):
+      print(author)
+    print()
+    print("Molecular Entities:")
+    for pdbx_entity in cif_block.get_looped_item("_entity.pdbx_description"):
+      print(pdbx_entity)
+    print()
+
+    # extract crystal symmetry information
+    import iotbx.cif.builders
+    builder = iotbx.cif.builders.crystal_symmetry_builder(cif_block)
+    builder.crystal_symmetry.show_summary()
+
+    # 1) this works also for .pdb files, but re-reads the file
+    import iotbx.pdb
+    pdb_input = iotbx.pdb.input(file_name=mmcif_file)
+    hierarchy = pdb_input.construct_hierarchy()
+
+    # 2) This only works for mmcif files, but re-uses the cif_object from above:
+    import iotbx.pdb.mmcif
+    pdb_input = iotbx.pdb.mmcif.cif_input(cif_object=cif_object)
+    hierarchy = pdb_input.construct_hierarchy()
+
+    # some convenience methods of pdb_input object
+    print("Software:", pdb_input.get_program_name())
+    print("Experiment type:", pdb_input.get_experiment_type())
+    print("Solvent content:", pdb_input.get_solvent_content())
+    print("Deposition date:", pdb_input.deposition_date())
+    r_rfree_sigma = pdb_input.get_r_rfree_sigma(mmcif_file)
+    print("R-work/R-free: %s/%s" %(r_rfree_sigma.r_work, r_rfree_sigma.r_free))
+    # can also get crystal_symmetry from pdb_input object
+    crystal_symmetry = pdb_input.crystal_symmetry()
+
+    print()
+    hierarchy.overall_counts().show()
+    # level_id can be "model", "chain", "residue_group", "atom_group" or "atom"
+    hierarchy.show(level_id="chain")
+    # for a more detailed example of interacting with a pdb.hierarchy object,
+    # see iotbx/examples/pdb_hierarchy.py
+
+    # extract atom sites
+    atoms = hierarchy.atoms()
+    sites_cart = atoms.extract_xyz()
+    print()
+    for i in range(10):
+      print(atoms[i].id_str(), atoms[i].xyz)
+    print()
+
+    # read some sequence information
+    entity_poly_entity_id = cif_block.get_looped_item("_entity_poly.entity_id")
+    entity_id = cif_block.get_looped_item("_entity.id")
+    entity_pdbx_description = cif_block.get_looped_item("_entity.pdbx_description")
+    entity_poly_one_letter_code = cif_block.get_looped_item(
+      "_entity_poly.pdbx_seq_one_letter_code")
+
+    from cctbx.array_family import flex
+    for i in range(len(entity_poly_one_letter_code)):
+      idx = flex.first_index(entity_id, entity_poly_entity_id[i])
+      print(entity_id[idx], entity_pdbx_description[i], end=' ')
+      print("".join(entity_poly_one_letter_code[i].split()))
+
+
+if __name__ == '__main__':
+  import sys
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/prepare_model_for_rsr.py
+"""Preparation of model for real-space refinement"""
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import mmtbx.model
+from libtbx.utils import null_out, Sorry
+import sys
+
+"""
+Example: preparation of model for real-space refinement:
+  - Expand MTRIX
+  - Expand BIOMT
+  - Build geometry restraints manager
+  - Show initial statistics.
+Should support PDB and mmCIF formats.
+
+Usage:
+  python prepare_model_for_rsr.py <model>
+"""
+
+def show_ss_counts(model):
+  ss = model.get_ss_annotation()
+  print("Number of helices:", ss.get_n_helices())
+  print("Number of sheets :", ss.get_n_sheets())
+
+
+
+def run(args):
+  assert len(args) == 1
+  # Read file into pdb_input class
+  inp = iotbx.pdb.input(file_name=args[0])
+
+  # create a model manager
+  # Catch Sorry about MTRIX here.
+  model = mmtbx.model.manager(
+      model_input = inp,
+      restraint_objects = None, # these are ligands if any [('fname', cif_object), ()]
+      log = null_out(),
+      )
+  print("="*80)
+  print("number of atoms with MTRIX multiplication:", model.get_number_of_atoms())
+  show_ss_counts(model)
+
+  # Expand with BIOMT if needed. MTRIX are already expanded by default
+  # Catch case when both MTRIX and BIOMT present, or other Sorry raised by
+  # BIOMT handling.
+  # LIMITATION: this should be done before any selections made on model.manager
+  double_counter = 0
+  try:
+    model.expand_with_BIOMT_records()
+  except Sorry as e:
+    if str(e).startswith("Model has been already expanded"):
+      double_counter += 1
+  print("="*80)
+  print("number of atoms with BIOMT multiplication:", model.get_number_of_atoms())
+  show_ss_counts(model)
+
+  # Get default params
+  pdb_int_params = mmtbx.model.manager.get_default_pdb_interpretation_params()
+  # Set whatever you want
+  pdb_int_params.pdb_interpretation.secondary_structure.protein.enabled = True
+  pdb_int_params.pdb_interpretation.ncs_search.enabled = True
+  pdb_int_params.pdb_interpretation.ncs_search.residue_match_radius = 999
+  pdb_int_params.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
+
+  #pdb_int_params.pdb_interpretation.nonbonded_weight = None
+
+  # set the params. Note, that GRM would be dropped, even if it was already
+  # constructed. In this example it is not yet constructed.
+  model.set_pdb_interpretation_params(params=pdb_int_params)
+  grm = model.get_restraints_manager()
+
+  # Not clear which one should be used at the moment
+  gs = model.geometry_statistics()
+  gs.show()
+  # The second way
+  msi = model.get_model_statistics_info()
+  msi.show_remark_3()
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/recalculate_phenix_refine_r_factors.py
+"""
+Read in an MTZ file produced by phenix.refine, extract the
+F-obs-filtered, F-model, and R-free-flags arrays, and calculate R-factors both
+for the entire dataset and for resolution shells.  This serves as an example
+both for processing MTZ files, and for cctbx.miller functionality.
+"""
+
+from __future__ import absolute_import, division, print_function
+from iotbx.reflection_file_utils import get_r_free_flags_scores
+from iotbx.file_reader import any_file
+import sys
+
+def compute_r_factors(fobs, fmodel, flags):
+  fmodel, fobs = fmodel.common_sets(other=fobs)
+  fmodel, flags = fmodel.common_sets(other=flags)
+  fc_work = fmodel.select(~(flags.data()))
+  fo_work = fobs.select(~(flags.data()))
+  fc_test = fmodel.select(flags.data())
+  fo_test = fobs.select(flags.data())
+  r_work = fo_work.r1_factor(fc_work)
+  r_free = fo_test.r1_factor(fc_test)
+  print("r_work = %.4f" % r_work)
+  print("r_free = %.4f" % r_free)
+  print("")
+  flags.setup_binner(n_bins=20)
+  fo_work.use_binning_of(flags)
+  fc_work.use_binner_of(fo_work)
+  fo_test.use_binning_of(fo_work)
+  fc_test.use_binning_of(fo_work)
+  for i_bin in fo_work.binner().range_all():
+    sel_work = fo_work.binner().selection(i_bin)
+    sel_test = fo_test.binner().selection(i_bin)
+    fo_work_bin = fo_work.select(sel_work)
+    fc_work_bin = fc_work.select(sel_work)
+    fo_test_bin = fo_test.select(sel_test)
+    fc_test_bin = fc_test.select(sel_test)
+    if fc_test_bin.size() == 0 : continue
+    r_work_bin = fo_work_bin.r1_factor(other=fc_work_bin,
+      assume_index_matching=True)
+    r_free_bin = fo_test_bin.r1_factor(other=fc_test_bin,
+      assume_index_matching=True)
+    cc_work_bin = fo_work_bin.correlation(fc_work_bin).coefficient()
+    cc_free_bin = fo_test_bin.correlation(fc_test_bin).coefficient()
+    legend = flags.binner().bin_legend(i_bin, show_counts=False)
+    print("%s  %8d %8d  %.4f %.4f  %.3f %.3f" % (legend, fo_work_bin.size(),
+      fo_test_bin.size(), r_work_bin, r_free_bin, cc_work_bin, cc_free_bin))
+
+def run(args):
+  mtz_in = any_file(args[0])
+  ma = mtz_in.file_server.miller_arrays
+  flags = fmodel = fobs = None
+  # select the output arrays from phenix.refine.  This could easily be modified
+  # to handle MTZ files from other programs.
+  for array in ma :
+    labels = array.info().label_string()
+    if labels.startswith("R-free-flags"):
+      flags = array
+    elif labels.startswith("F-model"):
+      fmodel = abs(array)
+    elif labels.startswith("F-obs-filtered"):
+      fobs = array
+  if (None in [flags, fobs, fmodel]):
+    raise RuntimeError("Not a valid phenix.refine output file")
+  scores = get_r_free_flags_scores([flags], None)
+  test_flag_value = scores.test_flag_values[0]
+  flags = flags.customized_copy(data=flags.data()==test_flag_value)
+  compute_r_factors(fobs, fmodel, flags)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/shelx_latt_sym_to_space_group_symbol.py
+"""Example of how to convert SHELX lattice symbol to a space group symbol"""
+from __future__ import absolute_import, division, print_function
+from iotbx import shelx
+from cctbx import sgtbx
+import sys
+
+def convert(file_object):
+  """ Examplify the direct use of the tool from shelx.lexer
+
+  In practice, one is strongly encouraged to make use of the tools
+  from shelx.parsers: that is to say, for the task handled here,
+  crystal_symmetry_parser (the code to follow just parrots
+  the implementation of crystal_symmetry_parser).
+  """
+  space_group = None
+  for command, line in shelx.command_stream(file=file_object):
+    cmd, args = command[0], command[-1]
+    if cmd == "LATT":
+      assert space_group is None
+      assert len(args) == 1
+      space_group = sgtbx.space_group()
+      n = int(args[0])
+      if n > 0:
+        space_group.expand_inv(sgtbx.tr_vec((0,0,0)))
+      z = "*PIRFABC"[abs(n)]
+      space_group.expand_conventional_centring_type(z)
+    elif cmd == "SYMM":
+      assert space_group is not None
+      assert len(args) == 1
+      s = sgtbx.rt_mx(args[0])
+      space_group.expand_smx(s)
+    elif cmd == "SFAC":
+      return sgtbx.space_group_info(group=space_group)
+
+def run(args):
+  if (len(args) == 0):
+    space_group_info = convert(file_object=sys.stdin)
+    print(space_group_info.type().lookup_symbol())
+  else:
+    for file_name in args:
+      space_group_info = convert(file_object=open(file_name))
+      print(space_group_info.type().lookup_symbol())
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/examples/tst_mtz_free_flipper.py
+"""Test the routine that swaps test and working sets"""
+from __future__ import absolute_import, division, print_function
+import libtbx.load_env
+if (libtbx.env.has_module("ccp4io")):
+  from iotbx.examples import mtz_free_flipper
+  from iotbx.examples import mtz_convert_free_to_work
+  import iotbx.mtz as iotbx_mtz
+else:
+  iotbx_mtz = None
+from libtbx.test_utils import show_diff
+from libtbx.utils import format_cpu_times
+from six.moves import cStringIO as StringIO
+import os
+
+def exercise():
+  if (iotbx_mtz is None):
+    print("Skipping iotbx/examples/tst_mtz_free_flipper.py: ccp4io not available")
+    return
+  input_file_name = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/reflection_files/l.mtz",
+    test=os.path.isfile)
+  if (input_file_name is None):
+    print("Skipping exercise(): input file not available")
+    return
+  label = "R-free-flags(-)"
+  mtz_free_flipper.run(args=[input_file_name], label=label)
+  mtz_free_flipper.run(args=["free_flipped_l.mtz"], label=label)
+  mtz_convert_free_to_work.run(args=[input_file_name], label=label)
+  spreadsheets = []
+  for file_name, expected in [
+        (input_file_name, (13469,1065,2323)),
+        ("free_flipped_l.mtz", (1065,13469,2323)),
+        ("free_flipped_free_flipped_l.mtz", (13469,1065,2323)),
+        ("less_free_l.mtz", (14002,532,2323))]:
+    s = StringIO()
+    mtz_obj = iotbx_mtz.object(file_name=file_name)
+    mtz_obj.show_column_data(out=s, format="spreadsheet")
+    s = s.getvalue()
+    spreadsheets.append(s)
+    n_0, n_1, n_rest = 0, 0, 0
+    for line in s.splitlines()[1:]:
+      if (line.endswith(",0")): n_0 += 1
+      elif (line.endswith(",1")): n_1 += 1
+      else:
+        assert line.endswith(",")
+        n_rest += 1
+    assert mtz_obj.n_reflections() == n_0 + n_1 + n_rest
+    assert (n_0, n_1, n_rest) == expected
+  assert not show_diff(spreadsheets[0], spreadsheets[2])
+  assert spreadsheets[0] != spreadsheets[1]
+
+def run():
+  exercise()
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************

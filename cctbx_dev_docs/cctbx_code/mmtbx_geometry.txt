@@ -1,0 +1,4072 @@
+
+
+ *******************************************************************************
+mmtbx/geometry/__init__.py
+from __future__ import absolute_import, division, print_function
+
+from scitbx.array_family import flex # import dependency
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/altloc.py
+from __future__ import absolute_import, division, print_function
+
+def Empty(data, coordinates, processor):
+  """
+  An object without an altloc identifier
+  """
+
+  processor.process_regular( data = data, coordinates = coordinates )
+
+
+class Alternate(object):
+  """
+  An object assigned with an altloc identifier
+  """
+
+  def __init__(self, identifier):
+
+    self.identifier = identifier
+
+
+  def __call__(self, data, coordinates, processor):
+
+    processor.process_altloc(
+      data = data,
+      coordinates = coordinates,
+      identifier = self.identifier,
+      )
+
+
+def altid_for(atom):
+
+  parent = atom.parent()
+
+  if parent:
+    return parent.altloc
+
+  else:
+    return Empty
+
+# Indexing with altloc support
+class Description(object):
+  """
+  An internal format to allow processing with the visitor pattern
+  """
+
+  def __init__(self, data, coordinates, altid):
+
+    self.data = data
+    self.coordinates = coordinates
+
+    if altid:
+      self.strategy = Alternate( identifier = altid )
+
+    else:
+      self.strategy = Empty
+
+
+  def accept(self, processor):
+
+    self.strategy(
+      data = self.data,
+      coordinates = self.coordinates,
+      processor = processor,
+      )
+
+
+class Indexer(object):
+  """
+  Indexer that takes into account altloc
+  """
+
+  def __init__(self, factory):
+
+    self.factory = factory
+    self.regular = self.factory()
+
+    self.altlocs = {}
+
+
+  def add(self, altloc):
+
+    self.altlocs[ altloc ] = self.factory()
+
+
+# Visitor
+class Inserter(object):
+  """
+  Fills up an indexer with data
+  """
+
+  def __init__(self, indexer):
+
+    self.indexer = indexer
+
+
+  def process_regular(self, data, coordinates):
+
+    self.indexer.regular.add( object = data, position = coordinates )
+
+
+  def process_altloc(self, data, coordinates, identifier):
+
+    if identifier not in self.indexer.altlocs:
+      self.indexer.add( altloc = identifier )
+
+    self.indexer.altlocs[ identifier ].add( object = data, position = coordinates )
+
+
+class Aggregator(object):
+  """
+  Queries the indexer and returns altloc-correct neighbours
+  """
+
+  def __init__(self, indexer):
+
+    self.indexer = indexer
+    self.ranges = []
+
+
+  @property
+  def entities(self):
+
+    from itertools import chain
+    return chain.from_iterable( self.ranges )
+
+
+  def process_regular(self, data, coordinates):
+
+    self.ranges.append( self.indexer.regular.close_to( centre = coordinates ) )
+
+    for indexer in self.indexer.altlocs.values():
+      self.ranges.append( indexer.close_to( centre = coordinates ) )
+
+
+  def process_altloc(self, data, coordinates, identifier):
+
+    self.ranges.append( self.indexer.regular.close_to( centre = coordinates ) )
+
+    if identifier in self.indexer.altlocs:
+      self.ranges.append(
+        self.indexer.altlocs[ identifier ].close_to( centre = coordinates ),
+        )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/asa.py
+from __future__ import absolute_import, division, print_function
+
+import mmtbx.geometry.shared_types # import dependency
+
+import boost_adaptbx.boost.python as bp
+from six.moves import zip
+ext = bp.import_ext( "mmtbx_geometry_asa_ext" )
+from mmtbx_geometry_asa_ext import *
+
+from mmtbx.geometry import altloc
+
+# Indexing with altloc support
+def create_description(index, atom, radius):
+
+  return altloc.Description(
+    data = sphere(
+      centre = atom.xyz,
+      radius = radius,
+      index = index,
+      ),
+    coordinates = atom.xyz,
+    altid = altloc.altid_for( atom = atom ),
+    )
+
+
+def create_and_populate_indexer(factory, descriptions):
+
+  indexer = altloc.Indexer( factory = factory )
+  inserter = altloc.Inserter( indexer = indexer )
+
+  for d in descriptions:
+    d.accept( processor = inserter )
+
+  return indexer
+
+
+def get_linear_indexer_for(descriptions):
+
+  return create_and_populate_indexer(
+    factory = indexing.linear_spheres,
+    descriptions = descriptions,
+    )
+
+
+def get_hash_indexer_for(descriptions):
+
+  voxelizer = get_voxelizer_for( descriptions = descriptions )
+  return create_and_populate_indexer(
+    factory = lambda: indexing.hash_spheres( voxelizer = voxelizer, margin = 1 ),
+    descriptions = descriptions,
+    )
+
+
+def get_optimal_indexer_for(descriptions):
+
+  return get_linear_indexer_for( descriptions = descriptions )
+
+
+def get_voxelizer_for(descriptions, step = 7):
+
+  lows = [ d.data.low for d in descriptions ]
+  low_xs, low_ys, low_zs  = zip( *lows )
+  low = ( min( low_xs ), min( low_ys ), min( low_zs ) )
+
+  return mmtbx.geometry.shared_types.voxelizer(
+    base = low,
+    step = ( step, step, step ),
+    )
+
+
+# Visitors
+class CompositeCheckerBuilder(object):
+  """
+  Finds neighbours for a sphere
+  """
+
+  def __init__(self, indexer, description):
+
+    processor = altloc.Aggregator( indexer = indexer )
+    description.accept( processor = processor )
+
+    self.checker = accessibility.pythagorean_checker()
+    pred = accessibility.overlap_equality_predicate( object = description.data )
+
+    for r in processor.ranges:
+      self.checker.add(
+        neighbours = accessibility.filter( range = r, predicate = pred )
+        )
+
+
+class SeparateCheckerBuilder(object):
+  """
+  Finds neighbours for a sphere
+  """
+
+  def __init__(self, indexer, description):
+
+    self.indexer = indexer
+    self.regular = accessibility.pythagorean_checker()
+    self.altlocs = {}
+    description.accept( processor = self )
+
+
+  def process_regular(self, data, coordinates):
+
+    self.append_neighbours(
+      indexer = self.indexer.regular,
+      sphere = data,
+      centre = coordinates,
+      checker = self.regular,
+      )
+
+    for ( identifier, indexer ) in self.indexer.altlocs.items():
+      checker = accessibility.pythagorean_checker()
+      self.append_neighbours(
+        indexer = indexer,
+        sphere = data,
+        centre = coordinates,
+        checker = checker,
+        )
+
+      if checker.neighbours():
+        self.altlocs[ identifier ] = checker
+
+
+  def process_altloc(self, data, coordinates, identifier):
+
+    self.append_neighbours(
+      indexer = self.indexer.regular,
+      sphere = data,
+      centre = coordinates,
+      checker = self.regular,
+      )
+    self.altlocs[ identifier ] = accessibility.pythagorean_checker()
+    self.append_neighbours(
+      indexer = self.indexer.altlocs[ identifier ],
+      sphere = data,
+      centre = coordinates,
+      checker = self.altlocs[ identifier ],
+      )
+
+
+  @staticmethod
+  def append_neighbours(indexer, sphere, centre, checker):
+
+    checker.add(
+      neighbours = accessibility.filter(
+        range = indexer.close_to( centre = centre ),
+        predicate = accessibility.overlap_equality_predicate( object = sphere )
+        )
+      )
+
+
+# Results
+class AccessibleSurfaceResult(object):
+  """
+  Result of the calculation
+  """
+
+  def __init__(self, count, radius_sq):
+
+    self.count = count
+    self.radius_sq = radius_sq
+
+
+  @property
+  def surface(self):
+
+    return self.count * self.radius_sq
+
+
+class AccessibleSurfaceAreas(object):
+  """
+  Result of a series of calculations
+  """
+
+  def __init__(self, values, unit):
+
+    self.values = values
+    self.unit = unit
+
+
+  @property
+  def points(self):
+
+    return [ v.count for v in self.values ]
+
+
+  @property
+  def areas(self):
+
+    from scitbx.array_family import flex
+    return self.unit * flex.double( v.surface for v in self.values )
+
+
+# Ways for calculating ASA
+def simple_surface_calculation(indexer, sampling, description):
+  """
+  Calculates ASA by not worrying about altlocs
+  """
+
+  builder = CompositeCheckerBuilder( indexer = indexer, description = description )
+  overlapped = accessibility.filter(
+    range = accessibility.transform(
+      range = sampling.points,
+      transformation = accessibility.transformation(
+        centre = description.data.centre,
+        radius = description.data.radius,
+        ),
+      ),
+    predicate = builder.checker,
+    )
+
+  return AccessibleSurfaceResult(
+    count = len( overlapped ),
+    radius_sq = description.data.radius_sq,
+    )
+
+
+def altloc_averaged_calculation(indexer, sampling, description):
+  """
+  For atoms with altloc identifier, use empty altloc + atom with same altloc.
+  For atoms with empty altloc, run a calculation for each know altloc and
+  average the results.
+  """
+
+  builder = SeparateCheckerBuilder( indexer = indexer, description = description )
+
+  nonoverlapped = accessibility.filter(
+    range = accessibility.transform(
+      range = sampling.points,
+      transformation = accessibility.transformation(
+        centre = description.data.centre,
+        radius = description.data.radius,
+        ),
+      ),
+    predicate = builder.regular,
+    )
+
+  if not builder.altlocs:
+    count = len( nonoverlapped )
+
+  else:
+    values = []
+
+    for checker in builder.altlocs.values():
+      values.append( len( [ p for p in nonoverlapped if checker( point = p ) ] ) )
+
+    count = sum( values ) / len( values )
+
+  return AccessibleSurfaceResult(
+    count = count,
+    radius_sq = description.data.radius_sq,
+    )
+
+
+# Module-level function
+def calculate(
+  atoms,
+  calculation = simple_surface_calculation,
+  indexer_selector = get_optimal_indexer_for,
+  probe = 1.4,
+  precision = 960,
+  ):
+
+  from cctbx.eltbx import van_der_waals_radii
+  radius_for = van_der_waals_radii.vdw.table
+
+  descriptions = [
+    create_description(
+      index = i,
+      atom = a,
+      radius = radius_for[ a.element.strip().capitalize() ] + probe,
+      )
+    for ( i, a ) in enumerate( atoms )
+    ]
+
+  indexer = indexer_selector( descriptions = descriptions )
+
+  from mmtbx.geometry import sphere_surface_sampling
+  sampling = sphere_surface_sampling.golden_spiral( count = precision )
+
+  values = [
+    calculation( indexer = indexer, sampling = sampling, description = d )
+    for d in descriptions
+    ]
+
+  return AccessibleSurfaceAreas(
+    values = values,
+    unit = sampling.unit_area,
+    )
+
+
+def identity(value):
+
+  return value
+
+
+def coordinate_adaptor(array, transformation = identity):
+
+  return ext._coordinate_adaptor( array = array, transformation = transformation )
+
+
+def radius_adaptor(array, transformation = identity):
+
+  return ext._radius_adaptor( array = array, transformation = transformation )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/clash.py
+from __future__ import absolute_import, division, print_function
+
+from cctbx import sgtbx # import dependency
+import mmtbx.geometry.shared_types # import dependency
+
+import boost_adaptbx.boost.python as bp
+from functools import reduce
+from six.moves import zip
+ext = bp.import_ext( "mmtbx_geometry_clash_ext" )
+from mmtbx_geometry_clash_ext import *
+
+def to_xray_structure(atoms, symmetry):
+  """
+  A utility function to convert atoms into cctbx.xray.structure
+  """
+
+  from cctbx import xray
+  from cctbx.array_family import flex
+  cell = symmetry.unit_cell()
+
+  return xray.structure(
+      crystal_symmetry = symmetry,
+      scatterers = flex.xray_scatterer(
+        [
+          xray.scatterer(
+            label = a.pdb_label_columns(),
+            site = cell.fractionalize( a.xyz ),
+            )
+          for a in atoms
+          ]
+        )
+      )
+
+
+def altloc_strategy_from_atom(atom):
+
+  altloc = atom.parent().altloc
+
+  if altloc:
+    return altloc_strategy.alternate( identifier = altloc )
+
+  else:
+    return altloc_strategy.regular()
+
+
+def element_of(atom):
+
+  return atom.element.strip().capitalize()
+
+
+def linear_indexer_for(params):
+
+  return indexing.linear_spheres()
+
+
+def hash_indexer_for(params):
+
+  return indexing.hash_spheres( voxelizer = params.voxelizer(), margin = 1 )
+
+
+class SymmetryEquivalent(object):
+  """
+  A potential symmetry equivalent of an atom
+  """
+
+  def __init__(self, atom, symop):
+
+    self.atom = atom
+    self.symop = symop
+
+
+  @property
+  def atom_group(self):
+
+    return self.atom.parent()
+
+
+  @property
+  def residue_group(self):
+
+    return self.atom_group.parent()
+
+
+  @property
+  def chain(self):
+
+    return self.residue_group.parent()
+
+
+  @property
+  def molecule(self):
+
+    return self.chain.parent()
+
+  @property
+  def root(self):
+
+    return self.molecule.parent()
+
+
+  def __eq__(self, other):
+
+    return ( self.atom == other.atom ) and ( self.symop == other.symop )
+
+
+  def __ne__(self, other):
+
+    return not ( self == other )
+
+
+  def __hash__(self):
+
+    return hash( ( self.atom, self.symop ) )
+
+
+class ClashingPair(object):
+  """
+  Clashing atom pair
+  """
+
+  def __init__(self, left, right):
+
+    self.left = left
+    self.right = right
+
+
+  def is_self_clash(self):
+
+    return self.left.root == self.right.root
+
+
+  def frozenset(self):
+
+    return frozenset( ( self.left, self.right ) )
+
+
+  def atom_pair(self):
+
+    return frozenset( ( self.left.atom, self.right.atom ) )
+
+
+  def __hash__(self):
+
+    return hash( self.frozenset() )
+
+
+  def __eq__(self, other):
+
+    return self.frozenset() == other.frozenset()
+
+
+  def __ne__(self, other):
+
+    return not ( self == other )
+
+
+class ClashPoint(object):
+  """
+  Clashes with a central atom
+  """
+
+  def __init__(self, centre, others):
+
+    self.centre = centre
+    self.others = others
+
+
+  def pairs(self):
+
+    return ( ClashingPair( left = self.centre, right = o ) for o in self.others )
+
+
+  def count(self):
+
+    return len( self.others )
+
+
+class ClashCollection(object):
+  """
+  All clashes in a model
+  """
+
+  def __init__(self, points):
+
+    self.points = points
+
+
+  def pairs(self):
+
+    for point in self.points:
+      for pair in point.pairs():
+        yield pair
+
+
+class Model(object):
+  """
+  A model, providing fast access to atoms by memory_id
+  """
+
+  def __init__(self, root):
+
+    self.identifier = root.memory_id()
+    self.atom_for = dict( ( a.memory_id(), a ) for a in root.atoms() )
+
+
+  def atoms(self):
+
+    return list(self.atom_for.values())
+
+
+  def elements(self):
+
+    return set( element_of( atom = a ) for a in self.atoms() )
+
+
+  def __hash__(self):
+
+    return hash( self.identifier )
+
+
+  def __eq__(self, other):
+
+    return self.identifier == other.identifier
+
+
+  def __ne__(self, other):
+
+    return not( self == other )
+
+
+  def __getitem__(self, key):
+
+    return self.atom_for[ key ]
+
+
+class Case(object):
+  """
+  Calculation parameters that are transferable
+  """
+
+  def __init__(self, symmetry, vdw_radius_for, max_radius, margin):
+
+    self.symmetry = symmetry
+    self.vdw_radius_for = vdw_radius_for
+    self.max_radius = max_radius
+    self.margin = margin
+
+
+  def asu_mapping_for(self, atoms):
+
+    structure = to_xray_structure( atoms = atoms, symmetry = self.symmetry )
+    return structure.asu_mappings(
+      buffer_thickness = 2 * self.max_radius + self.margin
+      )
+
+
+  def voxelizer(self):
+
+    vertices = self.symmetry.space_group_info().direct_space_asu().shape_vertices()
+    xs, ys, zs = zip( *vertices )
+
+    centre = (
+      ( min( xs ) + max( xs ) ) / 2.0,
+      ( min( ys ) + max( ys ) ) / 2.0,
+      ( min( zs ) + max( zs ) ) / 2.0,
+      )
+
+    step = 2 * self.max_radius
+
+    return mmtbx.geometry.shared_types.voxelizer(
+      base = self.symmetry.unit_cell().orthogonalize( centre ),
+      step = ( step, step, step ),
+      )
+
+  def radius_for(self, atom):
+
+    return self.vdw_radius_for[ element_of( atom = atom ) ]
+
+
+  def sphere_model_group_for(self, model):
+
+    atoms = model.atoms()
+    asu_mapping = self.asu_mapping_for( atoms = atoms )
+    mappings = asu_mapping.mappings()
+    assert len( atoms ) == len( mappings )
+    asu_spheres = []
+    other_spheres = []
+
+    for ( atom, mapping ) in zip( atoms, mappings ):
+      radius = self.radius_for( atom = atom )
+      altloc = altloc_strategy_from_atom( atom = atom )
+      aid = atom.memory_id()
+      considered = [
+        sphere(
+          centre = m.mapped_site(),
+          radius = radius,
+          molecule = model.identifier,
+          atom = aid,
+          altloc = altloc,
+          symop = asu_mapping.get_rt_mx( m ),
+          )
+        for m in mapping
+        ]
+      assert 1 <= len( considered )
+      asu_spheres.append( considered[0] )
+      other_spheres.extend( considered[1:] )
+
+    return SphereModelGroup(
+      model = model,
+      group = [ asu_spheres, other_spheres ],
+      )
+
+
+  @classmethod
+  def create(cls, symmetry, models, vdw_radius_for, margin = 1.0):
+
+    import operator
+    elements = reduce(
+      operator.or_,
+      [ m.elements() for m in models ],
+      set()
+      )
+
+    return cls(
+      symmetry = symmetry,
+      vdw_radius_for = vdw_radius_for,
+      max_radius = (
+        max( [ vdw_radius_for[ e ] for e in elements ] ) if elements else 0.0
+        ),
+      margin = margin,
+      )
+
+
+class AtomDescriptor(object):
+  """
+  A descriptor that allows looking up the original object is necessary
+  """
+
+  def __init__(self, model, sphere):
+
+    self.model = model
+    self.sphere = sphere
+
+
+  @property
+  def atom(self):
+
+    return self.model[ self.sphere.atom ]
+
+
+class SphereModel(object):
+  """
+  Sphere representation of a model
+  """
+
+  def __init__(self, model, spheres):
+
+    self.model = model
+    self.spheres = spheres
+
+
+  def descriptors(self):
+
+    return (
+      AtomDescriptor( model = self.model, sphere = s ) for s in self.spheres
+      )
+
+
+class SphereModelGroup(object):
+  """
+  Partitioned sphere model
+  """
+
+  def __init__(self, model, group):
+
+    self.model = model
+    self._group = group
+
+
+  def group(self):
+
+    return [
+      SphereModel( model = self.model, spheres = s ) for s in self._group
+      ]
+
+
+class ASUContent(object):
+  """
+  Contains the asymmetric unit
+  """
+
+  def __init__(self, case, ifactory = hash_indexer_for):
+
+    self.case = case
+    self.indexer = ifactory( params = self.case )
+    self.model_with = {}
+    self.asu_transforms = []
+
+
+  def add(self, sequence):
+
+    self.model_with[ sequence.model.identifier ] = sequence.model
+    ( asu, other ) = sequence.group()
+    self.asu_transforms.append( asu )
+
+    self._insert( sphere_model = asu )
+    self._insert( sphere_model = other )
+
+
+  def clashing_with(self, sphere, tolerance):
+
+    return list(filter(
+      range = self.indexer.close_to( object = sphere ),
+      predicate = overlap_interaction_predicate(
+        object = sphere,
+        tolerance = tolerance,
+        ),
+      ))
+
+
+  def descriptor_for(self, sphere):
+
+    return AtomDescriptor(
+      model = self.model_with[ sphere.molecule ],
+      sphere = sphere,
+      )
+
+
+  def _insert(self, sphere_model):
+
+    for d in sphere_model.descriptors():
+      self.indexer.add( object = d.sphere, position = d.sphere.centre )
+
+
+class DistanceCalculation(object):
+  """
+  Calculates clash distance for atom pair
+  """
+
+  def __init__(self, cell):
+
+    self.cell = cell
+
+
+  def __call__(self, pair):
+
+    ( l_x, l_y, l_z ) = pair.left.symop * self.cell.fractionalize( pair.left.atom.xyz )
+    ( r_x, r_y, r_z ) = pair.right.symop * self.cell.fractionalize( pair.right.atom.xyz )
+
+    diff = self.cell.orthogonalize( ( l_x - r_x, l_y - r_y, l_z - r_z ) )
+
+    import math
+    return math.sqrt( sum( [ d * d for d in diff ] ) )
+
+
+class ClashCalculation(object):
+  """
+  Calculates clashpoints
+  """
+
+  def __init__(self, tolerance = 0.5):
+
+    self.tolerance = tolerance
+
+
+  def __call__(self, asu, descriptor, accumulator):
+
+    clashing = asu.clashing_with(
+      sphere = descriptor.sphere,
+      tolerance = self.tolerance,
+      )
+
+    if clashing:
+      accumulator(
+        ClashPoint(
+          centre = SymmetryEquivalent(
+            atom = descriptor.atom,
+            symop = descriptor.sphere.symop,
+            ),
+          others = [
+            SymmetryEquivalent(
+              atom = asu.descriptor_for( sphere = s ).atom,
+              symop = s.symop,
+              )
+            for s in clashing
+            ]
+          )
+        )
+
+
+class ClashCountCalculation(object):
+  """
+  Calculates number of clashes
+  """
+
+  def __init__(self, tolerance = 0.5):
+
+    self.tolerance = tolerance
+
+
+  def __call__(self, asu, descriptor, accumulator):
+
+    clashing = asu.clashing_with(
+      sphere = descriptor.sphere,
+      tolerance = self.tolerance,
+      )
+    accumulator( len( clashing ) )
+
+
+class ElementAccumulator(object):
+  """
+  Collects all elements in a list
+  """
+
+  def __init__(self):
+
+    self.result = []
+
+
+  def __call__(self, element):
+
+    self.result.append( element )
+
+
+class ReducingAccumulator(object):
+  """
+  Sums up the elements as they come in
+  """
+
+  def __init__(self, initial, operation):
+
+    self.result = initial
+    self.operation = operation
+
+
+  def __call__(self, element):
+
+    self.result = self.operation( self.result, element )
+
+
+def calculate_contents(roots, symmetry, vdw_radius_for, ifactory, margin):
+
+  models = [ Model( root = r ) for r in roots ]
+  asu = ASUContent(
+    case = Case.create(
+      symmetry = symmetry,
+      models = models,
+      vdw_radius_for = vdw_radius_for,
+      margin = margin,
+      ),
+    ifactory = ifactory,
+    )
+
+  for m in models:
+    asu.add( sequence = asu.case.sphere_model_group_for( model = m ) )
+
+  return asu
+
+
+def calculate(
+  roots,
+  symmetry,
+  vdw_table,
+  ifactory = hash_indexer_for,
+  margin = 1.0,
+  calculation = None,
+  accumulator = None,
+  ):
+
+  asu = calculate_contents(
+    roots = roots,
+    symmetry = symmetry,
+    vdw_radius_for = vdw_table,
+    ifactory = ifactory,
+    margin = margin,
+    )
+
+  if calculation is None:
+    calculation = ClashCalculation()
+
+  if accumulator is None:
+    accumulator = ElementAccumulator() # avoid changing mutable default
+
+  for sphere_model in asu.asu_transforms:
+    for d in sphere_model.descriptors():
+      calculation( asu = asu, descriptor = d, accumulator = accumulator )
+
+  return accumulator.result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/indexing.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "mmtbx_geometry_indexing_ext" )
+from mmtbx_geometry_indexing_ext import *
+
+def filter(range, predicate):
+
+  return ext.filter(
+    range = range,
+    predicate = code_predicate( callable = predicate ),
+    )
+
+
+def direct(obj):
+
+  return obj
+
+
+class overlap_predicate(object):
+  """
+  Simple predicate to evaluate actual distance
+  """
+
+  def __init__(self, centre, distance, getter = direct):
+
+    ( self.x, self.y, self.z ) = centre
+    self.distance_sq = distance ** 2
+    self.getter = getter
+
+
+  def __call__(self, obj):
+
+    ( x, y, z ) = self.getter( obj )
+    dist_sq = ( self.x - x ) ** 2 + ( self.y - y ) ** 2 + ( self.z - z ) ** 2
+    return dist_sq <= self.distance_sq
+
+
+class containment_predicate(object):
+  """
+  Simple predicate to evaluate whether the object is in a predefined set
+  """
+
+  def __init__(self, selection, getter, relation):
+
+    self.selection = selection
+    self.getter = getter
+    self.relation = relation
+
+
+  def __call__(self, obj):
+
+    return self.relation( self.getter( obj ), self.selection )
+
+
+  @staticmethod
+  def include(obj, selection):
+
+    return obj in selection
+
+
+  @staticmethod
+  def exclude(obj, selection):
+
+    return obj not in selection
+
+
+  @classmethod
+  def inclusion(cls, selection, getter):
+
+    return cls( selection = selection, getter = getter, relation = cls.include )
+
+
+  @classmethod
+  def exclusion(cls, selection, getter):
+
+    return cls( selection = selection, getter = getter, relation = cls.exclude )
+
+
+class identity_predicate(object):
+  """
+  Simple predicate to evaluate whether the object is identical to something
+  """
+
+  def __init__(self, element, getter):
+
+    self.element = element
+    self.getter = getter
+
+
+  def __call__(self, obj):
+
+    return self.element == self.element_of( obj )
+
+
+class composite_predicate(object):
+  """
+  Layer several conditions
+  """
+
+  def __init__(self, conditions):
+
+    self.conditions = conditions
+
+
+  def __call__(self, obj):
+
+    return all( cond( obj ) for cond in self.conditions )
+
+
+class structure_indexer(object):
+  """
+  Indexes iotbx.pdb.hierarchy objects
+  """
+
+  def __init__(self, indexer, datagen, maxdist):
+
+    self.indexer = indexer
+    self.datagen = datagen
+    self.maxdist = maxdist
+
+
+  def add_atoms_in(self, obj):
+
+    for atom in obj.atoms():
+      xyz = atom.xyz
+      self.indexer.add(
+        object = ( self.datagen( obj, atom ), xyz ),
+        position = xyz,
+        )
+
+
+  def interaction_ranges_with(self, obj, predicates = []):
+
+    if not predicates:
+      predgen = self.simple_distance_predicate
+
+    else:
+      predgen = self.composite_distance_predicate
+
+    for atom in obj.atoms():
+      centre = atom.xyz
+      yield list(filter(
+        range = self.indexer.close_to( centre = centre ),
+        predicate = predgen( predicates = predicates, centre = centre ),
+        ))
+
+
+  def interaction_counts_with(self, obj, predicates = []):
+
+    rangiter = self.interaction_ranges_with( obj = obj, predicates = predicates )
+
+    return sum( len( r ) for r in rangiter )
+
+
+  def interactions_with(self, obj, predicates = []):
+
+    rangiter = self.interaction_ranges_with( obj = obj, predicates = predicates )
+
+    for r in rangiter:
+      for i in r:
+        yield i
+
+
+  def overlap_predicate(self, centre):
+
+    return overlap_predicate(
+      centre = centre,
+      distance = self.maxdist,
+      getter = self.coordinate_of,
+      )
+
+
+  @classmethod
+  def include_predicate(cls, selection):
+
+    return containment_predicate.Inclusion(
+      selection = selection,
+      getter = cls.data_of,
+      )
+
+
+  @classmethod
+  def exclude_predicate(cls, selection):
+
+    return containment_predicate.Exclusion(
+      selection = selection,
+      getter = cls.data_of,
+      )
+
+
+  @classmethod
+  def identity_predicate(cls, element):
+
+    return identity_predicate( element = element, getter = cls.data_of )
+
+
+  @staticmethod
+  def data_of(obj):
+
+    return obj[0]
+
+
+  @staticmethod
+  def coordinate_of(obj):
+
+    return obj[1]
+
+
+  def composite_distance_predicate(self, predicates, centre):
+
+    return composite_predicate(
+      conditions = predicates + [ self.overlap_predicate( centre = centre ) ],
+      )
+
+
+  def simple_distance_predicate(self, predicates, centre):
+
+    return self.overlap_predicate( centre = centre )
+
+
+  @classmethod
+  def hash(
+    cls,
+    base,
+    maxdist,
+    datagen = lambda o, a: None,
+    subdivision = 1,
+    safescale = 1.01,
+    ):
+
+    boxsize = safescale / subdivision * maxdist
+
+    from mmtbx.geometry import shared_types
+    voxelizer = shared_types.voxelizer(
+      base = base,
+      step = ( boxsize, boxsize, boxsize ),
+      )
+
+    return cls(
+      indexer = hash( voxelizer = voxelizer, margin = subdivision ),
+      datagen = datagen,
+      maxdist = maxdist,
+      )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/shared_types.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "mmtbx_geometry_shared_types_ext" )
+from mmtbx_geometry_shared_types_ext import *
+
+def calculate_base_for_coordinates(xyzs):
+
+  if len( xyzs ) == 0:
+    return ( 0, 0, 0 )
+
+  else:
+    ( xs, ys, zs ) = xyzs.parts()
+    return ( min( xs ), min( ys ), min( zs ) )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/sphere_surface_sampling.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "mmtbx_geometry_sphere_surface_sampling_ext" )
+from mmtbx_geometry_sphere_surface_sampling_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/tests/tst_altloc.py
+from __future__ import absolute_import, division, print_function
+
+from mmtbx.geometry import altloc
+
+import unittest
+
+class TestVisitor(object):
+
+  def __init__(self):
+
+    self.regular_calls = []
+    self.altloc_calls = []
+
+
+  def process_regular(self, data, coordinates):
+
+    self.regular_calls.append( ( data, coordinates ) )
+
+
+  def process_altloc(self, data, coordinates, identifier):
+
+    self.altloc_calls.append( ( data, coordinates, identifier ) )
+
+
+class TestStrategies(unittest.TestCase):
+
+  def setUp(self):
+
+    self.data = object()
+    self.coords = object()
+    self.processor = TestVisitor()
+
+
+  def test_empty(self):
+
+    altloc.Empty(
+      data = self.data,
+      coordinates = self.coords,
+      processor = self.processor,
+      )
+    self.assertEqual( self.processor.regular_calls, [ ( self.data, self.coords ) ] )
+    self.assertEqual( self.processor.altloc_calls, [] )
+
+
+  def test_altloc(self):
+
+    identifier = object()
+    strategy = altloc.Alternate( identifier = identifier )
+    strategy( data = self.data, coordinates = self.coords, processor = self.processor )
+    self.assertEqual( self.processor.regular_calls, [] )
+    self.assertEqual( self.processor.altloc_calls, [ ( self.data, self.coords, identifier ) ] )
+
+
+class TestDescription(unittest.TestCase):
+
+  def setUp(self):
+
+    self.data = object()
+    self.coords = object()
+    self.processor = TestVisitor()
+
+
+  def test_empty(self):
+
+    description = altloc.Description(
+      data = self.data,
+      coordinates = self.coords,
+      altid = None,
+      )
+    self.assertEqual( description.strategy, altloc.Empty )
+    description = altloc.Description(
+      data = self.data,
+      coordinates = self.coords,
+      altid = "",
+      )
+    self.assertEqual( description.strategy, altloc.Empty )
+    description.accept( processor = self.processor )
+    self.assertEqual( self.processor.regular_calls, [ ( self.data, self.coords ) ] )
+    self.assertEqual( self.processor.altloc_calls, [] )
+
+
+  def test_altoc(self):
+
+    identifier = object()
+    description = altloc.Description(
+      data = self.data,
+      coordinates = self.coords,
+      altid = identifier,
+      )
+    self.assertTrue( isinstance( description.strategy, altloc.Alternate ) )
+    self.assertEqual( description.strategy.identifier, identifier )
+    description.accept( processor = self.processor )
+    self.assertEqual( self.processor.regular_calls, [] )
+    self.assertEqual( self.processor.altloc_calls, [ ( self.data, self.coords, identifier ) ] )
+
+
+class TestIndexer(unittest.TestCase):
+
+  def test_1(self):
+
+    factory = lambda: object()
+
+    indexer = altloc.Indexer( factory = factory )
+    self.assertTrue( isinstance( indexer.regular, object ) )
+    self.assertEqual( indexer.factory, factory )
+    self.assertEqual( indexer.altlocs, {} )
+
+    altid = object()
+    indexer.add( altloc = altid )
+    self.assertTrue( altid in indexer.altlocs )
+    self.assertTrue( isinstance( indexer.altlocs[ altid ], object ) )
+
+
+class FakeIndexer(object):
+
+  def __init__(self):
+
+    self.calls = []
+
+
+  def add(self, object, position):
+
+    self.calls.append( ( object, position ) )
+
+
+class TestInserter(unittest.TestCase):
+
+  def setUp(self):
+
+    self.inserter = altloc.Inserter( indexer = altloc.Indexer( factory = FakeIndexer ) )
+
+
+  def test_basic(self):
+
+    self.assertEqual( self.inserter.indexer.regular.calls, [] )
+    self.assertEqual( self.inserter.indexer.altlocs, {} )
+
+
+  def test_regular(self):
+
+    obj1 = object()
+    coords1 = object()
+    self.inserter.process_regular( data = obj1, coordinates = coords1 )
+    self.assertEqual( self.inserter.indexer.regular.calls, [ ( obj1, coords1 ) ] )
+    self.assertEqual( self.inserter.indexer.altlocs, {} )
+
+    obj2 = object()
+    coords2 = object()
+    self.inserter.process_regular( data = obj2, coordinates = coords2 )
+    self.assertEqual(
+      self.inserter.indexer.regular.calls,
+      [ ( obj1, coords1 ), ( obj2, coords2 ) ],
+      )
+    self.assertEqual( self.inserter.indexer.altlocs, {} )
+
+
+  def test_altid(self):
+
+    obj1 = object()
+    coords1 = object()
+    altid1 = object()
+    self.inserter.process_altloc( data = obj1, coordinates = coords1, identifier = altid1 )
+    self.assertEqual( self.inserter.indexer.regular.calls, [] )
+    self.assertEqual( len( self.inserter.indexer.altlocs ), 1 )
+    self.assertTrue( altid1 in self.inserter.indexer.altlocs )
+    self.assertEqual(
+      self.inserter.indexer.altlocs[ altid1 ].calls,
+      [ ( obj1, coords1 ) ]
+      )
+
+    obj2 = object()
+    coords2 = object()
+    self.inserter.process_altloc( data = obj2, coordinates = coords2, identifier = altid1 )
+    self.assertEqual( self.inserter.indexer.regular.calls, [] )
+    self.assertEqual( len( self.inserter.indexer.altlocs ), 1 )
+    self.assertTrue( altid1 in self.inserter.indexer.altlocs )
+    self.assertEqual(
+      self.inserter.indexer.altlocs[ altid1 ].calls,
+      [ ( obj1, coords1 ), ( obj2, coords2 ) ],
+      )
+
+    altid2 = object()
+    self.inserter.process_altloc( data = obj2, coordinates = coords2, identifier = altid2 )
+    self.assertEqual( self.inserter.indexer.regular.calls, [] )
+    self.assertEqual( len( self.inserter.indexer.altlocs ), 2 )
+    self.assertTrue( altid1 in self.inserter.indexer.altlocs )
+    self.assertTrue( altid2 in self.inserter.indexer.altlocs )
+    self.assertEqual(
+      self.inserter.indexer.altlocs[ altid2 ].calls,
+      [ ( obj2, coords2 ) ],
+      )
+
+
+class FakeIndexer2(object):
+
+  def __init__(self):
+
+    self.objects = []
+
+
+  def add_to(self, objects):
+
+    self.objects.extend( objects )
+
+
+  def close_to(self, centre):
+
+    return self.objects
+
+
+class TestAggregator(unittest.TestCase):
+
+  def setUp(self):
+
+    self.regular = [ object(), object(), object() ]
+    self.altloc_a = [ object(), object(), object(), object() ]
+    self.altloc_b = [ object(), object() ]
+    indexer = altloc.Indexer( factory = FakeIndexer2 )
+    indexer.regular.add_to( objects = self.regular )
+    indexer.add( altloc = "A" )
+    indexer.altlocs[ "A" ].add_to( objects = self.altloc_a )
+    indexer.add( altloc = "B" )
+    indexer.altlocs[ "B" ].add_to( objects = self.altloc_b )
+    self.aggregator = altloc.Aggregator( indexer = indexer )
+
+  def test_basic(self):
+
+    self.assertEqual( self.aggregator.ranges, [] )
+    self.assertEqual( list( self.aggregator.entities ), [] )
+
+
+  def test_regular(self):
+
+    self.aggregator.process_regular( data = object(), coordinates = object() )
+
+    self.assertTrue(
+      ( self.aggregator.ranges == [ self.regular, self.altloc_a, self.altloc_b ] )
+      or ( self.aggregator.ranges == [ self.regular, self.altloc_b, self.altloc_a ] )
+      )
+    self.assertTrue(
+      ( list( self.aggregator.entities ) == ( self.regular + self.altloc_a + self.altloc_b ) )
+      or ( list( self.aggregator.entities ) == ( self.regular + self.altloc_b + self.altloc_a ) )
+      )
+
+
+  def test_altid_a(self):
+
+    self.aggregator.process_altloc(
+      data = object(),
+      coordinates = object(),
+      identifier = "A",
+      )
+
+    self.assertEqual( self.aggregator.ranges, [ self.regular, self.altloc_a ] )
+    self.assertEqual( list( self.aggregator.entities ), self.regular + self.altloc_a )
+
+
+  def test_altid_b(self):
+
+    self.aggregator.process_altloc(
+      data = object(),
+      coordinates = object(),
+      identifier = "B",
+      )
+
+    self.assertEqual( self.aggregator.ranges, [ self.regular, self.altloc_b ] )
+    self.assertEqual( list( self.aggregator.entities ), self.regular + self.altloc_b )
+
+
+  def test_altid_c(self):
+
+    self.aggregator.process_altloc(
+      data = object(),
+      coordinates = object(),
+      identifier = "C",
+      )
+
+    self.assertEqual( self.aggregator.ranges, [ self.regular ] )
+    self.assertEqual( list( self.aggregator.entities ), self.regular )
+
+
+suite_strategies = unittest.TestLoader().loadTestsFromTestCase(
+  TestStrategies
+  )
+suite_description = unittest.TestLoader().loadTestsFromTestCase(
+  TestDescription
+  )
+suite_indexer = unittest.TestLoader().loadTestsFromTestCase(
+  TestIndexer
+  )
+suite_inserter = unittest.TestLoader().loadTestsFromTestCase(
+  TestInserter
+  )
+suite_aggregator = unittest.TestLoader().loadTestsFromTestCase(
+  TestAggregator
+  )
+
+alltests = unittest.TestSuite(
+  [
+    suite_strategies,
+    suite_description,
+    suite_indexer,
+    suite_inserter,
+    suite_aggregator,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+    return alltests
+
+
+if __name__ == "__main__":
+    unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/tests/tst_asa.py
+from __future__ import absolute_import, division, print_function
+
+from mmtbx.geometry import asa
+from mmtbx.geometry import altloc
+
+import iotbx.pdb
+import libtbx.load_env
+
+import os.path
+import unittest
+from six.moves import zip
+from six.moves import range
+
+SOLVENT_RADIUS = 1.4
+
+PDB = os.path.join(
+  libtbx.env.under_dist( "mmtbx", "geometry" ),
+  "tests",
+  "1ahq_trunc.pdb"
+  )
+ROOT = iotbx.pdb.input( PDB ).construct_hierarchy( sort_atoms = False )
+ATOMS = ROOT.atoms()
+
+from mmtbx.geometry import sphere_surface_sampling
+SAMPLING_POINTS = sphere_surface_sampling.golden_spiral( count = 960 )
+
+from cctbx.eltbx import van_der_waals_radii
+TABLE = van_der_waals_radii.vdw.table
+
+PROBE = 1.4
+
+RADII = [
+  TABLE[ atom.determine_chemical_element_simple().strip().capitalize() ]
+  for atom in ATOMS
+  ]
+SPHERES = [
+  asa.sphere( centre = atom.xyz, radius = radius + PROBE, index = index )
+  for ( index, ( atom, radius ) ) in enumerate( zip( ATOMS, RADII ) )
+  ]
+
+DESCRIPTIONS = [
+  altloc.Description(
+    data = s,
+    coordinates = s.centre,
+    altid = altloc.altid_for( atom = atom ),
+    )
+    for ( s, atom ) in zip( SPHERES, ATOMS )
+  ]
+
+class TestSphere(unittest.TestCase):
+
+  def test_creation(self):
+
+    s1 = asa.sphere( centre = ( 0, 0, 0 ), radius = 3, index = 1 )
+    s2 = asa.sphere( centre = ( 0, 0, 0 ), radius = 3, index = 2 )
+
+    self.assertTrue( s1.index != s2.index )
+
+
+  def test_low(self):
+
+    self.assertIterablesAlmostEqual(
+      asa.sphere( centre = ( 1, 2, 3 ), radius = 4, index = 0 ).low,
+      ( -3, -2, -1 ),
+      7,
+      )
+
+
+  def test_high(self):
+
+    self.assertIterablesAlmostEqual(
+      asa.sphere( centre = ( 1, 2, 3 ), radius = 4, index = 0 ).high,
+      ( 5, 6, 7 ),
+      7,
+      )
+
+
+  def assertIterablesAlmostEqual(self, left, right, digits):
+
+    self.assertEqual( len( left ), len( right ) )
+
+    for ( e_left, e_right ) in zip( left, right ):
+      self.assertAlmostEqual( e_left, e_right, digits )
+
+
+class TestTransformation(unittest.TestCase):
+
+  def setUp(self):
+
+    ( self.x, self.y, self.z ) = ( 0.1, 2.5, -3.6 )
+    self.radius = 3.5
+
+    self.transformation = asa.accessibility.transformation(
+      centre = ( self.x, self.y, self.z ),
+      radius = self.radius,
+      )
+
+
+  def transform(self, site):
+
+    ( x, y, z ) = site
+    return ( self.radius * x + self.x, self.radius * y + self.y, self.radius * z + self.z )
+
+
+  def test_single_site(self):
+
+    site = ( 1, 2, 3 )
+
+    self.assertIterablesAlmostEqual(
+      self.transformation( point = site ),
+      self.transform( site = site ),
+      7,
+      )
+
+
+  def test_range(self):
+
+    from mmtbx.geometry import sphere_surface_sampling
+    sampling = sphere_surface_sampling.golden_spiral( count = 960 )
+    transformed = asa.accessibility.transform(
+      range = sampling.points,
+      transformation = self.transformation,
+      )
+    self.assertEqual( len( sampling.points ), len( transformed ) )
+
+    for ( o, t ) in zip( sampling.points, transformed ):
+      self.assertIterablesAlmostEqual( t, self.transform( site = o ), 7 )
+
+
+  def get_transformed_points(self):
+
+    from mmtbx.geometry import sphere_surface_sampling
+    sampling = sphere_surface_sampling.golden_spiral( count = 5 )
+    return (
+      list( sampling.points ),
+      asa.accessibility.transform(
+        range = sampling.points,
+        transformation = self.transformation,
+        )
+      )
+
+  def test_transformed_range_lifetime(self):
+
+    ( points, transformed ) = self.get_transformed_points()
+    for ( o, t ) in zip( points, transformed ):
+      self.assertIterablesAlmostEqual( t, self.transform( site = o ), 7 )
+
+
+  def assertIterablesAlmostEqual(self, left, right, digits):
+
+    self.assertEqual( len( left ), len( right ) )
+
+    for ( e_left, e_right ) in zip( left, right ):
+      self.assertAlmostEqual( e_left, e_right, digits )
+
+
+class TestLinearSpheresIndexer(unittest.TestCase):
+
+  def setUp(self):
+
+    self.indexer = asa.indexing.linear_spheres()
+
+
+  def test_structure(self):
+
+    for sphere in SPHERES:
+      self.indexer.add( object = sphere, position = sphere.centre )
+
+    self.assertEqual( len( self.indexer ), len( SPHERES ) )
+
+    for sphere in SPHERES:
+      closeby = self.indexer.close_to( centre = sphere.centre )
+      self.assertEqual( len( closeby ), len( SPHERES ) )
+
+
+class TestHashSpheresIndexer(unittest.TestCase):
+
+  def setUp(self):
+
+    self.indexer = asa.indexing.hash_spheres(
+      voxelizer = asa.get_voxelizer_for( descriptions = DESCRIPTIONS ),
+      margin = 1,
+      )
+
+
+  def test_structure(self):
+
+    for sphere in SPHERES:
+      self.indexer.add( object = sphere, position = sphere.centre )
+
+    self.assertEqual( len( self.indexer ), len( SPHERES ) )
+
+
+class TestPredicate(unittest.TestCase):
+
+  def setUp(self):
+
+    self.sphere = asa.sphere( centre = ( 1, 1, 1 ), radius = 2, index = 0 )
+    self.predicate = asa.accessibility.overlap_equality_predicate( object = self.sphere )
+    self.overlap1 = asa.sphere( centre = ( 1, 1, 1 ), radius = 0.1, index = 1 )
+    self.overlap2 = asa.sphere( centre = ( 2, 2, 2 ), radius = 0.1, index = 1 )
+    self.no_overlap = asa.sphere( centre = ( -1, -1, -1 ), radius = 0.1, index = 1 )
+
+
+  def test_filtering(self):
+
+    self.assertFalse( self.predicate( other = self.sphere ) )
+    self.assertTrue( self.predicate( other =  self.overlap1 ) )
+    self.assertTrue( self.predicate( other =  self.overlap2 ) )
+    self.assertFalse( self.predicate( other = self.no_overlap ) )
+
+
+  def make_indexer_linear(self):
+
+    indexer = asa.indexing.linear_spheres()
+    indexer.add( object = self.sphere, position = self.sphere.centre )
+    indexer.add( object = self.overlap1, position = self.overlap1.centre )
+    indexer.add( object = self.overlap2, position = self.overlap2.centre )
+    indexer.add( object = self.no_overlap, position = self.no_overlap.centre )
+
+    return indexer
+
+
+  def test_filtering_linear(self):
+
+    indexer = self.make_indexer_linear()
+
+    range = asa.accessibility.filter(
+      range = indexer.close_to( centre = self.sphere.centre ),
+      predicate = self.predicate,
+      )
+    self.assertFalse( range.empty() )
+    self.assertEqual( len( range ), 2 )
+    self.assertTrue( self.overlap1.index in set( s.index for s in range ) )
+    self.assertTrue( self.overlap2.index in set( s.index for s in range ) )
+
+    range = asa.accessibility.filter(
+      range = indexer.close_to( centre = self.no_overlap.centre ),
+      predicate = asa.accessibility.overlap_equality_predicate( object = self.no_overlap ),
+      )
+    self.assertTrue( range.empty() )
+    self.assertEqual( len( range ), 0 )
+
+
+  def get_overlapping_spheres(self, sphere):
+
+    return asa.accessibility.filter(
+      range = self.make_indexer_linear().close_to( centre = sphere.centre ),
+      predicate = asa.accessibility.overlap_equality_predicate( object = sphere ),
+      )
+
+
+  def test_filtering_lifetime(self):
+
+    range = self.get_overlapping_spheres( sphere = self.sphere )
+    self.assertEqual( len( range ), 2 )
+    self.assertTrue( self.overlap1.index in set( s.index for s in range ) )
+    self.assertTrue( self.overlap2.index in set( s.index for s in range ) )
+
+
+class TestPythagoreanChecker(unittest.TestCase):
+
+  def setUp(self):
+
+    self.checker = asa.accessibility.pythagorean_checker()
+
+
+  def test_add_from_list(self):
+
+    self.assertTrue( self.checker( point = ( 1, 1, 1 ) ) )
+    s = asa.sphere( centre = ( 1, 1, 1 ), radius = 0.1, index = 0 )
+    self.checker.add( neighbours = [ s ] )
+    self.assertFalse( self.checker( point = ( 1, 1, 1 ) ) )
+    self.assertTrue( self.checker( point = ( 1.2, 1, 1 ) ) )
+
+
+  def test_add_from_range_1(self):
+
+    self.assertTrue( self.checker( point = ( 1, 1, 1 ) ) )
+
+    s = asa.sphere( centre = ( 1, 1, 1 ), radius = 0.1, index = 0 )
+    indexer = asa.indexing.linear_spheres()
+    indexer.add( object = s, position = s.centre )
+
+    neighbours = asa.accessibility.filter(
+      range = indexer.close_to( centre = s.centre ),
+      predicate = asa.accessibility.overlap_equality_predicate( object = s ),
+      )
+
+    self.assertEqual( len( neighbours ), 0 )
+    self.checker.add( neighbours = neighbours )
+    self.assertTrue( self.checker( point = ( 1, 1, 1 ) ) )
+
+    neighbours = asa.accessibility.filter(
+      range = indexer.close_to( centre = s.centre ),
+      predicate = asa.accessibility.overlap_equality_predicate(
+        object = asa.sphere( centre = ( 1, 1, 1 ), radius = 0.1, index = 1 )
+        ),
+      )
+    self.assertEqual( len( neighbours ), 1 )
+    self.checker.add( neighbours = neighbours )
+    self.assertFalse( self.checker( point = ( 1, 1, 1 ) ) )
+
+
+  def test_add_from_range_2(self):
+
+    self.assertTrue( self.checker( point = ( 1, 1, 1 ) ) )
+
+    s = asa.sphere( centre = ( 1, 1, 1 ), radius = 0.1, index = 0 )
+    indexer = asa.indexing.linear_spheres()
+    indexer.add( object = s, position = s.centre )
+
+    neighbours = asa.accessibility.filter(
+      range = indexer.close_to( centre = s.centre ),
+      predicate = asa.accessibility.overlap_equality_predicate(
+        object = asa.sphere( centre = ( 2, 2, 2 ), radius = 0.1, index = 1 )
+        ),
+      )
+    self.assertEqual( len( neighbours ), 0 )
+    self.checker.add( neighbours = neighbours )
+    self.assertTrue( self.checker( point = ( 1, 1, 1 ) ) )
+
+    neighbours = asa.accessibility.filter(
+      range = indexer.close_to( centre = s.centre ),
+      predicate = asa.accessibility.overlap_equality_predicate(
+        object = asa.sphere( centre = ( 2, 2, 2 ), radius = 1.64, index = 2 )
+        ),
+      )
+    self.assertEqual( len( neighbours ), 1 )
+    self.checker.add( neighbours = neighbours )
+    self.assertFalse( self.checker( point = ( 1, 1, 1 ) ) )
+
+
+class TestAccessibleSurfaceArea(unittest.TestCase):
+
+  ACCESSIBLES = [
+    431, 322,  43, 228,   0,   4,   1, 213,  41,  70,  10, 302, 140, 140, 0, 43,
+    0,  0, 271,   1,  0,   0,   0, 141,  67, 144, 337, 125,   0,
+    0,   1,   0,  54,   0,   0,  25,   0,   0,  16,  33, 191,  76, 279,
+    409, 119,   7,  21,   0,   0, 119,  61, 164, 108,  49,   0,   0,   9,
+    16,  43,   3,   0,   0,  11,   2,   0,  23, 288, 169,   0,   4,  22,
+    0,   0,  57,  39,  68, 322,  50,   4, 325, 117,   0,   0,   0,   0,
+    0,   0,   0, 120,   1,   0,  67,  16, 323,   0,   0,   0,   0,  26,
+    21,  43,  67, 176,  97, 115,   0,   0,   0,   6,   0,  60,   5, 247,
+    0,   0,  75,   0,   0,   0,   0,   0,   0,  54,  11,  35, 117,   0,
+    0,   0,   0,  23,   0,  22,  46, 222,   0,   0,  38,   0, 134,   5,
+    41,   0,   0,   4,   0, 121, 101, 173,   0,   0,   0, 126,   6,   1,
+    0,  84,   0,   0,  70,  17, 207,   0,   0,  12,   2, 115, 115,  48,
+    25,  90, 366,  30,   0, 307, 315,   0,  56,   0,  59,  11,  88,  55,
+    108,  46,   0, 207, 152,   0,   0,   0,  39,   0,   0,   0,   0, 128,
+    0,   0,  43,   0,   0,   0,   0, 156,   0,  45,  59,  11,  56,  23,
+    55,   0, 168,   0, 109, 291, 264,   0,  12,   0,   0, 134,   0,   0,
+    11,   0,   0,   0, 118,   0,  51,   0,   0,   0, 122,   0,   0,   0,
+    75,   0,  10,   0,   0,   0,   0, 186,   0,  20,   0,   0,   5, 222,
+    44,  14,   3, 144,   4, 167,  47,  48,   0,  47,   5,   0, 118,   0,
+    87,  37,  12,   0, 247, 272, 333,   0,   0,   0,  47,  40, 117,   0,
+    391, 117,   0,  23,  20,  60,  53,   0,   0,  14,   0,  20, 259,  11,
+    70,  16, 253, 463, 119,   0,  77,   3, 152, 252,  29,  12,  59,   0,
+    0,   0, 114,  91,  51, 141,  55,   0, 334, 244,   0,  26,   0,  58,
+    79,  44, 325,   0, 119,   0,   0,   0,   0,   4,   0,  37, 223, 299,
+    0,   0,   0,   0,   0,   9, 115,  93,   0,   0,   0,   0,   0,  50,
+    134,  60,   0,   0,   0,   1, 133,  26,  42,   0,  41,   0,   0,   0,
+    81,   0,  31,   7,  38, 308,   0,   0,   0,   0,   0,  26,  21,   7,
+    145, 256,  16,   0, 117, 306,   1,   0,   9, 218,  15,  72, 133, 127,
+    0,  23,   0,   0,   0,   2, 153,   0,   0, 137,   0,   0,   1,  47,
+    125, 237, 101,   0,   0,  23, 153, 181,  63, 337,  65,  68, 338, 206,
+    11,  28,   0,   0,  75,   0,   0,   1,   1,   1,  53,  26, 346,   0,
+    49,   3,  35,   0,   0, 183,  23, 172, 126,  31,  99,  35, 147, 130,
+    226,   5,   5,   0,   0, 129, 201,  63, 209, 262,  46,   0,  19,   0,
+    137,  52,  56, 292, 131,   0,   0,   0,   0, 145,  11,   2,   1,  21,
+    88, 137, 276,   0,   0,  20,   0, 228,   0,  73,  82, 183,   9,   0,
+    285, 299, 326,   0,  62, 149, 407, 174,  55,   0, 178,  27, 431, 427,
+    383, 363,   0,   6,  36,   0,   0,   0,   0,   2,   0,   0, 210, 187,
+    231,  73, 213, 246,   0,   8,   3,   0,   0, 135,   0,   0,   0,   0,
+    0,   0,   0,   0,   0, 116,   0,   0,   0,   0,   0, 124,  53,  90,
+    84, 219, 410, 960, 957, 960, 960, 960, 948, 586,   0, 960, 958, 960,
+    635, 960, 542, 726, 960, 511, 828, 960, 875,
+    ]
+
+  def check_indexer(self, indexer, type):
+
+    self.assertTrue( isinstance( indexer.regular, type ) )
+    self.assertEqual(
+      len( indexer.regular ),
+      len( [ a for a in ATOMS if not a.parent().altloc ] ),
+      )
+
+
+  def test_get_linear_indexer(self):
+
+    indexer = asa.get_linear_indexer_for( descriptions = DESCRIPTIONS )
+    self.assertTrue( isinstance( indexer, altloc.Indexer ) )
+    self.check_indexer( indexer = indexer, type = asa.indexing.linear_spheres )
+
+
+  def test_get_hash_indexer(self):
+
+    indexer = asa.get_hash_indexer_for( descriptions = DESCRIPTIONS )
+    self.assertTrue( isinstance( indexer, altloc.Indexer ) )
+    self.check_indexer( indexer = indexer, type = asa.indexing.hash_spheres )
+
+
+  def test_get_optimal_indexer(self):
+
+    indexer = asa.get_optimal_indexer_for( descriptions = DESCRIPTIONS )
+    self.assertTrue( isinstance( indexer, altloc.Indexer ) )
+    self.check_indexer( indexer = indexer, type = asa.indexing.linear_spheres )
+
+
+  def test_get_voxelizer_for(self):
+
+    voxelizer = asa.get_voxelizer_for( descriptions = DESCRIPTIONS )
+    from mmtbx.geometry import shared_types
+    self.assertTrue( isinstance( voxelizer, shared_types.voxelizer ) )
+
+
+  def test_asa_calculation_simple_linear(self):
+
+    result = asa.calculate(
+      atoms = ATOMS,
+      indexer_selector = asa.get_linear_indexer_for,
+      calculation = asa.simple_surface_calculation,
+      )
+    self.asa_result_check( result = result )
+
+
+  def test_asa_calculation_aa_linear(self):
+
+    result = asa.calculate(
+      atoms = ATOMS,
+      indexer_selector = asa.get_linear_indexer_for,
+      calculation = asa.altloc_averaged_calculation,
+      )
+    self.asa_result_check( result = result )
+
+
+  def test_asa_calculation_aa_hash(self):
+
+    result = asa.calculate(
+      atoms = ATOMS,
+      indexer_selector = asa.get_hash_indexer_for,
+      calculation = asa.altloc_averaged_calculation,
+      )
+    self.asa_result_check( result = result )
+
+
+  def test_asa_calculation_simple_hash(self):
+
+    result = asa.calculate(
+      atoms = ATOMS,
+      indexer_selector = asa.get_hash_indexer_for,
+      calculation = asa.simple_surface_calculation,
+      )
+    self.asa_result_check( result = result )
+
+
+  def test_asa_calculator0(self):
+
+    myatoms = ATOMS[:2]
+    myradii = ( 2, -2 )
+
+    calc = asa.calculator(
+      coordinate_adaptor = asa.coordinate_adaptor( array = myatoms.extract_xyz() ),
+      radius_adaptor = asa.radius_adaptor( array = myradii ),
+      probe = PROBE,
+      )
+    self.assertEqual( calc.accessible_surface_points( index = 0 ), 960 )
+    self.assertRaises( RuntimeError, calc.accessible_surface_points, index = 1 )
+
+
+  def test_asa_calculator1(self):
+
+    myatoms = ATOMS[:12]
+    myatoms.extend( ATOMS[13:] )
+    mycoords = myatoms.extract_xyz()
+    myradii = RADII[:12] + RADII[13:]
+
+    calc = asa.calculator(
+      coordinate_adaptor = asa.coordinate_adaptor( array = mycoords ),
+      radius_adaptor = asa.radius_adaptor( array = myradii ),
+      probe = PROBE,
+      )
+    myvalues = self.ACCESSIBLES[:12] + self.ACCESSIBLES[13:]
+
+    for ( index, count, radius ) in zip( range( len( myatoms )), myvalues, myradii ):
+      self.assertEqual( calc.accessible_surface_points( index = index ), count )
+      self.assertAlmostEqual(
+        calc.accessible_surface_area( index = index ),
+        SAMPLING_POINTS.unit_area * count * ( radius + PROBE ) ** 2,
+        7,
+        )
+
+    self.assertTrue(
+      calc.is_overlapping_sphere( centre = mycoords[0], radius = myradii[0] )
+      )
+    self.assertFalse(
+      calc.is_overlapping_sphere( centre = ( 0, 0, 0 ), radius = 10 )
+      )
+    self.assertTrue(
+      calc.is_overlapping_sphere( centre = ( 0, 0, 0 ), radius = 15 )
+      )
+
+
+  def test_asa_calculator2(self):
+
+    myatoms = ATOMS[:12]
+    myatoms.extend( ATOMS[13:] )
+    myradii = RADII[:12] + RADII[13:]
+
+    calc = asa.calculator(
+      coordinate_adaptor = asa.coordinate_adaptor(
+        array = myatoms,
+        transformation = lambda a: a.xyz,
+        ),
+      radius_adaptor = asa.radius_adaptor( array = myradii ),
+      probe = PROBE,
+      )
+    myvalues = self.ACCESSIBLES[:12] + self.ACCESSIBLES[13:]
+
+    for ( index, count, radius ) in zip( range( len( myatoms )), myvalues, myradii ):
+      self.assertEqual( calc.accessible_surface_points( index = index ), count )
+      self.assertAlmostEqual(
+        calc.accessible_surface_area( index = index ),
+        SAMPLING_POINTS.unit_area * count * ( radius + PROBE ) ** 2,
+        7,
+        )
+
+
+  def test_is_overlapping_sphere(self):
+
+    mycoord = ATOMS.extract_xyz()[0]
+    myradius = 2
+
+    calc = asa.calculator(
+      coordinate_adaptor = asa.coordinate_adaptor( array = [ mycoord ] ),
+      radius_adaptor = asa.radius_adaptor( array = [ myradius ] ),
+      probe = PROBE,
+      )
+    self.assertTrue(
+      calc.is_overlapping_sphere( centre = mycoord, radius = myradius )
+      )
+
+    (x, y, z ) = mycoord
+    diff = 1.9 * myradius
+    self.assertTrue(
+      calc.is_overlapping_sphere( centre = ( x + diff, y, z ), radius = myradius )
+      )
+    self.assertTrue(
+      calc.is_overlapping_sphere( centre = ( x, y + diff, z ), radius = myradius )
+      )
+    self.assertTrue(
+      calc.is_overlapping_sphere( centre = ( x, y, z + diff ), radius = myradius )
+      )
+
+    diff = 2.1 * myradius
+    self.assertFalse(
+      calc.is_overlapping_sphere( centre = ( x + diff, y, z ), radius = myradius )
+      )
+    self.assertFalse(
+      calc.is_overlapping_sphere( centre = ( x, y + diff, z ), radius = myradius )
+      )
+    self.assertFalse(
+      calc.is_overlapping_sphere( centre = ( x, y, z + diff ), radius = myradius )
+      )
+
+    import math
+    diff = 1.9 * myradius / math.sqrt( 3 )
+    self.assertTrue(
+      calc.is_overlapping_sphere( centre = ( x + diff, y + diff, z + diff ), radius = myradius )
+      )
+
+    diff = 2.1  * myradius / math.sqrt( 3 )
+    self.assertFalse(
+      calc.is_overlapping_sphere( centre = ( x + diff, y + diff, z + diff ), radius = myradius )
+      )
+
+
+  def test_asa_const_radius_calculator(self):
+
+    myatoms = ATOMS[:2]
+
+    calc = asa.const_radius_calculator(
+      coordinate_adaptor = asa.coordinate_adaptor( array = myatoms.extract_xyz() ),
+      radius = 2,
+      probe = PROBE,
+      )
+    self.assertEqual( calc.accessible_surface_points( index = 0 ), 583 )
+    self.assertEqual( calc.accessible_surface_points( index = 1 ), 586 )
+
+
+  def asa_result_check(self, result):
+
+    self.assertEqual( len( result.values ), len( self.ACCESSIBLES ) )
+    self.assertEqual( len( result.values ), len( SPHERES ) )
+
+    self.assertEqual( len( result.points ), len( self.ACCESSIBLES ) )
+    self.assertEqual( result.points, self.ACCESSIBLES )
+
+    self.assertEqual( len( result.areas ), len( self.ACCESSIBLES ) )
+
+    for ( count, sphere, area ) in zip( self.ACCESSIBLES, SPHERES, result.areas ):
+      self.assertAlmostEqual(
+        area,
+        SAMPLING_POINTS.unit_area * count * sphere.radius_sq,
+        7,
+        )
+
+
+suite_sphere = unittest.TestLoader().loadTestsFromTestCase(
+  TestSphere
+  )
+suite_transformation = unittest.TestLoader().loadTestsFromTestCase(
+  TestTransformation
+  )
+suite_linear_spheres_indexer = unittest.TestLoader().loadTestsFromTestCase(
+  TestLinearSpheresIndexer
+  )
+suite_hash_spheres_indexer = unittest.TestLoader().loadTestsFromTestCase(
+  TestHashSpheresIndexer
+  )
+suite_predicate = unittest.TestLoader().loadTestsFromTestCase(
+  TestPredicate
+  )
+suite_pythagorean_checker = unittest.TestLoader().loadTestsFromTestCase(
+  TestPythagoreanChecker
+  )
+suite_accessible_surface_area = unittest.TestLoader().loadTestsFromTestCase(
+  TestAccessibleSurfaceArea
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_sphere,
+    suite_transformation,
+    suite_linear_spheres_indexer,
+    suite_hash_spheres_indexer,
+    suite_predicate,
+    suite_pythagorean_checker,
+    suite_accessible_surface_area,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+    return alltests
+
+
+if __name__ == "__main__":
+    unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/tests/tst_clash.py
+from __future__ import absolute_import, division, print_function
+
+from mmtbx.geometry import clash
+
+import unittest
+from six.moves import zip
+
+class TestAltlocStrategy(unittest.TestCase):
+
+  def setUp(self):
+
+    self.regular1 = clash.altloc_strategy.regular()
+    self.regular2 = clash.altloc_strategy.regular()
+    self.altloc1 = clash.altloc_strategy.alternate( identifier = "A" )
+    self.altloc2 = clash.altloc_strategy.alternate( identifier = "A" )
+    self.altloc3 = clash.altloc_strategy.alternate( identifier = "B" )
+
+
+  def test_equality(self):
+
+    self.assertFalse( self.regular1 == self.regular2 )
+    self.assertFalse( self.regular1 == self.altloc1 )
+    self.assertFalse( self.regular1 == self.altloc2 )
+    self.assertFalse( self.regular1 == self.altloc3 )
+
+    self.assertFalse( self.altloc1 == self.altloc2 )
+    self.assertFalse( self.altloc1 == self.altloc3 )
+
+
+  def run_interaction_tests(self, left, right, outcome):
+
+    self.assertEqual( left.is_interacting_with( other = right ), outcome )
+    self.assertEqual( right.is_interacting_with( other = left ), outcome )
+
+
+  def test_interaction_regular(self):
+
+    self.run_interaction_tests( self.regular1, self.regular1, True )
+    self.run_interaction_tests( self.regular1, self.regular2, True )
+    self.run_interaction_tests( self.regular1, self.altloc1, True )
+    self.run_interaction_tests( self.regular1, self.altloc2, True )
+    self.run_interaction_tests( self.regular1, self.altloc3, True )
+
+
+  def test_interaction_altloc(self):
+
+    self.run_interaction_tests( self.altloc1, self.altloc1, True )
+    self.run_interaction_tests( self.altloc1, self.altloc2, True )
+    self.run_interaction_tests( self.altloc1, self.altloc3, False )
+
+
+class TestSphere(unittest.TestCase):
+
+  def setUp(self):
+
+    self.centre = ( 1, 2, 3 )
+    self.radius = 4
+    self.molecule = 5
+    self.atom = 6
+    self.symop = clash.sgtbx.rt_mx( ( 1, 0, 0, 0, 1, 0, 0, 0, 1 ), ( 0, 0, 1 ) )
+
+    self.regular = clash.altloc_strategy.regular()
+    self.altloc_a = clash.altloc_strategy.alternate( identifier = "A" )
+    self.altloc_b = clash.altloc_strategy.alternate( identifier = "B" )
+
+
+  def assertVectorsAlmostEqual(self, left, right, precision = 7):
+
+    self.assertEqual( len( left ), len( right ) )
+
+    for ( l, r ) in zip( left, right ):
+      self.assertAlmostEqual( l, r, precision )
+
+
+  def check_sphere(self, sphere):
+
+    self.assertVectorsAlmostEqual( self.centre, sphere.centre )
+    self.assertAlmostEqual( self.radius, sphere.radius )
+    self.assertEqual( self.molecule, sphere.molecule )
+    self.assertEqual( self.atom, sphere.atom )
+    self.assertEqual( self.symop, sphere.symop )
+
+
+  def check_altloc(self, sphere, interacting = [], noninteracting = []):
+
+    altloc = sphere.altloc
+
+    for a in interacting:
+      self.assertTrue( altloc.is_interacting_with( other = a ) )
+
+    for a in noninteracting:
+      self.assertFalse( altloc.is_interacting_with( other = a ) )
+
+
+  def test_regular(self):
+
+    sphere = clash.sphere(
+      centre = self.centre,
+      radius = self.radius,
+      molecule = self.molecule,
+      atom = self.atom,
+      altloc = self.regular,
+      symop = self.symop,
+      )
+    self.check_sphere( sphere = sphere )
+    self.check_altloc(
+      sphere = sphere,
+      interacting = [ self.regular, self.altloc_a, self.altloc_b],
+      )
+
+
+  def test_altloc_a(self):
+
+    sphere = clash.sphere(
+      centre = self.centre,
+      radius = self.radius,
+      molecule = self.molecule,
+      atom = self.atom,
+      altloc = self.altloc_a,
+      symop = self.symop,
+      )
+    self.check_sphere( sphere = sphere )
+    self.check_altloc(
+      sphere = sphere,
+      interacting = [ self.regular, self.altloc_a ],
+      noninteracting = [ self.altloc_b ],
+      )
+
+
+  def test_altloc_b(self):
+
+    sphere = clash.sphere(
+      centre = self.centre,
+      radius = self.radius,
+      molecule = self.molecule,
+      atom = self.atom,
+      altloc = self.altloc_b,
+      symop = self.symop,
+      )
+    self.check_sphere( sphere = sphere )
+    self.check_altloc(
+      sphere = sphere,
+      interacting = [ self.regular, self.altloc_b],
+      noninteracting = [ self.altloc_a ],
+      )
+
+
+  def test_altloc_c(self):
+
+    sphere = clash.sphere(
+      centre = self.centre,
+      radius = self.radius,
+      molecule = self.molecule,
+      atom = self.atom,
+      altloc = clash.altloc_strategy.alternate( identifier = "C" ),
+      symop = self.symop,
+      )
+    self.check_sphere( sphere = sphere )
+    self.check_altloc(
+      sphere = sphere,
+      interacting = [ self.regular ],
+      noninteracting = [ self.altloc_a, self.altloc_b ],
+      )
+
+
+class TestOverlapInteractionPredicate(unittest.TestCase):
+
+  def setUp(self):
+
+    self.centre = ( 0, 0, 0 )
+    self.radius = 1.7
+    self.molecule = 0
+    self.atom = 0
+    self.symop = clash.sgtbx.rt_mx( ( 1, 0, 0, 0, 1, 0, 0, 0, 1 ), ( 0, 0, 0 ) )
+    self.symop2 = clash.sgtbx.rt_mx( ( 1, 0, 0, 0, 1, 0, 0, 0, 1 ), ( 0, 0, 1 ) )
+    self.altloc = clash.altloc_strategy.alternate( identifier = "A" )
+
+    self.predicate = clash.overlap_interaction_predicate(
+      object = clash.sphere(
+        centre = self.centre,
+        radius = self.radius,
+        molecule = self.molecule,
+        atom = self.atom,
+        altloc = self.altloc,
+        symop = self.symop,
+        ),
+      tolerance = 0,
+      )
+
+
+  def test_same_atom(self):
+
+    # Exact same
+    self.assertFalse(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule,
+          atom = self.atom,
+          altloc = self.altloc,
+          symop = self.symop,
+          )
+        )
+      )
+
+    # Symmetry equivalent
+    self.assertTrue(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule,
+          atom = self.atom,
+          altloc = self.altloc,
+          symop = self.symop2,
+          )
+        )
+      )
+    self.assertFalse(
+      self.predicate(
+        other = clash.sphere(
+          centre = ( 0, 0, 3 * self.radius ),
+          radius = self.radius,
+          molecule = self.molecule,
+          atom = self.atom,
+          altloc = self.altloc,
+          symop = self.symop2,
+          )
+        )
+      )
+
+
+  def test_same_molecule(self):
+
+    # Exact same
+    self.assertFalse(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule,
+          atom = self.atom + 1,
+          altloc = self.altloc,
+          symop = self.symop,
+          )
+        )
+      )
+
+    # Symmetry equivalent
+    self.assertTrue(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule,
+          atom = self.atom + 1,
+          altloc = self.altloc,
+          symop = self.symop2,
+          )
+        )
+      )
+    self.assertFalse(
+      self.predicate(
+        other = clash.sphere(
+          centre = ( 0, 0, 3 * self.radius ),
+          radius = self.radius,
+          molecule = self.molecule,
+          atom = self.atom + 1,
+          altloc = self.altloc,
+          symop = self.symop2,
+          )
+        )
+      )
+    self.assertFalse(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule,
+          atom = self.atom + 1,
+          altloc = clash.altloc_strategy.alternate( identifier = "B" ),
+          symop = self.symop2,
+          )
+        )
+      )
+
+
+  def test_other_molecules(self):
+
+    self.assertTrue(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule + 1,
+          atom = self.atom,
+          altloc = self.altloc,
+          symop = self.symop,
+          )
+        )
+      )
+    self.assertTrue(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule + 1,
+          atom = self.atom,
+          altloc = self.altloc,
+          symop = self.symop2,
+          )
+        )
+      )
+    self.assertFalse(
+      self.predicate(
+        other = clash.sphere(
+          centre = self.centre,
+          radius = self.radius,
+          molecule = self.molecule + 1,
+          atom = self.atom,
+          altloc = clash.altloc_strategy.alternate( identifier = "B" ),
+          symop = self.symop,
+          )
+        )
+      )
+
+
+class TestLinearSpheresIndexer(unittest.TestCase):
+
+  def setUp(self):
+
+    self.indexer = clash.indexing.linear_spheres()
+
+    self.centre = ( 1, 2, 3 )
+    self.radius = 4
+    self.molecule = 5
+    self.atom = 6
+    self.altloc = clash.altloc_strategy.regular()
+    self.symop = clash.sgtbx.rt_mx( ( 1, 0, 0, 0, 1, 0, 0, 0, 1 ), ( 0, 0, 1 ) )
+
+
+  def test_structure(self):
+
+    self.assertEqual( len( self.indexer ), 0 )
+
+    sphere = clash.sphere(
+      centre = self.centre,
+      radius = self.radius,
+      molecule = self.molecule,
+      atom = self.atom,
+      altloc = self.altloc,
+      symop = self.symop,
+      )
+
+    self.indexer.add( object = sphere, position = sphere.centre )
+
+    self.assertEqual( len( self.indexer ), 1 )
+
+    closeby = self.indexer.close_to( centre = sphere.centre )
+    self.assertEqual( len( closeby ), 1 )
+
+    spheres = list( closeby )
+
+    self.assertEqual( sphere.atom, spheres[0].atom )
+    self.assertEqual( sphere.molecule, spheres[0].molecule )
+    self.assertEqual( sphere.symop, spheres[0].symop )
+
+
+class TestHashSpheresIndexer(unittest.TestCase):
+
+  def setUp(self):
+
+    import mmtbx.geometry.shared_types
+    self.indexer = clash.indexing.hash_spheres(
+      voxelizer = mmtbx.geometry.shared_types.voxelizer(
+        base = ( 0, 0, 0 ),
+        step = ( 1, 1, 1 ),
+        ),
+      margin = 1,
+      )
+
+    self.centre = ( 1, 2, 3 )
+    self.radius = 4
+    self.molecule = 5
+    self.atom = 6
+    self.altloc = clash.altloc_strategy.regular()
+    self.symop = clash.sgtbx.rt_mx( ( 1, 0, 0, 0, 1, 0, 0, 0, 1 ), ( 0, 0, 1 ) )
+
+
+  def test_structure(self):
+
+    self.assertEqual( len( self.indexer ), 0 )
+
+    sphere = clash.sphere(
+      centre = self.centre,
+      radius = self.radius,
+      molecule = self.molecule,
+      atom = self.atom,
+      altloc = self.altloc,
+      symop = self.symop,
+      )
+
+    self.indexer.add( object = sphere, position = sphere.centre )
+
+    self.assertEqual( len( self.indexer ), 1 )
+
+    closeby = self.indexer.close_to( centre = sphere.centre )
+    self.assertEqual( len( closeby ), 1 )
+
+    spheres = list( closeby )
+
+    self.assertEqual( sphere.atom, spheres[0].atom )
+    self.assertEqual( sphere.molecule, spheres[0].molecule )
+    self.assertEqual( sphere.symop, spheres[0].symop )
+
+    closeby = self.indexer.close_to( centre = [ c + 3 for c in self.centre ] )
+    self.assertEqual( len( closeby ), 0 )
+
+
+suite_altloc_strategy = unittest.TestLoader().loadTestsFromTestCase(
+  TestAltlocStrategy
+  )
+suite_sphere = unittest.TestLoader().loadTestsFromTestCase(
+  TestSphere
+  )
+suite_overlap_interaction_predicate = unittest.TestLoader().loadTestsFromTestCase(
+  TestOverlapInteractionPredicate
+  )
+suite_linear_spheres_indexer = unittest.TestLoader().loadTestsFromTestCase(
+  TestLinearSpheresIndexer
+  )
+suite_hash_spheres_indexer = unittest.TestLoader().loadTestsFromTestCase(
+  TestHashSpheresIndexer
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_altloc_strategy,
+    suite_sphere,
+    suite_overlap_interaction_predicate,
+    suite_linear_spheres_indexer,
+    suite_hash_spheres_indexer,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+    return alltests
+
+
+if __name__ == "__main__":
+    unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/tests/tst_indexing.py
+from __future__ import absolute_import, division, print_function
+
+from mmtbx.geometry import indexing
+
+import unittest
+
+OBJECTS = [
+  ( ( 0, 0, 0 ), 1 ),
+  ( ( 0.5, 0.5, 0.5 ), 1.5 ),
+  ( ( 0.7, 0.7, 0.7 ), 1 ),
+  ( ( 0, 0, 3 ), 1.7 ),
+  ( ( 1, 1, 1 ), 2 ),
+  ( ( 3, 3, 3 ), 1 ),
+  ( ( 4, 4, 4 ), "foo" ),
+  ( ( 5, 5, 5 ), 3 ),
+  ( ( 6, 6, 6 ), 4 ),
+  ( ( 7, 7, 7 ), 5 ),
+  ]
+
+class TestLinearIndexer(unittest.TestCase):
+
+  def test_1(self):
+
+    indexer = indexing.linear()
+
+    for ( coords, obj ) in OBJECTS:
+      indexer.add( object = obj, position = coords )
+
+    self.assertEqual( len( indexer ), len( OBJECTS ) )
+
+    for ( coords, obj ) in OBJECTS:
+      closeby = indexer.close_to( centre = coords )
+      self.assertEqual( len( closeby ), len( OBJECTS ) )
+      self.assertTrue( obj in closeby )
+      self.assertFalse( "bar" in closeby )
+
+
+class TestHashIndexer(unittest.TestCase):
+
+  def split_sorted(self, input_list):
+    ints = [x for x in input_list if isinstance(x, (int, float))]
+    strs = [x for x in input_list if isinstance(x, str)]
+    return sorted(ints) + sorted(strs)
+
+  def test_1(self):
+
+    from mmtbx.geometry.shared_types import voxelizer
+    v = voxelizer( base = ( 0, 0, 0 ), step = ( 1, 1, 1 ) )
+    indexer = indexing.hash( voxelizer = v, margin = 1 )
+
+    for ( coords, obj ) in OBJECTS:
+      indexer.add( object = obj, position = coords )
+
+    self.assertEqual( len( indexer ), len( OBJECTS ) )
+    self.assertEqual( indexer.cubes(), 8 )
+
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0, 0, 0 ) ) ),
+      [ 1, 1, 1.5, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0.5, 0.5, 0.5 ) ) ),
+      [ 1, 1, 1.5, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0, 0, 3 ) ) ),
+      [ 1.7 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 1, 1, 1 ) ) ),
+      [ 1, 1, 1.5, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 2, 2, 2 ) ) ),
+      [ 1, 2 ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 3, 3, 3 ) ) ),
+      [ 1, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 4, 4, 4 ) ) ),
+      [ 1, 3, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 5, 5, 5 ) ) ),
+      [ 3, 4, "foo" ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 6, 6, 6 ) ) ),
+      [ 3, 4, 5 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 7, 7, 7 ) ) ),
+      [ 4, 5 ],
+      )
+
+
+  def test_2(self):
+
+    from mmtbx.geometry.shared_types import voxelizer
+    v = voxelizer( base = ( 0, 0, 0 ), step = ( 1, 1, 1 ) )
+    indexer = indexing.hash( voxelizer = v, margin = 2 )
+
+    for ( coords, obj ) in OBJECTS:
+      indexer.add( object = obj, position = coords )
+
+    self.assertEqual( len( indexer ), len( OBJECTS ) )
+    self.assertEqual( indexer.cubes(), 8 )
+
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0, 0, 0 ) ) ),
+      [ 1, 1, 1.5, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0.5, 0.5, 0.5 ) ) ),
+      [ 1, 1, 1.5, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0, 0, 3 ) ) ),
+      [ 1.7, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 1, 1, 1 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2 ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 2, 2, 2 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 3, 3, 3 ) ) ),
+      [ 1, 2, 3, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 4, 4, 4 ) ) ),
+      [ 1, 3, 4, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 5, 5, 5 ) ) ),
+      [ 1, 3, 4, 5, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 6, 6, 6 ) ) ),
+      [ 3, 4, 5, "foo" ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 7, 7, 7 ) ) ),
+      [ 3, 4, 5 ],
+      )
+
+
+  def test_3(self):
+
+    from mmtbx.geometry.shared_types import voxelizer
+    v = voxelizer( base = ( 0, 0, 0 ), step = ( 2, 2, 2 ) )
+    indexer = indexing.hash( voxelizer = v, margin = 1 )
+
+    for ( coords, obj ) in OBJECTS:
+      indexer.add( object = obj, position = coords )
+
+    self.assertEqual( len( indexer ), len( OBJECTS ) )
+    self.assertEqual( indexer.cubes(), 5 )
+
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0, 0, 0 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0.5, 0.5, 0.5 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 0, 0, 3 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2 ],
+      )
+    self.assertEqual(
+      sorted( indexer.close_to( centre = ( 1, 1, 1 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2 ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 2, 2, 2 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2, 3, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 3, 3, 3 ) ) ),
+      [ 1, 1, 1, 1.5, 1.7, 2, 3, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 4, 4, 4 ) ) ),
+      [ 1, 3, 4, 5, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 5, 5, 5 ) ) ),
+      [ 1, 3, 4, 5, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 6, 6, 6 ) ) ),
+      [ 3, 4, 5, "foo" ],
+      )
+    self.assertEqual(
+      self.split_sorted( indexer.close_to( centre = ( 7, 7, 7 ) ) ),
+      [ 3, 4, 5, "foo" ],
+      )
+
+
+suite_linear_indexer = unittest.TestLoader().loadTestsFromTestCase(
+  TestLinearIndexer
+  )
+suite_hash_indexer = unittest.TestLoader().loadTestsFromTestCase(
+  TestHashIndexer
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_linear_indexer,
+    suite_hash_indexer,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+    return alltests
+
+
+if __name__ == "__main__":
+    unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/tests/tst_shared_types.py
+from __future__ import absolute_import, division, print_function
+
+from mmtbx.geometry import shared_types
+
+import unittest
+
+class TestVoxelizer(unittest.TestCase):
+
+  def setUp(self):
+
+    self.voxelizer = shared_types.voxelizer(
+      base = ( 100, 200, 300 ),
+      step = ( 2.0, 3.0, 4.0 ),
+      )
+
+
+  def test_1(self):
+
+    self.assertEqual(
+      self.voxelizer( vector = ( 100, 200, 300 ) ),
+      ( 0, 0, 0 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 101, 201, 301 ) ),
+      ( 0, 0, 0 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 101.99, 202, 302 ) ),
+      ( 0, 0, 0 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 102, 202.99, 303 ) ),
+      ( 1, 0, 0 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 103, 203, 303.99 ) ),
+      ( 1, 1, 0 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 104, 204, 304 ) ),
+      ( 2, 1, 1 ),
+      )
+
+  def test_2(self):
+
+    self.assertEqual(
+      self.voxelizer( vector = ( 99.99, 199.99, 299.99 ) ),
+      ( -1, -1, -1 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 98.00, 197.00, 296.00 ) ),
+      ( -1, -1, -1 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 97.99, 197.00, 296.00 ) ),
+      ( -2, -1, -1 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 96.00, 196.99, 296.00 ) ),
+      ( -2, -2, -1 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 96.00, 194.00, 295.99 ) ),
+      ( -2, -2, -2 ),
+      )
+    self.assertEqual(
+      self.voxelizer( vector = ( 96.00, 194.00, 292.00 ) ),
+      ( -2, -2, -2 ),
+      )
+
+suite_voxelizer = unittest.TestLoader().loadTestsFromTestCase(
+  TestVoxelizer
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_voxelizer,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+    return alltests
+
+
+if __name__ == "__main__":
+    unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/tests/tst_sphere_surface_sampling.py
+from __future__ import absolute_import, division, print_function
+
+from mmtbx.geometry import sphere_surface_sampling
+
+import unittest
+from six.moves import zip
+
+class TestGoldenSpiral(unittest.TestCase):
+
+  def setUp(self):
+
+    self.sampling = sphere_surface_sampling.golden_spiral( count = 5 )
+    self.count = 5
+    self.points = [
+      ( 0.5999999999999999, -0.8, 0.0 ),
+      ( -0.6758097397797129, -0.39999999999999997, 0.6190970809322855 ),
+      ( 0.08742572471695988, 5.551115123125783e-17, -0.9961710408648278 ),
+      ( 0.5576434272376701, 0.4000000000000002, 0.7273471028736039 ),
+      ( -0.590828091189257, 0.8, -0.10450917022758696 )
+      ]
+
+
+  def test_count(self):
+
+    self.assertEqual( self.sampling.count, self.count )
+
+
+  def test_unit_area(self):
+
+    import math
+    self.assertAlmostEqual(
+      self.sampling.unit_area,
+      4 * math.pi / self.count,
+      8,
+      )
+
+
+  def test_points(self):
+
+    got = list( self.sampling.points )
+
+    self.assertEqual( len( got ), len( self.points ) )
+
+    for ( left, right ) in zip( got, self.points ):
+      self.assertIterablesAlmostEqual( left, right, 7 )
+
+
+  """
+  def test_transformed(self):
+
+    ( centre_x, centre_y, centre_z ) = ( 0.1, 2.5, -3.6 )
+    radius = 3.5
+
+    got = list(
+      self.sampling.transformed(
+        centre = ( centre_x, centre_y, centre_z ),
+        radius = radius,
+        )
+      )
+
+    self.assertEqual( len( got ), len( self.points ) )
+
+    for ( point, ( x, y, z ) )  in zip( got, self.points ):
+      self.assertIterablesAlmostEqual(
+        point,
+        ( radius * x + centre_x, radius * y + centre_y, radius * z + centre_z ),
+        7,
+        )
+    """
+
+  def assertIterablesAlmostEqual(self, left, right, digits):
+
+    self.assertEqual( len( left ), len( right ) )
+
+    for ( e_left, e_right ) in zip( left, right ):
+      self.assertAlmostEqual( e_left, e_right, digits )
+
+
+
+suite_golden_spiral = unittest.TestLoader().loadTestsFromTestCase(
+    TestGoldenSpiral
+    )
+
+alltests = unittest.TestSuite(
+  [
+      suite_golden_spiral,
+      ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/tests/tst_topology.py
+from __future__ import absolute_import, division, print_function
+
+from mmtbx.geometry import topology
+
+import unittest
+
+class TestAtom(unittest.TestCase):
+
+  def test_1(self):
+
+    foo = object()
+    bar = object()
+
+    a = topology.Atom( foo = foo, bar = bar )
+    self.assertEqual( a.foo, foo )
+    self.assertEqual( a.bar, bar )
+
+
+class TestMolecule(unittest.TestCase):
+
+  def test_0(self):
+
+    m = topology.Molecule()
+    self.assertEqual( m.size(), 0 )
+    self.assertEqual( m.atoms, [] )
+    self.assertEqual( m.atom_for, {} )
+    self.assertEqual( m.descriptor_for, {} )
+    self.assertEqual( list( m.graph.vertices() ), [] )
+    self.assertEqual( list( m.graph.edges() ), [] )
+
+
+  def test_1(self):
+
+    m = topology.Molecule()
+    a = topology.Atom()
+    m.add( atom = a,  xyz = ( 0, 0, 0 ) )
+    self.assertEqual( m.size(), 1 )
+    self.assertEqual( m.atoms, [ a ] )
+    self.assertEqual( len( m.atom_for ), 1 )
+    self.assertTrue( a in m.atom_for.values() )
+    self.assertEqual( len( m.descriptor_for ), 1 )
+    self.assertTrue( a in m.descriptor_for )
+    self.assertEqual( len( list( m.graph.vertices() ) ), 1 )
+    self.assertEqual( list( m.graph.edges() ), [] )
+
+
+  def test_2(self):
+
+    m = topology.Molecule()
+    a1 = topology.Atom()
+    a2 = topology.Atom()
+    m.add( atom = a1, xyz = ( 0, 0, 0 ) )
+    m.add( atom = a2, xyz = ( 1, 1, 1 ) )
+    self.assertEqual( m.size(), 2 )
+    self.assertEqual( set( m.atoms ), set( [ a1, a2 ] ) )
+    self.assertEqual( len( m.atom_for ), 2 )
+    self.assertTrue( a1 in m.atom_for.values() )
+    self.assertTrue( a2 in m.atom_for.values() )
+    self.assertEqual( len( m.descriptor_for ), 2 )
+    self.assertTrue( a1 in m.descriptor_for )
+    self.assertTrue( a2 in m.descriptor_for )
+    self.assertEqual( len( list( m.graph.vertices() ) ), 2 )
+    self.assertEqual( len( list( m.graph.edges() ) ), 1 )
+    edge = next(m.graph.edges())
+    self.assertAlmostEqual( m.graph.edge_weight( edge = edge ), 1.73205, 5 )
+
+
+class TestCompound(unittest.TestCase):
+
+  def test_0(self):
+
+    m = topology.Compound.create()
+    self.assertEqual( m.atoms, [] )
+    self.assertEqual( m.atom_for, {} )
+    self.assertEqual( m.descriptor_for, {} )
+    self.assertEqual( list( m.graph.vertices() ), [] )
+    self.assertEqual( list( m.graph.edges() ), [] )
+
+  def test_1(self):
+
+    m = topology.Compound.create()
+    a = topology.Atom()
+    m.add_atom( atom = a )
+    self.assertEqual( m.atoms, [ a ] )
+    self.assertEqual( len( m.atom_for ), 1 )
+    self.assertTrue( a in m.atom_for.values() )
+    self.assertEqual( len( m.descriptor_for ), 1 )
+    self.assertTrue( a in m.descriptor_for )
+    self.assertEqual( len( list( m.graph.vertices() ) ), 1 )
+    self.assertEqual( list( m.graph.edges() ), [] )
+    self.assertEqual( m.distances_from( atom = a ), { a: 0 } )
+    self.assertEqual( m.connected_segments(), [ [ a ] ] )
+
+
+  def test_2(self):
+
+    m = topology.Compound.create()
+    a1 = topology.Atom()
+    a2 = topology.Atom()
+    m.add_atom( atom = a1 )
+    m.add_atom( atom = a2 )
+    self.assertEqual( set( m.atoms ), set( [ a1, a2 ] ) )
+    self.assertEqual( len( m.atom_for ), 2 )
+    self.assertTrue( a1 in m.atom_for.values() )
+    self.assertTrue( a2 in m.atom_for.values() )
+    self.assertEqual( len( m.descriptor_for ), 2 )
+    self.assertTrue( a1 in m.descriptor_for )
+    self.assertTrue( a2 in m.descriptor_for )
+    self.assertEqual( len( list( m.graph.vertices() ) ), 2 )
+    self.assertEqual( len( list( m.graph.edges() ) ), 0 )
+    self.assertEqual( m.distances_from( atom = a1 ), { a1: 0, a2: None } )
+    self.assertEqual( m.distances_from( atom = a2 ), { a2: 0, a1: None } )
+    self.assertEqual(
+      set( frozenset( s ) for s in m.connected_segments() ),
+      set( [ frozenset( [ a1 ] ), frozenset( [ a2 ] ) ] ),
+      )
+
+    m.add_bond( left = a1, right = a2 )
+    self.assertEqual( len( list( m.graph.vertices() ) ), 2 )
+    self.assertEqual( len( list( m.graph.edges() ) ), 1 )
+    self.assertEqual( m.distances_from( atom = a1 ), { a1: 0, a2: 1 } )
+    self.assertEqual( m.distances_from( atom = a2 ), { a2: 0, a1: 1 } )
+    self.assertEqual(
+      set( frozenset( s ) for s in m.connected_segments() ),
+      set( [ frozenset( [ a1, a2 ] ) ] ),
+      )
+
+    ss1 = m.subset( atoms = [ a1 ] )
+    self.assertEqual( len( ss1.atom_for ), 1 )
+    self.assertTrue( a1 in ss1.atom_for.values() )
+    self.assertEqual( len( ss1.descriptor_for ), 1 )
+    self.assertTrue( a1 in ss1.descriptor_for )
+    self.assertEqual( len( list( ss1.graph.vertices() ) ), 1 )
+    self.assertEqual( len( list( ss1.graph.edges() ) ), 0 )
+
+    ss2 = m.subset( atoms = [ a2 ] )
+    self.assertEqual( len( ss2.atom_for ), 1 )
+    self.assertTrue( a2 in ss2.atom_for.values() )
+    self.assertEqual( len( ss2.descriptor_for ), 1 )
+    self.assertTrue( a2 in ss2.descriptor_for )
+    self.assertEqual( len( list( ss2.graph.vertices() ) ), 1 )
+    self.assertEqual( len( list( ss2.graph.edges() ) ), 0 )
+
+
+  def test_3(self):
+
+    atoms = [
+      topology.Atom( name = "N", element =  "N", xyz = ( 11.498, 10.510, 10.231 ) ),
+      topology.Atom( name = "CA", element =  "C", xyz = ( 12.730, 11.073, 10.769 ) ),
+      topology.Atom( name = "C", element =  "C", xyz = ( 13.674, 9.966, 11.221 ) ),
+      topology.Atom( name = "O", element =  "O", xyz = ( 13.739, 8.902, 10.605 ) ),
+      topology.Atom( name = "CB", element =  "C", xyz = ( 12.421, 12.004, 11.944 ) ),
+      topology.Atom( name = "CG", element =  "C", xyz = ( 11.478, 13.179, 11.661 ) ),
+      topology.Atom( name = "CD1", element =  "C", xyz = ( 11.043, 13.834, 12.963 ) ),
+      topology.Atom( name = "CD2", element =  "C", xyz = ( 12.126, 14.201, 10.736 ) ),
+      ]
+    compound = topology.Compound.from_structure( atoms = atoms, tolerance = 0.1 )
+
+    self.assertEqual(
+      set( frozenset( [ l.name, r.name ] ) for ( l, r ) in compound.bonds ),
+      set(
+        [ frozenset( [ "N", "CA" ] ), frozenset( [ "CA", "C" ] ),
+          frozenset( [ "C", "O" ] ), frozenset( [ "CA", "CB" ] ),
+          frozenset( [ "CB", "CG" ] ), frozenset( [ "CG", "CD1" ] ),
+          frozenset( [ "CG", "CD2" ] ),
+          ]
+        )
+      )
+
+
+class TestMcGregorMatch(unittest.TestCase):
+
+  def test_asn_leu(self):
+
+    l_ca = topology.Atom( label = "CA" )
+    l_cb = topology.Atom( label = "C" )
+    l_cg = topology.Atom( label = "C" )
+    l_cd1 = topology.Atom( label = "C" )
+    l_cd2 = topology.Atom( label = "C" )
+    leu = topology.Molecule()
+    leu.add( atom = l_ca, xyz = ( -1.0085, -0.590773,  0.814318 ) )
+    leu.add( atom = l_cb,  xyz = (  0.0275, -0.557773, -0.314682 ) )
+    leu.add( atom = l_cg,  xyz = (  1.2335,  0.374227, -0.138682 ) )
+    leu.add( atom = l_cd1, xyz = (  2.3065,  0.046227, -1.16768  ) )
+    leu.add( atom = l_cd2, xyz = (  0.8395,  1.84323,  -0.230682 ) )
+
+    a_ca = topology.Atom( label = "CA" )
+    a_cb = topology.Atom( label = "C" )
+    a_cg = topology.Atom( label = "C" )
+    a_od1 = topology.Atom( label = "C" )
+    a_nd2 = topology.Atom( label = "C" )
+    asn = topology.Molecule()
+    asn.add( atom = a_ca, xyz = ( -1.03327, -0.544348,  0.860946 ) )
+    asn.add( atom = a_cb,  xyz = (  0.10486, -0.548357, -0.164901 ) )
+    asn.add( atom = a_cg,  xyz = (  0.990984, 0.682823, -0.070521 ) )
+    asn.add( atom = a_od1, xyz = (  1.39496,  1.24684,  -1.08724  ) )
+    asn.add( atom = a_nd2, xyz = (  1.29745,  1.10599,   1.15228  ) )
+
+    res = topology.McGregorMatch(
+      molecule1 = leu,
+      molecule2 = asn,
+      is_valid = lambda match: any( m.label == "CA" for m in match ),
+      vertex_equality = lambda l, r: l.label == r.label,
+      edge_equality = lambda l, r: abs( l - r ) < 0.1
+      )
+    self.assertEqual( res.length(), 3 )
+    mapping = res.remapped()
+    self.assertTrue( ( l_ca, a_ca ) in mapping )
+    self.assertTrue( ( l_cb, a_cb ) in mapping )
+    self.assertTrue( ( l_cg, a_cg ) in mapping )
+    self.assertTrue( ( l_cd1, a_od1 ) not in mapping )
+
+
+class TestRascalMatch(unittest.TestCase):
+
+  def test_asn_leu(self):
+
+    l_ca = topology.Atom( label = "CA" )
+    l_cb = topology.Atom( label = "C" )
+    l_cg = topology.Atom( label = "C" )
+    l_cd1 = topology.Atom( label = "C" )
+    l_cd2 = topology.Atom( label = "C" )
+    leu = topology.Molecule()
+    leu.add( atom = l_ca, xyz = ( -1.0085, -0.590773,  0.814318 ) )
+    leu.add( atom = l_cb, xyz = (  0.0275, -0.557773, -0.314682 ) )
+    leu.add( atom = l_cg, xyz = (  1.2335,  0.374227, -0.138682 ) )
+    leu.add( atom = l_cd1, xyz = (  2.3065,  0.046227, -1.16768  ) )
+    leu.add( atom = l_cd2, xyz = (  0.8395,  1.84323,  -0.230682 ) )
+
+    a_ca = topology.Atom( label = "CA" )
+    a_cb = topology.Atom( label = "C" )
+    a_cg = topology.Atom( label = "C" )
+    a_od1 = topology.Atom( label = "C" )
+    a_nd2 = topology.Atom( label = "C" )
+    asn = topology.Molecule()
+    asn.add( atom = a_ca, xyz = ( -1.03327, -0.544348,  0.860946 ) )
+    asn.add( atom = a_cb,  xyz = (  0.10486, -0.548357, -0.164901 ) )
+    asn.add( atom = a_cg,  xyz = (  0.990984, 0.682823, -0.070521 ) )
+    asn.add( atom = a_od1, xyz = (  1.39496,  1.24684,  -1.08724  ) )
+    asn.add( atom = a_nd2, xyz = (  1.29745,  1.10599,   1.15228  ) )
+
+    m = topology.RascalMatch(
+      molecule1 = leu,
+      molecule2 = asn,
+      vertex_equality = lambda l, r: l.label == r.label,
+      edge_equality = lambda l, r: abs( l - r ) <= 0.1,
+      )
+    self.assertEqual( m.count(), 1 )
+    self.assertEqual( m.length(), 3 )
+    mapping = m.remapped()[0]
+    self.assertEqual( len( mapping ), 3 )
+    self.assertTrue( ( l_ca, a_ca ) in mapping )
+    self.assertTrue( ( l_cb, a_cb ) in mapping )
+    self.assertTrue( ( l_cg, a_cg ) in mapping )
+    self.assertTrue( ( l_cd1, a_od1 ) not in mapping )
+
+
+class TestGreedyMatch(unittest.TestCase):
+
+  def test_asn_leu(self):
+
+    l_ca = topology.Atom( label = "CA" )
+    l_cb = topology.Atom( label = "C" )
+    l_cg = topology.Atom( label = "C" )
+    l_cd1 = topology.Atom( label = "C" )
+    l_cd2 = topology.Atom( label = "C" )
+    leu = topology.Molecule()
+    leu.add( atom = l_ca, xyz = ( -1.0085, -0.590773,  0.814318 ) )
+    leu.add( atom = l_cb, xyz = (  0.0275, -0.557773, -0.314682 ) )
+    leu.add( atom = l_cg, xyz = (  1.2335,  0.374227, -0.138682 ) )
+    leu.add( atom = l_cd1, xyz = (  2.3065,  0.046227, -1.16768  ) )
+    leu.add( atom = l_cd2, xyz = (  0.8395,  1.84323,  -0.230682 ) )
+
+    a_ca = topology.Atom( label = "CA" )
+    a_cb = topology.Atom( label = "C" )
+    a_cg = topology.Atom( label = "C" )
+    a_od1 = topology.Atom( label = "C" )
+    a_nd2 = topology.Atom( label = "C" )
+    asn = topology.Molecule()
+    asn.add( atom = a_ca, xyz = ( -1.03327, -0.544348,  0.860946 ) )
+    asn.add( atom = a_cb,  xyz = (  0.10486, -0.548357, -0.164901 ) )
+    asn.add( atom = a_cg,  xyz = (  0.990984, 0.682823, -0.070521 ) )
+    asn.add( atom = a_od1, xyz = (  1.39496,  1.24684,  -1.08724  ) )
+    asn.add( atom = a_nd2, xyz = (  1.29745,  1.10599,   1.15228  ) )
+
+    m = topology.GreedyMatch(
+      molecule1 = leu,
+      molecule2 = asn,
+      vertex_equality = lambda l, r: l.label == r.label,
+      edge_equality = lambda l, r: abs( l - r ) <= 0.1,
+      )
+    self.assertEqual( m.count(), 1 )
+    self.assertEqual( m.length(), 3 )
+    mapping = m.remapped()[0]
+    self.assertEqual( len( mapping ), 3 )
+    self.assertTrue( ( l_ca, a_ca ) in mapping )
+    self.assertTrue( ( l_cb, a_cb ) in mapping )
+    self.assertTrue( ( l_cg, a_cg ) in mapping )
+    self.assertTrue( ( l_cd1, a_od1 ) not in mapping )
+
+
+suite_atom = unittest.TestLoader().loadTestsFromTestCase(
+  TestAtom
+  )
+suite_molecule = unittest.TestLoader().loadTestsFromTestCase(
+  TestMolecule
+  )
+suite_compound = unittest.TestLoader().loadTestsFromTestCase(
+  TestCompound
+  )
+suite_mcgregor_match = unittest.TestLoader().loadTestsFromTestCase(
+  TestMcGregorMatch
+  )
+suite_rascal_match= unittest.TestLoader().loadTestsFromTestCase(
+  TestRascalMatch
+  )
+suite_greedy_match= unittest.TestLoader().loadTestsFromTestCase(
+  TestGreedyMatch
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_atom,
+    suite_molecule,
+    suite_compound,
+    suite_mcgregor_match,
+    suite_rascal_match,
+    suite_greedy_match,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/geometry/topology.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+
+import math
+from six.moves import zip
+
+class Atom(object):
+  """
+  Match results by identity
+  """
+
+  def __init__(self, **kwargs):
+
+    for ( name, value ) in kwargs.items():
+      setattr( self, name, value )
+
+
+class Molecule(object):
+  """
+  A graph-based 3D-description of a molecule
+  """
+
+  def __init__(self, vertex_type = "vector", edge_type = "set"):
+
+    self.graph = graph.adjacency_list(
+      graph_type = "undirected",
+      vertex_type = vertex_type,
+      edge_type = edge_type,
+      )
+    self.atom_for = {}
+    self.xyz_for = {}
+
+
+  @property
+  def descriptor_for(self):
+    # TODO: six.moves.zip this file
+    return dict( zip( self.atom_for.values(), self.atom_for.keys() ))
+
+
+  @property
+  def atoms(self):
+
+    return list(self.atom_for.values())
+
+
+  def add(self, atom, xyz):
+
+    d2 = self.graph.add_vertex( label = atom )
+    ( x2, y2, z2 ) = xyz
+    assert d2 not in self.xyz_for
+
+    for ( d1, ( x1, y1, z1 ) ) in self.xyz_for.items():
+      self.graph.add_edge(
+        vertex1 = d1,
+        vertex2 = d2,
+        weight = math.sqrt(
+          ( x1 - x2 ) ** 2  + ( y1 - y2 ) ** 2 + ( z1 - z2 ) ** 2
+          ),
+        )
+
+    self.atom_for[ d2 ] = atom
+    self.xyz_for[ d2 ] = xyz
+
+
+  def size(self):
+
+    return len( self.atom_for )
+
+
+class Compound(object):
+  """
+  A graph-based 2D-representation of a compound
+  """
+
+  def __init__(self, graph):
+
+    self.graph = graph
+    self.descriptor_for = dict(
+      ( self.graph.vertex_label( vertex = v ), v ) for v in self.graph.vertices()
+      )
+
+
+  @property
+  def atom_for(self):
+
+    return dict( zip( self.descriptor_for.values(), self.descriptor_for.keys() ))
+
+
+  @property
+  def atoms(self):
+
+    return list(self.descriptor_for.keys())
+
+
+  @property
+  def descriptors(self):
+
+    return list(self.descriptor_for.values())
+
+
+  @property
+  def bonds(self):
+
+    atom_for = self.atom_for
+
+    for edge in self.graph.edges():
+      yield (
+        atom_for[ self.graph.source( edge = edge) ],
+        atom_for[ self.graph.target( edge = edge) ],
+        )
+
+
+  def add_atom(self, atom):
+
+    self.descriptor_for[ atom ] = self.graph.add_vertex( label = atom )
+
+
+  def add_bond(self, left, right, order = 1):
+
+    if left not in self.descriptor_for:
+      self.add_atom( atom = left )
+
+    if right not in self.descriptor_for:
+      self.add_atom( atom = right )
+
+    self.graph.add_edge(
+      vertex1 = self.descriptor_for[ left ],
+      vertex2 = self.descriptor_for[ right ],
+      weight = order,
+      )
+
+
+  def distances_from(self, atom):
+
+    if atom not in self.descriptor_for:
+      raise ValueError("Unknown atom: %s" % atom)
+
+    from boost_adaptbx.graph import breadth_first_search as bfs
+
+    vertex = self.descriptor_for[ atom ]
+    visitor = bfs.distance_recording_visitor( start_vertex = vertex )
+    bfs.breadth_first_search(
+      graph = self.graph,
+      vertex = vertex,
+      visitor = visitor,
+      )
+
+    atom_for = self.atom_for
+    return dict(
+      ( atom_for[ v ], visitor.distance_for.get( v, None ) )
+      for v in self.descriptors
+      )
+
+
+  def subset(self, atoms):
+
+    if not all( a in self.descriptor_for for a in atoms ):
+      raise ValueError("Unknown atoms: %s" % atoms)
+
+    from boost_adaptbx.graph import maximum_clique
+    subgraph = maximum_clique.selected_subgraph(
+      graph = self.graph,
+      vertices = ( self.descriptor_for[ a ] for a in atoms ),
+      )
+
+    return self.__class__( graph = subgraph )
+
+
+  def connected_segments(self):
+
+    from boost_adaptbx.graph import connected_component_algorithm as cca
+    res = cca.connected_components( graph = self.graph )
+    atom_for = self.atom_for
+
+    return [ [ atom_for[ v ] for v in comp ] for comp in res ]
+
+
+  def connected_segment_from(self, atom):
+
+    if atom not in self.descriptor_for:
+      raise ValueError("Unknown atom: %s" % atom)
+
+    from boost_adaptbx.graph import breadth_first_search as bfs
+
+    vertex = self.descriptor_for[ atom ]
+    visitor = bfs.vertex_recording_visitor( start_vertex = vertex )
+    bfs.breadth_first_search(
+      graph = self.graph,
+      vertex = vertex,
+      visitor = visitor,
+      )
+
+    atom_for = self.atom_for
+
+    return [ atom_for[ v ] for v in visitor.visited_vertices ]
+
+
+  @classmethod
+  def create(cls, vertex_type = "vector", edge_type = "set"):
+
+    return cls(
+      graph = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = vertex_type,
+        edge_type = edge_type,
+        ),
+      )
+
+
+  @classmethod
+  def from_structure(cls, atoms, tolerance = 0.1, vertex_type = "vector", edge_type = "set"):
+
+    compound = cls.create( vertex_type = vertex_type, edge_type = edge_type )
+
+    for a in atoms:
+      compound.add_atom( atom = a )
+
+    import itertools
+    from mmtbx.monomer_library import bondlength_defaults
+
+    for ( a1, a2 ) in itertools.combinations( atoms, 2 ):
+      ( x1, y1, z1 ) = a1.xyz
+      ( x2, y2, z2 ) = a2.xyz
+
+      dist2 = ( ( x1 - x2 ) ** 2 + ( y1 - y2 ) ** 2 + ( z1 - z2 ) ** 2 )
+      expected = bondlength_defaults.get_default_bondlength( a1.element, a2.element )
+
+      if dist2 < ( expected + tolerance ) ** 2:
+        compound.add_bond( a1, a2 )
+
+    return compound
+
+
+class RascalMatch(object):
+  """
+  Geometry and label-based correspondence matching using the Rascal algorithm
+  """
+
+  def __init__(
+    self,
+    molecule1,
+    molecule2,
+    prematched = [],
+    vertex_equality = None,
+    edge_equality = None,
+    ):
+
+    if vertex_equality is None:
+      import operator
+      vertex_equality = operator.eq
+
+    if edge_equality is None:
+      import operator
+      edge_equality = operator.eq
+
+    self.molecule1 = molecule1.atom_for
+    self.molecule2 = molecule2.atom_for
+    self.best = [ [] ]
+    self.largest = 0
+
+    from boost_adaptbx.graph import maximum_clique
+
+    self.compat_graph = maximum_clique.compatibility_graph(
+      first = molecule1.graph,
+      second = molecule2.graph,
+      vertex_equality = vertex_equality,
+      edge_equality = edge_equality
+      )
+
+    self.prematched = prematched
+
+    if self.prematched:
+      desc_for_1 = molecule1.descriptor_for
+      desc_for_2 = molecule2.descriptor_for
+      pairs = set(
+        [ ( desc_for_1[ l ], desc_for_2[ r ] ) for ( l, r ) in self.prematched ]
+        )
+      vertices = [ v for v in self.compat_graph.vertices()
+        if self.compat_graph.vertex_label( vertex = v ) in pairs ]
+
+      assert len( vertices ) == len( self.prematched )
+      neighbours = set( self.compat_graph.adjacent_vertices( vertex = vertices[0] ) )
+
+      for v in vertices[1:]:
+        neighbours.intersection_update( self.compat_graph.adjacent_vertices( vertex = v ) )
+
+      self.compat_graph = maximum_clique.selected_subgraph(
+        graph = self.compat_graph,
+        vertices = neighbours,
+        )
+
+    maximum_clique.rascal( graph = self.compat_graph, callable = self )
+
+
+  def count(self):
+
+    return len( self.best )
+
+
+  def length(self):
+
+    return len( self.prematched ) + self.largest
+
+
+  def remapped(self):
+
+    matches = [
+      [ self.compat_graph.vertex_label( vertex = v ) for v in match ]
+      for match in self.best
+      ]
+    return [
+      self.prematched + [
+        ( self.molecule1[ l ], self.molecule2[ r ] ) for ( l, r ) in pairs
+        ]
+      for pairs in matches
+      ]
+
+
+  def __call__(self, result):
+
+    size = len( result )
+
+    if self.largest < size:
+      self.largest = size
+      self.best = [ result ]
+
+    elif self.largest == size:
+      self.best.append( result )
+
+
+class McGregorMatch(object):
+  """
+  Geometry and label-based correspondence matching using the McGregor algorithm
+  """
+
+  def __init__(
+    self,
+    molecule1,
+    molecule2,
+    is_valid,
+    maxsteps = 500,
+    vertex_equality = None,
+    edge_equality = None,
+    ):
+
+    if vertex_equality is None:
+      import operator
+      vertex_equality = operator.eq
+
+    if edge_equality is None:
+      import operator
+      edge_equality = operator.eq
+
+    self.molecule1 = molecule1.atom_for
+    self.molecule2 = molecule2.atom_for
+    self.is_valid = is_valid
+    self.best = []
+    self.steps = 0
+    self.maxsteps = maxsteps
+
+    from boost_adaptbx.graph import graph_structure_comparison as gsc
+    gsc.mcgregor_common_subgraphs_unique(
+      graph1 = molecule1.graph,
+      graph2 = molecule2.graph,
+      vertex_equality = vertex_equality,
+      edge_equality = edge_equality,
+      callback = self,
+      )
+
+
+  def length(self):
+
+    return len( self.best )
+
+
+  def remapped(self):
+
+    return [
+      ( self.molecule1[ l ], self.molecule2[ r ] ) for ( l, r ) in self.best
+      ]
+
+
+  def __call__(self, match):
+
+    if len( match ) <= len( self.best ):
+      self.steps += 1
+
+    elif ( self.is_valid( ( self.molecule1[ m[0] ] for m in match ) )
+      and self.is_valid( ( self.molecule2[ m[1] ] for m in match ) ) ):
+      self.best = match
+      self.steps = 0
+
+    else:
+      self.steps += 1
+
+    return self.steps <= self.maxsteps
+
+
+class GreedyMatch(object):
+  """
+  Geometry and label-based correspondence matching using the Greedy algorithm
+  """
+
+  def __init__(
+    self,
+    molecule1,
+    molecule2,
+    prematched = [],
+    vertex_equality = None,
+    edge_equality = None,
+    maxsol = 0,
+    ):
+
+    if vertex_equality is None:
+      import operator
+      vertex_equality = operator.eq
+
+    if edge_equality is None:
+      import operator
+      edge_equality = operator.eq
+
+    self.molecule1 = molecule1.atom_for
+    self.molecule2 = molecule2.atom_for
+    self.best = [ [] ]
+    self.largest = 0
+
+    from boost_adaptbx.graph import maximum_clique
+
+    self.compat_graph = maximum_clique.compatibility_graph(
+      first = molecule1.graph,
+      second = molecule2.graph,
+      vertex_equality = vertex_equality,
+      edge_equality = edge_equality
+      )
+
+    self.prematched = prematched
+
+    if self.prematched:
+      desc_for_1 = molecule1.descriptor_for
+      desc_for_2 = molecule2.descriptor_for
+      pairs = set(
+        [ ( desc_for_1[ l ], desc_for_2[ r ] ) for ( l, r ) in self.prematched ]
+        )
+      vertices = [ v for v in self.compat_graph.vertices()
+        if self.compat_graph.vertex_label( vertex = v ) in pairs ]
+
+      assert len( vertices ) == len( self.prematched )
+      neighbours = set( self.compat_graph.adjacent_vertices( vertex = vertices[0] ) )
+
+      for v in vertices[1:]:
+        neighbours.intersection_update( self.compat_graph.adjacent_vertices( vertex = v ) )
+
+      self.compat_graph = maximum_clique.selected_subgraph(
+        graph = self.compat_graph,
+        vertices = neighbours,
+        )
+
+    self.result = maximum_clique.greedy( graph = self.compat_graph, maxsol = maxsol )
+
+
+  def count(self):
+
+    return len( self.result )
+
+
+  def length(self):
+
+    assert self.result
+    return len( self.prematched ) + len( self.result[0] )
+
+
+  def remapped(self):
+
+    matches = [
+      [ self.compat_graph.vertex_label( vertex = v ) for v in match ]
+      for match in self.result
+      ]
+    return [
+      self.prematched + [
+        ( self.molecule1[ l ], self.molecule2[ r ] ) for ( l, r ) in pairs
+        ]
+      for pairs in matches
+      ]
+
+
+ *******************************************************************************

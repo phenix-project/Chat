@@ -1,0 +1,3985 @@
+
+
+ *******************************************************************************
+iotbx/mtz/__init__.py
+"""Routines to read and write mtz formatted files
+"""
+from __future__ import absolute_import, division, print_function
+import cctbx.array_family.flex
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+from six.moves import zip
+ext = bp.import_ext("iotbx_mtz_ext")
+from iotbx_mtz_ext import *
+import iotbx_mtz_ext as ext
+
+from iotbx.mtz import extract_from_symmetry_lib
+from cctbx import xray
+import cctbx.xray.observation_types
+from cctbx import miller
+import cctbx.crystal
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx.array_family import flex
+from libtbx.str_utils import show_string, overwrite_at, contains_one_of
+from libtbx.utils import Sorry
+from libtbx import adopt_init_args, slots_getstate_setstate
+import warnings
+import string
+import re
+import sys, os
+
+expected_cmtz_struct_sizes = (
+  (56, 84, 176, 500, 12336, 12488), # Linux 32-bit
+  (64, 88, 184, 504, 12336, 12528), # Tru64
+  #
+  # 2010/04/19, addition of spg_confidence to struct SYMGRP in mtzdata.h
+  (56, 84, 176, 500, 12340, 12492), # 32-bit
+  (64, 88, 184, 504, 12340, 12536), # 64-bit
+  #
+  # 2010/06/30, addition of colsource...grpposn to struct MTZCOL
+  # and xml...n_unknown_headers to struct MTZ in mtzdata.h
+  (136, 84, 176, 500, 12340, 12504), # 32-bit
+  (144, 88, 184, 504, 12340, 12560), # 64-bit
+)
+if (tuple(ext.cmtz_struct_sizes()) not in expected_cmtz_struct_sizes):
+  warnings.warn("""Unexpected iotbx.mtz.cmtz_struct_sizes(): %s
+
+os.name: %s
+sys.platform: %s
+bp.platform_info: %s
+
+The iotbx.mtz module makes certain assumptions about the C structs in
+the CMtz library. This warning appears if the sizes of the C structs
+are not in a table of expected sizes. It may appear on platforms
+where the iotbx.mtz module was not tested before, or if the CMtz
+library structs have changed. If you see this warning, please send
+the complete output to cctbx@cci.lbl.gov to give us the opportunity
+to investigate.
+Thank you!
+""" % (
+  str(tuple(ext.cmtz_struct_sizes())),
+  os.name,
+  sys.platform,
+  bp.platform_info))
+
+column_type_legend_source = "ccp4/doc/mtzformat.doc"
+column_type_legend = {
+  "H": "index h,k,l",
+  "J": "intensity",
+  "F": "amplitude",
+  "D": "anomalous difference",
+  "Q": "standard deviation",
+  "G": "F(+) or F(-)",
+  "L": "standard deviation",
+  "K": "I(+) or I(-)",
+  "M": "standard deviation",
+  "E": "normalized amplitude",
+  "P": "phase angle in degrees",
+  "W": "weight (of some sort)",
+  "A": "phase probability coefficients (Hendrickson/Lattman)",
+  "B": "BATCH number",
+  "Y": "M/ISYM, packed partial/reject flag and symmetry number",
+  "I": "integer",
+  "R": "real",
+}
+
+column_type_as_miller_array_type_hints = {
+  "H": "miller_index",
+  "J": "intensity",
+  "F": "amplitude",
+  "D": "anomalous_difference",
+  "Q": "standard_deviation",
+  "G": "amplitude",
+  "L": "standard_deviation",
+  "K": "intensity",
+  "M": "standard_deviation",
+  "E": "normalized_amplitude",
+  "P": "phase_degrees",
+  "W": "weight",
+  "A": "hendrickson_lattman",
+  "B": "batch_number",
+  "Y": "m_isym",
+  "I": "integer",
+  "R": "real",
+}
+
+assert sorted(column_type_as_miller_array_type_hints.keys()) \
+    == sorted(column_type_legend.keys())
+
+def default_column_types(miller_array):
+  result = None
+  if (miller_array.is_complex_array() and miller_array.sigmas() is None):
+    assert not miller_array.is_xray_intensity_array()
+    if (miller_array.anomalous_flag()):
+      result = "GP"
+    else:
+      result = "FP"
+  elif (    miller_array.is_xray_reconstructed_amplitude_array()
+        and miller_array.anomalous_flag()
+        and miller_array.sigmas() is not None):
+    result = "FQDQY"
+  elif ((   miller_array.is_bool_array()
+         or miller_array.is_integer_array())
+        and miller_array.sigmas() is None):
+    result = "I"
+  elif (miller_array.is_xray_intensity_array()):
+    if (miller_array.anomalous_flag()):
+      result = "K"
+      if (miller_array.sigmas() is not None):
+        result += "M"
+    else:
+      result = "J"
+      if (miller_array.sigmas() is not None):
+        result += "Q"
+  elif (miller_array.is_xray_amplitude_array()
+        or (miller_array.is_real_array()
+            and miller_array.sigmas() is not None)):
+    if (miller_array.anomalous_flag()):
+      result = "G"
+      if (miller_array.sigmas() is not None):
+        result += "L"
+    else:
+      result = "F"
+      if (miller_array.sigmas() is not None):
+        result += "Q"
+  elif (miller_array.is_real_array()):
+    if (miller_array.anomalous_flag()):
+      result = "G"
+    else:
+      result = "F"
+  elif (miller_array.is_hendrickson_lattman_array()):
+    result = "AAAA"
+  return result
+
+anomalous_label_patterns = {
+  "+": ("+", "PLUS"),
+  "-": ("-", "MINU")
+}
+
+def is_anomalous_label(sign, label):
+  return contains_one_of(label.upper(), anomalous_label_patterns[sign])
+
+def are_anomalous_labels(sign, labels):
+  for label in labels:
+    if (not is_anomalous_label(sign, label)): return False
+  return True
+
+class label_decorator(__builtins__["object"]):
+
+  def __init__(self,
+        anomalous_plus_suffix="(+)",
+        anomalous_minus_suffix="(-)",
+        sigmas_prefix="SIG",
+        sigmas_suffix="",
+        delta_anomalous_prefix="DANO",
+        delta_anomalous_suffix="",
+        delta_anomalous_isym_prefix="ISYM",
+        delta_anomalous_isym_suffix="",
+        phases_prefix="PHI",
+        phases_suffix="",
+        hendrickson_lattman_suffix_list=["A","B","C","D"]):
+    assert len(hendrickson_lattman_suffix_list) == 4
+    adopt_init_args(self, locals())
+    self.maximum_characters=30
+
+  def check_character_length(self,label):
+    if len(label)>self.maximum_characters:
+      raise Sorry(
+        "The label %s would be more than the maximum of %d characters" %(
+         label,self.maximum_characters))
+
+  def anomalous(self, root_label, sign=None):
+    assert sign in (None, "+", "-")
+    if (sign is None):
+      label = root_label
+    elif (sign == "+"):
+      label = root_label + self.anomalous_plus_suffix
+    else:
+      label = root_label + self.anomalous_minus_suffix
+    self.check_character_length(label)
+    return label
+
+  def sigmas(self, root_label, anomalous_sign=None):
+    return self.anomalous(
+      self.sigmas_prefix + root_label + self.sigmas_suffix,
+      anomalous_sign)
+
+  def delta_anomalous(self, root_label):
+    label = self.delta_anomalous_prefix + root_label \
+         + self.delta_anomalous_suffix
+    self.check_character_length(label)
+    return label
+
+  def delta_anomalous_sigmas(self, root_label):
+    return self.sigmas(self.delta_anomalous(root_label))
+
+  def delta_anomalous_isym(self, root_label):
+    label = self.delta_anomalous_isym_prefix + root_label \
+         + self.delta_anomalous_isym_suffix
+    self.check_character_length(label)
+    return label
+
+  def phases(self, root_label, anomalous_sign=None):
+    return self.anomalous(
+      self.phases_prefix + root_label + self.phases_suffix,
+      anomalous_sign)
+
+  def hendrickson_lattman(self, root_label, i_coeff, anomalous_sign=None):
+    assert 0 <= i_coeff < 4
+    return self.anomalous(
+      root_label + self.hendrickson_lattman_suffix_list[i_coeff],
+      anomalous_sign)
+
+# XXX this will generate output labels recognizable by the Coot auto-open
+# command, but only for specific root label types.
+class ccp4_label_decorator(label_decorator):
+  def phases(self, root_label, anomalous_sign=None):
+    assert (root_label in ["FWT", "DELFWT"])
+    root_label = re.sub("F", "", root_label)
+    return self.anomalous(
+      "PH" + root_label + self.phases_suffix,
+      anomalous_sign)
+
+def format_min_max(func, values):
+  if (len(values) == 0): return "None"
+  value = func(values)
+  result = "%.2f" % value
+  if (len(result) > 12): result = "%12.4E" % value
+  return result
+
+show_column_data_format_keywords = [
+  "human_readable",
+  "machine_readable",
+  "spreadsheet"]
+
+def tidy_show_column_data_format_keyword(input):
+  if (input is None): return show_column_data_format_keywords[0]
+  input = input.lower()
+  for k in show_column_data_format_keywords:
+    if (input.startswith(k[0])): return k
+  raise Sorry(
+      "Column data format keyword not recognized: %s\n" % show_string(input)
+    + "  Valid keywords are: %s" % ", ".join(show_column_data_format_keywords))
+
+@bp.inject_into(ext.object)
+class _():
+
+  def space_group_info(self):
+    return sgtbx.space_group_info(group=self.space_group())
+
+  def set_space_group_info(self, space_group_info, symbol=None):
+    if (symbol is None):
+      symbol = extract_from_symmetry_lib.ccp4_symbol(
+        space_group_info=space_group_info,
+        lib_name="symop.lib")
+      if (symbol is None):
+        symbol = "No.%d" % space_group_info.type().number()
+    group = space_group_info.group()
+    self.set_space_group_name(name=symbol)
+    self.set_space_group_number(number=space_group_info.type().number())
+    self.set_point_group_name(name=group.point_group_type())
+    self.set_lattice_centring_type(
+      symbol=group.conventional_centring_type_symbol())
+    if (self.lattice_centring_type() == "\0"):
+      self.set_lattice_centring_type(symbol="?")
+    self.set_space_group(space_group=space_group_info.group())
+    return self
+
+  def set_hkl_base(self, unit_cell):
+    assert self.n_crystals() == 0
+    return self.add_crystal(
+      name="HKL_base",
+      project_name="HKL_base",
+      unit_cell=unit_cell).set_id(id=0).add_dataset(
+        name="HKL_base",
+        wavelength=0).set_id(id=0)
+
+  def n_columns(self):
+    result = 0
+    for crystal in self.crystals():
+      for dataset in crystal.datasets():
+        result += dataset.n_columns()
+    return result
+
+  def columns(self):
+    for crystal in self.crystals():
+      for dataset in crystal.datasets():
+        for column in dataset.columns():
+          yield column
+
+  def column_labels(self):
+    return [column.label() for column in self.columns()]
+
+  def column_types(self):
+    return [column.type() for column in self.columns()]
+
+  def next_isym_column_starting_at(self, i_column, return_label=False):
+    for i,column in enumerate(self.columns()):
+      if (i < i_column): continue
+      if (column.type() == "Y"):
+        if (return_label):
+          return column.label()
+        return column
+    return None
+
+  def show_summary(self, out=None, prefix=""):
+    if (out is None): out = sys.stdout
+    p = prefix
+    print(p+"Title:", self.title(), file=out)
+    print(p+"Space group symbol from file:", self.space_group_name(), file=out)
+    print(p+"Space group number from file:", self.space_group_number(), file=out)
+    self.space_group_info().show_summary(
+      f=out, prefix=p+"Space group from matrices: ")
+    print(p+"Point group symbol from file:", self.point_group_name(), file=out)
+    if (self.n_batches() > 0):
+      print(p+"Number of batches:", self.n_batches(), file=out)
+    print(p+"Number of crystals:", self.n_crystals(), file=out)
+    print(p+"Number of Miller indices:", self.n_reflections(), file=out)
+    if (self.n_crystals() > 0 and self.n_reflections() > 0):
+      print(p+"Resolution range: %.6g %.6g" % self.max_min_resolution(), file=out)
+    print(p+"History:", file=out)
+    for line in self.history():
+      print(p+" ", line.rstrip(), file=out)
+    for i_crystal,crystal in enumerate(self.crystals()):
+      print(p+"Crystal %d:" % (i_crystal+1), file=out)
+      print(p+"  Name:", crystal.name(), file=out)
+      print(p+"  Project:", crystal.project_name(), file=out)
+      print(p+"  Id:", crystal.id(), file=out)
+      crystal.unit_cell().show_parameters(f=out, prefix=p+"  Unit cell: ")
+      print(p+"  Number of datasets:", crystal.n_datasets(), file=out)
+      for i_dataset,dataset in enumerate(crystal.datasets()):
+        print(p+"  Dataset %d:" % (i_dataset+1), file=out)
+        print(p+"    Name:", dataset.name(), file=out)
+        print(p+"    Id:", dataset.id(), file=out)
+        print(p+"    Wavelength: %.6g" % dataset.wavelength(), file=out)
+        print(p+"    Number of columns:", dataset.n_columns(), file=out)
+        if (dataset.n_columns() > 0):
+          fields_list = [[
+            "label", "#valid", "%valid", "min", "max", "type", ""]]
+          max_field_lengths = [len(field) for field in fields_list[0]]
+          max_field_lengths[-2] = 0
+          for i_column,column in enumerate(dataset.columns()):
+            fields = column.format_fields_for_mtz_dump(
+              n_refl=self.n_reflections())
+            fields_list.append(fields)
+            for i,field in enumerate(fields):
+              max_field_lengths[i] = max(max_field_lengths[i], len(field))
+          format = "    %%-%ds %%%ds %%%ds %%%ds %%%ds %%%ds %%s" % tuple(
+            max_field_lengths[:6])
+          for fields in fields_list:
+            print(p+(format % tuple(fields)).rstrip(), file=out)
+    return self
+
+  def _show_column_data_preparation(self):
+    miller_indices = self.extract_miller_indices()
+    labels = []
+    pairs = []
+    for column in self.columns():
+      if (column.label() in ["H", "K", "L"]): continue
+      labels.append(column.label())
+      pairs.append((column.extract_values(), column.selection_valid()))
+    return miller_indices, labels, pairs
+
+  def show_column_data_human_readable(self, out=None):
+    if (out is None): out = sys.stdout
+    miller_indices, labels, pairs = self._show_column_data_preparation()
+    if (miller_indices.size() == 0):
+      h_width = 1
+    else:
+      h_width = len("-%d" % int(flex.max(flex.abs(
+        miller_indices.as_vec3_double().as_double()))+.5))
+    h_format = " ".join(["%%%dd" % h_width]*3)
+    h_blank = " "*(h_width*3+2)
+    def show_labels():
+      for i in range(0, len(labels), 4):
+        print(" ".join([h_blank] + ["%15s"%x for x in labels[i:i+4]]), file=out)
+      print(file=out)
+    n_data_lines = 0
+    print("Column data:", file=out)
+    print("-"*79, file=out)
+    show_labels()
+    for iref,h in enumerate(miller_indices):
+      if (n_data_lines > 20):
+        print(file=out)
+        show_labels()
+        n_data_lines = 0
+      h_str = h_format % h
+      print(h_str, end=' ', file=out)
+      # Group columns by 4
+      for i in range(0, len(pairs), 4):
+        # Only indent if not the first line (it has miller index)
+        table_data = [h_blank] if i else []
+        table_data += [
+          "%15.6g" % data[iref] if selection[iref] else "%15s" % "None"
+          for data, selection in pairs[i : i + 4]
+        ]
+        print(" ".join(table_data), file=out)
+      n_data_lines += 1
+    print("-"*79, file=out)
+    return self
+
+  def show_column_data_machine_readable(self, out=None):
+    if (out is None): out = sys.stdout
+    miller_indices, labels, pairs = self._show_column_data_preparation()
+    print("Machine readable colum data:", file=out)
+    print("Number of columns:", len(labels), file=out)
+    print("Column labels (one per line):", file=out)
+    for label in labels:
+      print(label, file=out)
+    print("Number of Miller indices:", miller_indices.size(), file=out)
+    print("Column data (HKL followed by data):", file=out)
+    for iref,h in enumerate(miller_indices):
+      print(" ".join([str(i) for i in h]), file=out)
+      for i,(data,selection) in enumerate(pairs):
+        if (selection[iref]): print("%.7g" % data[iref], file=out)
+        else:                 print("None", file=out)
+    print("End of column data.", file=out)
+    return self
+
+  def show_column_data_spreadsheet(self, out=None):
+    if (out is None): out = sys.stdout
+    miller_indices, labels, pairs = self._show_column_data_preparation()
+    print(",".join([label.replace(",","_")
+      for label in ["H","K","L"]+labels]), file=out)
+    for iref,h in enumerate(miller_indices):
+      row = [str(i) for i in h]
+      for i,(data,selection) in enumerate(pairs):
+        if (selection[iref]): row.append("%.7g" % data[iref])
+        else:                 row.append("")
+      print(",".join(row), file=out)
+    return self
+
+  def show_column_data(self, out=None, format="human_readable"):
+    assert format in show_column_data_format_keywords
+    return getattr(self, "show_column_data_"+format)(out=out)
+
+  def change_basis_in_place(self,
+        cb_op,
+        new_space_group_info=None,
+        assert_is_compatible_unit_cell=False):
+    assert len(column_type_legend) == 17 # programmer alert
+      # force update if column_type_legend is changed
+    for column_type in self.column_types():
+      if (column_type == "P"):
+        raise RuntimeError(
+          "In-place transformation of phase angles not implemented.")
+      if (column_type == "A"):
+        raise RuntimeError(
+          "In-place transformation of Hendrickson-Lattman coefficients"
+          " not implemented.")
+    if (new_space_group_info is None):
+      new_space_group_info = self.space_group_info().change_basis(cb_op)
+    if "M_ISYM" in self.column_labels():
+      original_miller_indices = self.extract_original_index_miller_indices()
+      indices = cb_op.apply(original_miller_indices)
+      isym = flex.int(len(indices))
+      self.replace_original_index_miller_indices(indices)
+    else:
+      self.replace_miller_indices(cb_op.apply(self.extract_miller_indices()))
+    self.set_space_group_info(space_group_info=new_space_group_info)
+    for crystal in self.crystals():
+      crystal_symmetry = cctbx.crystal.symmetry(
+        unit_cell=crystal.unit_cell().change_basis(cb_op=cb_op),
+        space_group_info=new_space_group_info,
+        assert_is_compatible_unit_cell=assert_is_compatible_unit_cell,
+        raise_sorry_if_incompatible_unit_cell=True)
+      crystal.set_unit_cell_parameters(
+        crystal_symmetry.unit_cell().parameters())
+
+    # transform & symmetrize per-batch unit cell to support Scala 6.0 (NKS)
+    # MTZ stores umat corresponding to Busing & Levy convention
+
+    def mosflm_B(unit_cell):
+      from math import cos, sin, radians
+
+      params = unit_cell.parameters()
+      rparams = unit_cell.reciprocal_parameters()
+
+      a, b, c = params[:3]
+      alpha, beta, gamma = [radians(a) for a in params[3:]]
+      ra, rb, rc = rparams[:3]
+      ralpha, rbeta, rgamma = [radians(a) for a in rparams[3:]]
+
+      B = (ra, rb * cos(rgamma),  rc * cos(rbeta),
+           0, rb * sin(rgamma), -rc * sin(rbeta) * cos(alpha),
+           0, 0, 1/c)
+
+      return B
+
+    from scitbx import matrix
+    for batch in self.batches():
+      batch_uc = uctbx.unit_cell(list(batch.cell()))
+      B = matrix.sqr(mosflm_B(batch_uc))
+      U = matrix.sqr(batch.umat()).transpose()
+      A = U * B
+      direct_matrix = A.inverse()
+      M = cb_op.c_inv().r().transpose().as_rational()
+      new_direct_matrix = M * direct_matrix
+      new_uc = batch_uc.change_basis(cb_op=cb_op)
+      new_B = matrix.sqr(mosflm_B(new_uc))
+      new_U = (new_direct_matrix.inverse() * new_B.inverse()).transpose()
+      batch_crystal_symmetry = cctbx.crystal.symmetry(
+        unit_cell=new_uc,
+        space_group_info=new_space_group_info,
+        assert_is_compatible_unit_cell=assert_is_compatible_unit_cell)
+      batch.set_cell(flex.float(
+        batch_crystal_symmetry.unit_cell().parameters()))
+      batch.set_umat(flex.float(new_U))
+
+  def as_miller_arrays(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        include_unmerged_data=False,
+        anomalous=None,
+        reconstruct_amplitudes=True
+        ):
+    assert not include_unmerged_data, "Unmerged data not supported in MTZ"
+    other_symmetry = crystal_symmetry
+    if (base_array_info is None):
+      base_array_info = miller.array_info(source_type="ccp4_mtz")
+    result = []
+    for crystal in self.crystals():
+      try :
+        unit_cell = crystal.unit_cell()
+      except ValueError as e :
+        raise Sorry(str(e))
+      crystal_symmetry_from_file = cctbx.crystal.symmetry(
+        unit_cell=unit_cell,
+        space_group_info=self.space_group_info(),
+        raise_sorry_if_incompatible_unit_cell=True)
+      crystal_symmetry = crystal_symmetry_from_file.join_symmetry(
+        other_symmetry=other_symmetry,
+        force=force_symmetry)
+      for dataset in crystal.datasets():
+        base_dataset_info = base_array_info.customized_copy(
+          wavelength=dataset.wavelength())
+        column_groups = self.group_columns(
+          crystal_symmetry_from_file=crystal_symmetry_from_file,
+          crystal_symmetry=crystal_symmetry,
+          base_array_info=base_dataset_info,
+          dataset=dataset,
+          anomalous=anomalous,
+          reconstruct_amplitudes=reconstruct_amplitudes
+        )
+        for column_group in column_groups:
+          if (merge_equivalents
+              and isinstance(column_group.data(), flex.double)
+              and isinstance(column_group.sigmas(), flex.double)
+              and column_group.sigmas().size() != 0
+              and flex.min(column_group.sigmas()) > 0):
+            merged_column_group = column_group.merge_equivalents().array()
+            if (merged_column_group.indices().size()
+                != column_group.indices().size()):
+              merged_column_group.set_info(
+                column_group.info().customized_copy(merged=True))
+              column_group = merged_column_group
+          result.append(column_group)
+    return result
+
+  def as_miller_arrays_dict(self,
+                            crystal_symmetry=None,
+                            force_symmetry=False,
+                            merge_equivalents=True,
+                            base_array_info=None,
+                            anomalous=None):
+    """
+    Returns a python dictionary with keys of tuples containing
+    (crystal name, dataset name, column label) and values of
+    the Miller arrays from :func:`as_miller_arrays`.
+
+    The arguments to :func:`as_miller_arrays_dict` are the same
+    as :func:`as_miller_arrays`.
+
+    >>> miller_dict = mtz_file.as_miller_arrays_dict()
+    >>> miller_dict[('NATIVE', 'NATIVE', 'FTOXD3')]
+    <cctbx.miller.array at 0x108a87b90>
+    >>> miller_dict[('NATIVE', 'NATIVE', 'SIGFTOXD3')]
+    <cctbx.miller.array at 0x108a87b90>
+    """
+    miller_arrays = self.as_miller_arrays(
+      crystal_symmetry,
+      force_symmetry,
+      merge_equivalents,
+      base_array_info,
+      anomalous=anomalous
+    )
+    keys = []
+    for crystal in self.crystals():
+      for dataset in crystal.datasets():
+        for label in dataset.column_labels():
+          keys.append((crystal.name(), dataset.name(), label))
+    miller_dict = {}
+    ikeys = iter(keys)
+    for miller_array in miller_arrays:
+      for label in miller_array.info().labels:
+        for key in ikeys:
+           if label == key[2]:
+             miller_dict[key] = miller_array
+             break
+    return miller_dict
+
+  def group_columns(self,
+        crystal_symmetry_from_file,
+        crystal_symmetry,
+        base_array_info,
+        dataset,
+        strict=True,
+        skip_incompatible_values=True,
+        anomalous=None,
+        reconstruct_amplitudes=True):
+    known_mtz_column_types = "".join(column_type_legend)
+    assert len(known_mtz_column_types) == 17 # safety guard
+    all_columns = dataset.columns()
+    all_column_labels = dataset.column_labels()
+    all_column_types = mend_non_conforming_anomalous_column_types(
+      dataset.column_types(), all_column_labels)
+    all_column_prev_use_flags = [False] * len(all_columns)
+    groups = []
+    i_column = -1
+    while 1:
+      i_column += 1
+      if (i_column == len(all_columns)): break
+      if (all_column_prev_use_flags[i_column]): continue
+      column = all_columns[i_column]
+      if (strict and column.type() not in known_mtz_column_types):
+        raise RuntimeError(
+          'Unknown MTZ column type: "%s" (column label: "%s")' % (
+            column.type(), column.label()))
+      t0 = all_column_types[i_column]
+      if (t0 == "H"): continue # skip h,k,l
+      l0 = all_column_labels[i_column]
+      remaining_types = all_column_types[i_column:]
+      labels = None
+      group = None
+      observation_type = None
+      if (t0 in "BYI"): # integer columns
+        if (len(remaining_types) > 1
+            and remaining_types[1] == t0
+            and is_anomalous_label("+", l0)
+            and is_anomalous_label("-", all_column_labels[i_column+1])):
+          labels = all_column_labels[i_column:i_column+2]
+          i_column += 1
+          group = self.extract_integers_anomalous(*labels)
+        else:
+          labels = [l0]
+          group = self.extract_integers(column_label=l0)
+      elif (t0 in "R"): # general real column
+        labels = [l0]
+        group = self.extract_reals(column_label=l0)
+      elif (t0 in "A"): # Hendrickson-Lattman coefficients
+        if (all_column_types[i_column:i_column+4] == "AAAA"):
+          if (len(remaining_types) >= 8
+              and remaining_types[4:8] == "AAAA"
+              and are_anomalous_labels("+",
+                    all_column_labels[i_column:i_column+4])
+              and are_anomalous_labels("-",
+                    all_column_labels[i_column+4:i_column+8])):
+            labels = all_column_labels[i_column:i_column+8]
+            i_column += 7
+            group = self.extract_hendrickson_lattman_anomalous(*labels)
+          else:
+            labels = all_column_labels[i_column:i_column+4]
+            if (    are_anomalous_labels("+",
+                      all_column_labels[i_column:i_column+2])
+                and are_anomalous_labels("-",
+                      all_column_labels[i_column+2:i_column+4])):
+              group = self.extract_hendrickson_lattman_anomalous_ab_only(
+                *labels)
+            else:
+              group = self.extract_hendrickson_lattman(*labels)
+            i_column += 3
+        elif (all_column_types[i_column:i_column+2] == "AA"):
+          labels = all_column_labels[i_column:i_column+2]
+          i_column += 1
+          group = self.extract_hendrickson_lattman_ab_only(*labels)
+        else:
+          raise RuntimeError(
+            'Invalid MTZ column combination'
+            ' (incomplete Hendrickson-Lattman array),'
+            + ' column labels: ' + ", ".join(['"%s"' % l
+              for l in all_column_labels[i_column:i_column+4]])
+            + ' column types: ' + ", ".join(['"%s"' % t
+              for t in all_column_types[i_column:i_column+4]]))
+      elif (remaining_types[:4] == "FQDQ" and reconstruct_amplitudes):
+        labels = all_column_labels[i_column:i_column+4]
+        def next_isym_column_label():
+          for j in range(i_column+4, len(all_column_types)):
+            if (all_column_types[j] == "Y"):
+              vv = all_columns[j].extract_valid_values()
+              if (vv.size() != 0 and vv.all_ge(0) and vv.all_le(2)):
+                all_column_prev_use_flags[j] = True
+                return all_column_labels[j]
+              break
+          return None
+        labels.append(next_isym_column_label())
+        i_column += 3
+        cpp_args = list(labels) + [ skip_incompatible_values ]
+        group = self.extract_delta_anomalous(*cpp_args)
+        if (labels[-1] is None): labels.pop()
+        observation_type = xray.observation_types.reconstructed_amplitude()
+      elif (t0 in "JFED"):
+        # "J": "intensity"
+        # "F": "amplitude"
+        # "E": "normalized amplitude"
+        # "D": "anomalous difference"
+        # "Q": "standard deviation"
+        # "P": "phase angle in degrees"
+        labels = [l0]
+        if (t0 == "D"and not reconstruct_amplitudes):
+          observation_type = xray.observation_types.amplitude()
+        if (    i_column+1 < len(all_column_types)
+            and all_column_types[i_column+1] in "QP"):
+          labels = all_column_labels[i_column:i_column+2]
+          i_column += 1
+          if (all_column_types[i_column] == "Q"):
+            group = self.extract_observations(*labels)
+          else:
+            if (t0 == "J"):
+              raise RuntimeError(
+                'Invalid MTZ column combination (intensity + phase angle),'
+                + ' column labels: "%s" + "%s"' % tuple(labels))
+            group = self.extract_complex(*labels)
+        else:
+          group = self.extract_reals(column_label=l0)
+      elif (t0 in "GK"):
+        # "G": "F(+) or F(-)"
+        # "L": "standard deviation"
+        # "P": "phase angle in degrees"
+        # "K": "I(+) or I(-)"
+        # "M": "standard deviation"
+        perm = None
+        if (remaining_types[:4] in ("GLGL", "GPGP", "KMKM")):
+          perm = [0,1,2,3]
+        elif (remaining_types[:4] in ("GGLL", "GGPP", "KKMM")):
+          perm = [0,2,1,3]
+        elif (remaining_types[:2] in ("GG", "KK")):
+          perm = [0,1]
+        else:
+          raise RuntimeError('Invalid MTZ column combination:'
+            + ' incomplete anomalous data for column label: "%s"' % l0)
+        labels = [all_column_labels[i_column+i] for i in perm]
+        i_column += len(perm)-1
+        if (len(perm) == 2):
+          group = self.extract_reals_anomalous(*labels)
+        elif ("P" in remaining_types[:4]):
+          group = self.extract_complex_anomalous(*labels)
+        else:
+          group = self.extract_observations_anomalous(*labels)
+      else:
+        labels = [l0]
+        group = self.extract_reals(l0)
+      groups.append(column_group(
+        crystal_symmetry_from_file=crystal_symmetry_from_file,
+        crystal_symmetry=crystal_symmetry,
+        base_array_info=base_array_info,
+        primary_column_type=t0,
+        labels=labels,
+        group=group,
+        observation_type=observation_type,
+        anomalous=anomalous,
+      ))
+    return groups
+
+def column_group(
+      crystal_symmetry_from_file,
+      crystal_symmetry,
+      base_array_info,
+      primary_column_type,
+      labels,
+      group,
+      observation_type,
+      anomalous=None):
+  assert group.data.size() == group.indices.size()
+  sigmas = getattr(group, "sigmas", None)
+  if (sigmas is not None): assert sigmas.size() == group.indices.size()
+  if anomalous is not None:
+    miller_set = miller.set(
+      crystal_symmetry=crystal_symmetry,
+      indices=group.indices,
+      anomalous_flag=anomalous)
+  else:
+    if (group.anomalous_flag):
+      miller_set = miller.set(
+        crystal_symmetry=crystal_symmetry,
+        indices=group.indices,
+        anomalous_flag=True)
+      if (miller_set.n_bijvoet_pairs() == 0):
+        # account for non-sensical files generated via
+        # ccp4i "import merged data" tab with default parameters
+        miller_set = miller.set(
+          crystal_symmetry=crystal_symmetry,
+          indices=group.indices,
+          anomalous_flag=False)
+    else:
+      miller_set = miller.set(
+        crystal_symmetry=crystal_symmetry,
+        indices=group.indices).auto_anomalous(min_fraction_bijvoet_pairs=2/3.)
+  result = miller_set.array(
+    data=group.data,
+    sigmas=sigmas).set_info(
+      base_array_info.customized_copy(
+        labels=labels,
+        crystal_symmetry_from_file=crystal_symmetry_from_file,
+        type_hints_from_file=column_type_as_miller_array_type_hints.get(
+          primary_column_type)))
+  if (observation_type is not None):
+    result.set_observation_type(observation_type)
+  elif (not result.is_complex_array()):
+    if   (primary_column_type in "FG"):
+      result.set_observation_type_xray_amplitude()
+    elif (primary_column_type in "JK"):
+      result.set_observation_type_xray_intensity()
+  return result
+
+def mend_non_conforming_anomalous_column_types(all_types, all_labels):
+
+  replacements = {
+    "JQJQ": "KMKM",
+    "FQFQ": "GLGL",
+    "JJQQ": "KKMM",
+    "FFQQ": "GGLL",
+    "FPFP": "GPGP",
+    "FFPP": "GGPP",
+  }
+
+  def are_anomalous_labels():
+    if (group_types[1] == "Q"):
+      permutation = ((0,1),(2,3))
+    else:
+      permutation = ((0,2),(1,3))
+    for offsets,sign in zip(permutation, ("+", "-")):
+      for offs in offsets:
+        if (not is_anomalous_label(sign, all_labels[i_group_start + offs])):
+          return False
+    return True
+
+  def find_group():
+    for group_types in replacements.keys():
+      i_group_start = all_types_x.find(group_types)
+      if (i_group_start >= 0):
+        return group_types, i_group_start
+    return None, None
+
+  all_types = "".join(all_types)
+  if (0): # for debugging only
+    all_types = all_types.replace("GLGL", "FQFQ")
+    all_types = all_types.replace("KMKM", "JQJQ")
+  all_types_x = all_types
+  while 1:
+    group_types, i_group_start = find_group()
+    if (group_types is None):
+      break
+    if (are_anomalous_labels()):
+      replacement = replacements[group_types]
+      all_types = overwrite_at(all_types, i_group_start, replacement)
+    else:
+      replacement = "X"
+    all_types_x = overwrite_at(all_types_x, i_group_start, replacement)
+  return all_types
+
+@bp.inject_into(ext.crystal)
+class _():
+
+  def crystal_symmetry(self):
+    try :
+      unit_cell = self.unit_cell()
+    except ValueError as e :
+      raise Sorry(str(e))
+    return cctbx.crystal.symmetry(
+      unit_cell=unit_cell,
+      space_group_info=self.mtz_object().space_group_info())
+
+  def miller_set(self, anomalous_flag=None):
+    return miller.set(
+      crystal_symmetry=self.crystal_symmetry(),
+      indices=self.mtz_object().extract_miller_indices(),
+      anomalous_flag=anomalous_flag)
+
+@bp.inject_into(ext.dataset)
+class _():
+
+  def column_labels(self):
+    return [column.label() for column in self.columns()]
+
+  def column_types(self):
+    return [column.type() for column in self.columns()]
+
+  def initialize_hkl_columns(self):
+    if (self.mtz_object().n_columns() == 0):
+      for label in "HKL":
+        self.add_column(label=label, type="H")
+
+  def _add_observations(self, data_label, sigmas_label, column_types,
+                              indices, data, sigmas):
+    mtz_reflection_indices = self.add_column(
+      label=data_label,
+      type=column_types[0]).set_reals(
+        miller_indices=indices,
+        data=data)
+    if (sigmas is not None):
+      self.add_column(
+        label=sigmas_label,
+        type=column_types[1]).set_reals(
+          mtz_reflection_indices=mtz_reflection_indices,
+          data=sigmas)
+
+  def _add_complex(self, amplitudes_label, phases_label, column_types,
+                         indices, data):
+    mtz_reflection_indices = self.add_column(
+      label=amplitudes_label,
+      type=column_types[0]).set_reals(
+        miller_indices=indices,
+        data=flex.abs(data))
+    self.add_column(
+      label=phases_label,
+      type=column_types[1]).set_reals(
+        mtz_reflection_indices=mtz_reflection_indices,
+        data=flex.arg(data, True))
+
+  def add_miller_array(self,
+        miller_array,
+        column_root_label,
+        column_types=None,
+        label_decorator=None):
+    assert column_types is None or isinstance(column_types, str)
+    if (label_decorator is None):
+      label_decorator = globals()["label_decorator"]()
+    default_col_types = default_column_types(miller_array=miller_array)
+    if (default_col_types is None):
+      raise RuntimeError(
+        "Conversion of given type of miller_array to MTZ format"
+        " is not supported.")
+    if (column_types is None):
+      column_types = default_col_types
+    elif (len(column_types) != len(default_col_types)):
+      raise RuntimeError(
+        "Invalid MTZ column_types for the given miller_array.")
+    self.initialize_hkl_columns()
+    if (not miller_array.anomalous_flag()):
+      if (default_col_types in ["FQ", "JQ"]):
+        self._add_observations(
+          data_label=column_root_label,
+          sigmas_label=label_decorator.sigmas(column_root_label),
+          column_types=column_types,
+          indices=miller_array.indices(),
+          data=miller_array.data(),
+          sigmas=miller_array.sigmas())
+      elif (default_col_types == "FP"):
+        self._add_complex(
+          amplitudes_label=column_root_label,
+          phases_label=label_decorator.phases(column_root_label),
+          column_types=column_types,
+          indices=miller_array.indices(),
+          data=miller_array.data())
+      elif (default_col_types in ["F", "J"]):
+        self.add_column(
+          label=column_root_label,
+          type=column_types).set_reals(
+            miller_indices=miller_array.indices(),
+            data=miller_array.data())
+      elif (default_col_types == "I"):
+        self.add_column(
+          label=column_root_label,
+          type=column_types).set_reals(
+            miller_indices=miller_array.indices(),
+            data=miller_array.data().as_double())
+      elif (default_col_types == "AAAA"):
+        mtz_reflection_indices = self.add_column(
+          label=label_decorator.hendrickson_lattman(column_root_label, 0),
+          type=column_types[0]).set_reals(
+            miller_indices=miller_array.indices(),
+            data=miller_array.data().slice(0))
+        for i in range(1,4):
+          self.add_column(
+            label=label_decorator.hendrickson_lattman(column_root_label, i),
+            type=column_types[i]).set_reals(
+              mtz_reflection_indices=mtz_reflection_indices,
+              data=miller_array.data().slice(i))
+      else:
+        raise RuntimeError("Fatal programming error.")
+    else:
+      asu, matches = miller_array.match_bijvoet_mates()
+      if (default_col_types == "FQDQY"):
+        _ = matches.pairs_hemisphere_selection
+        selpp = _("+")
+        selpm = _("-")
+        _ = matches.singles_hemisphere_selection
+        selsp = _("+")
+        selsm = _("-")
+        _ = asu.data()
+        fp = _.select(selpp)
+        fm = _.select(selpm)
+        fs = _.select(selsp)
+        fs.extend(_.select(selsm))
+        # http://www.ccp4.ac.uk/dist/html/mtzMADmod.html
+        f = 0.5 * (fp + fm)
+        d = fp - fm
+        _ = asu.sigmas()
+        sp = _.select(selpp)
+        sm = _.select(selpm)
+        ss = _.select(selsp)
+        ss.extend(_.select(selsm))
+        sd = flex.sqrt(sp**2 + sm**2)
+        sf = 0.5 * sd
+        f.extend(fs)
+        sf.extend(ss)
+        _ = asu.indices()
+        hd = _.select(selpp)
+        hf = hd.concatenate(_.select(selsp))
+        hf.extend(-_.select(selsm))
+        isym = flex.double(selpp.size(), 0)       # both F+ and F-
+        isym.resize(selpp.size()+selsp.size(), 1) # only F+
+        isym.resize(hf.size(), 2)                 # only F-
+        isym.set_selected(miller_array.space_group().is_centric(hf) , 0)
+        label_group = [
+          column_root_label,
+          label_decorator.sigmas(column_root_label),
+          label_decorator.delta_anomalous(column_root_label),
+          label_decorator.delta_anomalous_sigmas(column_root_label),
+          label_decorator.delta_anomalous_isym(column_root_label)]
+        for i,(mi,data) in enumerate([(hf,f),(hf,sf),(hd,d),(hd,sd),(hf,isym)]):
+          self.add_column(
+            label=label_group[i],
+            type=column_types[i]).set_reals(miller_indices=mi, data=data)
+      else:
+        for anomalous_sign in ("+","-"):
+          sel = matches.pairs_hemisphere_selection(anomalous_sign)
+          sel.extend(matches.singles_hemisphere_selection(anomalous_sign))
+          if (anomalous_sign == "+"):
+            indices = asu.indices().select(sel)
+          else:
+            indices = -asu.indices().select(sel)
+          data = asu.data().select(sel)
+          if (default_col_types in ["GL", "KM"]):
+            self._add_observations(
+              data_label=label_decorator.anomalous(
+                column_root_label, anomalous_sign),
+              sigmas_label=label_decorator.sigmas(
+                column_root_label, anomalous_sign),
+              column_types=column_types,
+              indices=indices,
+              data=data,
+              sigmas=asu.sigmas().select(sel))
+          elif (default_col_types == "GP"):
+            self._add_complex(
+              amplitudes_label=label_decorator.anomalous(
+                column_root_label, anomalous_sign),
+              phases_label=label_decorator.phases(
+                column_root_label, anomalous_sign),
+              column_types=column_types,
+              indices=indices,
+              data=data)
+          elif (default_col_types in ["G", "K"]):
+            self.add_column(
+              label=label_decorator.anomalous(
+                column_root_label, anomalous_sign),
+              type=column_types).set_reals(
+                miller_indices=indices,
+                data=data)
+          elif (default_col_types == "I"):
+            self.add_column(
+              label=label_decorator.anomalous(
+                column_root_label, anomalous_sign),
+              type=column_types).set_reals(
+                miller_indices=indices,
+                data=data.as_double())
+          elif (default_col_types == "AAAA"):
+            mtz_reflection_indices = self.add_column(
+              label=label_decorator.hendrickson_lattman(
+                column_root_label, 0, anomalous_sign),
+              type=column_types[0]).set_reals(
+                miller_indices=indices,
+                data=data.slice(0))
+            for i in range(1,4):
+              self.add_column(
+                label=label_decorator.hendrickson_lattman(
+                  column_root_label, i, anomalous_sign),
+                type=column_types[i]).set_reals(
+                  mtz_reflection_indices=mtz_reflection_indices,
+                  data=data.slice(i))
+          else:
+            raise RuntimeError("Fatal programming error.")
+    return self
+
+class column_values_and_selection_valid(slots_getstate_setstate):
+
+  __slots__ = ["values", "selection_valid"]
+
+  def __init__(O, values, selection_valid):
+    O.values = values
+    O.selection_valid = selection_valid
+
+  def as_tuple(O):
+    return (O.values, O.selection_valid)
+
+@bp.inject_into(ext.column)
+class _():
+
+  def extract_values_and_selection_valid(self, not_a_number_substitute=0):
+    return column_values_and_selection_valid(
+      values=self.extract_values(
+        not_a_number_substitute=not_a_number_substitute),
+      selection_valid=self.selection_valid())
+
+  def format_fields_for_mtz_dump(self, n_refl):
+    valid_values = self.extract_valid_values()
+    fields = [
+      self.label(),
+      "%d" % valid_values.size(),
+      "%.2f%%" %(100.*valid_values.size()/max(1, n_refl)),
+      format_min_max(flex.min, valid_values),
+      format_min_max(flex.max, valid_values),
+      self.type()+":",
+      column_type_legend.get(
+        self.type(), "*** UNDEFINED column type ***")]
+    return fields
+
+def miller_array_as_mtz_dataset(self,
+      column_root_label,
+      column_types=None,
+      label_decorator=None,
+      title=None,
+      crystal_name="crystal",
+      project_name="project",
+      dataset_name="dataset",
+      wavelength=0.0):
+  if (title is None):
+    title = str(self.info())
+  if (title is None):
+    title = "cctbx.miller.array"
+  unit_cell = self.unit_cell()
+  if (unit_cell is None):
+    unit_cell = uctbx.unit_cell((1,1,1,90,90,90))
+  space_group_info = self.space_group_info()
+  if (space_group_info is None):
+    space_group_info = sgtbx.space_group_info(symbol="P 1")
+  mtz_object = object() \
+    .set_title(title=title) \
+    .set_space_group_info(space_group_info=space_group_info)
+  mtz_object.set_hkl_base(unit_cell=unit_cell)
+  return mtz_object.add_crystal(
+    name=crystal_name,
+    project_name=project_name,
+    unit_cell=unit_cell).add_dataset(
+      name=dataset_name,
+      wavelength=wavelength).add_miller_array(
+        miller_array=self,
+        column_root_label=column_root_label,
+        column_types=column_types,
+        label_decorator=label_decorator)
+
+@bp.inject_into(ext.batch)
+class _():
+
+  def show(self, out=None):
+    if (out is None): out = sys.stdout
+    print("batch number:", self.num(), file=out)
+    print("batch title:", self.title().rstrip(), file=out)
+    print("names of the three axes:", list(self.gonlab()), file=out)
+    print("type of orientation block:", self.iortyp(), file=out)
+    print("refinement flags for cell:", list(self.lbcell()), file=out)
+    print("number of phixyz used (0, 1, or 2):", self.misflg(), file=out)
+    print("reciprocal axis closest to rotation axis:", self.jumpax(), file=out)
+    print("crystal number:", self.ncryst(), file=out)
+    print("mosaicity model: 0 = isotropic, 1 = anisotropic:", \
+      self.lcrflg(), file=out)
+    print("type of data: 2D (1), 3D (2), or Laue (3):", self.ldtype(), file=out)
+    print("goniostat scan axis number:", self.jsaxs(), file=out)
+    print("number of batch scales & Bfactors (0 if unset):", \
+      self.nbscal(), file=out)
+    print("number of goniostat axes:", self.ngonax(), file=out)
+    print("flag for type of beam info:", self.lbmflg(), file=out)
+    print("  0: for alambd, delamb; 1: also delcor, divhd, divvd", file=out)
+    print("number of detectors (current maximum 2):", self.ndet(), file=out)
+    print("dataset id:", self.nbsetid(), file=out)
+    print("cell dimensions:", list(self.cell()), file=out)
+    print("orientation matrix U:", list(self.umat()), file=out)
+    print("  in Fortranic order, i.e. U(1,1), U(2,1) ...", file=out)
+    print("missetting angles at beginning and end of oscillation:", \
+      list(self.phixyz()), file=out)
+    print("mosaicity:", list(self.crydat()), file=out)
+    print("datum values of goniostat axes:", list(self.datum()), file=out)
+    print("start of phi relative to datum:", self.phistt(), file=out)
+    print("end of phi relative to datum:", self.phiend(), file=out)
+    print("rotation axis in lab frame:", list(self.scanax()), file=out)
+    print("start time:", self.time1(), file=out)
+    print("stop time:", self.time2(), file=out)
+    print("batch scale:", self.bscale(), file=out)
+    print("batch temperature factor:", self.bbfac(), file=out)
+    print("sd bscale:", self.sdbscale(), file=out)
+    print("sd bbfac:", self.sdbfac(), file=out)
+    print("phi range:", self.phirange(), file=out)
+    print('vectors ("Cambridge" laboratory axes) defining' \
+      ' ngonax goniostat axes:', file=out)
+    print("  vector 1:", list(self.e1()), file=out)
+    print("  vector 2:", list(self.e2()), file=out)
+    print("  vector 3:", list(self.e3()), file=out)
+    print("idealised source vector:", list(self.source()), file=out)
+    print("source vector:", list(self.so()), file=out)
+    print("wavelength (A):", self.alambd(), file=out)
+    print("dispersion (deltalambda / lambda):", self.delamb(), file=out)
+    print("correlated component:", self.delcor(), file=out)
+    print("horizontal beam divergence:", self.divhd(), file=out)
+    print("vertical beam divergence:", self.divvd(), file=out)
+    print("xtal to detector distance:", list(self.dx()), file=out)
+    print("detector tilt angle:", list(self.theta()), file=out)
+    print("min & max values of detector coords (pixels):", \
+      list(self.detlm()), file=out)
+
+def cutoff_data(file_name, d_min_cut):
+  """
+  Utility function for applying a global resolution cutoff to an MTZ file
+  without reference to the contents.  This is only used internally in cases
+  where the input MTZ has already been processed by CCTBX.
+  """
+  mtz_in = object(file_name=file_name)
+  cut_arrays = []
+  labels = ["H","K","L"]
+  uppercase = ['']
+  for miller_array in mtz_in.as_miller_arrays():
+    cut_arrays.append(miller_array.resolution_filter(d_min=d_min_cut))
+    labels.extend(miller_array.info().labels)
+  mtz_dataset = cut_arrays[0].as_mtz_dataset(column_root_label="A")
+  for k, other_array in enumerate(cut_arrays[1:], start=1):
+    mtz_dataset.add_miller_array(other_array,
+      column_root_label=string.ascii_uppercase[k])
+  mtz_obj = mtz_dataset.mtz_object()
+  assert (len(list(mtz_obj.columns())) == len(labels))
+  for k, column in enumerate(mtz_obj.columns()):
+    column.set_label(labels[k])
+  mtz_obj.write(file_name)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/crystal_symmetry_from_mtz.py
+"Extracts crystal symmetry from MTZ file."
+from __future__ import absolute_import, division, print_function
+
+from iotbx import mtz
+from cctbx import crystal
+
+def extract_from(file_name):
+  mtz_object = mtz.object(file_name=file_name)
+  assert mtz_object.n_symmetry_matrices() > 0
+  return mtz_object.crystals()[0].crystal_symmetry()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/extract_from_symmetry_lib.py
+from __future__ import absolute_import, division, print_function
+from cctbx import sgtbx
+import libtbx.load_env
+import os.path as op
+from six.moves import range
+
+if (libtbx.env.has_module("ccp4io")):
+  for _ in ["libccp4/data", "data"]:
+    ccp4io_lib_data = libtbx.env.under_dist(
+      module_name="ccp4io", path=_)
+    if (op.isdir(ccp4io_lib_data)):
+      break
+  else:
+    ccp4io_lib_data = None
+else:
+  ccp4io_lib_data = None
+
+_ccp4_symbol_cache = {"symop.lib": {}, "syminfo.lib": {}}
+_syminfo_lib_cache = []
+
+syminfo_lib_bad_old = set("""
+P 21/m 21/m 2/n a
+""".splitlines())
+
+def ccp4_symbol(space_group_info, lib_name, require_at_least_one_lib=True):
+  assert lib_name in _ccp4_symbol_cache
+  sg_type = space_group_info.type()
+  lookup_symbol = sg_type.lookup_symbol()
+  cache = _ccp4_symbol_cache[lib_name]
+  result = cache.get(lookup_symbol, "..unknown..")
+  if (result != "..unknown.."):
+    return result
+  if (lib_name != "syminfo.lib" or len(_syminfo_lib_cache) == 0):
+    lib_paths = []
+    if (ccp4io_lib_data is not None):
+      lib_paths.append(op.join(ccp4io_lib_data, lib_name))
+    import os
+    if 'CCP4_LIB' in os.environ:
+      lib_paths.append(op.expandvars("$CCP4_LIB/data/"+lib_name))
+    if 'CLIBD' in os.environ:
+      lib_paths.append(op.expandvars("$CLIBD/"+lib_name))
+    found_at_least_one_lib = False
+    for lib_path in lib_paths:
+      if (op.isfile(lib_path)):
+        found_at_least_one_lib = True
+        if (lib_name == "symop.lib"):
+          with open(lib_path) as fh:
+            ccp4_symbol = search_symop_lib_for_ccp4_symbol(
+              space_group_info=space_group_info,
+              file_iter=fh)
+          if (ccp4_symbol is not None):
+            cache[lookup_symbol] = ccp4_symbol
+            return ccp4_symbol
+        else:
+          build_syminfo_lib_cache(lib_path)
+          break
+    else:
+      if (require_at_least_one_lib):
+        assert found_at_least_one_lib
+  if (lib_name == "syminfo.lib"):
+    for hall,ccp4_symbol in _syminfo_lib_cache[sg_type.number()]:
+      sgi = sgtbx.space_group_info(symbol="Hall: "+hall)
+      lus = sgi.type().lookup_symbol()
+      cache[lus] = ccp4_symbol
+      if (lus == lookup_symbol):
+        return ccp4_symbol
+  return None
+
+def search_symop_lib_for_ccp4_symbol(space_group_info, file_iter):
+  given_space_group_number = space_group_info.type().number()
+  for line in file_iter:
+    flds = line.split(None, 4)
+    space_group_number = int(flds[0][-3:])
+    order_z = int(flds[1])
+    if (space_group_number != given_space_group_number):
+      for i in range(order_z):
+        next(file_iter)
+    else:
+      result = flds[3]
+      group = collect_symops(file_iter=file_iter, order_z=order_z)
+      if (space_group_info.group() == group):
+        return result
+  return None
+
+def collect_symops(file_iter, order_z):
+  result = sgtbx.space_group()
+  for i in range(order_z):
+    line = next(file_iter).strip()
+    result.expand_smx(sgtbx.rt_mx(line))
+  return result
+
+def build_syminfo_lib_cache(lib_path):
+  _syminfo_lib_cache.append(None)
+  for number in range(230):
+    _syminfo_lib_cache.append([])
+  with open(lib_path) as file_iter:
+    for line in file_iter:
+      l = line.strip()
+      if (l == "begin_spacegroup"):
+        number = None
+        symbols = {}
+        for line in file_iter:
+          l = line.strip()
+          if (l == "end_spacegroup"):
+            assert number is not None
+            assert len(symbols) == 3
+            def get_shortest(s_list):
+              result = None
+              for s in s_list:
+                if (len(s) == 0): continue
+                if (result is None or len(result) > len(s)):
+                  result = s
+              return result
+            ccp4_symbol = get_shortest(symbols["old"])
+            if (   ccp4_symbol is None
+                or ccp4_symbol in syminfo_lib_bad_old):
+              if (len(symbols["xhm"]) != 0):
+                ccp4_symbol = symbols["xhm"]
+              else:
+                raise RuntimeError("Missing both xHM and old symbols")
+            _syminfo_lib_cache[number].append((symbols["hall"], ccp4_symbol))
+            break
+          if (l.startswith("number ")):
+            flds = l.split()
+            assert len(flds) == 2
+            number = int(flds[1])
+            assert number >= 1
+            assert number <= 230
+          elif (l.startswith("symbol ")):
+            flds = l.split(None, 2)
+            assert len(flds) == 3
+            stype = flds[1].lower()
+            if (stype in ["hall", "xhm", "old"]):
+              assert stype not in symbols
+              symbol = flds[2].strip()
+              assert len(symbol) >= 2
+              assert symbol.startswith("'")
+              assert symbol.endswith("'")
+              if (stype == "old"):
+                symbols[stype] = " ".join(symbol[1:-1].split()).split("' '")
+              else:
+                symbols[stype] = symbol[1:-1]
+        else:
+          raise RuntimeError("Missing end_spacegroup")
+  return None
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/tst.py
+from __future__ import absolute_import, division, print_function
+import libtbx.load_env
+from six.moves import range
+from six.moves import zip
+if (libtbx.env.has_module("ccp4io")):
+  from iotbx import mtz
+else:
+  mtz = None
+from cctbx.development import debug_utils
+from cctbx import miller
+from cctbx import crystal
+from cctbx.array_family import flex
+from cctbx.regression.tst_miller import generate_random_hl
+from iotbx.regression.utils import random_f_calc
+from libtbx.test_utils import Exception_expected, approx_equal, eps_eq
+import math
+import sys
+import os
+op = os.path
+
+def to_mtz(miller_array, column_root_label, column_types=None):
+  mtz_object = mtz.object()
+  mtz_object.set_title("mtz writer test")
+  mtz_object.add_history(line="start")
+  mtz_object.set_space_group_info(miller_array.space_group_info())
+  mtz_object.set_hkl_base(miller_array.unit_cell())
+  crystal = mtz_object.add_crystal(
+    name="test_crystal",
+    project_name="test_project",
+    unit_cell=miller_array.unit_cell())
+  dataset = crystal.add_dataset(
+    name="test_dataset",
+    wavelength=1)
+  assert dataset.add_miller_array(
+    miller_array=miller_array,
+    column_root_label=column_root_label,
+    column_types=column_types) is dataset
+  mtz_object.add_history(line="done")
+  return dataset
+
+def recycle(miller_array, column_root_label, column_types=None, verbose=0):
+  original_dataset = to_mtz(miller_array, column_root_label, column_types)
+  label_decorator = mtz.label_decorator()
+  written = original_dataset.mtz_object()
+  if (0 or verbose):
+    written.show_summary()
+  original_dataset.mtz_object().write(file_name="tmp_iotbx_mtz.mtz")
+  restored = mtz.object(file_name="tmp_iotbx_mtz.mtz")
+  if (0 or verbose):
+    restored.show_summary()
+  assert restored.title() == written.title()
+  assert [line.rstrip() for line in restored.history()] \
+      == list(written.history())
+  assert restored.space_group_name() == written.space_group_name()
+  assert restored.space_group_number() == written.space_group_number()
+  assert restored.space_group() == written.space_group()
+  assert restored.point_group_name() == written.point_group_name()
+  assert restored.lattice_centring_type() == written.lattice_centring_type()
+  assert restored.n_batches() == written.n_batches()
+  assert restored.n_reflections() == written.n_reflections()
+  assert eps_eq(
+    restored.max_min_resolution(), written.max_min_resolution(), eps=1.e-5)
+  assert restored.n_crystals() == written.n_crystals()
+  assert restored.n_active_crystals() == written.n_active_crystals()
+  assert restored.n_crystals() == 2
+  for rx,wx in zip(restored.crystals(), written.crystals()):
+    assert rx.name() == wx.name()
+    assert rx.project_name() == wx.project_name()
+    assert rx.unit_cell().is_similar_to(wx.unit_cell())
+    assert rx.n_datasets() == wx.n_datasets()
+    for rd,wd in zip(rx.datasets(), wx.datasets()):
+      assert rd.name() == wd.name()
+      assert rd.wavelength() == wd.wavelength()
+      assert rd.n_columns() == wd.n_columns()
+  miller_set = restored.crystals()[1].miller_set()
+  assert miller_set.indices().size() == restored.n_reflections()
+  crystal_symmetry = restored.crystals()[1].crystal_symmetry()
+  restored_dataset = restored.crystals()[1].datasets()[0]
+  if (not miller_array.anomalous_flag()):
+    if (miller_array.sigmas() is None):
+      if (miller_array.is_complex_array()):
+        assert restored_dataset.n_columns() == 3+2
+        group = restored.extract_complex(
+          column_label_ampl=column_root_label,
+          column_label_phi=label_decorator.phases(column_root_label))
+      elif (miller_array.is_hendrickson_lattman_array()):
+        assert restored_dataset.n_columns() == 3+4
+        deco = label_decorator.hendrickson_lattman
+        group = restored.extract_hendrickson_lattman(
+          column_label_a=deco(column_root_label, 0),
+          column_label_b=deco(column_root_label, 1),
+          column_label_c=deco(column_root_label, 2),
+          column_label_d=deco(column_root_label, 3))
+      else:
+        assert restored_dataset.n_columns() == 3+1
+        group = restored.extract_reals(
+          column_label=column_root_label)
+      r = miller.array(
+        miller_set=miller.set(
+          crystal_symmetry=crystal_symmetry,
+          indices=group.indices,
+          anomalous_flag=False),
+        data=group.data)
+    else:
+      assert restored_dataset.n_columns() == 3+2
+      group = restored.extract_observations(
+        column_label_data=column_root_label,
+        column_label_sigmas=label_decorator.sigmas(column_root_label))
+      r = miller.array(
+        miller_set=miller.set(
+          crystal_symmetry=crystal_symmetry,
+          indices=group.indices,
+          anomalous_flag=False),
+        data=group.data,
+        sigmas=group.sigmas)
+  else:
+    if (miller_array.sigmas() is None):
+      if (miller_array.is_complex_array()):
+        assert restored_dataset.n_columns() == 3+4
+        group = restored.extract_complex_anomalous(
+          column_label_ampl_plus=label_decorator.anomalous(
+            column_root_label, "+"),
+          column_label_phi_plus=label_decorator.phases(
+            column_root_label, "+"),
+          column_label_ampl_minus=label_decorator.anomalous(
+            column_root_label, "-"),
+          column_label_phi_minus=label_decorator.phases(
+            column_root_label, "-"))
+      elif (miller_array.is_hendrickson_lattman_array()):
+        assert restored_dataset.n_columns() == 3+8
+        deco = label_decorator.hendrickson_lattman
+        group = restored.extract_hendrickson_lattman_anomalous(
+          column_label_a_plus=deco(column_root_label, 0, "+"),
+          column_label_b_plus=deco(column_root_label, 1, "+"),
+          column_label_c_plus=deco(column_root_label, 2, "+"),
+          column_label_d_plus=deco(column_root_label, 3, "+"),
+          column_label_a_minus=deco(column_root_label, 0, "-"),
+          column_label_b_minus=deco(column_root_label, 1, "-"),
+          column_label_c_minus=deco(column_root_label, 2, "-"),
+          column_label_d_minus=deco(column_root_label, 3, "-"))
+      else:
+        assert restored_dataset.n_columns() == 3+2
+        group = restored.extract_reals_anomalous(
+          column_label_plus=label_decorator.anomalous(column_root_label, "+"),
+          column_label_minus=label_decorator.anomalous(column_root_label, "-"))
+      r = miller.array(
+        miller_set=miller.set(
+          crystal_symmetry=crystal_symmetry,
+          indices=group.indices,
+          anomalous_flag=True),
+        data=group.data)
+    else:
+      assert restored_dataset.n_columns() == 3+4
+      group = restored.extract_observations_anomalous(
+        column_label_data_plus=label_decorator.anomalous(
+          column_root_label, "+"),
+        column_label_sigmas_plus=label_decorator.sigmas(
+          column_root_label, "+"),
+        column_label_data_minus=label_decorator.anomalous(
+          column_root_label, "-"),
+        column_label_sigmas_minus=label_decorator.sigmas(
+          column_root_label, "-"))
+      r = miller.array(
+        miller_set=miller.set(
+          crystal_symmetry=crystal_symmetry,
+          indices=group.indices,
+          anomalous_flag=True),
+        data=group.data,
+        sigmas=group.sigmas)
+  verify_miller_arrays(miller_array, r)
+  restored_miller_arrays = restored.as_miller_arrays()
+  assert len(restored_miller_arrays) == 1
+  thff = restored_miller_arrays[0].info().type_hints_from_file
+  assert thff is not None
+  assert miller_array.is_hendrickson_lattman_array() \
+      == (thff == "hendrickson_lattman")
+  verify_miller_arrays(miller_array, restored_miller_arrays[0])
+  mtz_object = miller_array.as_mtz_dataset(
+    column_root_label=column_root_label).mtz_object()
+  restored_miller_arrays = mtz_object.as_miller_arrays()
+  assert len(restored_miller_arrays) == 1
+  verify_miller_arrays(miller_array, restored_miller_arrays[0])
+  if (   miller_array.is_bool_array()
+      or miller_array.is_integer_array()
+      or miller_array.is_real_array()):
+    cb_op = miller_array.change_of_basis_op_to_niggli_cell()
+    mtz_object.change_basis_in_place(cb_op=cb_op)
+    cb_array = miller_array.change_basis(cb_op=cb_op)
+    assert mtz_object.space_group() == cb_array.space_group()
+    for mtz_crystal in mtz_object.crystals():
+      assert mtz_crystal.unit_cell().is_similar_to(cb_array.unit_cell())
+    restored_miller_arrays = mtz_object.as_miller_arrays()
+    assert len(restored_miller_arrays) == 1
+    verify_miller_arrays(cb_array, restored_miller_arrays[0])
+    mtz_object.change_basis_in_place(cb_op=cb_op.inverse())
+    assert mtz_object.space_group() == miller_array.space_group()
+    for mtz_crystal in mtz_object.crystals():
+      assert mtz_crystal.unit_cell().is_similar_to(miller_array.unit_cell())
+    restored_miller_arrays = mtz_object.as_miller_arrays()
+    assert len(restored_miller_arrays) == 1
+    verify_miller_arrays(miller_array, restored_miller_arrays[0])
+
+def verify_miller_arrays(a1, a2, eps=1.e-5):
+  v = a2.adopt_set(a1)
+  if (a1.is_bool_array()):
+    if (a2.is_integer_array()):
+      assert flex.max(flex.abs(a1.data().as_int() - v.data())) == 0
+    else:
+      assert flex.max(flex.abs(a1.data().as_double() - v.data())) < eps
+  elif (a1.is_hendrickson_lattman_array()):
+    for i in range(4):
+      assert flex.max(flex.abs(a1.data().slice(i) - v.data().slice(i))) < eps
+  else:
+    assert flex.max(flex.abs(a1.data() - v.data())) < eps
+  if (v.sigmas() is not None):
+    assert flex.max(flex.abs(a1.sigmas() - v.sigmas())) < eps
+
+def exercise_recycle(
+      space_group_info, anomalous_flag,
+      n_scatterers=8, d_min=2.5, verbose=0):
+  f_calc = random_f_calc(
+    space_group_info=space_group_info,
+    n_scatterers=n_scatterers,
+    d_min=d_min,
+    anomalous_flag=anomalous_flag,
+    verbose=verbose)
+  if (f_calc is None): return
+  recycle(f_calc, "f_calc", verbose=verbose)
+  for column_root_label, column_types in [
+        ("f_obs", None),
+        ("Ework", "E")]:
+    if (anomalous_flag and column_types == "E"): continue
+    recycle(
+      miller_array=abs(f_calc),
+      column_root_label=column_root_label,
+      column_types=column_types,
+      verbose=verbose)
+  if (not anomalous_flag):
+    recycle(abs(f_calc), "f_obs", column_types="R", verbose=verbose)
+  for column_root_label, column_types in [
+        ("f_obs", None),
+        ("Ework", "EQ")]:
+    if (anomalous_flag and column_types == "EQ"): continue
+    recycle(
+      miller_array=miller.array(
+        miller_set=f_calc,
+        data=flex.abs(f_calc.data()),
+        sigmas=flex.abs(f_calc.data())/10),
+      column_root_label=column_root_label,
+      column_types=column_types,
+      verbose=verbose)
+  recycle(f_calc.centric_flags(), "cent", verbose=verbose)
+  recycle(generate_random_hl(miller_set=f_calc), "prob", verbose=verbose)
+
+def run_call_back(flags, space_group_info):
+  for anomalous_flag in [False, True]:
+    exercise_recycle(
+      space_group_info=space_group_info,
+      anomalous_flag=anomalous_flag,
+      verbose=flags.Verbose)
+  exercise_unmerged(space_group_info=space_group_info)
+
+def exercise_miller_array_data_types():
+  miller_set = crystal.symmetry(
+    unit_cell=(10,10,10,90,90,90),
+    space_group_symbol="P1").miller_set(
+      indices=flex.miller_index([(1,2,3),(4,5,6)]),
+      anomalous_flag=False)
+  for data in [
+        flex.bool([False,True]),
+        flex.int([0,1]),
+        flex.size_t([0,1]),
+        flex.double([0,1]),
+        flex.complex_double([0,1])]:
+    miller_array = miller_set.array(data=data)
+    if (op.isfile("tmp_iotbx_mtz.mtz")): os.remove("tmp_iotbx_mtz.mtz")
+    assert not op.isfile("tmp_iotbx_mtz.mtz")
+    miller_array.as_mtz_dataset(column_root_label="DATA").mtz_object().write(
+      file_name="tmp_iotbx_mtz.mtz")
+    assert op.isfile("tmp_iotbx_mtz.mtz")
+    mtz_obj = mtz.object(file_name="tmp_iotbx_mtz.mtz")
+    miller_arrays_read_back = mtz_obj.as_miller_arrays()
+    assert len(miller_arrays_read_back) == 1
+    miller_array_read_back = miller_arrays_read_back[0]
+    assert miller_array_read_back.indices().all_eq(miller_array.indices())
+    if (miller_array.is_integer_array() or miller_array.is_bool_array()):
+      assert miller_array_read_back.data().all_eq(flex.int([0, 1]))
+    elif (miller_array.is_real_array()):
+      assert miller_array_read_back.data().all_eq(flex.double([0, 1]))
+    elif (miller_array.is_complex_array()):
+      assert miller_array_read_back.data().all_eq(flex.complex_double([0, 1]))
+    else:
+      raise RuntimeError("Programming error.")
+
+def exercise_extract_delta_anomalous():
+  miller_array_start = miller.set(
+    crystal_symmetry=crystal.symmetry(
+      unit_cell=(10,10,10,90,90,90),
+      space_group_symbol="P1"),
+    indices=flex.miller_index([(1,2,3),(-1,-2,-3)]),
+    anomalous_flag=True).array(
+      data=flex.double([3,5]),
+      sigmas=flex.double([0.3,0.5]))
+  mtz_dataset = miller_array_start.as_mtz_dataset(column_root_label="F")
+  mtz_object = mtz_dataset.mtz_object()
+  fp = mtz_object.get_column(label="F(+)").extract_values()[0]
+  fm = mtz_object.get_column(label="F(-)").extract_values()[0]
+  sp = mtz_object.get_column(label="SIGF(+)").extract_values()[0]
+  sm = mtz_object.get_column(label="SIGF(-)").extract_values()[0]
+  # http://www.ccp4.ac.uk/dist/html/mtzMADmod.html
+  # F = 0.5*( F(+) + F(-) )
+  # D = F(+) - F(-)
+  # SIGD = sqrt( SIGF(+)**2 + SIGF(-)**2 )
+  # SIGF = 0.5*SIGD
+  f = 0.5 * (fp + fm)
+  d = fp - fm
+  sigd = math.sqrt(sp**2 + sm**2)
+  sigf = 0.5 * sigd
+  mtz_dataset.add_column(label="F", type="F").set_reals(
+    mtz_reflection_indices=flex.int([0]), data=flex.double([f]))
+  mtz_dataset.add_column(label="SIGF", type="Q").set_reals(
+    mtz_reflection_indices=flex.int([0]), data=flex.double([sigf]))
+  mtz_dataset.add_column(label="D", type="D").set_reals(
+    mtz_reflection_indices=flex.int([0]), data=flex.double([d]))
+  mtz_dataset.add_column(label="SIGD", type="Q").set_reals(
+    mtz_reflection_indices=flex.int([0]), data=flex.double([sigd]))
+  miller_arrays = mtz_object.as_miller_arrays()
+  assert len(miller_arrays) == 2
+  miller_array = miller_arrays[0]
+  assert list(miller_array.indices()) == [(1,2,3),(-1,-2,-3)]
+  assert approx_equal(miller_array.data(), [3,5])
+  assert approx_equal(miller_array.sigmas(), [0.3,0.5])
+  miller_array = miller_arrays[1]
+  assert list(miller_array.indices()) == [(1,2,3),(-1,-2,-3)]
+  # F(+) = F + 0.5*D
+  # F(-) = F - 0.5*D
+  # SIGF(+) = sqrt( SIGF**2 + 0.25*SIGD**2 )
+  # SIGF(-) = SIGF(+)
+  fp = f + 0.5 * d
+  fm = f - 0.5 * d
+  assert approx_equal([fp,fm], miller_array.data())
+  sp = math.sqrt(sigf**2 + 0.25 * sigd**2)
+  sm = sp
+  assert approx_equal([sp,sm], miller_array.sigmas())
+
+def exercise_repair_ccp4i_import_merged_data():
+  miller_array_start = miller.set(
+    crystal_symmetry=crystal.symmetry(
+      unit_cell=(10,10,10,90,90,90),
+      space_group_symbol="P1"),
+    indices=flex.miller_index([(1,2,3),(-1,-2,-3),(1,2,4),(-1,-2,-4)]),
+    anomalous_flag=True).array(
+      data=flex.double([3,5,6,7]),
+      sigmas=flex.double([0.3,0.5,0.6,0.7]))
+  mtz_dataset = miller_array_start.as_mtz_dataset(column_root_label="F")
+  mtz_object = mtz_dataset.mtz_object()
+  selection_valid = flex.bool([False,True])
+  for sign in ["+", "-"]:
+    for label in ["F(%s)"%sign, "SIGF(%s)"%sign]:
+      column = mtz_object.get_column(label=label)
+      values = column.extract_values()
+      column.set_values(values=values, selection_valid=selection_valid)
+    selection_valid = ~selection_valid
+  miller_arrays = mtz_object.as_miller_arrays()
+  assert len(miller_arrays) == 1
+  assert not miller_arrays[0].anomalous_flag()
+  assert list(miller_arrays[0].indices()) == [(-1,-2,-3),(1,2,4)]
+  assert approx_equal(miller_arrays[0].data(), [5,6])
+  assert approx_equal(miller_arrays[0].sigmas(), [0.5,0.6])
+
+def exercise_hl_ab_only(anomalous_flag):
+  cs = crystal.symmetry(
+    unit_cell=(3.95738, 5.1446, 6.72755, 83, 109, 129),
+    space_group_symbol="P1")
+  if (not anomalous_flag):
+    i = [
+      (-1, 0, 1), (-1, 1, 1), (0, -1, 1), (0, 0, 1),
+      (0, 0, 2), (0, 1, 0), (0, 1, 1), (1, -1, 0)]
+  else:
+    i = [
+      (-1, 0, 1), (1, 0, -1), (-1, 1, 1), (1, -1, -1),
+      (0, -1, 1), (0, 1, -1), (0, 0, 1), (0, 0, -1),
+      (0, 0, 2), (0, 0, -2), (0, 1, 0), (0, -1, 0),
+      (0, 1, 1), (0, -1, -1), (1, -1, 0), (-1, 1, 0)]
+  ms = miller.set(
+    crystal_symmetry=cs,
+    indices=flex.miller_index(i),
+    anomalous_flag=anomalous_flag)
+  ma = ms.array(data=flex.size_t_range(ms.indices().size()).as_double()+1)
+  mtz_dataset = ma.as_mtz_dataset(column_root_label="HA")
+  columns = mtz_dataset.columns()
+  if (not anomalous_flag):
+    assert columns.size() == 4
+    c = columns[3]
+    assert c.label() == "HA"
+    c.set_type("A")
+    values = c.extract_values()
+    selection_valid = c.selection_valid()
+    c = mtz_dataset.add_column(label="HB", type="A")
+    c.set_values(values=-values, selection_valid=selection_valid)
+  else:
+    assert columns.size() == 5
+    for i,l in [(3,"HA(+)"), (4,"HA(-)")]:
+      c = columns[i]
+      assert c.label() == l
+      if (i == 4):
+        c.set_label("HB(+)")
+      c.set_type("A")
+    for i,l in [(3,"HA(-)"), (4,"HB(-)")]:
+      c = columns[i]
+      values = c.extract_values()
+      selection_valid = c.selection_valid()
+      c = mtz_dataset.add_column(label=l, type="A")
+      c.set_values(values=-values, selection_valid=selection_valid)
+  mtz_obj = mtz_dataset.mtz_object()
+  mas = mtz_obj.as_miller_arrays()
+  assert len(mas) == 1
+  assert approx_equal(mas[0].indices(), ma.indices())
+  if (not anomalous_flag):
+    assert approx_equal(mas[0].data(), [
+      (1, -1, 0, 0), (2, -2, 0, 0), (3, -3, 0, 0), (4, -4, 0, 0),
+      (5, -5, 0, 0), (6, -6, 0, 0), (7, -7, 0, 0), (8, -8, 0, 0)])
+  else:
+    assert approx_equal(mas[0].data(), [
+      (1, 2, 0, 0), (-1, -2, 0, 0), (3, 4, 0, 0), (-3, -4, 0, 0),
+      (5, 6, 0, 0), (-5, -6, 0, 0), (7, 8, 0, 0), (-7, -8, 0, 0),
+      (9, 10, 0, 0), (-9, -10, 0, 0), (11, 12, 0, 0), (-11, -12, 0, 0),
+      (13, 14, 0, 0), (-13, -14, 0, 0), (15, 16, 0, 0), (-15, -16, 0, 0)])
+  #
+  columns = mtz_dataset.columns()
+  columns[-1].set_type("F")
+  try:
+    mtz_obj.as_miller_arrays()
+  except RuntimeError as e:
+    if (not anomalous_flag):
+      assert str(e) == 'Invalid MTZ column combination' \
+        ' (incomplete Hendrickson-Lattman array),' \
+        ' column labels: "HA", "HB" column types: "A", "F"'
+    else:
+      assert str(e) == 'Invalid MTZ column combination' \
+        ' (incomplete Hendrickson-Lattman array),' \
+        ' column labels: "HA(-)", "HB(-)" column types: "A", "F"'
+  else: raise Exception_expected
+
+def exercise_wavelength():
+  miller_set = crystal.symmetry(
+    unit_cell=(10,10,10,90,90,90),
+    space_group_symbol="P1").miller_set(
+      indices=flex.miller_index([(1,2,3),(4,5,6)]),
+      anomalous_flag=False)
+  data = flex.double([1,2])
+  info = miller.array_info(wavelength=0.9792)
+  miller_array = miller_set.array(data=data).set_info(info)
+  mtz_dataset = miller_array.as_mtz_dataset(column_root_label="F")
+  mtz_dataset.mtz_object().write("tst_iotbx_mtz_wavelength.mtz")
+  mtz_object = mtz.object(file_name="tst_iotbx_mtz_wavelength.mtz")
+  miller_array = mtz_object.as_miller_arrays()[0]
+  assert (approx_equal(miller_array.info().wavelength, 0.9792))
+
+def exercise_unmerged(space_group_info):
+  import random
+  from cctbx import sgtbx
+  # shuffle the
+  space_group = sgtbx.space_group('P 1', no_expand=True)
+  perm = list(range(len(space_group_info.group())))
+  random.shuffle(perm)
+  for i in perm:
+    space_group.expand_smx(space_group_info.group()[i])
+  unit_cell = space_group_info.any_compatible_unit_cell(volume=1000)
+  for cb_op in (
+    None, space_group.info().change_of_basis_op_to_primitive_setting(),
+    unit_cell.change_of_basis_op_to_niggli_cell()):
+    miller_set = crystal.symmetry(
+      unit_cell=unit_cell,
+      space_group=space_group).build_miller_set(
+        d_min=1, anomalous_flag=True)
+    miller_set = miller_set.expand_to_p1().customized_copy(
+      space_group_info=miller_set.space_group_info())
+    if cb_op is not None:
+      miller_set = miller_set.change_basis(cb_op)
+
+    m = mtz.object()
+    m.set_title('This is a title')
+    m.set_space_group_info(miller_set.space_group_info())
+    x = m.add_crystal('XTAL', 'CCTBX', miller_set.unit_cell().parameters())
+    d = x.add_dataset('TEST', 1)
+
+    indices = miller_set.indices()
+    original_indices = indices.deep_copy()
+
+    # map the miller indices to one hemisphere (i.e. just I+)
+    miller.map_to_asu(m.space_group().type(), False, indices)
+
+    h, k, l = [i.iround() for i in indices.as_vec3_double().parts()]
+    m.adjust_column_array_sizes(len(h))
+    m.set_n_reflections(len(h))
+
+    # assign H, K, L
+    d.add_column('H', 'H').set_values(h.as_double().as_float())
+    d.add_column('K', 'H').set_values(k.as_double().as_float())
+    d.add_column('L', 'H').set_values(l.as_double().as_float())
+
+    d.add_column('M_ISYM', 'Y').set_values(flex.float(len(indices)))
+
+    m.replace_original_index_miller_indices(original_indices)
+
+    assert (m.extract_original_index_miller_indices() == original_indices).count(False) == 0
+    # check the indices in the mtz file are actually in the asu
+    extracted_indices = m.extract_miller_indices()
+    miller.map_to_asu(m.space_group().type(), False, extracted_indices)
+    assert (extracted_indices == m.extract_miller_indices()).count(False) == 0
+
+    # test change_basis_in_place if appropriate for current space group
+    import cctbx.sgtbx.cosets
+
+    cb_op_to_niggli_cell \
+      = miller_set.change_of_basis_op_to_niggli_cell()
+
+    minimum_cell_symmetry = crystal.symmetry.change_basis(
+      miller_set.crystal_symmetry(),
+      cb_op=cb_op_to_niggli_cell)
+
+    lattice_group = sgtbx.lattice_symmetry.group(
+      minimum_cell_symmetry.unit_cell(),
+      max_delta=3.0)
+    lattice_group.expand_inv(sgtbx.tr_vec((0,0,0)))
+    lattice_group.make_tidy()
+
+    cosets = sgtbx.cosets.left_decomposition_point_groups_only(
+      g=lattice_group,
+      h=minimum_cell_symmetry.reflection_intensity_symmetry(
+        anomalous_flag=True).space_group()
+          .build_derived_acentric_group()
+          .make_tidy())
+
+    possible_twin_laws = cosets.best_partition_representatives(
+      cb_op=cb_op_to_niggli_cell.inverse(),
+      omit_first_partition=True,
+      omit_negative_determinants=True)
+
+    for twin_law in possible_twin_laws:
+      cb_op = sgtbx.change_of_basis_op(twin_law.as_xyz())
+      #print cb_op.as_hkl()
+      # forward direction
+      m.change_basis_in_place(cb_op)
+      assert (
+        m.extract_original_index_miller_indices() == cb_op.apply(original_indices)
+        ).count(False) == 0
+      ## check the indices in the mtz file are actually in the asu
+      #extracted_indices = m.extract_miller_indices()
+      #miller.map_to_asu(m.space_group().type(), False, extracted_indices)
+      #assert (extracted_indices == m.extract_miller_indices()).count(False) == 0
+      # and back again
+      m.change_basis_in_place(cb_op.inverse())
+      assert (
+        m.extract_original_index_miller_indices() == original_indices
+        ).count(False) == 0
+      ## check the indices in the mtz file are actually in the asu
+      #extracted_indices = m.extract_miller_indices()
+      #miller.map_to_asu(m.space_group().type(), False, extracted_indices)
+      #assert (extracted_indices == m.extract_miller_indices()).count(False) == 0
+
+def exercise_util():
+  miller_set = miller.build_set(
+    crystal.symmetry(
+      unit_cell=(10,10,10,90,90,90),
+      space_group_symbol="P1"),
+    d_min=1.5,
+    anomalous_flag=True)
+  f_obs = miller_set.array(data=flex.double(miller_set.size(), 1.0),
+    sigmas=flex.double(miller_set.size(), 0.1))
+  flags = f_obs.generate_r_free_flags()
+  mtz_dataset = f_obs.as_mtz_dataset(column_root_label="F")
+  mtz_dataset.add_miller_array(flags, column_root_label="FreeR_flag")
+  mtz_dataset.mtz_object().write("tst_mtz_cutoff.mtz")
+  mtz.cutoff_data("tst_mtz_cutoff.mtz", 2.5)
+  mtz_in = mtz.object(file_name="tst_mtz_cutoff.mtz")
+  ma = mtz_in.as_miller_arrays()
+  assert approx_equal(ma[0].d_min(), 2.5)
+
+def exercise_change_basis_in_place():
+  from cctbx import sgtbx
+  space_group_info = sgtbx.space_group_info(symbol='P4')
+  unit_cell = space_group_info.any_compatible_unit_cell(volume=1000)
+
+  miller_set = crystal.symmetry(
+    unit_cell=unit_cell,
+    space_group_info=space_group_info).build_miller_set(
+      d_min=1, anomalous_flag=True)
+  miller_set = miller_set.expand_to_p1().customized_copy(
+    space_group_info=miller_set.space_group_info())
+
+  m = mtz.object()
+  m.set_title('This is a title')
+  m.set_space_group_info(miller_set.space_group_info())
+  x = m.add_crystal('XTAL', 'CCTBX', miller_set.unit_cell().parameters())
+  d = x.add_dataset('TEST', 1)
+
+  indices = miller_set.indices()
+  original_indices = indices.deep_copy()
+
+  # map the miller indices to one hemisphere (i.e. just I+)
+  miller.map_to_asu(m.space_group().type(), False, indices)
+
+  h, k, l = [i.iround() for i in indices.as_vec3_double().parts()]
+  m.adjust_column_array_sizes(len(h))
+  m.set_n_reflections(len(h))
+
+  # assign H, K, L
+  d.add_column('H', 'H').set_values(h.as_double().as_float())
+  d.add_column('K', 'H').set_values(k.as_double().as_float())
+  d.add_column('L', 'H').set_values(l.as_double().as_float())
+
+  d.add_column('M_ISYM', 'Y').set_values(flex.float(len(indices)))
+
+  b = m.add_batch()
+  b.set_cell(flex.float(unit_cell.parameters()))
+  b.set_umat(flex.float((
+    -0.9542511701583862, -0.1780465543270111, -0.2402169108390808,
+    -0.13100790977478027, 0.9711279273033142, -0.19936780631542206,
+    0.26877808570861816, -0.1587766408920288, -0.9500254392623901)))
+
+  m.change_basis_in_place(sgtbx.change_of_basis_op('-h,k,-l'))
+  assert approx_equal(
+    b.umat(),
+    (0.9542511701583862, 0.1780465543270111, 0.2402169108390808,
+     -0.13100790977478027, 0.9711279273033142, -0.19936780631542206,
+     -0.26877808570861816, 0.1587766408920288, 0.9500254392623901)
+  )
+
+
+def exercise():
+  if (mtz is None):
+    print("Skipping iotbx/mtz/tst.py: ccp4io not available")
+    return
+  from cctbx import sgtbx
+  exercise_change_basis_in_place()
+  exercise_unmerged(sgtbx.space_group_info("I23"))
+  exercise_wavelength()
+  exercise_extract_delta_anomalous()
+  exercise_repair_ccp4i_import_merged_data()
+  exercise_miller_array_data_types()
+  for anomalous_flag in [False, True]:
+    exercise_hl_ab_only(anomalous_flag=anomalous_flag)
+  exercise_util()
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], run_call_back)
+
+def run():
+  exercise()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/tst_dano.py
+from __future__ import absolute_import, division, print_function
+from six.moves import cStringIO as StringIO
+import six
+import sys
+
+def assert_equal_data_and_sigmas(array_1, array_2):
+  a, b = array_1.map_to_asu().common_sets(array_2.map_to_asu())
+  assert a.indices().all_eq(b.indices())
+  from libtbx.test_utils import approx_equal
+  assert approx_equal(a.data(), b.data())
+  if (not array_1.is_xray_reconstructed_amplitude_array()):
+    assert approx_equal(a.sigmas(), b.sigmas())
+
+def exercise_systematic(verbose):
+  from cctbx import miller
+  from cctbx import crystal
+  from cctbx.array_family import flex
+  cs = crystal.symmetry(
+    unit_cell=(13,15,14,90,90,100),
+    space_group_symbol="P112")
+  ms = miller.set(
+    crystal_symmetry=cs,
+    indices=flex.miller_index([
+      (0,0,1),(0,0,-1),
+      (0,1,1),
+      (1,0,0),
+      (-1,-1,-1)]),
+    anomalous_flag=True).map_to_asu()
+  cf = ms.centric_flags().data()
+  assert cf.count(True) == 1
+  mt = flex.mersenne_twister(seed=0)
+  ma = ms.array(
+    data=mt.random_double(size=5)+0.1,
+    sigmas=mt.random_double(size=5)+0.1)
+  def recycle(expected_column_data):
+    mtz_obj = ma.as_mtz_dataset(column_root_label="X").mtz_object()
+    sio = StringIO()
+    mtz_obj.show_column_data_human_readable(out=sio)
+    from libtbx.test_utils import show_diff
+    if (verbose): sys.stdout.write(sio.getvalue())
+    assert not show_diff(sio.getvalue(), expected_column_data)
+    ma_2 = mtz_obj.as_miller_arrays()
+    assert len(ma_2) == 1
+    assert_equal_data_and_sigmas(ma, ma_2[0])
+  recycle("""\
+Column data:
+-------------------------------------------------------------------------------
+                    X(+)         SIGX(+)            X(-)         SIGX(-)
+
+ 0  0  1        0.517022        0.192339        0.820324         0.28626
+ 0  1  1        0.100114        0.445561            None            None
+ 1  0  0        0.402333        0.496767            None            None
+ 1  1  1            None            None        0.246756        0.638817
+-------------------------------------------------------------------------------
+""")
+  from cctbx.xray import observation_types
+  ma.set_observation_type(observation_types.reconstructed_amplitude())
+  recycle("""\
+Column data:
+-------------------------------------------------------------------------------
+                       X            SIGX           DANOX        SIGDANOX
+                   ISYMX
+
+ 0  0  1        0.668673        0.172438       -0.303302        0.344875
+                       0
+ 0  1  1        0.100114        0.445561            None            None
+                       1
+ 1  0  0        0.402333        0.496767            None            None
+                       0
+ 1  1  1        0.246756        0.638817            None            None
+                       2
+-------------------------------------------------------------------------------
+""")
+
+def recycle_dano_miller_array(miller_array):
+  assert miller_array.is_xray_reconstructed_amplitude_array()
+  from cctbx.array_family import flex
+  mt = flex.mersenne_twister(seed=0)
+  miller_array = miller_array.select(
+    mt.random_permutation(size=miller_array.indices().size()))
+  mtz_obj = miller_array.as_mtz_dataset(column_root_label="X").mtz_object()
+  miller_array_2 = mtz_obj.as_miller_arrays()
+  assert len(miller_array_2) == 1
+  assert str(miller_array_2[0].info()) == "ccp4_mtz:X,SIGX,DANOX,SIGDANOX,ISYMX"
+  assert_equal_data_and_sigmas(miller_array, miller_array_2[0])
+
+def recycle_dano_mtz(mtz_file_name):
+  import iotbx.mtz
+  mtz_obj = iotbx.mtz.object(file_name=mtz_file_name)
+  for miller_array in mtz_obj.as_miller_arrays():
+    if (miller_array.is_xray_reconstructed_amplitude_array()):
+      recycle_dano_miller_array(miller_array)
+
+def recycle_one_dano(missing, verbose):
+  assert missing in [None, "+", "-"]
+  from cctbx import crystal
+  cs = crystal.symmetry(
+    unit_cell=(13,17,19,85,95,105),
+    space_group_symbol="P1")
+  from cctbx.array_family import flex
+  mi = flex.miller_index([(1,2,3), (-1,-2,-3)])
+  fpm = flex.double([2.5, 5.5])
+  spm = flex.double([0.1, 0.3])
+  from cctbx import miller
+  ms = miller.set(crystal_symmetry=cs, indices=mi, anomalous_flag=True)
+  ma = ms.array(data=fpm, sigmas=spm)
+  mtz_dataset = ma.as_mtz_dataset(column_root_label="X")
+  if (missing is not None):
+    for col in mtz_dataset.columns():
+      if (col.label() in ["X(%s)" % missing, "SIGX(%s)" % missing]):
+        col.set_values(
+          values=flex.float([0]),
+          selection_valid=flex.bool([False]))
+    if (missing == "+"): i = 1
+    else:                i = 0
+    ma = ma.select(flex.size_t([i]))
+  mtz_obj = mtz_dataset.mtz_object()
+  from cctbx.xray import observation_types
+  ma.set_observation_type(observation_types.reconstructed_amplitude())
+  mtz_obj_reco = ma.as_mtz_dataset(column_root_label="R").mtz_object()
+  sio = StringIO()
+  print("Resulting mtz from .as_mtz_dataset():", file=sio)
+  mtz_obj_reco.show_column_data_human_readable(out=sio)
+  print(file=sio)
+  ma_reco = mtz_obj_reco.as_miller_arrays()[0]
+  print("mtz_obj_reco.as_miller_arrays result:", file=sio)
+  ma_reco.show_array(f=sio)
+  print(file=sio)
+  if (verbose):
+    sys.stdout.write(sio.getvalue())
+  if (missing is None):
+    expected = """\
+Resulting mtz from .as_mtz_dataset():
+Column data:
+-------------------------------------------------------------------------------
+                       R            SIGR           DANOR        SIGDANOR
+                   ISYMR
+
+ 1  2  3               4        0.158114              -3        0.316228
+                       0
+-------------------------------------------------------------------------------
+
+mtz_obj_reco.as_miller_arrays result:
+(1, 2, 3) 2.5 0.223606796247
+(-1, -2, -3) 5.5 0.223606796247
+
+"""
+    expected3 = """\
+Resulting mtz from .as_mtz_dataset():
+Column data:
+-------------------------------------------------------------------------------
+                       R            SIGR           DANOR        SIGDANOR
+                   ISYMR
+
+ 1  2  3               4        0.158114              -3        0.316228
+                       0
+-------------------------------------------------------------------------------
+
+mtz_obj_reco.as_miller_arrays result:
+(1, 2, 3) 2.5 0.2236067962469402
+(-1, -2, -3) 5.5 0.2236067962469402
+
+"""
+  elif (missing == "+"):
+    expected = """\
+Resulting mtz from .as_mtz_dataset():
+Column data:
+-------------------------------------------------------------------------------
+                       R            SIGR           DANOR        SIGDANOR
+                   ISYMR
+
+ 1  2  3             5.5             0.3            None            None
+                       2
+-------------------------------------------------------------------------------
+
+mtz_obj_reco.as_miller_arrays result:
+(-1, -2, -3) 5.5 0.300000011921
+
+"""
+    expected3 = """\
+Resulting mtz from .as_mtz_dataset():
+Column data:
+-------------------------------------------------------------------------------
+                       R            SIGR           DANOR        SIGDANOR
+                   ISYMR
+
+ 1  2  3             5.5             0.3            None            None
+                       2
+-------------------------------------------------------------------------------
+
+mtz_obj_reco.as_miller_arrays result:
+(-1, -2, -3) 5.5 0.30000001192092896
+
+"""
+  elif (missing == "-"):
+    expected = """\
+Resulting mtz from .as_mtz_dataset():
+Column data:
+-------------------------------------------------------------------------------
+                       R            SIGR           DANOR        SIGDANOR
+                   ISYMR
+
+ 1  2  3             2.5             0.1            None            None
+                       1
+-------------------------------------------------------------------------------
+
+mtz_obj_reco.as_miller_arrays result:
+(1, 2, 3) 2.5 0.10000000149
+
+"""
+    expected3 = """\
+Resulting mtz from .as_mtz_dataset():
+Column data:
+-------------------------------------------------------------------------------
+                       R            SIGR           DANOR        SIGDANOR
+                   ISYMR
+
+ 1  2  3             2.5             0.1            None            None
+                       1
+-------------------------------------------------------------------------------
+
+mtz_obj_reco.as_miller_arrays result:
+(1, 2, 3) 2.5 0.10000000149011612
+
+"""
+  else:
+    raise RuntimeError("Unreachable.")
+  from libtbx.test_utils import show_diff
+  # Python 3 is displaying more decimal places
+  if six.PY3:
+    assert not show_diff(sio.getvalue(), expected3)
+  else:
+    assert not show_diff(sio.getvalue(), expected)
+
+def run(args):
+  verbose = False
+  mtz_file_names = []
+  for arg in args:
+    if (arg == "--help"):
+      from libtbx.utils import Usage
+      raise Usage("iotbx.python tst_dano.py [your_dano.mtz] [--verbose]")
+    elif (arg == "--verbose"):
+      verbose = True
+    else:
+      mtz_file_names.append(arg)
+  exercise_systematic(verbose)
+  if (len(mtz_file_names) == 0):
+    import libtbx.load_env
+    import os
+    have_regression = libtbx.env.has_module("phenix_regression")
+    if have_regression:
+      mtz_file_names.append(libtbx.env.find_in_repositories(
+        relative_path="phenix_regression/reflection_files/dano.mtz",
+        test=os.path.isfile,
+        optional=False))
+    else:
+      print('Skipping tests on dano.mtz: no phenix_regression')
+  for mtz_file_name in mtz_file_names:
+    recycle_dano_mtz(mtz_file_name)
+  for missing in [None, "+", "-"]:
+    recycle_one_dano(missing, verbose)
+  print("OK")
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/tst_ext.py
+from __future__ import absolute_import, division, print_function
+import libtbx.load_env
+from six.moves import range
+from six.moves import zip
+if (libtbx.env.has_module("ccp4io")):
+  from iotbx import mtz
+else:
+  mtz = None
+from iotbx.option_parser import option_parser
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx.array_family import flex
+from libtbx.test_utils import Exception_expected, approx_equal, show_diff
+from itertools import count
+from six.moves import cStringIO as StringIO
+import sys, os
+
+def exercise_read_corrupt():
+  for i_trial in range(5):
+    f = open("tmp_iotbx_mtz_ext.mtz", "w")
+    if (i_trial > 0):
+      f.write("\0"*(40*i_trial))
+    f.close()
+    try: mtz.object(file_name="tmp_iotbx_mtz_ext.mtz")
+    except RuntimeError as e:
+      assert str(e) == "cctbx Error: MTZ file read error: tmp_iotbx_mtz_ext.mtz"
+    else: raise Exception_expected
+
+def exercise_setting_nref_etc():
+  m = mtz.object()
+  assert m.n_reflections() == 0
+  m.adjust_column_array_sizes(10)
+  m.set_n_reflections(10)
+  assert m.n_reflections() == 10
+
+def exercise_basic():
+  assert mtz.ccp4_liberr_verbosity(-1) == 0
+  assert mtz.ccp4_liberr_verbosity(1) == 1
+  assert mtz.ccp4_liberr_verbosity(-1) == 1
+  assert mtz.ccp4_liberr_verbosity(0) == 0
+  assert mtz.ccp4_liberr_verbosity(-1) == 0
+  mtz_object = mtz.object()
+  assert mtz_object.title() == ""
+  assert mtz_object.history().size() == 0
+  assert mtz_object.space_group_name() == ""
+  assert mtz_object.space_group_number() == 0
+  assert mtz_object.n_symmetry_matrices() == 0
+  assert mtz_object.space_group_confidence() == "\x00"
+  assert mtz_object.space_group().order_z() == 1
+  assert mtz_object.point_group_name() == ""
+  assert mtz_object.lattice_centring_type() == "\0"
+  assert mtz_object.n_batches() == 0
+  assert mtz_object.batches().size() == 0
+  assert mtz_object.n_reflections() == 0
+  assert mtz_object.max_min_resolution() == (-1, -1)
+  assert mtz_object.n_crystals() == 0
+  assert mtz_object.n_active_crystals() == 0
+  file_name = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/reflection_files/dano.mtz",
+    test=os.path.isfile)
+  if (file_name is None):
+    print("Skipping dano.mtz test: input file not available")
+  else:
+    mtz_object = mtz.object(file_name=file_name)
+    assert mtz_object.title() == "......"
+    assert mtz_object.history().size() == 17
+    assert mtz_object.space_group_name() == "P212121"
+    assert mtz_object.space_group_number() == 19
+    assert mtz_object.point_group_name() == "PG222"
+    assert mtz_object.lattice_centring_type() == "P"
+    assert mtz_object.n_symmetry_matrices() == 4
+    assert mtz_object.space_group().type().lookup_symbol() == "P 21 21 21"
+    assert mtz_object.n_batches() == 0
+    assert mtz_object.batches().size() == 0
+    assert mtz_object.n_reflections() == 165
+    assert approx_equal(mtz_object.max_min_resolution(),
+      (19.869975507347792, 15.001543055390009))
+    assert mtz_object.n_crystals() == 4
+    assert mtz_object.n_active_crystals() == 3
+    assert mtz_object.has_crystal("unknown")
+    assert not mtz_object.has_crystal("abc")
+    assert mtz_object.has_column("H")
+    assert not mtz_object.has_column("abc")
+    crystal = mtz.crystal(mtz_object=mtz_object, i_crystal=1)
+    assert crystal.mtz_object().n_reflections() == 165
+    assert crystal.i_crystal() == 1
+    assert mtz_object.crystals().size() == mtz_object.n_crystals()
+    assert crystal.id() == 2
+    assert crystal.name() == "unknown"
+    assert crystal.set_name(new_name="abc") is crystal
+    assert crystal.name() == "abc"
+    assert crystal.set_name("abc") is crystal
+    assert crystal.name() == "abc"
+    try: crystal.set_name("unknown3")
+    except RuntimeError as e:
+      assert str(e) == 'mtz::crystal::set_name(new_name="unknown3"):' \
+        ' new_name is used already for another crystal.'
+    else: raise Exception_expected
+    assert crystal.name() == "abc"
+    assert crystal.set_name("unknown") is crystal
+    assert crystal.name() == "unknown"
+    assert crystal.project_name() == "unknown"
+    assert crystal.set_project_name(new_project_name="abc") is crystal
+    assert crystal.project_name() == "abc"
+    assert crystal.set_project_name(new_project_name="unknown") is crystal
+    assert crystal.project_name() == "unknown"
+    assert approx_equal(crystal.unit_cell_parameters(),
+      (84.511, 104.308, 174.103, 90, 90, 90))
+    assert approx_equal(crystal.unit_cell().parameters(),
+      (84.511, 104.308, 174.103, 90, 90, 90))
+    assert crystal.n_datasets() == 1
+    dataset = mtz.dataset(mtz_crystal=crystal, i_dataset=0)
+    assert dataset.mtz_crystal().i_crystal() == 1
+    assert dataset.i_dataset() == 0
+    assert dataset.mtz_object().n_crystals() == mtz_object.n_crystals()
+    assert dataset.id() == 1
+    assert dataset.name() == "unknown230103:23:14:49"
+    assert dataset.set_name(new_name="abc") is dataset
+    assert dataset.name() == "abc"
+    assert dataset.set_name(new_name="abc") is dataset
+    assert dataset.name() == "abc"
+    assert dataset.set_name("unknown230103:23:14:49") is dataset
+    assert dataset.name() == "unknown230103:23:14:49"
+    assert dataset.wavelength() == 0
+    assert dataset.set_wavelength(new_wavelength=0.12) is dataset
+    assert approx_equal(dataset.wavelength(), 0.12)
+    assert dataset.set_wavelength(0) is dataset
+    assert dataset.wavelength() == 0
+    column = mtz.column(mtz_dataset=dataset, i_column=0)
+    assert column.mtz_dataset().mtz_crystal().i_crystal() == 1
+    assert column.i_column() == 0
+    assert column.mtz_crystal().i_crystal() == 1
+    assert column.mtz_object().n_reflections() == 165
+    assert column.label() == "H"
+    assert column.set_label(new_label="New") is column
+    assert column.label() == "New"
+    try: column.set_label("a,b,c")
+    except RuntimeError as e:
+      assert str(e) == 'mtz::column::set_label(new_label="a,b,c"):' \
+        ' new_label must not include commas.'
+    else: raise Exception_expected
+    assert column.label() == "New"
+    assert column.set_label(new_label="New") is column
+    assert column.label() == "New"
+    try: column.set_label(new_label="K")
+    except RuntimeError as e:
+      assert str(e) == 'mtz::column::set_label(new_label="K"):' \
+        ' new_label is used already for another column.'
+    else: raise Exception_expected
+    assert column.set_label("H") is column
+    assert column.label() == "H"
+    assert column.type() == "H"
+    assert column.set_type(new_type="Nw") is column
+    assert column.type() == "Nw"
+    assert column.set_type("H") is column
+    assert column.type() == "H"
+    assert column.is_active()
+    if (column.source() is None):
+      assert column.group_name() is None
+      assert column.group_type() is None
+      assert column.group_position() == -1
+    else:
+      assert column.source() == ""
+      assert column.set_source(new_source="NsRc") is column
+      assert column.source() == "NsRc"
+      assert column.set_source(new_source="") is column
+      assert column.source() == ""
+      assert column.group_name() == ""
+      assert column.set_group_name(new_group_name="NgN") is column
+      assert column.group_name() == "NgN"
+      assert column.set_group_name(new_group_name="") is column
+      assert column.group_name() == ""
+      assert column.group_type() == ""
+      assert column.set_group_type(new_group_type="NgT") is column
+      assert column.group_type() == "NgT"
+      assert column.set_group_type(new_group_type="") is column
+      assert column.group_type() == ""
+      assert column.group_position() == -1
+      assert column.set_group_position(new_group_position=23) is column
+      assert column.group_position() == 23
+      assert column.set_group_position(new_group_position=-1) is column
+      assert column.group_position() == -1
+    assert column.array_size() == 165
+    assert column.array_capacity() == 200
+    assert column.path() == "/unknown/unknown230103:23:14:49/H"
+    assert column.get_other("H").i_column() == 0
+    assert column.get_other("K").i_column() == 1
+    assert column.get_other("L").i_column() == 2
+    assert column.n_valid_values() == 165
+    valid_values = column.extract_valid_values()
+    assert valid_values.size() == 165
+    assert approx_equal(flex.min(valid_values), 0)
+    assert approx_equal(flex.max(valid_values), 5)
+    assert approx_equal(flex.mean(valid_values), 2.41818189621)
+    assert column.selection_valid().count(True) == 165
+    assert approx_equal(flex.mean(column.extract_values()), 2.41818189621)
+    assert approx_equal(flex.mean(column.extract_values(
+      not_a_number_substitute=10)), 2.41818189621)
+    column = mtz_object.get_column("F*")
+    assert column.label() == "Frem"
+    assert column.n_valid_values() == 163
+    valid_values = column.extract_valid_values()
+    assert valid_values.size() == 163
+    assert approx_equal(flex.min(valid_values), 32.5101776123)
+    assert approx_equal(flex.max(valid_values), 2711.84350586)
+    assert approx_equal(flex.mean(valid_values), 615.060852051)
+    assert column.selection_valid().count(True) == 163
+    assert approx_equal(flex.mean(column.extract_values()),
+      615.060852051*163/165)
+    assert approx_equal(flex.mean(column.extract_values(13)),
+      (615.060852051*163+2*13)/165)
+    v,s = column.extract_values_and_selection_valid(
+      not_a_number_substitute=-97).as_tuple()
+    assert v.size() == 165
+    assert s.count(True) == 163
+    assert approx_equal(v.select(~s), [-97]*2)
+    expected_dataset_ids = iter(range(4))
+    expected_dataset_names = iter([
+      "HKL_base",
+      "unknown230103:23:14:49",
+      "unknown230103:23:14:21",
+      "unknown230103:23:13:49"])
+    expected_n_columns = iter([0,8,5,5])
+    expected_column_labels = iter([
+      "H", "K", "L",
+      "Frem", "SIGFrem", "DANOrem", "SIGDANOrem", "ISYMrem",
+      "Finf", "SIGFinf", "DANOinf", "SIGDANOinf", "ISYMinf",
+      "Fabs", "SIGFabs", "DANOabs", "SIGDANOabs", "ISYMabs"])
+    expected_column_types = iter("HHHFQDQYFQDQYFQDQY")
+    for i_crystal,crystal in enumerate(mtz_object.crystals()):
+      assert crystal.mtz_object().n_reflections() == 165
+      assert crystal.i_crystal() == i_crystal
+      assert crystal.n_datasets() == 1
+      for i_dataset,dataset in enumerate(crystal.datasets()):
+        assert dataset.mtz_crystal().i_crystal() == i_crystal
+        assert dataset.i_dataset() == i_dataset
+        assert dataset.id() == next(expected_dataset_ids)
+        assert dataset.name() == next(expected_dataset_names)
+        assert dataset.wavelength() == 0
+        assert dataset.n_columns() == next(expected_n_columns)
+        for i_column,column in enumerate(dataset.columns()):
+          assert column.mtz_dataset().i_dataset() == i_dataset
+          assert column.i_column() == i_column
+          assert column.label() == next(expected_column_labels)
+          assert column.type() == next(expected_column_types)
+          assert column.is_active()
+          assert column.array_size() == 165
+          assert column.array_capacity() == 200
+          assert column.path().endswith(column.label())
+          get_column = mtz_object.get_column(column.label())
+          assert get_column.label() == column.label()
+    group = mtz_object.extract_integers(
+      column_label="ISYMabs")
+    assert not group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 165
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    data = mtz_object.extract_integers(
+      mtz_reflection_indices=group.mtz_reflection_indices,
+      column_label="ISYMabs")
+    assert data.all_eq(group.data)
+    group = mtz_object.extract_integers_anomalous(
+      column_label_plus="ISYMabs",
+      column_label_minus="ISYMabs")
+    assert group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 330
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    group = mtz_object.extract_reals(
+      column_label="Frem")
+    assert not group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 163
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    data = mtz_object.extract_reals(
+      mtz_reflection_indices=group.mtz_reflection_indices,
+      column_label="Frem")
+    assert data.all_eq(group.data)
+    group = mtz_object.extract_reals_anomalous(
+      column_label_plus="Frem",
+      column_label_minus="DANOrem")
+    assert group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 326
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    group = mtz_object.extract_hendrickson_lattman(
+      column_label_a="Frem",
+      column_label_b="DANOrem",
+      column_label_c="Frem",
+      column_label_d="DANOrem")
+    assert not group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 163
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    group = mtz_object.extract_hendrickson_lattman_ab_only(
+      column_label_a="Frem",
+      column_label_b="DANOrem")
+    assert not group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 163
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    group = mtz_object.extract_hendrickson_lattman_anomalous(
+      column_label_a_plus="Frem",
+      column_label_b_plus="DANOrem",
+      column_label_c_plus="Frem",
+      column_label_d_plus="DANOrem",
+      column_label_a_minus="Frem",
+      column_label_b_minus="DANOrem",
+      column_label_c_minus="Frem",
+      column_label_d_minus="DANOrem")
+    assert group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 326
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    group = mtz_object.extract_hendrickson_lattman_anomalous_ab_only(
+      column_label_a_plus="Frem",
+      column_label_b_plus="DANOrem",
+      column_label_a_minus="Frem",
+      column_label_b_minus="DANOrem")
+    assert group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 326
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    group = mtz_object.extract_observations(
+      column_label_data="Frem",
+      column_label_sigmas="SIGFrem")
+    assert not group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 163
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    assert group.sigmas.size() == group.indices.size()
+    group = mtz_object.extract_observations_anomalous(
+      column_label_data_plus="Frem",
+      column_label_sigmas_plus="SIGFrem",
+      column_label_data_minus="DANOrem",
+      column_label_sigmas_minus="SIGDANOrem")
+    assert group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 272
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    assert group.sigmas.size() == group.indices.size()
+    group = mtz_object.extract_delta_anomalous(
+      column_label_f_data="Frem",
+      column_label_f_sigmas="SIGFrem",
+      column_label_d_data="DANOrem",
+      column_label_d_sigmas="SIGDANOrem",
+      column_label_isym="ISYMrem")
+    assert group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 272
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    assert group.sigmas.size() == group.indices.size()
+    group = mtz_object.extract_complex(
+      column_label_ampl="Frem",
+      column_label_phi="SIGFrem")
+    assert not group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 163
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+    group = mtz_object.extract_complex_anomalous(
+      column_label_ampl_plus="Frem",
+      column_label_phi_plus="SIGFrem",
+      column_label_ampl_minus="DANOrem",
+      column_label_phi_minus="SIGDANOrem")
+    assert group.anomalous_flag
+    assert group.mtz_reflection_indices.size() == 326
+    assert group.indices.size() == group.mtz_reflection_indices.size()
+    assert group.data.size() == group.mtz_reflection_indices.size()
+
+class QuickStop(Exception): pass
+
+class exercise_extract_any(object):
+
+  def __init__(self, full=True):
+    self.full = full
+    self.counters = {
+      "extract_integers": 0,
+      "extract_reals": 0,
+      "extract_reals_anomalous": 0,
+      "extract_hendrickson_lattman": 0,
+      "extract_observations": 0,
+      "extract_observations_anomalous": 0,
+      "extract_delta_anomalous": 0,
+      "extract_complex": 0,
+      "extract_complex_anomalous": 0}
+
+  def all_tests_ran_at_least_once(self):
+    return min(self.counters.values()) > 0
+
+  def raise_if_all_tests_ran_at_least_once(self):
+    if (self.full): return
+    if (self.all_tests_ran_at_least_once()): raise QuickStop
+
+  def __call__(self, file_name, out):
+    mtz_object = mtz.object(file_name=file_name)
+    mtz_object.show_summary(out=out)
+    types = "".join(mtz_object.column_types())
+    for type_group in ["B", "H", "I", "Y"]:
+      i = types.find(type_group)
+      if (i >= 0):
+        label = mtz_object.column_labels()[i]
+        group = mtz_object.extract_integers(
+          column_label=label)
+        assert group.data.size() == group.indices.size()
+        self.counters["extract_integers"] += 1
+    for type_group in ["FQ", "JQ"]:
+      i = types.find(type_group)
+      if (i >= 0):
+        labels = mtz_object.column_labels()[i:i+2]
+        group = mtz_object.extract_reals(
+          column_label=labels[0])
+        assert group.data.size() == group.indices.size()
+        self.counters["extract_reals"] += 1
+        group = mtz_object.extract_observations(
+          column_label_data=labels[0],
+          column_label_sigmas=labels[1])
+        assert group.data.size() == group.indices.size()
+        assert group.sigmas.size() == group.indices.size()
+        self.counters["extract_observations"] += 1
+    for type_group in ["FQFQ", "JQJQ"]:
+      i = types.find(type_group)
+      if (i >= 0):
+        labels = mtz_object.column_labels()[i:i+4]
+        group = mtz_object.extract_observations_anomalous(
+          column_label_data_plus=labels[0],
+          column_label_sigmas_plus=labels[1],
+          column_label_data_minus=labels[2],
+          column_label_sigmas_minus=labels[3])
+        assert group.data.size() == group.indices.size()
+        assert group.sigmas.size() == group.indices.size()
+        self.counters["extract_observations_anomalous"] += 1
+    i = types.find("FQDQ")
+    if (i >= 0):
+      labels = mtz_object.column_labels()[i:i+4]
+      group = mtz_object.extract_delta_anomalous(
+        column_label_f_data=labels[0],
+        column_label_f_sigmas=labels[1],
+        column_label_d_data=labels[2],
+        column_label_d_sigmas=labels[3],
+        column_label_isym=mtz_object.next_isym_column_starting_at(
+          i_column=i+4, return_label=True))
+      assert group.data.size() == group.indices.size()
+      self.counters["extract_delta_anomalous"] += 1
+    i = types.find("FP")
+    if (i >= 0):
+      labels = mtz_object.column_labels()[i:i+2]
+      group = mtz_object.extract_complex(
+        column_label_ampl=labels[0],
+        column_label_phi=labels[1])
+      assert group.data.size() == group.indices.size()
+      self.counters["extract_complex"] += 1
+    for type_group in ["GLGL", "KMKM"]:
+      i = types.find(type_group)
+      if (i >= 0):
+        labels = mtz_object.column_labels()[i:i+4]
+        group = mtz_object.extract_reals_anomalous(
+          column_label_plus=labels[0],
+          column_label_minus=labels[2])
+        assert group.data.size() == group.indices.size()
+        self.counters["extract_reals_anomalous"] += 1
+        group = mtz_object.extract_observations_anomalous(
+          column_label_data_plus=labels[0],
+          column_label_sigmas_plus=labels[1],
+          column_label_data_minus=labels[2],
+          column_label_sigmas_minus=labels[3])
+        assert group.data.size() == group.indices.size()
+        assert group.sigmas.size() == group.indices.size()
+        self.counters["extract_observations_anomalous"] += 1
+        # work around lack of FPFP in MTZ files available
+        group = mtz_object.extract_complex_anomalous(
+          column_label_ampl_plus=labels[0],
+          column_label_phi_plus=labels[1],
+          column_label_ampl_minus=labels[2],
+          column_label_phi_minus=labels[3])
+        assert group.data.size() == group.indices.size()
+        self.counters["extract_complex_anomalous"] += 1
+    i = types.find("AAAA")
+    if (i >= 0):
+      labels = mtz_object.column_labels()[i:i+4]
+      group = mtz_object.extract_hendrickson_lattman(
+        column_label_a=labels[0],
+        column_label_b=labels[1],
+        column_label_c=labels[2],
+        column_label_d=labels[3])
+      assert group.data.size() == group.indices.size()
+      self.counters["extract_hendrickson_lattman"] += 1
+
+def walk_callback(arg, top, names):
+  exercise_function, out = arg
+  for name in names:
+    if (not name.lower().endswith(".mtz")): continue
+    file_name = os.path.normpath(os.path.join(top, name))
+    print("Processing:", file_name, file=out)
+    exercise_function(file_name=file_name, out=out)
+    exercise_function.raise_if_all_tests_ran_at_least_once()
+
+def exercise_walk(root_dir, full, verbose=False):
+  if (verbose):
+    out = sys.stdout
+  else:
+    out = StringIO()
+  exercise_function = exercise_extract_any(full=full)
+  try:
+    if sys.version_info.major == 3:
+      for root, dirs, files in os.walk(root_dir):
+        walk_callback(
+            arg=(exercise_function, out),
+            top=root,
+            names=files)
+    else:
+      os.path.walk(
+        top=root_dir, func=walk_callback, arg=(exercise_function, out))
+  except QuickStop:
+    pass
+  if (verbose):
+    print(exercise_function.counters)
+
+def exercise_modifiers(verbose=0):
+  if (verbose):
+    out = sys.stdout
+  mtz_object = mtz.object()
+  mtz_object.set_title(title="012345678")
+  assert mtz_object.title() == "012345678"
+  mtz_object.set_title(title="012345678", append=True)
+  assert mtz_object.title() == "012345678 012345678"
+  mtz_object.set_title(title="0123456789"*10+"012345678", append=True)
+  assert mtz_object.title() == "012345678 "*2 + "0123456789"*5
+  mtz_object.set_title("0123456789"*100)
+  assert mtz_object.title() == "0123456789"*7
+  mtz_object.set_title(title="")
+  assert mtz_object.title() == ""
+  mtz_object.set_title(title="abc", append=True)
+  assert mtz_object.title() == "abc"
+  mtz_object.set_title(title="def", append=True)
+  assert mtz_object.title() == "abc def"
+  mtz_object.set_title(title="a")
+  assert mtz_object.title() == "a"
+  mtz_object.set_title(title="bc", append=True)
+  assert mtz_object.title() == "a bc"
+  mtz_object.set_title(title=" "*70)
+  mtz_object.set_title(title="abc", append=True)
+  assert mtz_object.title() == "abc"
+  mtz_object.set_title(title="z"*70)
+  mtz_object.set_title(title="abc", append=True)
+  assert mtz_object.title() == "z"*70
+  mtz_object.set_title(title="z"*69)
+  mtz_object.set_title(title="abc", append=True)
+  assert mtz_object.title() == "z"*69
+  mtz_object.set_title(title="z"*68)
+  mtz_object.set_title(title="abc", append=True)
+  assert mtz_object.title() == "z"*68 + " a"
+  mtz_object.set_title(title="z"*67)
+  mtz_object.set_title(title="abc", append=True)
+  assert mtz_object.title() == "z"*67 + " ab"
+  mtz_object.add_history(lines=flex.std_string(["a1", "a2"]))
+  assert list(mtz_object.history()) == ["a1", "a2"]
+  mtz_object.add_history(lines=flex.std_string(["b1", "b2"]))
+  assert list(mtz_object.history()) == ["b1", "b2", "a1", "a2"]
+  mtz_object.add_history(line="c1")
+  assert list(mtz_object.history()) == ["c1", "b1", "b2", "a1", "a2"]
+  mtz_object.set_space_group_name(name="sg"*100)
+  assert mtz_object.space_group_name() == "sgsgsgsgsgsgsgsgsgsg"
+  mtz_object.set_space_group_number(number=12)
+  assert mtz_object.space_group_number() == 12
+  mtz_object.set_point_group_name(name="pg"*100)
+  assert mtz_object.point_group_name() == "pgpgpgpgpg"
+  mtz_object.set_lattice_centring_type(symbol="C")
+  assert mtz_object.lattice_centring_type() == "C"
+  for space_group_symbols in sgtbx.space_group_symbol_iterator():
+    space_group = sgtbx.space_group(space_group_symbols)
+    mtz_object.set_space_group(space_group)
+    assert mtz_object.space_group() == space_group
+    assert mtz_object.n_symmetry_matrices() == space_group.order_z()
+  assert mtz_object.xml() is None
+  assert mtz_object.unknown_headers() is None
+  assert mtz_object.number_of_unknown_headers() == 0
+  mtz_object = mtz.object() \
+    .set_title(title="exercise") \
+    .add_history(lines=flex.std_string(["h2"])) \
+    .add_history(line="h1") \
+    .set_space_group_name("sg") \
+    .set_space_group_number(123) \
+    .set_point_group_name("pg") \
+    .set_space_group(sgtbx.space_group_info(number=123).group())
+  assert mtz_object.title() == "exercise"
+  assert list(mtz_object.history()) == ["h1", "h2"]
+  for stage in [0,1]:
+    for i_crystal in range(3):
+      if (stage == 0):
+        if (i_crystal % 2 == 0):
+          crystal = mtz_object.add_crystal(
+            name="crystal_%d"%i_crystal,
+            project_name="project_%d"%i_crystal,
+            unit_cell_parameters=(10+i_crystal,20,20,90,90,120))
+        else:
+          crystal = mtz_object.add_crystal(
+            name="crystal_%d"%i_crystal,
+            project_name="project_%d"%i_crystal,
+            unit_cell=uctbx.unit_cell((10+i_crystal,20,20,90,90,120)))
+      else:
+        crystal = mtz_object.crystals()[i_crystal]
+      assert crystal.i_crystal() == i_crystal
+      assert crystal.name() == "crystal_%d"%i_crystal
+      assert crystal.project_name() == "project_%d"%i_crystal
+      assert approx_equal(crystal.unit_cell_parameters(),
+        (10+i_crystal,20,20,90,90,120))
+  if (not verbose): out = StringIO()
+  assert mtz_object.show_summary(out=out) is mtz_object
+  if (not verbose):
+    assert not show_diff(out.getvalue(), """\
+Title: exercise
+Space group symbol from file: sg
+Space group number from file: 123
+Space group from matrices: P 4/m m m (No. 123)
+Point group symbol from file: pg
+Number of crystals: 3
+Number of Miller indices: 0
+History:
+  h1
+  h2
+Crystal 1:
+  Name: crystal_0
+  Project: project_0
+  Id: 1
+  Unit cell: (10, 20, 20, 90, 90, 120)
+  Number of datasets: 0
+Crystal 2:
+  Name: crystal_1
+  Project: project_1
+  Id: 2
+  Unit cell: (11, 20, 20, 90, 90, 120)
+  Number of datasets: 0
+Crystal 3:
+  Name: crystal_2
+  Project: project_2
+  Id: 3
+  Unit cell: (12, 20, 20, 90, 90, 120)
+  Number of datasets: 0
+""")
+  mtz_object.crystals()[1].set_unit_cell_parameters([13,21,23,81,82,83])
+  assert approx_equal(mtz_object.crystals()[1].unit_cell_parameters(),
+    [13,21,23,81,82,83])
+  mtz_object.crystals()[1].set_unit_cell_parameters([11,20,20,90,90,120])
+  assert approx_equal(mtz_object.crystals()[1].unit_cell_parameters(),
+    [11,20,20,90,90,120])
+  for stage in [0,1]:
+    for i_crystal,crystal in enumerate(mtz_object.crystals()):
+      for i_dataset in range(5-i_crystal):
+        if (stage == 0):
+          new_name = "dataset_%d" % i_dataset
+          assert not crystal.has_dataset(name=new_name)
+          dataset = crystal.add_dataset(name=new_name, wavelength=10-i_dataset)
+          assert crystal.has_dataset(name=new_name)
+        else:
+          dataset = crystal.datasets()[i_dataset]
+        assert dataset.name() == "dataset_%d"%i_dataset
+        assert approx_equal(dataset.wavelength(), 10-i_dataset)
+  if (not verbose): out = StringIO()
+  mtz_object.show_summary(out=out)
+  if (not verbose):
+    assert not show_diff(out.getvalue(), """\
+Title: exercise
+Space group symbol from file: sg
+Space group number from file: 123
+Space group from matrices: P 4/m m m (No. 123)
+Point group symbol from file: pg
+Number of crystals: 3
+Number of Miller indices: 0
+History:
+  h1
+  h2
+Crystal 1:
+  Name: crystal_0
+  Project: project_0
+  Id: 1
+  Unit cell: (10, 20, 20, 90, 90, 120)
+  Number of datasets: 5
+  Dataset 1:
+    Name: dataset_0
+    Id: 1
+    Wavelength: 10
+    Number of columns: 0
+  Dataset 2:
+    Name: dataset_1
+    Id: 2
+    Wavelength: 9
+    Number of columns: 0
+  Dataset 3:
+    Name: dataset_2
+    Id: 3
+    Wavelength: 8
+    Number of columns: 0
+  Dataset 4:
+    Name: dataset_3
+    Id: 4
+    Wavelength: 7
+    Number of columns: 0
+  Dataset 5:
+    Name: dataset_4
+    Id: 5
+    Wavelength: 6
+    Number of columns: 0
+Crystal 2:
+  Name: crystal_1
+  Project: project_1
+  Id: 2
+  Unit cell: (11, 20, 20, 90, 90, 120)
+  Number of datasets: 4
+  Dataset 1:
+    Name: dataset_0
+    Id: 6
+    Wavelength: 10
+    Number of columns: 0
+  Dataset 2:
+    Name: dataset_1
+    Id: 7
+    Wavelength: 9
+    Number of columns: 0
+  Dataset 3:
+    Name: dataset_2
+    Id: 8
+    Wavelength: 8
+    Number of columns: 0
+  Dataset 4:
+    Name: dataset_3
+    Id: 9
+    Wavelength: 7
+    Number of columns: 0
+Crystal 3:
+  Name: crystal_2
+  Project: project_2
+  Id: 3
+  Unit cell: (12, 20, 20, 90, 90, 120)
+  Number of datasets: 3
+  Dataset 1:
+    Name: dataset_0
+    Id: 10
+    Wavelength: 10
+    Number of columns: 0
+  Dataset 2:
+    Name: dataset_1
+    Id: 11
+    Wavelength: 9
+    Number of columns: 0
+  Dataset 3:
+    Name: dataset_2
+    Id: 12
+    Wavelength: 8
+    Number of columns: 0
+""")
+  #
+  dataset_0_0 = mtz_object.crystals()[0].datasets()[0]
+  assert dataset_0_0.name() == "dataset_0"
+  assert dataset_0_0.set_name(new_name="dataset_x") is dataset_0_0
+  assert dataset_0_0.name() == "dataset_x"
+  assert dataset_0_0.set_name(new_name="dataset_0") is dataset_0_0
+  assert dataset_0_0.name() == "dataset_0"
+  try: dataset_0_0.set_name(new_name="dataset_1")
+  except RuntimeError as e:
+    assert str(e) == 'mtz::dataset::set_name(new_name="dataset_1"):' \
+      ' new_name is used already for another dataset.'
+  else: raise Exception_expected
+  assert dataset_0_0.name() == "dataset_0"
+  #
+  for stage in [0,1]:
+    i_seq_iter = count()
+    for i_crystal,crystal in enumerate(mtz_object.crystals()):
+      for i_dataset,dataset in enumerate(crystal.datasets()):
+        for i_column in range((i_crystal+i_dataset) % 3 + 1):
+          i_seq = next(i_seq_iter)
+          col_label = "column_%d"%i_seq
+          col_type = "FB?"[(i_crystal-i_dataset+i_column) % 3]
+          if (stage == 0):
+            column = dataset.add_column(label=col_label, type=col_type)
+          else:
+            column = dataset.columns()[i_column]
+          assert column.label() == col_label
+          assert column.type() == col_type
+  if (not verbose): out = StringIO()
+  mtz_object.show_summary(out=out)
+  if (not verbose):
+    assert not show_diff(out.getvalue(), """\
+Title: exercise
+Space group symbol from file: sg
+Space group number from file: 123
+Space group from matrices: P 4/m m m (No. 123)
+Point group symbol from file: pg
+Number of crystals: 3
+Number of Miller indices: 0
+History:
+  h1
+  h2
+Crystal 1:
+  Name: crystal_0
+  Project: project_0
+  Id: 1
+  Unit cell: (10, 20, 20, 90, 90, 120)
+  Number of datasets: 5
+  Dataset 1:
+    Name: dataset_0
+    Id: 1
+    Wavelength: 10
+    Number of columns: 1
+    label    #valid %valid  min  max type
+    column_0      0  0.00% None None F: amplitude
+  Dataset 2:
+    Name: dataset_1
+    Id: 2
+    Wavelength: 9
+    Number of columns: 2
+    label    #valid %valid  min  max type
+    column_1      0  0.00% None None ?: *** UNDEFINED column type ***
+    column_2      0  0.00% None None F: amplitude
+  Dataset 3:
+    Name: dataset_2
+    Id: 3
+    Wavelength: 8
+    Number of columns: 3
+    label    #valid %valid  min  max type
+    column_3      0  0.00% None None B: BATCH number
+    column_4      0  0.00% None None ?: *** UNDEFINED column type ***
+    column_5      0  0.00% None None F: amplitude
+  Dataset 4:
+    Name: dataset_3
+    Id: 4
+    Wavelength: 7
+    Number of columns: 1
+    label    #valid %valid  min  max type
+    column_6      0  0.00% None None F: amplitude
+  Dataset 5:
+    Name: dataset_4
+    Id: 5
+    Wavelength: 6
+    Number of columns: 2
+    label    #valid %valid  min  max type
+    column_7      0  0.00% None None ?: *** UNDEFINED column type ***
+    column_8      0  0.00% None None F: amplitude
+Crystal 2:
+  Name: crystal_1
+  Project: project_1
+  Id: 2
+  Unit cell: (11, 20, 20, 90, 90, 120)
+  Number of datasets: 4
+  Dataset 1:
+    Name: dataset_0
+    Id: 6
+    Wavelength: 10
+    Number of columns: 2
+    label     #valid %valid  min  max type
+    column_9       0  0.00% None None B: BATCH number
+    column_10      0  0.00% None None ?: *** UNDEFINED column type ***
+  Dataset 2:
+    Name: dataset_1
+    Id: 7
+    Wavelength: 9
+    Number of columns: 3
+    label     #valid %valid  min  max type
+    column_11      0  0.00% None None F: amplitude
+    column_12      0  0.00% None None B: BATCH number
+    column_13      0  0.00% None None ?: *** UNDEFINED column type ***
+  Dataset 3:
+    Name: dataset_2
+    Id: 8
+    Wavelength: 8
+    Number of columns: 1
+    label     #valid %valid  min  max type
+    column_14      0  0.00% None None ?: *** UNDEFINED column type ***
+  Dataset 4:
+    Name: dataset_3
+    Id: 9
+    Wavelength: 7
+    Number of columns: 2
+    label     #valid %valid  min  max type
+    column_15      0  0.00% None None B: BATCH number
+    column_16      0  0.00% None None ?: *** UNDEFINED column type ***
+Crystal 3:
+  Name: crystal_2
+  Project: project_2
+  Id: 3
+  Unit cell: (12, 20, 20, 90, 90, 120)
+  Number of datasets: 3
+  Dataset 1:
+    Name: dataset_0
+    Id: 10
+    Wavelength: 10
+    Number of columns: 3
+    label     #valid %valid  min  max type
+    column_17      0  0.00% None None ?: *** UNDEFINED column type ***
+    column_18      0  0.00% None None F: amplitude
+    column_19      0  0.00% None None B: BATCH number
+  Dataset 2:
+    Name: dataset_1
+    Id: 11
+    Wavelength: 9
+    Number of columns: 1
+    label     #valid %valid  min  max type
+    column_20      0  0.00% None None B: BATCH number
+  Dataset 3:
+    Name: dataset_2
+    Id: 12
+    Wavelength: 8
+    Number of columns: 2
+    label     #valid %valid  min  max type
+    column_21      0  0.00% None None F: amplitude
+    column_22      0  0.00% None None B: BATCH number
+""")
+  for column in mtz_object.columns():
+    assert column.array_size() == 2000
+    assert column.array_capacity() == 2402
+  mtz_object.reserve(5000)
+  for column in mtz_object.columns():
+    assert column.array_size() == 2000
+    assert column.array_capacity() == 5000
+  mtz_object.reserve(100)
+  for column in mtz_object.columns():
+    assert column.array_size() == 2000
+    assert column.array_capacity() == 5000
+  #
+  mtz_object = mtz.object() \
+    .set_title(title="exercise") \
+    .set_space_group_name("sg") \
+    .set_space_group_number(123) \
+    .set_point_group_name("pg") \
+    .set_lattice_centring_type("pg") \
+    .set_space_group(sgtbx.space_group_info(number=123).group())
+  unit_cell = uctbx.unit_cell((10,10,10,90,90,90))
+  mtz_object.set_hkl_base(unit_cell=unit_cell)
+  dataset = mtz_object.add_crystal(
+    name="crystal_1",
+    project_name="crystal_1",
+    unit_cell=unit_cell).add_dataset(
+      name="crystal_1",
+      wavelength=0)
+  try: dataset.add_column(label="a,b,c", type="H")
+  except RuntimeError as e:
+    assert str(e) == 'mtz::dataset::add_column(label="a,b,c", ...):' \
+      ' label must not include commas.'
+  else: raise Exception_expected
+  for label in "HKL":
+    dataset.add_column(label=label, type="H")
+  column = dataset.add_column(label="F", type="F")
+  mtz_reflection_indices = column.set_reals(
+    miller_indices=flex.miller_index([(1,2,3),(2,3,4),(3,4,5)]),
+    data=flex.double([10,20,30]))
+  assert list(mtz_reflection_indices) == [0,1,2]
+  column = dataset.add_column(label="SigF", type="Q")
+  column.set_reals(
+    mtz_reflection_indices=mtz_reflection_indices,
+    data=flex.double([1,2,3]))
+  group = mtz_object.extract_observations(
+    column_label_data="F",
+    column_label_sigmas="SigF")
+  assert list(group.indices) == [(1, 2, 3), (2, 3, 4), (3, 4, 5)]
+  assert approx_equal(group.data, [10, 20, 30])
+  assert approx_equal(group.sigmas, [1, 2, 3])
+  column = dataset.add_column(label="I", type="F")
+  mtz_reflection_indices = column.set_reals(
+    miller_indices=flex.miller_index([(2,3,5),(1,2,3),(3,4,5)]),
+    data=flex.double([11,21,31]))
+  assert list(mtz_reflection_indices) == [3, 0, 2]
+  column = dataset.add_column(label="SigI", type="Q")
+  column.set_reals(
+    mtz_reflection_indices=mtz_reflection_indices,
+    data=flex.double([4,5,6]))
+  group = mtz_object.extract_observations(
+    column_label_data="I",
+    column_label_sigmas="SigI")
+  assert list(group.indices) == [(1, 2, 3), (3, 4, 5), (2, 3, 5)]
+  assert approx_equal(group.data, [21, 31, 11])
+  assert approx_equal(group.sigmas, [5, 6, 4])
+  if (not verbose): out = StringIO()
+  mtz_object.show_summary(out=out)
+  if (not verbose):
+    assert not show_diff(out.getvalue(), """\
+Title: exercise
+Space group symbol from file: sg
+Space group number from file: 123
+Space group from matrices: P 4/m m m (No. 123)
+Point group symbol from file: pg
+Number of crystals: 2
+Number of Miller indices: 4
+Resolution range: 2.67261 1.41421
+History:
+Crystal 1:
+  Name: HKL_base
+  Project: HKL_base
+  Id: 0
+  Unit cell: (10, 10, 10, 90, 90, 90)
+  Number of datasets: 1
+  Dataset 1:
+    Name: HKL_base
+    Id: 0
+    Wavelength: 0
+    Number of columns: 0
+Crystal 2:
+  Name: crystal_1
+  Project: crystal_1
+  Id: 1
+  Unit cell: (10, 10, 10, 90, 90, 90)
+  Number of datasets: 1
+  Dataset 1:
+    Name: crystal_1
+    Id: 1
+    Wavelength: 0
+    Number of columns: 7
+    label #valid  %valid   min   max type
+    H          4 100.00%  1.00  3.00 H: index h,k,l
+    K          4 100.00%  2.00  4.00 H: index h,k,l
+    L          4 100.00%  3.00  5.00 H: index h,k,l
+    F          3  75.00% 10.00 30.00 F: amplitude
+    SigF       3  75.00%  1.00  3.00 Q: standard deviation
+    I          3  75.00% 11.00 31.00 F: amplitude
+    SigI       3  75.00%  4.00  6.00 Q: standard deviation
+""")
+  if (not verbose): out = StringIO()
+  assert mtz_object.show_column_data(out=out) is mtz_object
+  if (not verbose):
+    assert not show_diff(out.getvalue(), """\
+Column data:
+-------------------------------------------------------------------------------
+                       F            SigF               I            SigI
+
+ 1  2  3              10               1              21               5
+ 2  3  4              20               2            None            None
+ 3  4  5              30               3              31               6
+ 2  3  5            None            None              11               4
+-------------------------------------------------------------------------------
+""")
+  mtz_object.write(file_name="tmp_iotbx_mtz_ext.mtz")
+  if (not verbose): out = StringIO()
+  mtz.object(file_name="tmp_iotbx_mtz_ext.mtz").show_summary(out=out)
+  if (not verbose):
+    assert not show_diff(out.getvalue(), """\
+Title: exercise
+Space group symbol from file: sg
+Space group number from file: 123
+Space group from matrices: P 4/m m m (No. 123)
+Point group symbol from file: pg
+Number of crystals: 2
+Number of Miller indices: 4
+Resolution range: 2.67261 1.41421
+History:
+Crystal 1:
+  Name: HKL_base
+  Project: HKL_base
+  Id: 0
+  Unit cell: (10, 10, 10, 90, 90, 90)
+  Number of datasets: 1
+  Dataset 1:
+    Name: HKL_base
+    Id: 0
+    Wavelength: 0
+    Number of columns: 0
+Crystal 2:
+  Name: crystal_1
+  Project: crystal_1
+  Id: 2
+  Unit cell: (10, 10, 10, 90, 90, 90)
+  Number of datasets: 1
+  Dataset 1:
+    Name: crystal_1
+    Id: 1
+    Wavelength: 0
+    Number of columns: 7
+    label #valid  %valid   min   max type
+    H          4 100.00%  1.00  3.00 H: index h,k,l
+    K          4 100.00%  2.00  4.00 H: index h,k,l
+    L          4 100.00%  3.00  5.00 H: index h,k,l
+    F          3  75.00% 10.00 30.00 F: amplitude
+    SigF       3  75.00%  1.00  3.00 Q: standard deviation
+    I          3  75.00% 11.00 31.00 F: amplitude
+    SigI       3  75.00%  4.00  6.00 Q: standard deviation
+""")
+  #
+  original_miller_indices = mtz_object.extract_miller_indices()
+  assert list(original_miller_indices) \
+      == [(1, 2, 3), (2, 3, 4), (3, 4, 5), (2, 3, 5)]
+  new_miller_indices = flex.miller_index(
+    [(3, -1, 2), (-4, 2, -3), (5, -3, 4), (-5, 2, -3)])
+  assert not mtz_object.extract_miller_indices().all_eq(new_miller_indices)
+  mtz_object.replace_miller_indices(miller_indices=new_miller_indices)
+  assert mtz_object.extract_miller_indices().all_eq(new_miller_indices)
+  mtz_object.replace_miller_indices(miller_indices=original_miller_indices)
+  assert not mtz_object.extract_miller_indices().all_eq(new_miller_indices)
+  assert mtz_object.extract_miller_indices().all_eq(original_miller_indices)
+  #
+  c = mtz_object.get_column(label="F")
+  s = c.selection_valid()
+  v = c.extract_values(not_a_number_substitute=-1)
+  assert list(s) == [True, True, True, False]
+  assert approx_equal(v, [10.0, 20.0, 30.0, -1.0])
+  c.set_values(values=flex.float([5,9,3,7]), selection_valid=None)
+  v = c.extract_values(not_a_number_substitute=-1)
+  assert approx_equal(v, [5.0, 9.0, 3.0, 7.0])
+  c.set_values(values=flex.float([7,8,2,0]))
+  v = c.extract_values(not_a_number_substitute=-1)
+  assert approx_equal(v, [7.0, 8.0, 2.0, 0.0])
+  c.set_values(
+    values=flex.float([5,9,3,7]),
+    selection_valid=flex.bool([False]*4))
+  v = c.extract_values(not_a_number_substitute=-1)
+  assert approx_equal(v, [-1]*4)
+  for i_trial in range(10):
+    s = flex.random_bool(size=4, threshold=0.5)
+    v = flex.float(list(flex.random_double(size=4)*10-5))
+    c.set_values(values=v, selection_valid=s)
+    sx = c.selection_valid()
+    vx = c.extract_values(not_a_number_substitute=99)
+    assert list(s) == list(sx)
+    assert vx.select(s).all_eq(v.select(s))
+    assert vx.select(~s).all_ne(v.select(~s))
+    assert vx.select(~s).all_eq(99)
+  #
+  values_in = count()
+  values_out = count()
+  for i_batch in range(10):
+    batch = mtz_object.add_batch()
+    assert batch.num() == i_batch+1
+    assert batch.set_num(value=next(values_in)) is batch
+    assert batch.num() == next(values_out)
+    assert batch.set_num(value=i_batch+1) is batch
+    assert batch.title() == " "
+    assert batch.set_title("Hello MTZ") is batch
+    assert batch.title() == "Hello MTZ"
+    assert batch.set_title("Hello MTZ"*10) is batch
+    assert len(batch.title()) == 70
+    assert list(batch.gonlab()) == ["", "", ""]
+    assert batch.set_gonlab(
+      flex.std_string(["what", "ever", "this_is....."])) is batch
+    assert list(batch.gonlab()) == ["what", "ever", "this_is"]
+    assert batch.iortyp() == 0
+    assert batch.set_iortyp(value=next(values_in)) is batch
+    assert batch.iortyp() == next(values_out)
+    assert list(batch.lbcell()) == [0, 0, 0, 0, 0, 0]
+    assert batch.set_lbcell(flex.int(range(3,9))) is batch
+    assert list(batch.lbcell()) == list(range(3,9))
+    assert batch.misflg() == 0
+    assert batch.set_misflg(value=next(values_in)) is batch
+    assert batch.misflg() == next(values_out)
+    assert batch.jumpax() == 0
+    assert batch.set_jumpax(value=next(values_in)) is batch
+    assert batch.jumpax() == next(values_out)
+    assert batch.ncryst() == 0
+    assert batch.set_ncryst(value=next(values_in)) is batch
+    assert batch.ncryst() == next(values_out)
+    assert batch.lcrflg() == 0
+    assert batch.set_lcrflg(value=next(values_in)) is batch
+    assert batch.lcrflg() == next(values_out)
+    assert batch.ldtype() == 0
+    assert batch.set_ldtype(value=next(values_in)) is batch
+    assert batch.ldtype() == next(values_out)
+    assert batch.jsaxs() == 0
+    assert batch.set_jsaxs(value=next(values_in)) is batch
+    assert batch.jsaxs() == next(values_out)
+    assert batch.nbscal() == 0
+    assert batch.set_nbscal(value=next(values_in)) is batch
+    assert batch.nbscal() == next(values_out)
+    assert batch.ngonax() == 0
+    assert batch.set_ngonax(value=next(values_in)) is batch
+    assert batch.ngonax() == next(values_out)
+    assert batch.lbmflg() == 0
+    assert batch.set_lbmflg(value=next(values_in)) is batch
+    assert batch.lbmflg() == next(values_out)
+    assert batch.ndet() == 0
+    assert batch.set_ndet(value=next(values_in) % 3) is batch
+    assert batch.ndet() == next(values_out) % 3
+    assert batch.nbsetid() == 0
+    assert batch.set_nbsetid(value=next(values_in)) is batch
+    assert batch.nbsetid() == next(values_out)
+    assert list(batch.cell()) == [0]*6
+    assert batch.set_cell(flex.float(range(18,24))) is batch
+    assert list(batch.cell()) == list(range(18,24))
+    assert list(batch.umat()) == [0]*9
+    assert batch.set_umat(flex.float(range(16,25))) is batch
+    assert list(batch.umat()) == list(range(16,25))
+    assert list(batch.phixyz()) == [0]*6
+    assert batch.set_phixyz(flex.float(range(28,34))) is batch
+    assert list(batch.phixyz()) == list(range(28,34))
+    assert list(batch.crydat()) == [0]*12
+    assert batch.set_crydat(flex.float(range(26,38))) is batch
+    assert list(batch.crydat()) == list(range(26,38))
+    assert list(batch.datum()) == [0]*3
+    assert batch.set_datum(flex.float(range(26,29))) is batch
+    assert list(batch.datum()) == list(range(26,29))
+    assert batch.phistt() == 0
+    assert batch.set_phistt(value=next(values_in)) is batch
+    assert batch.phistt() == next(values_out)
+    assert batch.phiend() == 0
+    assert batch.set_phiend(value=next(values_in)) is batch
+    assert batch.phiend() == next(values_out)
+    assert list(batch.scanax()) == [0]*3
+    assert batch.set_scanax(flex.float(range(62,65))) is batch
+    assert list(batch.scanax()) == list(range(62,65))
+    assert batch.time1() == 0
+    assert batch.set_time1(value=next(values_in)) is batch
+    assert batch.time1() == next(values_out)
+    assert batch.time2() == 0
+    assert batch.set_time2(value=next(values_in)) is batch
+    assert batch.time2() == next(values_out)
+    assert batch.bscale() == 0
+    assert batch.set_bscale(value=next(values_in)) is batch
+    assert batch.bscale() == next(values_out)
+    assert batch.bbfac() == 0
+    assert batch.set_bbfac(value=next(values_in)) is batch
+    assert batch.bbfac() == next(values_out)
+    assert batch.sdbscale() == 0
+    assert batch.set_sdbscale(value=next(values_in)) is batch
+    assert batch.sdbscale() == next(values_out)
+    assert batch.sdbfac() == 0
+    assert batch.set_sdbfac(value=next(values_in)) is batch
+    assert batch.sdbfac() == next(values_out)
+    assert batch.phirange() == 0
+    assert batch.set_phirange(value=next(values_in)) is batch
+    assert batch.phirange() == next(values_out)
+    assert list(batch.e1()) == [0]*3
+    assert batch.set_e1(flex.float(range(71,74))) is batch
+    assert list(batch.e1()) == list(range(71,74))
+    assert list(batch.e2()) == [0]*3
+    assert batch.set_e2(flex.float(range(72,75))) is batch
+    assert list(batch.e2()) == list(range(72,75))
+    assert list(batch.e3()) == [0]*3
+    assert batch.set_e3(flex.float(range(73,76))) is batch
+    assert list(batch.e3()) == list(range(73,76))
+    assert list(batch.source()) == [0]*3
+    assert batch.set_source(flex.float(range(74,77))) is batch
+    assert list(batch.source()) == list(range(74,77))
+    assert list(batch.so()) == [0]*3
+    assert batch.set_so(flex.float(range(75,78))) is batch
+    assert list(batch.so()) == list(range(75,78))
+    assert batch.alambd() == 0
+    assert batch.set_alambd(value=next(values_in)) is batch
+    assert batch.alambd() == next(values_out)
+    assert batch.delamb() == 0
+    assert batch.set_delamb(value=next(values_in)) is batch
+    assert batch.delamb() == next(values_out)
+    assert batch.delcor() == 0
+    assert batch.set_delcor(value=next(values_in)) is batch
+    assert batch.delcor() == next(values_out)
+    assert batch.divhd() == 0
+    assert batch.set_divhd(value=next(values_in)) is batch
+    assert batch.divhd() == next(values_out)
+    assert batch.divvd() == 0
+    assert batch.set_divvd(value=next(values_in)) is batch
+    assert batch.divvd() == next(values_out)
+    assert list(batch.dx()) == [0]*2
+    assert batch.set_dx(flex.float(range(84,86))) is batch
+    assert list(batch.dx()) == list(range(84,86))
+    assert list(batch.theta()) == [0]*2
+    assert batch.set_theta(flex.float(range(85,87))) is batch
+    assert list(batch.theta()) == list(range(85,87))
+    assert list(batch.detlm()) == [0]*8
+    assert batch.set_detlm(flex.float(range(86,94))) is batch
+    assert list(batch.detlm()) == list(range(86,94))
+    if (not verbose): out = StringIO()
+    batch.show(out=out)
+    if (not verbose and i_batch == 3):
+      batch_3_show = out
+      assert not show_diff(out.getvalue(), """\
+batch number: 4
+batch title: Hello MTZHello MTZHello MTZHello MTZHello MTZHello MTZHello MTZHello M
+names of the three axes: ['what', 'ever', 'this_is']
+type of orientation block: 82
+refinement flags for cell: [3, 4, 5, 6, 7, 8]
+number of phixyz used (0, 1, or 2): 83
+reciprocal axis closest to rotation axis: 84
+crystal number: 85
+mosaicity model: 0 = isotropic, 1 = anisotropic: 86
+type of data: 2D (1), 3D (2), or Laue (3): 87
+goniostat scan axis number: 88
+number of batch scales & Bfactors (0 if unset): 89
+number of goniostat axes: 90
+flag for type of beam info: 91
+  0: for alambd, delamb; 1: also delcor, divhd, divvd
+number of detectors (current maximum 2): 2
+dataset id: 93
+cell dimensions: [18.0, 19.0, 20.0, 21.0, 22.0, 23.0]
+orientation matrix U: [16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0]
+  in Fortranic order, i.e. U(1,1), U(2,1) ...
+missetting angles at beginning and end of oscillation: [28.0, 29.0, 30.0, 31.0, 32.0, 33.0]
+mosaicity: [26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0]
+datum values of goniostat axes: [26.0, 27.0, 28.0]
+start of phi relative to datum: 94.0
+end of phi relative to datum: 95.0
+rotation axis in lab frame: [62.0, 63.0, 64.0]
+start time: 96.0
+stop time: 97.0
+batch scale: 98.0
+batch temperature factor: 99.0
+sd bscale: 100.0
+sd bbfac: 101.0
+phi range: 102.0
+vectors ("Cambridge" laboratory axes) defining ngonax goniostat axes:
+  vector 1: [71.0, 72.0, 73.0]
+  vector 2: [72.0, 73.0, 74.0]
+  vector 3: [73.0, 74.0, 75.0]
+idealised source vector: [74.0, 75.0, 76.0]
+source vector: [75.0, 76.0, 77.0]
+wavelength (A): 103.0
+dispersion (deltalambda / lambda): 104.0
+correlated component: 105.0
+horizontal beam divergence: 106.0
+vertical beam divergence: 107.0
+xtal to detector distance: [84.0, 85.0]
+detector tilt angle: [85.0, 86.0]
+min & max values of detector coords (pixels): [86.0, 87.0, 88.0, 89.0, 90.0, 91.0, 92.0, 93.0]
+""")
+  mtz_object.write(file_name="tmp_iotbx_mtz_ext.mtz")
+  restored = mtz.object(file_name="tmp_iotbx_mtz_ext.mtz")
+  assert restored.n_batches() == 10
+  if (not verbose): out = StringIO()
+  restored.batches()[3].show(out=out)
+  if (not verbose):
+    assert out.getvalue() == batch_3_show.getvalue()
+  for i_trial in range(10):
+    perm = flex.random_permutation(size=10)
+    for batch,new_num in zip(mtz_object.batches(), perm):
+      batch.set_num(value=new_num+1)
+    mtz_object.sort_batches()
+    assert [batch.num() for batch in mtz_object.batches()] \
+        == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  for batch,nbsetid in zip(mtz_object.batches(), [0,0,1,0,1,1,1,0,1,1]):
+    batch.set_nbsetid(value=nbsetid)
+  for crystal in mtz_object.crystals():
+    for dataset in crystal.datasets():
+      assert dataset.id() in [0,1]
+      assert dataset.n_batches() == [4,6][dataset.id()]
+      assert dataset.batches().size() == dataset.n_batches()
+      for batch in dataset.batches():
+        assert batch.nbsetid() == dataset.id()
+      batch = dataset.add_batch()
+      assert batch.nbsetid() == dataset.id()
+      assert dataset.n_batches() == [5,7][dataset.id()]
+  # quick test for delete_reflection
+  assert mtz_object.n_reflections() > 3
+  mx = mtz_object.extract_miller_indices()[1]
+  assert mx in mtz_object.extract_miller_indices()
+  mtz_object.delete_reflection(1)
+  assert mx not in mtz_object.extract_miller_indices()
+  # test for delete_reflections
+  isel = flex.size_t((1,0))
+  try: mtz_object.delete_reflections(isel)
+  except RuntimeError: pass
+  else: raise Exception_expected
+  isel = flex.size_t((0,2))
+  mx = [mtz_object.extract_miller_indices()[i] for i in isel]
+  for m in mx:
+    assert m in mtz_object.extract_miller_indices()
+  mtz_object.delete_reflections(isel)
+  for m in mx:
+    assert m not in mtz_object.extract_miller_indices()
+
+
+def exercise():
+  if (mtz is None):
+    print("Skipping iotbx/mtz/tst_ext.py: ccp4io not available")
+    return
+  command_line = (option_parser()
+    .option(None, "--verbose",
+      action="store_true")
+    .option(None, "--forever",
+      action="store_true",
+      help="Infinite loop, for detection of memory leaks")
+    .option(None, "--walk",
+      action="store",
+      type="string",
+      metavar="ROOT_DIR",
+      help="Find and process all MTZ files under ROOT_DIR")
+    .option(None, "--full",
+      action="store_true",
+      help="Visit all MTZ files")
+  ).process(args=sys.argv[1:])
+  exercise_read_corrupt()
+  exercise_basic()
+  exercise_setting_nref_etc()
+  exercise_modifiers(verbose=command_line.options.verbose)
+  for file_name in command_line.args:
+    exercise_extract_any()(file_name=file_name, out=sys.stdout)
+  if (command_line.options.walk is not None):
+    exercise_walk(
+      root_dir=command_line.options.walk,
+      full=command_line.options.full,
+      verbose=command_line.options.verbose)
+  while (command_line.options.forever):
+    exercise_basic()
+    exercise_modifiers()
+
+def run():
+  exercise()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/tst_extract_from_symmetry_lib.py
+from __future__ import absolute_import, division, print_function
+from iotbx.mtz import extract_from_symmetry_lib
+from cctbx import sgtbx
+from libtbx.utils import format_cpu_times
+import libtbx
+import sys, os
+from six.moves import range
+op = os.path
+
+try:
+  import ccp4io_adaptbx
+except ImportError:
+  ccp4io_adaptbx = None
+
+def exercise_230():
+  for space_group_number in range(1,231):
+    space_group_info = sgtbx.space_group_info(
+      number=space_group_number,
+      table_id="A1983")
+    symbol = extract_from_symmetry_lib.ccp4_symbol(
+      space_group_info=space_group_info,
+      lib_name="symop.lib")
+    if (symbol[0] == "H"):
+      symbol = "R" + symbol[1:] + ":H"
+    assert sgtbx.space_group_info(
+      symbol=symbol,
+      table_id="A1983").group() == space_group_info.group()
+    #
+    symbol = extract_from_symmetry_lib.ccp4_symbol(
+      space_group_info=space_group_info,
+      lib_name="syminfo.lib")
+    if (symbol[0] == "H"):
+      symbol = "R" + symbol[1:] + ":H"
+    assert sgtbx.space_group_info(
+      symbol=symbol,
+      table_id="A1983").group() == space_group_info.group()
+
+def exercise_symop_lib_recycling():
+  file_iter = open(op.join(
+    extract_from_symmetry_lib.ccp4io_lib_data, "symop.lib"))
+  ccp4_id_counts = libtbx.dict_with_default_0()
+  ccp4_symbol_counts = libtbx.dict_with_default_0()
+  for line in file_iter:
+    flds = line.split(None, 4)
+    ccp4_id = flds[0]
+    ccp4_id_counts[ccp4_id] += 1
+    space_group_number = int(ccp4_id[-3:])
+    order_z = int(flds[1])
+    given_ccp4_symbol = flds[3]
+    ccp4_symbol_counts[given_ccp4_symbol] += 1
+    group = extract_from_symmetry_lib.collect_symops(
+      file_iter=file_iter, order_z=order_z)
+    assert group.order_z() == order_z
+    space_group_info = sgtbx.space_group_info(group=group)
+    retrieved_ccp4_symbol = extract_from_symmetry_lib.ccp4_symbol(
+      space_group_info=space_group_info,
+      lib_name="symop.lib")
+    assert retrieved_ccp4_symbol == given_ccp4_symbol
+    assert space_group_info.type().number() == space_group_number
+    if (1):
+      from iotbx.pdb import format_cryst1_sgroup
+      sgroup = format_cryst1_sgroup(space_group_info=space_group_info)
+      if (len(sgroup) > 11):
+        print("ccp4 symop.lib setting leads to pdb CRYST1 overflow:",\
+          ccp4_id, given_ccp4_symbol, sgroup)
+  file_iter.close()
+  for ccp4_id,count in ccp4_id_counts.items():
+    if (count != 1):
+      raise RuntimeError(
+        'ccp4 id "%s" appears %d times (should be unique).'
+          % (ccp4_id, count))
+  ccp4_symbol_counts = libtbx.dict_with_default_0()
+  for ccp4_symbol,count in ccp4_symbol_counts.items():
+    if (count != 1):
+      raise RuntimeError(
+        'ccp4 symbol "%s" appears %d times (should be unique).'
+          % (ccp4_symbol, count))
+
+def exercise_mmdb_cryst1_interpretation(sgi_hall, pdb_str):
+  if (os.name == "nt"):
+    return # unknown mmdb problem 2010-10-31
+  with open("tmp.pdb", "w") as f:
+    print(pdb_str, file=f)
+  mgr = ccp4io_adaptbx.mmdb.Manager()
+  mgr.ReadPDBASCII(fileName="tmp.pdb",
+    gzipMode=ccp4io_adaptbx.mmdb.IO_GZ_MODE.NONE)
+  if (mgr.isSpaceGroup() == 0):
+    print("MMDB does not recognize space group symbol:")
+    print(pdb_str)
+    print()
+  else:
+    sg = sgtbx.space_group()
+    for i in range(mgr.GetNumberOfSymOps()):
+      s = mgr.GetSymOp(Nop=i)
+      sg.expand_smx(s)
+    sgi = sgtbx.space_group_info(group=sg)
+    if (sgi.group() != sgi_hall.group()):
+      print("MMDB symmetry mismatch:")
+      print(pdb_str)
+      print(sgi_hall)
+      print(sgi)
+      print()
+
+def exercise_syminfo_lib_pdb_cryst1_recycling():
+  # this call is to build _syminfo_lib_cache
+  assert extract_from_symmetry_lib.ccp4_symbol(
+    space_group_info=sgtbx.space_group_info("P 1"),
+    lib_name="syminfo.lib") == "P 1"
+  #
+  import iotbx.pdb.cryst1_interpretation
+  n_need_more_special = 0
+  for number in range(1,230+1):
+    for hall,ccp4_symbol in \
+          extract_from_symmetry_lib._syminfo_lib_cache[number]:
+      sgi_hall = sgtbx.space_group_info(symbol="Hall: "+hall)
+      if (sgi_hall.group().is_centric()):
+        continue
+      sgroup = iotbx.pdb.format_cryst1_sgroup(space_group_info=sgi_hall)
+      if (len(sgroup) > 11):
+        print("ccp4 syminfo.lib setting leads to pdb CRYST1 overflow:",\
+          ccp4_symbol, sgroup)
+      cs = sgi_hall.any_compatible_crystal_symmetry(volume=1000)
+      pdb_str = iotbx.pdb.format_cryst1_record(crystal_symmetry=cs)
+      cs2 = iotbx.pdb.cryst1_interpretation.crystal_symmetry(
+        cryst1_record=pdb_str)
+      if (cs2.space_group_info() is None):
+        if (n_need_more_special == 0): print()
+        print('"%s": "Hall: %s",' % (
+          ccp4_symbol.replace(" ", "").upper(), hall))
+        n_need_more_special += 1
+      else:
+        assert cs2.is_similar_symmetry(other=cs)
+      if (ccp4io_adaptbx is not None):
+        exercise_mmdb_cryst1_interpretation(
+          sgi_hall=sgi_hall, pdb_str=pdb_str)
+  if (n_need_more_special != 0):
+    print()
+    from libtbx.utils import plural_s
+    raise RuntimeError("""\
+Please edit iotbx/pdb/cryst1_interpretation.py:
+  Add the %d line%s above with "Hall:" to the "special" dictionary.
+""" % plural_s(n_need_more_special))
+
+def exercise(args):
+  assert len(args) == 0
+  if (extract_from_symmetry_lib.ccp4io_lib_data is None):
+    print("Skipping iotbx/mtz/tst_extract_from_symmetry_lib.py:" \
+      " ccp4io not available")
+    return
+  exercise_230()
+  exercise_symop_lib_recycling()
+  exercise_syminfo_lib_pdb_cryst1_recycling()
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  exercise(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/tst_miller_dict.py
+from __future__ import absolute_import, division, print_function
+import os
+from iotbx import mtz
+import libtbx.load_env
+import os.path
+
+if (__name__ == "__main__"):
+  fname = libtbx.env.find_in_repositories(
+    relative_path="iotbx/regression/data/insulin_unmerged_cutted_from_ccp4.mtz",
+    test=os.path.isfile)
+  m = mtz.object(file_name=fname)
+
+  miller_dict = m.as_miller_arrays_dict()
+
+  keys = sorted(miller_dict.keys())
+
+  assert keys == [('HKL_base', 'HKL_base', 'BATCH'),
+                  ('HKL_base', 'HKL_base', 'BGPKRATIOS'),
+                  ('HKL_base', 'HKL_base', 'FLAG'),
+                  ('HKL_base', 'HKL_base', 'FRACTIONCALC'),
+                  ('HKL_base', 'HKL_base', 'I'),
+                  ('HKL_base', 'HKL_base', 'IPR'),
+                  ('HKL_base', 'HKL_base', 'LP'),
+                  ('HKL_base', 'HKL_base', 'MPART'),
+                  ('HKL_base', 'HKL_base', 'M_ISYM'),
+                  ('HKL_base', 'HKL_base', 'ROT'),
+                  ('HKL_base', 'HKL_base', 'SIGI'),
+                  ('HKL_base', 'HKL_base', 'SIGIPR'),
+                  ('HKL_base', 'HKL_base', 'WIDTH'),
+                  ('HKL_base', 'HKL_base', 'XDET'),
+                  ('HKL_base', 'HKL_base', 'YDET')]
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/mtz/tst_unmerged.py
+from __future__ import absolute_import, division, print_function
+import os
+from iotbx import mtz
+import libtbx.load_env
+import os.path
+from six.moves import range
+
+if (__name__ == "__main__"):
+  fname = libtbx.env.find_in_repositories(
+    relative_path="iotbx/regression/data/insulin_unmerged_cutted_from_ccp4.mtz",
+    test=os.path.isfile)
+  m = mtz.object(file_name=fname)
+  m.show_summary()
+
+  h = m.extract_miller_indices()
+  j = m.extract_original_index_miller_indices()
+  misym = m.extract_integers("M_ISYM")
+
+  for idx in range(len(h)):
+    print("asu:%17s    orig:%17s    M/ISYM:%4d"%(h[idx],j[idx],misym.data[idx]))
+
+
+ *******************************************************************************

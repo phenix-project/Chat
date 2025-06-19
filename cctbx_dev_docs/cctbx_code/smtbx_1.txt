@@ -1,0 +1,2794 @@
+
+
+ *******************************************************************************
+smtbx/refinement/restraints/tests/tst_restraints.py
+from __future__ import absolute_import, division, print_function
+from scitbx.lstbx import normal_eqns_solving
+from cctbx import geometry_restraints, adp_restraints, sgtbx, adptbx
+from cctbx.array_family import flex
+from cctbx.xray import parameter_map
+from smtbx.refinement import restraints
+from smtbx.refinement.restraints.adp_restraints import\
+     adp_similarity_restraints, isotropic_adp_restraints,\
+     rigid_bond_restraints, fixed_u_eq_adp_restraints,\
+     adp_u_eq_similarity_restraints, adp_volume_similarity_restraints
+
+from cctbx.adp_restraints import adp_restraint_params
+import smtbx.utils
+import smtbx.development
+from smtbx.refinement import constraints, least_squares
+from libtbx.test_utils import approx_equal
+from libtbx.utils import wall_clock_time
+import libtbx
+from scitbx import matrix
+from six.moves import range
+
+geom = geometry_restraints
+adp = adp_restraints
+
+rows_per_restraint = {
+  geom.bond_similarity_proxy: 6,
+  adp.adp_similarity_proxy: 6,
+  adp.isotropic_adp_proxy: 6,
+  }
+
+class restraints_test_case:
+
+  def __init__(self):
+    self.xray_structure = smtbx.development.sucrose()
+    self.tolerance = 1e-4
+    for sc in self.xray_structure.scatterers():
+      sc.flags.set_grad_site(True)
+      if sc.flags.use_u_aniso(): sc.flags.set_grad_u_aniso(True)
+      if sc.flags.use_u_iso(): sc.flags.set_grad_u_iso(True)
+
+    self.param_map = parameter_map(self.xray_structure.scatterers())
+    assert self.proxies.size() > 0
+
+  def run(self):
+    self.exercise_ls_restraints()
+
+  def exercise_ls_restraints(self):
+    xs = self.xray_structure.deep_copy_scatterers()
+    linearised_eqns = self.manager.build_linearised_eqns(xs, xs.parameter_map())
+    design_matrix = linearised_eqns.design_matrix.as_dense_matrix()
+    fd_design = flex.double()
+    for proxy in self.proxies:
+      grads = self.fd_grads(proxy)
+      for i, grad in enumerate(grads):
+        fd_design.extend(grad)
+    assert approx_equal(design_matrix, fd_design, self.tolerance)
+
+class geometry_restraints_test_case(restraints_test_case):
+
+  def exercise_ls_restraints(self):
+    match = restraints_test_case.exercise_ls_restraints(self)
+
+  def fd_grads(self, proxy):
+    grads = flex.double(self.param_map.n_parameters)
+    eps = 1e-8
+    uc = self.xray_structure.unit_cell()
+    sites_cart = self.xray_structure.sites_cart().deep_copy()
+    for i in range(self.param_map.n_scatterers):
+      grad_site_cart = [0,0,0]
+      for j in range(3):
+        h = [0,0,0]
+        h[j] = eps
+        h = matrix.col(h)
+        sites_cart[i] = matrix.col(sites_cart[i])+h
+        r = self.restraint_t(uc, sites_cart, proxy)
+        d1 = r.delta
+        sites_cart[i] = matrix.col(sites_cart[i])-2*h
+        r = self.restraint_t(uc, sites_cart, proxy)
+        d2 = r.delta
+        d_delta = (d1-d2)/(2*eps)
+        grad_site_cart[j] = d_delta
+      grad_site_frac = uc.fractionalize_gradient(grad_site_cart)
+      for j in range(3):
+        grads[self.param_map[i].site+j] = grad_site_frac[j]
+    return [grads]
+
+class bond_restraint_test_case(geometry_restraints_test_case):
+  manager = restraints.manager(
+    bond_proxies = geometry_restraints.shared_bond_simple_proxy([
+      geom.bond_simple_proxy((0,30), 1.42, 1),
+      geom.bond_simple_proxy((1,21), 1.42, 1)
+    ]))
+  proxies = manager.bond_proxies
+  restraint_t = geom.bond
+
+class angle_restraint_test_case(geometry_restraints_test_case):
+  manager = restraints.manager(
+    angle_proxies = geometry_restraints.shared_angle_proxy([
+      geom.angle_proxy((30, 0, 19), 115, 1),
+      geom.angle_proxy((21, 1, 2), 110, 1)
+    ]))
+  proxies = manager.angle_proxies
+  restraint_t = geom.angle
+
+class dihedral_restraint_test_case(geometry_restraints_test_case):
+  manager = restraints.manager(
+    dihedral_proxies = geometry_restraints.shared_dihedral_proxy([
+      geom.dihedral_proxy((21, 19, 24, 26), 180, 1),
+      geom.dihedral_proxy((5, 26, 28, 7), 60, 1)
+    ]))
+  proxies = manager.dihedral_proxies
+  restraint_t = geom.dihedral
+
+class adp_restraints_test_case(restraints_test_case):
+
+  def __init__(self):
+    restraints_test_case.__init__(self)
+
+  def fd_grads(self, proxy):
+    dynamic_restraint_proxy_classes = (
+      adp.adp_u_eq_similarity_proxy,
+      adp.adp_volume_similarity_proxy,
+    )
+    if isinstance(proxy, (dynamic_restraint_proxy_classes)):
+      n_restraints = len(proxy.i_seqs)
+    else:
+      n_restraints = rows_per_restraint.get(proxy.__class__, 1)
+    grads = [flex.double(self.param_map.n_parameters) for i in range(n_restraints)]
+    eps = 1e-8
+    uc = self.xray_structure.unit_cell()
+    xs = self.xray_structure
+    u_cart = xs.scatterers().extract_u_cart(uc).deep_copy()
+    u_star = xs.scatterers().extract_u_star().deep_copy()
+    u_iso = xs.scatterers().extract_u_iso().deep_copy()
+    single_delta_classes = (
+      adp.fixed_u_eq_adp,
+    )
+    for n in range(n_restraints):
+      for i in range(self.param_map.n_scatterers):
+        use_u_aniso = self.param_map[i].u_aniso > -1
+        use_u_iso = self.param_map[i].u_iso > -1
+        for j in range(6):
+          if use_u_aniso:
+            h = [0,0,0,0,0,0]
+            h[j] = eps
+            h = matrix.sym(sym_mat3=h)
+            u_star[i]=list((matrix.sym(sym_mat3=u_star[i]) + h).as_sym_mat3())
+            r = self.restraint(proxy, u_cart=flex.sym_mat3_double([
+              adptbx.u_star_as_u_cart(uc, u) for u in u_star]))
+            if isinstance(r, adp.rigid_bond):
+              d1 = r.delta_z()
+            elif isinstance(r, single_delta_classes):
+              d1 = r.delta()
+            else:
+              d1 = r.deltas()[n]
+            u_star[i]=list((matrix.sym(sym_mat3=u_star[i]) - 2*h).as_sym_mat3())
+            r = self.restraint(proxy, u_cart=flex.sym_mat3_double([
+              adptbx.u_star_as_u_cart(uc, u) for u in u_star]))
+            if isinstance(r, adp.rigid_bond):
+              d2 = r.delta_z()
+            elif isinstance(r, single_delta_classes):
+              d2 = r.delta()
+            else:
+              d2 = r.deltas()[n]
+          elif use_u_iso:
+            u_iso[i] += eps
+            r = self.restraint(proxy, u_iso=u_iso)
+            if isinstance(r, adp.rigid_bond):
+              d1 = r.delta_z()
+            elif isinstance(r, single_delta_classes):
+              d1 = r.delta()
+            else:
+              d1 = r.deltas()[n]
+            u_iso[i] -= 2*eps
+            r = self.restraint(proxy, u_iso=u_iso)
+            if isinstance(r, adp.rigid_bond):
+              d2 = r.delta_z()
+            elif isinstance(r, single_delta_classes):
+              d2 = r.delta()
+            else:
+              d2 = r.deltas()[n]
+          d_delta = (d1-d2)/(2*eps)
+          if not isinstance(r, adp.rigid_bond) and j > 2:
+            d_delta *= 2 # off diagonals count twice
+          if use_u_aniso:
+            grads[n][self.param_map[i].u_aniso+j] = d_delta
+          elif use_u_iso:
+            grads[n][self.param_map[i].u_iso] = d_delta
+            break
+    return grads
+
+class isotropic_adp_test_case(adp_restraints_test_case):
+  proxies = isotropic_adp_restraints(
+    xray_structure=smtbx.development.sucrose()).proxies
+  # no need to test all of them every time
+  proxies = adp.shared_isotropic_adp_proxy(
+    flex.select(proxies, flags=flex.random_bool(proxies.size(), 0.5)))
+  manager = restraints.manager(isotropic_adp_proxies=proxies)
+
+  def restraint(self, proxy, u_iso=None, u_cart=None):
+    if u_cart is None:
+      u_cart=self.xray_structure.scatterers().extract_u_cart(
+        self.xray_structure.unit_cell())
+    return adp.isotropic_adp(
+      adp_restraint_params(u_cart=u_cart),
+      proxy)
+
+class fixed_u_eq_adp_test_case(adp_restraints_test_case):
+  proxies = fixed_u_eq_adp_restraints(
+    xray_structure=smtbx.development.sucrose(),
+    u_eq_ideal=0.025).proxies
+  # no need to test all of them every time
+  proxies = adp.shared_fixed_u_eq_adp_proxy(
+    flex.select(proxies, flags=flex.random_bool(proxies.size(), 0.5)))
+  manager = restraints.manager(fixed_u_eq_adp_proxies=proxies)
+
+  def restraint(self, proxy, u_iso=None, u_cart=None):
+    if u_cart is None:
+      u_cart=self.xray_structure.scatterers().extract_u_cart(
+        self.xray_structure.unit_cell())
+    return adp.fixed_u_eq_adp(
+      adp_restraint_params(u_cart=u_cart),
+      proxy)
+
+class adp_similarity_test_case(adp_restraints_test_case):
+  proxies = adp_similarity_restraints(
+    xray_structure=smtbx.development.sucrose()).proxies
+  # no need to test all of them every time
+  proxies = adp.shared_adp_similarity_proxy(
+    flex.select(proxies, flags=flex.random_bool(proxies.size(), 0.5)))
+  manager = restraints.manager(adp_similarity_proxies=proxies)
+
+  def restraint(self, proxy, u_iso=None, u_cart=None):
+    if u_cart is None:
+      u_cart=self.xray_structure.scatterers().extract_u_cart(
+        self.xray_structure.unit_cell())
+    if u_iso is None:
+      u_iso=self.xray_structure.scatterers().extract_u_iso()
+    use_u_aniso=self.xray_structure.use_u_aniso()
+    return adp.adp_similarity(
+      adp_restraint_params(u_cart=u_cart, u_iso=u_iso, use_u_aniso=use_u_aniso),
+      proxy)
+
+class adp_u_eq_similarity_test_case(adp_restraints_test_case):
+  proxies = adp_u_eq_similarity_restraints(
+    xray_structure=smtbx.development.sucrose()).proxies
+  # no need to test all of them every time
+  #proxies = adp.shared_adp_u_eq_similarity_proxy(
+    #flex.select(proxies, flags=flex.random_bool(proxies.size(), 0.5)))
+  manager = restraints.manager(adp_u_eq_similarity_proxies=proxies)
+
+  def restraint(self, proxy, u_iso=None, u_cart=None):
+    if u_cart is None:
+      u_cart=self.xray_structure.scatterers().extract_u_cart(
+        self.xray_structure.unit_cell())
+    if u_iso is None:
+      u_iso=self.xray_structure.scatterers().extract_u_iso()
+    use_u_aniso=self.xray_structure.use_u_aniso()
+    return adp.adp_u_eq_similarity(
+      adp_restraint_params(u_cart=u_cart, u_iso=u_iso, use_u_aniso=use_u_aniso),
+      proxy)
+
+class adp_volume_similarity_test_case(adp_restraints_test_case):
+  proxies = adp_volume_similarity_restraints(
+    xray_structure=smtbx.development.sucrose()).proxies
+  manager = restraints.manager(adp_volume_similarity_proxies=proxies)
+  def __init__(self):
+    adp_restraints_test_case.__init__(self)
+    # eigen values and eigen vectors are dependent after all...
+    # may need to make smaller
+    self.tolerance = 0.2
+  def restraint(self, proxy, u_iso=None, u_cart=None):
+    if u_cart is None:
+      u_cart=self.xray_structure.scatterers().extract_u_cart(
+        self.xray_structure.unit_cell())
+    if u_iso is None:
+      u_iso=self.xray_structure.scatterers().extract_u_iso()
+    use_u_aniso=self.xray_structure.use_u_aniso()
+    return adp.adp_volume_similarity(
+      adp_restraint_params(u_cart=u_cart, u_iso=u_iso, use_u_aniso=use_u_aniso),
+      proxy)
+
+class rigid_bond_test_case(adp_restraints_test_case):
+  proxies = rigid_bond_restraints(
+    xray_structure=smtbx.development.sucrose()).proxies
+  # no need to test all of them every time
+  proxies = adp.shared_rigid_bond_proxy(
+    flex.select(proxies, flags=flex.random_bool(proxies.size(), 0.3)))
+  manager = restraints.manager(rigid_bond_proxies=proxies)
+
+  def restraint(self, proxy, u_iso=None, u_cart=None):
+    if u_cart is None:
+      u_cart = self.xray_structure.scatterers().extract_u_cart(
+        self.xray_structure.unit_cell())
+    sites_cart = self.xray_structure.sites_cart()
+    return adp.rigid_bond(
+      adp_restraint_params(sites_cart=sites_cart, u_cart=u_cart),
+      proxy)
+
+def exercise_restrained_refinement(options):
+  import random
+  random.seed(1)
+  flex.set_random_seed(1)
+  xs0 = smtbx.development.random_xray_structure(
+    sgtbx.space_group_info('P1'),
+    n_scatterers=options.n_scatterers,
+    elements="random")
+  for sc in xs0.scatterers():
+    sc.flags.set_grad_site(True)
+  sc0 = xs0.scatterers()
+  uc = xs0.unit_cell()
+
+  mi = xs0.build_miller_set(anomalous_flag=False, d_min=options.resolution)
+  fo_sq = mi.structure_factors_from_scatterers(
+    xs0, algorithm="direct").f_calc().norm()
+  fo_sq = fo_sq.customized_copy(sigmas=flex.double(fo_sq.size(), 1))
+
+  i, j, k, l = random.sample(range(options.n_scatterers), 4)
+  bond_proxies = geometry_restraints.shared_bond_simple_proxy()
+  w = 1e9
+  d_ij = uc.distance(sc0[i].site, sc0[j].site)*0.8
+  bond_proxies.append(geom.bond_simple_proxy(
+    i_seqs=(i, j),
+    distance_ideal=d_ij,
+    weight=w))
+  d_jk = uc.distance(sc0[j].site, sc0[k].site)*0.85
+  bond_proxies.append(geom.bond_simple_proxy(
+    i_seqs=(j, k),
+    distance_ideal=d_jk,
+    weight=w))
+  d_ki = min(uc.distance(sc0[k].site, sc0[i].site)*0.9, (d_ij + d_jk)*0.8)
+  bond_proxies.append(geom.bond_simple_proxy(
+    i_seqs=(k, i),
+    distance_ideal=d_ki,
+    weight=w))
+  d_jl = uc.distance(sc0[j].site, sc0[l].site)*0.9
+  bond_proxies.append(geom.bond_simple_proxy(
+    i_seqs=(j, l),
+    distance_ideal=d_jl,
+    weight=w))
+  d_lk = min(uc.distance(sc0[l].site, sc0[k].site)*0.8, 0.75*(d_jk + d_jl))
+  bond_proxies.append(geom.bond_simple_proxy(
+    i_seqs=(l, k),
+    distance_ideal=d_lk,
+    weight=w))
+  restraints_manager = restraints.manager(bond_proxies=bond_proxies)
+
+  xs1 = xs0.deep_copy_scatterers()
+  xs1.shake_sites_in_place(rms_difference=0.1)
+
+  def ls_problem():
+    xs = xs1.deep_copy_scatterers()
+    reparametrisation = constraints.reparametrisation(
+      structure=xs,
+      constraints=[],
+      connectivity_table=smtbx.utils.connectivity_table(xs),
+      temperature=20)
+    return least_squares.crystallographic_ls(
+      fo_sq.as_xray_observations(),
+      reparametrisation=reparametrisation,
+      restraints_manager=restraints_manager)
+
+  gradient_threshold, step_threshold = 1e-6, 1e-6
+  eps = 5e-3
+
+  ls = ls_problem()
+  t = wall_clock_time()
+  cycles = normal_eqns_solving.naive_iterations(
+    ls,
+    gradient_threshold=gradient_threshold,
+    step_threshold=step_threshold,
+    track_all=True)
+  if options.verbose:
+    print("%i %s steps in %.6f s" % (cycles.n_iterations, cycles, t.elapsed()))
+  sc = ls.xray_structure.scatterers()
+  for p in bond_proxies:
+    d = uc.distance(*[ sc[i_pair].site for i_pair in p.i_seqs ])
+    assert approx_equal(d, p.distance_ideal, eps)
+
+  ls = ls_problem()
+  t = wall_clock_time()
+  cycles = normal_eqns_solving.levenberg_marquardt_iterations(
+    ls,
+    gradient_threshold=gradient_threshold,
+    step_threshold=step_threshold,
+    tau=1e-3,
+    track_all=True)
+  if options.verbose:
+    print("%i %s steps in %.6f s" % (cycles.n_iterations, cycles, t.elapsed()))
+  sc = ls.xray_structure.scatterers()
+  sc = ls.xray_structure.scatterers()
+  for p in bond_proxies:
+    d = uc.distance(*[ sc[i].site for i in p.i_seqs ])
+    assert approx_equal(d, p.distance_ideal, eps)
+
+def exercise_add_equation():
+  linearised_eqns = restraints.linearised_eqns_of_restraint(10, 10)
+  delta = 0.5
+  grads = flex.double((0,0,1,0,0,2,0,0,-1, 0))
+  w = 10
+  linearised_eqns.add_equation(delta, grads, w)
+  assert linearised_eqns.n_restraints() == 1
+  linearised_eqns.add_equation(delta, grads, w)
+  linearised_eqns.add_equation(delta, grads, w)
+  assert linearised_eqns.n_restraints() == 3
+  from scitbx import sparse
+  assert approx_equal(
+    linearised_eqns.design_matrix.as_dense_matrix(),
+    sparse.matrix(rows=10, columns=10,
+                  elements_by_columns=[ { 0: 0, 1: 0, 2: 0 },
+                                        { 0: 0, 1: 0, 2: 0 },
+                                        { 0: 1, 1: 1, 2: 1 },
+                                        { 0: 0, 1: 0, 2: 0 },
+                                        { 0: 0, 1: 0, 2: 0 },
+                                        { 0: 2, 1: 2, 2: 2 },
+                                        { 0: 0, 1: 0, 2: 0 },
+                                        { 0: 0, 1: 0, 2: 0 },
+                                        { 0: -1, 1: -1, 2: -1 },
+                                        { 0: 0, 1: 0, 2: 0 }, ]).as_dense_matrix())
+
+
+def exercise_ls_restraints(options):
+  exercise_add_equation()
+  exercise_restrained_refinement(options)
+  bond_restraint_test_case().run()
+  angle_restraint_test_case().run()
+  dihedral_restraint_test_case().run()
+
+  isotropic_adp_test_case().run()
+  adp_similarity_test_case().run()
+  rigid_bond_test_case().run()
+  fixed_u_eq_adp_test_case().run()
+  adp_u_eq_similarity_test_case().run()
+  adp_volume_similarity_test_case().run()
+
+def run():
+  libtbx.utils.show_times_at_exit()
+  import sys
+  from libtbx.option_parser import option_parser
+  command_line = (option_parser()
+    .option(None, "--verbose",
+            action="store_true")
+    .option(None, "--scatterers",
+            dest='n_scatterers',
+            type="int",
+            default=5)
+    .option(None, "--resolution",
+            type="float",
+            default=0.2)
+  ).process(args=sys.argv[1:])
+  exercise_ls_restraints(command_line.options)
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/refinement/tests/tst_least_squares.py
+from __future__ import absolute_import, division, print_function
+from libtbx import object_oriented_patterns as oop
+from scitbx.linalg import eigensystem, svd
+from scitbx import matrix
+from scitbx.lstbx import normal_eqns_solving
+from cctbx import sgtbx, crystal, xray, adptbx, uctbx
+import cctbx.sgtbx.lattice_symmetry
+from cctbx import euclidean_model_matching as emma
+from cctbx.array_family import flex
+from cctbx.development import random_structure
+from smtbx.refinement import least_squares
+from smtbx.refinement import constraints
+from smtbx.refinement.restraints import origin_fixing_restraints
+import smtbx.utils
+from libtbx.test_utils import approx_equal
+import libtbx.utils
+import math
+import sys
+import random
+import re
+from six.moves import range
+
+tested_ls_engines = (
+  least_squares.normal_eqns.non_linear_ls_with_separable_scale_factor_BLAS_2,
+)
+try:
+  from fast_linalg import env
+  if env.initialised:
+    tested_ls_engines += (  least_squares.normal_eqns.non_linear_ls_with_separable_scale_factor_BLAS_3,)
+except ImportError:
+  print('Skipping fast_linalg checks')
+# we use a wrapper to make sure non_linear_ls_with_separable_scale_factor
+# is not an argument with a default value, so as to protect ourself from
+# forgetting to specify that argument in the tests, which would result
+# in the wrong feature to be tested, potentially.
+def tested_crystallographic_ls(
+  observations, reparametrisation,
+  non_linear_ls_with_separable_scale_factor,
+  may_parallelise,
+  **kwds):
+  return least_squares.crystallographic_ls(
+    observations, reparametrisation,
+    non_linear_ls_with_separable_scale_factor,
+    may_parallelise,
+    **kwds)
+
+class refinement_test(object):
+
+  ls_cycle_repeats = 1
+
+  def __init__(self, ls_engine, parallelise):
+    self.ls_engine = ls_engine
+    self.parallelise = parallelise
+
+  def run(self):
+    if self.ls_cycle_repeats == 1:
+      self.do_run()
+    else:
+      print("%s in %s" % (self.purpose, self.hall))
+      for n in range(self.ls_cycle_repeats):
+        self.do_run()
+        print('.', end=' ')
+        sys.stdout.flush()
+      print()
+
+
+class site_refinement_test(refinement_test):
+
+  debug = 1
+  purpose = "site refinement"
+
+  def do_run(self):
+    self.exercise_ls_cycles()
+    self.exercise_floating_origin_restraints()
+
+  def __init__(self, ls_engine, parallelise):
+    refinement_test.__init__(self, ls_engine, parallelise)
+    sgi = sgtbx.space_group_info("Hall: %s" % self.hall)
+    cs = sgi.any_compatible_crystal_symmetry(volume=1000)
+    xs = xray.structure(crystal.special_position_settings(cs))
+    for sc in self.scatterers():
+      sc.flags.set_use_u_iso(False).set_use_u_aniso(False)\
+              .set_grad_site(True)
+      xs.add_scatterer(sc)
+    self.reference_xs = xs.as_emma_model()
+    self.xray_structure = xs
+
+    mi = cs.build_miller_set(d_min=0.5, anomalous_flag=False)
+    ma = mi.structure_factors_from_scatterers(xs, algorithm="direct").f_calc()
+    self.fo_sq = ma.norm().customized_copy(
+      sigmas=flex.double(ma.size(), 1.))
+
+  def exercise_floating_origin_restraints(self):
+    n = self.n_independent_params
+    eps_zero_rhs = 1e-6
+    connectivity_table = smtbx.utils.connectivity_table(self.xray_structure)
+    reparametrisation = constraints.reparametrisation(
+      structure=self.xray_structure,
+      constraints=[],
+      connectivity_table=connectivity_table)
+    obs = self.fo_sq.as_xray_observations()
+    ls = tested_crystallographic_ls(
+      obs, reparametrisation,
+      non_linear_ls_with_separable_scale_factor=self.ls_engine,
+      may_parallelise=self.parallelise,
+      weighting_scheme=least_squares.unit_weighting(),
+      origin_fixing_restraints_type=oop.null())
+    ls.build_up()
+    unrestrained_normal_matrix = ls.normal_matrix_packed_u()
+    assert len(unrestrained_normal_matrix) == n*(n+1)//2
+    ev = eigensystem.real_symmetric(
+      unrestrained_normal_matrix.matrix_packed_u_as_symmetric())
+    unrestrained_eigenval = ev.values()
+    unrestrained_eigenvec = ev.vectors()
+
+    ls = tested_crystallographic_ls(
+      obs,
+      reparametrisation,
+      non_linear_ls_with_separable_scale_factor=self.ls_engine,
+      may_parallelise=self.parallelise,
+      weighting_scheme=least_squares.unit_weighting(),
+      origin_fixing_restraints_type=
+      origin_fixing_restraints.homogeneous_weighting)
+    ls.build_up()
+
+    # Let's check that the computed singular directions span the same
+    # space as the expected ones
+    singular_test = flex.double()
+    jac = ls.reparametrisation.jacobian_transpose_matching_grad_fc()
+    m = 0
+    for s in ls.origin_fixing_restraint.singular_directions:
+      assert s.norm() != 0
+      singular_test.extend(jac*s)
+      m += 1
+    for s in self.continuous_origin_shift_basis:
+      singular_test.extend(flex.double(s))
+      m += 1
+    singular_test.reshape(flex.grid(m, n))
+    assert self.rank(singular_test) == len(self.continuous_origin_shift_basis)
+
+    assert ls.opposite_of_gradient()\
+             .all_approx_equal(0, eps_zero_rhs),\
+           list(ls.gradient())
+    restrained_normal_matrix = ls.normal_matrix_packed_u()
+    assert len(restrained_normal_matrix) == n*(n+1)//2
+    ev = eigensystem.real_symmetric(
+      restrained_normal_matrix.matrix_packed_u_as_symmetric())
+    restrained_eigenval = ev.values()
+    restrained_eigenvec = ev.vectors()
+
+    # The eigendecomposition of the normal matrix
+    # for the unrestrained problem is:
+    #    A = sum_{0 <= i < n-p-1} lambda_i v_i^T v_i
+    # where the eigenvalues lambda_i are sorted in decreasing order
+    # and p is the dimension of the continous origin shift space.
+    # In particular A v_i = 0, n-p <= i < n.
+    # In the restrained case, it becomes:
+    #    A' = A + sum_{n-p <= i < n} mu v_i^T v_i
+
+    p = len(self.continuous_origin_shift_basis)
+    assert approx_equal(restrained_eigenval[p:], unrestrained_eigenval[:-p],
+                        eps=1e-12)
+    assert unrestrained_eigenval[-p]/unrestrained_eigenval[-p-1] < 1e-12
+
+    if p > 1:
+      # eigenvectors are stored by rows
+      unrestrained_null_space = unrestrained_eigenvec.matrix_copy_block(
+        i_row=n-p, i_column=0,
+        n_rows=p, n_columns=n)
+      assert self.rank(unrestrained_null_space) == p
+
+      restrained_space = restrained_eigenvec.matrix_copy_block(
+        i_row=0, i_column=0,
+        n_rows=p, n_columns=n)
+      assert self.rank(restrained_space) == p
+
+      singular = flex.double(
+        self.continuous_origin_shift_basis)
+      assert self.rank(singular) == p
+
+      rank_finder = flex.double(n*3*p)
+      rank_finder.resize(flex.grid(3*p, n))
+      rank_finder.matrix_paste_block_in_place(unrestrained_null_space,
+                                              i_row=0, i_column=0)
+      rank_finder.matrix_paste_block_in_place(restrained_space,
+                                              i_row=p, i_column=0)
+      rank_finder.matrix_paste_block_in_place(singular,
+                                              i_row=2*p, i_column=0)
+      assert self.rank(rank_finder) == p
+    else:
+      # this branch handles the case p=1
+      # it's necessary to work around a bug in the svd module
+      # ( nx1 matrices crashes the code )
+      assert approx_equal(
+        restrained_eigenvec[0:n].angle(
+          unrestrained_eigenvec[-n:]) % math.pi, 0)
+      assert approx_equal(
+        unrestrained_eigenvec[-n:].angle(
+          flex.double(self.continuous_origin_shift_basis[0])) % math.pi, 0)
+
+    # Do the floating origin restraints prevent the structure from floating?
+    xs = self.xray_structure.deep_copy_scatterers()
+    ls = tested_crystallographic_ls(
+      obs,
+      reparametrisation,
+      non_linear_ls_with_separable_scale_factor=self.ls_engine,
+      may_parallelise=self.parallelise,
+      weighting_scheme=least_squares.unit_weighting(),
+      origin_fixing_restraints_type=
+      origin_fixing_restraints.atomic_number_weighting
+    )
+    barycentre_0 = xs.sites_frac().mean()
+    while True:
+      xs.shake_sites_in_place(rms_difference=0.15)
+      xs.apply_symmetry_sites()
+      barycentre_1 = xs.sites_frac().mean()
+      delta = matrix.col(barycentre_1) - matrix.col(barycentre_0)
+      moved_far_enough = 0
+      for singular in self.continuous_origin_shift_basis:
+        e = matrix.col(singular[:3])
+        if not approx_equal(delta.dot(e), 0, eps=0.01, out=None):
+          moved_far_enough += 1
+      if moved_far_enough: break
+
+    # one refinement cycle
+    ls.build_up()
+    ls.solve()
+    shifts = ls.step()
+
+    # That's what floating origin restraints are for!
+    # Note that in the presence of special position, that's different
+    # from the barycentre not moving along the continuous shift directions.
+    # TODO: typeset notes about that subtlety.
+    for singular in self.continuous_origin_shift_basis:
+      assert approx_equal(shifts.dot(flex.double(singular)), 0, eps=1e-12)
+
+  def rank(cls, a):
+    """ row rank of a """
+    rank_revealing = svd.real(a.deep_copy(),
+                              accumulate_u=False, accumulate_v=False)
+    return rank_revealing.numerical_rank(rank_revealing.sigma[0]*1e-9)
+  rank = classmethod(rank)
+
+  def exercise_ls_cycles(self):
+    xs = self.xray_structure.deep_copy_scatterers()
+    connectivity_table = smtbx.utils.connectivity_table(xs)
+    emma_ref = xs.as_emma_model()
+    # shaking must happen before the reparametrisation is constructed,
+    # otherwise the original values will prevail
+    xs.shake_sites_in_place(rms_difference=0.1)
+    reparametrisation = constraints.reparametrisation(
+      structure=xs,
+      constraints=[],
+      connectivity_table=connectivity_table)
+    ls = tested_crystallographic_ls(
+      self.fo_sq.as_xray_observations(), reparametrisation,
+      non_linear_ls_with_separable_scale_factor=self.ls_engine,
+      may_parallelise=self.parallelise,
+      weighting_scheme=least_squares.mainstream_shelx_weighting(a=0),
+      origin_fixing_restraints_type=
+      origin_fixing_restraints.atomic_number_weighting)
+
+    cycles = normal_eqns_solving.naive_iterations(
+      ls,
+      gradient_threshold=1e-12,
+      step_threshold=1e-7,
+      track_all=True)
+
+    assert approx_equal(ls.scale_factor(), 1, eps=1e-5), ls.scale_factor()
+    assert approx_equal(ls.objective(), 0), ls.objective()
+
+    match = emma.model_matches(emma_ref, xs.as_emma_model()).refined_matches[0]
+    assert match.rt.r == matrix.identity(3)
+    for pair in match.pairs:
+      assert approx_equal(match.calculate_shortest_dist(pair), 0, eps=1e-4)
+
+
+class adp_refinement_test(refinement_test):
+
+  random_u_cart_scale = 0.2
+  purpose = "ADP refinement"
+
+  class refinement_diverged(RuntimeError):
+    pass
+
+  def __init__(self, ls_engine, parallelise):
+    refinement_test.__init__(self, ls_engine, parallelise)
+    sgi = sgtbx.space_group_info("Hall: %s" % self.hall)
+    cs = sgi.any_compatible_crystal_symmetry(volume=1000)
+    xs = xray.structure(crystal.special_position_settings(cs))
+    for i, sc in enumerate(self.scatterers()):
+      sc.flags.set_use_u_iso(False).set_use_u_aniso(True)\
+              .set_grad_u_aniso(True)
+      xs.add_scatterer(sc)
+      site_symm = xs.site_symmetry_table().get(i)
+      u_cart = adptbx.random_u_cart(u_scale=self.random_u_cart_scale)
+      u_star = adptbx.u_cart_as_u_star(cs.unit_cell(), u_cart)
+      xs.scatterers()[-1].u_star = site_symm.average_u_star(u_star)
+    self.xray_structure = xs
+
+    mi = cs.build_miller_set(d_min=0.5, anomalous_flag=False)
+    ma = mi.structure_factors_from_scatterers(xs, algorithm="direct").f_calc()
+    self.fo_sq = ma.norm().customized_copy(
+      sigmas=flex.double(ma.size(), 1.))
+
+  def do_run(self):
+    self.exercise_ls_cycles()
+
+  def exercise_ls_cycles(self):
+    xs = self.xray_structure.deep_copy_scatterers()
+    xs.shake_adp() # it must happen before the reparamtrisation is constructed
+                   # because the ADP values are read then and only then.
+    connectivity_table = smtbx.utils.connectivity_table(xs)
+    reparametrisation = constraints.reparametrisation(
+      structure=xs,
+      constraints=[],
+      connectivity_table=connectivity_table)
+    ls = tested_crystallographic_ls(
+      self.fo_sq.as_xray_observations(), reparametrisation,
+      non_linear_ls_with_separable_scale_factor=self.ls_engine,
+      may_parallelise=self.parallelise,
+      weighting_scheme=least_squares.mainstream_shelx_weighting(a=0),
+      origin_fixing_restraints_type=oop.null())
+
+    try:
+      cycles = normal_eqns_solving.naive_iterations(
+        ls,
+        gradient_threshold=1e-12,
+        track_all=True)
+
+      assert approx_equal(ls.scale_factor(), 1, eps=1e-4)
+      assert approx_equal(ls.objective(), 0)
+      assert cycles.gradient_norm_history[-1] < cycles.gradient_threshold
+
+      for sc0, sc1 in zip(self.xray_structure.scatterers(), xs.scatterers()):
+        assert approx_equal(sc0.u_star, sc1.u_star)
+    except RuntimeError as err:
+      import re
+      m = re.search(
+        r'^cctbx::adptbx::debye_waller_factor_exp: \s* arg_limit \s+ exceeded'
+        r'.* arg \s* = \s* ([\d.eE+-]+)', str(err), re.X)
+      assert m is not None, eval
+      print("Warning: refinement of ADP's diverged")
+      print('         argument to debye_waller_factor_exp reached %s' % m.group(1))
+      print('Here is the failing structure')
+      xs.show_summary()
+      xs.show_scatterers()
+      raise self.refinement_diverged()
+
+
+class p1_test(object):
+
+  hall = "P 1"
+  n_independent_params = 9
+  continuous_origin_shift_basis = [ (1,0,0)*3,
+                                    (0,1,0)*3,
+                                    (0,0,1)*3 ]
+
+  def scatterers(self):
+    yield xray.scatterer("C1", (0.1, 0.2, 0.3))
+    yield xray.scatterer("C2", (0.4, 0.7, 0.8))
+    yield xray.scatterer("C3", (-0.1, -0.8, 0.6))
+
+
+class p2_test(object):
+
+  hall = "P 2x"
+  n_independent_params = 7
+  continuous_origin_shift_basis = [ (1,0,0, 1, 1,0,0) ]
+
+  def scatterers(self):
+    yield xray.scatterer("C1", (0.1, 0.2, 0.3))
+    yield xray.scatterer("C2", (-0.3, 0, 0)) # on 2-axis
+    yield xray.scatterer("C3", (0.4, 0.1, -0.1)) # near 2-axis
+
+class pm_test(object):
+
+  hall = "P -2x"
+  n_independent_params = 8
+  continuous_origin_shift_basis = [ (0,1,0, 1,0, 0,1,0),
+                                    (0,0,1, 0,1, 0,0,1) ]
+
+  def scatterers(self):
+    yield xray.scatterer("C1", (0.1, 0.2, 0.3)) # near mirror plance
+    yield xray.scatterer("C2", (0, -0.3, 0.4)) # on mirror plane
+    yield xray.scatterer("C3", (0.7, 0.1, -0.1))
+
+class all_special_position_test(object):
+  """ cod_ma_xs/2104451.pickle (generated by cctbx/omz/cod_select_and_pickle.py)
+      It was pointed out by Ralf that it crashes smtbx-refine:
+      it turned out to be a bug in floating origin restraint
+      and this is a regression test for that bug fix.
+  """
+
+  hall = "C 2c -2"
+  n_independent_params = 12
+  continuous_origin_shift_basis = [ (0, 1)*6 ]
+
+  def scatterers(self):
+    yield xray.scatterer('Ba', (0.500000, 0.369879, 0.431121))
+    yield xray.scatterer('Mg', (-0.000000, 0.385261, -0.084062))
+    yield xray.scatterer('F1', (0.000000, 0.291730, 0.783213))
+    yield xray.scatterer('F2', (0.000000, 0.328018, 0.303193))
+    yield xray.scatterer('F3', (0.000000, 0.506766, 0.591744))
+    yield xray.scatterer('F4', (0.500000, 0.414262, 1.002902))
+
+class twin_test(object):
+
+  def __init__(self, ls_engine, parallelise):
+    self.ls_engine = ls_engine
+    self.parallelise = parallelise
+    # Let's start from some X-ray structure
+    self.structure = xs = xray.structure(
+      crystal_symmetry=crystal.symmetry(
+      unit_cell=(7.6338, 7.6338, 9.8699, 90, 90, 120),
+      space_group_symbol='hall:  P 3 -2c'),
+      scatterers=flex.xray_scatterer((
+        xray.scatterer( #0
+      label='LI',
+      site=(0.032717, 0.241544, 0.254924),
+      u=(0.000544, 0.000667, 0.000160,
+         0.000326, 0.000072, -0.000030)),
+        xray.scatterer( #1
+      label='NA',
+      site=(0.033809, 0.553123, 0.484646),
+      u=(0.000554, 0.000731, 0.000174,
+         0.000212, 0.000032, -0.000015)),
+        xray.scatterer( #2
+      label='S1',
+      site=(0.000000, 0.000000, -0.005908),
+      u=(0.000370, 0.000370, 0.000081,
+         0.000185, 0.000000, 0.000000)),
+        xray.scatterer( #3
+      label='S2',
+      site=(0.333333, 0.666667, 0.211587),
+      u=(0.000244, 0.000244, 0.000148,
+         0.000122, 0.000000, 0.000000)),
+        xray.scatterer( #4
+      label='S3',
+      site=(0.666667, 0.333333, 0.250044),
+      u=(0.000349, 0.000349, 0.000094,
+         0.000174, 0.000000, 0.000000)),
+        xray.scatterer( #5
+      label='O1',
+      site=(0.000000, -0.000000, 0.154207),
+      u=(0.000360, 0.000360, 0.000149,
+         0.000180, 0.000000, 0.000000),
+      occupancy=0.999000),
+        xray.scatterer( #6
+      label='O2',
+      site=(0.333333, 0.666667, 0.340665),
+      u=(0.000613, 0.000613, 0.000128,
+         0.000306, 0.000000, 0.000000)),
+        xray.scatterer( #7
+      label='O3',
+      site=(0.666667, 0.333333, 0.112766),
+      u=(0.000724, 0.000724, 0.000118,
+         0.000362, 0.000000, 0.000000)),
+        xray.scatterer( #8
+      label='O4',
+      site=(0.225316, 0.110088, -0.035765),
+      u=(0.000477, 0.000529, 0.000213,
+         0.000230, 0.000067, -0.000013)),
+        xray.scatterer( #9
+      label='O5',
+      site=(0.221269, 0.442916, 0.153185),
+      u=(0.000767, 0.000286, 0.000278,
+         0.000210, 0.000016, -0.000082)),
+        xray.scatterer( #10
+      label='O6',
+      site=(0.487243, 0.169031, 0.321690),
+      u=(0.000566, 0.000582, 0.000354,
+         0.000007, 0.000022, 0.000146))
+      )))
+
+    # We could use miller.array.twin_data below but we want to make
+    # a few extra checks along the way. So we do it by hand...
+
+    # Start by producing indices and Fo^2 for a 1st domain,
+    # with an overall scale factor
+    mi_1 = self.structure.build_miller_set(d_min=0.5, anomalous_flag=False
+                                           ).map_to_asu()
+    fo_sq_1 = mi_1.structure_factors_from_scatterers(
+        self.structure, algorithm='direct').f_calc().norm()
+
+    # Then introduce a twin law ...
+    self.twin_law = sgtbx.rt_mx('y,x,-z')
+    # For the record, we have a twinning by merohedry:
+    assert self.twin_law not in xs.space_group().build_derived_laue_group()
+    assert self.twin_law in sgtbx.lattice_symmetry.group(xs.unit_cell())
+    # ... and compute the indices and Fo^2 for the 2nd domain
+    fo_sq_2 = fo_sq_1.change_basis(sgtbx.change_of_basis_op(self.twin_law)
+                                   ).map_to_asu()
+
+    # Then add the two domains together with a twin fraction
+    self.twin_fraction = 0.3 + 0.2*(1 + flex.random_double())
+    matches = fo_sq_1.match_indices(fo_sq_2)
+    # sanity check for a merohedral twin
+    assert matches.singles(0).size() == 0
+    assert matches.singles(1).size() == 0
+    pairs = matches.pairs()
+    fo_sq_1 = fo_sq_1.select(pairs.column(1))
+    fo_sq_2 = fo_sq_2.select(pairs.column(0))
+    self.fo_sq = fo_sq_1.customized_copy(
+      data=(fo_sq_1.data()*(1 - self.twin_fraction) +
+            fo_sq_2.data()*self.twin_fraction),
+      sigmas=flex.double(fo_sq_1.size(), 1))
+
+  def run(self):
+    self.fo_sq = self.fo_sq.sort(by_value="packed_indices")
+    self.exercise(fixed_twin_fraction=True)
+    self.exercise(fixed_twin_fraction=False)
+    self.fo_sq = self.fo_sq.sort(by_value="resolution")
+    self.exercise(fixed_twin_fraction=True)
+    self.exercise(fixed_twin_fraction=False)
+
+  def exercise(self, fixed_twin_fraction):
+    # Create a shaken structure xs ready for refinement
+    xs0 = self.structure
+    emma_ref = xs0.as_emma_model()
+    xs = xs0.deep_copy_scatterers()
+    xs.shake_sites_in_place(rms_difference=0.15)
+    xs.shake_adp()
+    for sc in xs.scatterers():
+      sc.flags.set_use_u_iso(False).set_use_u_aniso(True)
+      sc.flags.set_grad_site(True).set_grad_u_aniso(True)
+
+    # Setup L.S. problem
+    connectivity_table = smtbx.utils.connectivity_table(xs)
+    shaken_twin_fraction = (
+      self.twin_fraction if fixed_twin_fraction else
+      self.twin_fraction + 0.1*flex.random_double())
+    # 2nd domain in __init__
+    twin_components = (xray.twin_component(
+        twin_law=self.twin_law.r(), value=shaken_twin_fraction,
+        grad=not fixed_twin_fraction),)
+    reparametrisation = constraints.reparametrisation(
+      structure=xs,
+      constraints=[],
+      connectivity_table=connectivity_table,
+      twin_fractions=twin_components)
+    obs = self.fo_sq.as_xray_observations(twin_components=twin_components)
+    ls = tested_crystallographic_ls(
+      obs, reparametrisation,
+      non_linear_ls_with_separable_scale_factor=self.ls_engine,
+      may_parallelise=self.parallelise,
+      weighting_scheme=least_squares.unit_weighting(),
+      origin_fixing_restraints_type=
+      origin_fixing_restraints.atomic_number_weighting)
+
+    # Refine till we get back the original structure (so we hope)
+    cycles = normal_eqns_solving.levenberg_marquardt_iterations(
+      ls,
+      gradient_threshold=1e-12,
+      step_threshold=1e-6,
+      track_all=True)
+
+    # Now let's start to check it all worked
+    assert ls.n_parameters == 63 if fixed_twin_fraction else 64
+
+    match = emma.model_matches(emma_ref, xs.as_emma_model()).refined_matches[0]
+    assert match.rt.r == matrix.identity(3)
+    for pair in match.pairs:
+      assert approx_equal(match.calculate_shortest_dist(pair), 0, eps=1e-4), pair
+
+    if fixed_twin_fraction:
+      assert ls.twin_fractions[0].value == self.twin_fraction
+    else:
+      assert approx_equal(ls.twin_fractions[0].value, self.twin_fraction,
+                          eps=1e-2)
+
+    assert approx_equal(ls.scale_factor(), 1, eps=1e-5)
+    assert approx_equal(ls.objective(), 0)
+
+
+class site_refinement_in_p1_test(p1_test, site_refinement_test): pass
+
+class site_refinement_in_p2_test(p2_test, site_refinement_test): pass
+
+class site_refinement_in_pm_test(pm_test, site_refinement_test): pass
+
+class site_refinement_with_all_on_special_positions(all_special_position_test,
+                                                    site_refinement_test):
+  pass
+
+
+class adp_refinement_in_p1_test(p1_test, adp_refinement_test): pass
+
+class adp_refinement_in_p2_test(p2_test, adp_refinement_test): pass
+
+class adp_refinement_in_pm_test(pm_test, adp_refinement_test): pass
+
+
+def exercise_normal_equations(ls_engine, parallelise):
+  site_refinement_with_all_on_special_positions(ls_engine, parallelise).run()
+
+  for klass in (adp_refinement_in_p1_test,
+                adp_refinement_in_pm_test,
+                adp_refinement_in_p2_test):
+    for i in range(4):
+      try:
+        klass(ls_engine, parallelise).run()
+        break
+      except adp_refinement_test.refinement_diverged:
+        print("Warning: ADP refinement diverged, retrying...")
+    else:
+      print ("Error: ADP refinement diverged four times in a row (%s)"
+             % klass.__name__)
+
+  site_refinement_in_p1_test(ls_engine, parallelise).run()
+  site_refinement_in_pm_test(ls_engine, parallelise).run()
+  site_refinement_in_p2_test(ls_engine, parallelise).run()
+
+class special_positions_test(object):
+
+  delta_site   = 0.1 # % (of unit cell c for constrained atoms)
+  delta_u_star = 0.1 # %
+
+  def __init__(self, ls_engine, parallelise, n_runs, **kwds):
+    libtbx.adopt_optional_init_args(self, kwds)
+    self.ls_engine = ls_engine
+    self.parallelise = parallelise
+    self.n_runs = n_runs
+    self.crystal_symmetry = crystal.symmetry(
+      unit_cell=uctbx.unit_cell((5.1534, 5.1534, 8.6522, 90, 90, 120)),
+      space_group_symbol='Hall: P 6c')
+    self.structure = xray.structure(
+      self.crystal_symmetry.special_position_settings(),
+      flex.xray_scatterer((
+        xray.scatterer('K1',
+                        site=(0, 0, -0.00195),
+                        u=self.u_cif_as_u_star((0.02427, 0.02427, 0.02379,
+                                                0.01214, 0.00000, 0.00000))),
+        xray.scatterer('S1',
+                       site=(1/3, 2/3, 0.204215),
+                       u=self.u_cif_as_u_star((0.01423, 0.01423, 0.01496,
+                                               0.00712, 0.00000, 0.00000 ))),
+        xray.scatterer('Li1',
+                       site=(1/3, 2/3, 0.815681),
+                       u=self.u_cif_as_u_star((0.02132, 0.02132, 0.02256,
+                                               0.01066, 0.00000, 0.00000 ))),
+        xray.scatterer('O1',
+                       site=(1/3, 2/3, 0.035931),
+                       u=self.u_cif_as_u_star((0.06532, 0.06532, 0.01669,
+                                               0.03266, 0.00000, 0.00000 ))),
+        xray.scatterer('O2',
+                       site=(0.343810, 0.941658, 0.258405),
+                       u=self.u_cif_as_u_star((0.02639,  0.02079, 0.05284,
+                                               0.01194, -0.00053,-0.01180 )))
+      )))
+    mi = self.crystal_symmetry.build_miller_set(anomalous_flag=False,
+                                                d_min=0.5)
+    fo_sq = mi.structure_factors_from_scatterers(
+      self.structure, algorithm="direct").f_calc().norm()
+    self.fo_sq = fo_sq.customized_copy(sigmas=flex.double(fo_sq.size(), 1))
+
+  def u_cif_as_u_star(self, u_cif):
+    return adptbx.u_cif_as_u_star(self.crystal_symmetry.unit_cell(), u_cif)
+
+  def shake_point_group_3(self, sc):
+    _, _, c, _, _, _ = self.crystal_symmetry.unit_cell().parameters()
+
+    x, y, z = sc.site
+    z += random.uniform(-self.delta_site, self.delta_site)/c
+    sc.site = (x, y, z)
+
+    u11, _, u33, _, _, _ = sc.u_star
+    u11 *= 1 + random.uniform(-self.delta_u_star, self.delta_u_star)
+    u33 *= 1 + random.uniform(-self.delta_u_star, self.delta_u_star)
+    sc.u_star = (u11, u11, u33, u11/2, 0, 0)
+
+  def run(self):
+    if self.n_runs > 1:
+      print('small inorganic refinement with many special positions')
+      for i in range(self.n_runs):
+        print('.', end=' ')
+        self.exercise()
+      print()
+    else:
+      self.exercise()
+
+  def exercise(self):
+    xs0 = self.structure
+    xs = xs0.deep_copy_scatterers()
+    k1, s1, li1, o1, o2 = xs.scatterers()
+    self.shake_point_group_3(k1)
+    self.shake_point_group_3(s1)
+    self.shake_point_group_3(li1)
+    self.shake_point_group_3(o1)
+    o2.site = tuple(
+      [ x*(1 + random.uniform(-self.delta_site, self.delta_site))
+        for x in o2.site])
+    o2.u_star = tuple(
+      [ u*(1 + random.uniform(-self.delta_u_star, self.delta_u_star))
+        for u in o2.u_star])
+
+    for sc in xs.scatterers():
+      sc.flags.set_use_u_iso(False).set_use_u_aniso(True)
+      sc.flags.set_grad_site(True).set_grad_u_aniso(True)
+      connectivity_table = smtbx.utils.connectivity_table(xs)
+    reparametrisation = constraints.reparametrisation(
+      structure=xs,
+      constraints=[],
+      connectivity_table=connectivity_table)
+    ls = tested_crystallographic_ls(
+      self.fo_sq.as_xray_observations(), reparametrisation,
+      non_linear_ls_with_separable_scale_factor=self.ls_engine,
+      may_parallelise=self.parallelise,
+      weighting_scheme=least_squares.unit_weighting(),
+      origin_fixing_restraints_type=
+      origin_fixing_restraints.atomic_number_weighting)
+
+    cycles = normal_eqns_solving.levenberg_marquardt_iterations(
+      ls,
+      gradient_threshold=1e-12,
+      step_threshold=1e-7,
+      track_all=True)
+
+    ## Test whether refinement brought back the shaked structure to its
+    ## original state
+    match = emma.model_matches(xs0.as_emma_model(),
+                               xs.as_emma_model()).refined_matches[0]
+    assert match.rt.r == matrix.identity(3)
+    assert not match.singles1 and not match.singles2
+    assert match.rms < 1e-6
+
+    delta_u_carts= (   xs.scatterers().extract_u_cart(xs.unit_cell())
+                    - xs0.scatterers().extract_u_cart(xs.unit_cell())).norms()
+    assert flex.abs(delta_u_carts) < 1e-6
+
+    assert approx_equal(ls.scale_factor(), 1, eps=1e-4)
+
+    ## Test covariance matrix
+    jac_tr = reparametrisation.jacobian_transpose_matching_grad_fc()
+    cov = ls.covariance_matrix(
+      jacobian_transpose=jac_tr, normalised_by_goof=False)\
+        .matrix_packed_u_as_symmetric()
+    m, n = cov.accessor().focus()
+    # x,y for point group 3 sites are fixed: no variance or correlation
+    for i in (0, 9, 18, 27,):
+      assert cov.matrix_copy_block(i, 0, 2, n) == 0
+
+    # u_star coefficients u13 and u23 for point group 3 sites are fixed
+    # to 0: again no variance or correlation with any other param
+    for i in (7, 16, 25, 34,):
+      assert cov.matrix_copy_block(i, 0, 2, n).as_1d()\
+             .all_approx_equal(0., 1e-20)
+
+    # u_star coefficients u11, u22 and u12 for point group 3 sites
+    # are totally correlated, with variances in ratios 1:1:1/2
+    for i in (3, 12, 21, 30,):
+      assert cov[i, i] != 0
+      assert approx_equal(cov[i, i], cov[i+1, i+1], eps=1e-15)
+      assert approx_equal(cov[i, i+1]/cov[i, i], 1, eps=1e-12)
+      assert approx_equal(cov[i, i+3]/cov[i, i], 0.5, eps=1e-12)
+
+def exercise_floating_origin_dynamic_weighting(ls_engine,
+                                               parallelise,
+                                               verbose=False):
+  from cctbx import covariance
+  import scitbx.math
+
+  worst_condition_number_acceptable = 10
+
+  # light elements only
+  xs0 = random_structure.xray_structure(elements=['C', 'C', 'C', 'O', 'N'],
+                                        use_u_aniso=True)
+  msg = "light elements in %s ..." % (
+    xs0.space_group_info().type().hall_symbol())
+  if verbose:
+    print(msg, end=' ')
+  fo_sq = xs0.structure_factors(d_min=0.8).f_calc().norm()
+  fo_sq = fo_sq.customized_copy(sigmas=flex.double(fo_sq.size(), 1.))
+  xs = xs0.deep_copy_scatterers()
+  xs.shake_adp()
+  xs.shake_sites_in_place(rms_difference=0.1)
+  for sc in xs.scatterers():
+    sc.flags.set_grad_site(True).set_grad_u_aniso(True)
+  ls = tested_crystallographic_ls(
+    fo_sq.as_xray_observations(),
+    constraints.reparametrisation(
+      structure=xs,
+      constraints=[],
+      connectivity_table=smtbx.utils.connectivity_table(xs)),
+    non_linear_ls_with_separable_scale_factor=ls_engine,
+    may_parallelise=parallelise,
+    weighting_scheme=least_squares.unit_weighting(),
+    origin_fixing_restraints_type=
+    origin_fixing_restraints.atomic_number_weighting)
+  ls.build_up()
+  lambdas = eigensystem.real_symmetric(
+    ls.normal_matrix_packed_u().matrix_packed_u_as_symmetric()).values()
+  # assert the restrained L.S. problem is not too ill-conditionned
+  cond = math.log10(lambdas[0]/lambdas[-1])
+  if verbose:
+    print("normal matrix condition: %.1f" % cond)
+  assert cond < worst_condition_number_acceptable, msg
+
+  # one heavy element
+  xs0 = random_structure.xray_structure(
+    space_group_info=sgtbx.space_group_info('hall: P 2yb'),
+    elements=['Zn', 'C', 'C', 'C', 'O', 'N'],
+    use_u_aniso=True)
+  msg = "one heavy element + light elements (synthetic data) in %s ..." % (
+    xs0.space_group_info().type().hall_symbol())
+  if verbose:
+    print(msg, end=' ')
+  fo_sq = xs0.structure_factors(d_min=0.8).f_calc().norm()
+  fo_sq = fo_sq.customized_copy(sigmas=flex.double(fo_sq.size(), 1.))
+  xs = xs0.deep_copy_scatterers()
+  xs.shake_adp()
+  xs.shake_sites_in_place(rms_difference=0.1)
+  for sc in xs.scatterers():
+    sc.flags.set_grad_site(True).set_grad_u_aniso(True)
+  ls = tested_crystallographic_ls(
+    fo_sq.as_xray_observations(),
+    constraints.reparametrisation(
+      structure=xs,
+      constraints=[],
+      connectivity_table=smtbx.utils.connectivity_table(xs)),
+    non_linear_ls_with_separable_scale_factor=ls_engine,
+    may_parallelise=parallelise,
+    weighting_scheme=least_squares.mainstream_shelx_weighting(),
+    origin_fixing_restraints_type=
+    origin_fixing_restraints.atomic_number_weighting)
+  ls.build_up()
+  lambdas = eigensystem.real_symmetric(
+    ls.normal_matrix_packed_u().matrix_packed_u_as_symmetric()).values()
+  # assert the restrained L.S. problem is not too ill-conditionned
+  cond = math.log10(lambdas[0]/lambdas[-1])
+  if verbose:
+    print("normal matrix condition: %.1f" % cond)
+  assert cond < worst_condition_number_acceptable, msg
+
+  # are esd's for x,y,z coordinates of the same order of magnitude?
+  var_cart = covariance.orthogonalize_covariance_matrix(
+    ls.covariance_matrix(),
+    xs.unit_cell(),
+    xs.parameter_map())
+  var_site_cart = covariance.extract_covariance_matrix_for_sites(
+      flex.size_t_range(len(xs.scatterers())),
+      var_cart,
+      xs.parameter_map())
+  site_esds = var_site_cart.matrix_packed_u_diagonal()
+  indicators = flex.double()
+  for i in range(0, len(site_esds), 3):
+    stats = scitbx.math.basic_statistics(site_esds[i:i+3])
+    indicators.append(stats.bias_corrected_standard_deviation/stats.mean)
+  assert indicators.all_lt(2)
+
+  # especially troublesome structure with one heavy element
+  # (contributed by Jonathan Coome)
+  xs0 = xray.structure(
+    crystal_symmetry=crystal.symmetry(
+      unit_cell=(8.4519, 8.4632, 18.7887, 90, 96.921, 90),
+      space_group_symbol="hall: P 2yb"),
+    scatterers=flex.xray_scatterer([
+      xray.scatterer( #0
+                      label="ZN1",
+                      site=(-0.736683, -0.313978, -0.246902),
+                      u=(0.000302, 0.000323, 0.000054,
+                         0.000011, 0.000015, -0.000004)),
+      xray.scatterer( #1
+                      label="N3B",
+                      site=(-0.721014, -0.313583, -0.134277),
+                      u=(0.000268, 0.000237, 0.000055,
+                         -0.000027, 0.000005, 0.000006)),
+      xray.scatterer( #2
+                      label="N3A",
+                      site=(-0.733619, -0.290423, -0.357921),
+                      u=(0.000229, 0.000313, 0.000053,
+                         0.000022, 0.000018, -0.000018)),
+      xray.scatterer( #3
+                      label="C9B",
+                      site=(-1.101537, -0.120157, -0.138063),
+                      u=(0.000315, 0.000345, 0.000103,
+                         0.000050, 0.000055, -0.000017)),
+    xray.scatterer( #4
+                    label="N5B",
+                    site=(-0.962032, -0.220345, -0.222045),
+                    u=(0.000274, 0.000392, 0.000060,
+                       -0.000011, -0.000001, -0.000002)),
+    xray.scatterer( #5
+                    label="N1B",
+                    site=(-0.498153, -0.402742, -0.208698),
+                    u=(0.000252, 0.000306, 0.000063,
+                       0.000000, 0.000007, 0.000018)),
+    xray.scatterer( #6
+                    label="C3B",
+                    site=(-0.322492, -0.472610, -0.114594),
+                    u=(0.000302, 0.000331, 0.000085,
+                       0.000016, -0.000013, 0.000037)),
+    xray.scatterer( #7
+                    label="C4B",
+                    site=(-0.591851, -0.368163, -0.094677),
+                    u=(0.000262, 0.000255, 0.000073,
+                       -0.000034, 0.000027, -0.000004)),
+    xray.scatterer( #8
+                    label="N4B",
+                    site=(-0.969383, -0.204624, -0.150014),
+                    u=(0.000279, 0.000259, 0.000070,
+                       -0.000009, 0.000039, 0.000000)),
+    xray.scatterer( #9
+                    label="N2B",
+                    site=(-0.470538, -0.414572, -0.135526),
+                    u=(0.000277, 0.000282, 0.000065,
+                       0.000003, 0.000021, -0.000006)),
+    xray.scatterer( #10
+                    label="C8A",
+                    site=(-0.679889, -0.158646, -0.385629),
+                    u=(0.000209, 0.000290, 0.000078,
+                       0.000060, 0.000006, 0.000016)),
+    xray.scatterer( #11
+                    label="N5A",
+                    site=(-0.649210, -0.075518, -0.263412),
+                    u=(0.000307, 0.000335, 0.000057,
+                       -0.000002, 0.000016, -0.000012)),
+    xray.scatterer( #12
+                    label="C6B",
+                    site=(-0.708620, -0.325965, 0.011657),
+                    u=(0.000503, 0.000318, 0.000053,
+                       -0.000058, 0.000032, -0.000019)),
+    xray.scatterer( #13
+                    label="C10B",
+                    site=(-1.179332, -0.083184, -0.202815),
+                    u=(0.000280, 0.000424, 0.000136,
+                       0.000094, 0.000006, 0.000013)),
+    xray.scatterer( #14
+                    label="N1A",
+                    site=(-0.838363, -0.532191, -0.293213),
+                    u=(0.000312, 0.000323, 0.000060,
+                       0.000018, 0.000011, -0.000008)),
+    xray.scatterer( #15
+                    label="C3A",
+                    site=(-0.915414, -0.671031, -0.393826),
+                    u=(0.000319, 0.000384, 0.000078,
+                       -0.000052, -0.000001, -0.000020)),
+    xray.scatterer( #16
+                    label="C1A",
+                    site=(-0.907466, -0.665419, -0.276011),
+                    u=(0.000371, 0.000315, 0.000079,
+                       0.000006, 0.000036, 0.000033)),
+    xray.scatterer( #17
+                    label="C1B",
+                    site=(-0.365085, -0.452753, -0.231927),
+                    u=(0.000321, 0.000253, 0.000087,
+                       -0.000024, 0.000047, -0.000034)),
+    xray.scatterer( #18
+                    label="C11A",
+                    site=(-0.598622, 0.053343, -0.227354),
+                    u=(0.000265, 0.000409, 0.000084,
+                       0.000088, -0.000018, -0.000030)),
+    xray.scatterer( #19
+                    label="C2A",
+                    site=(-0.958694, -0.755645, -0.337016),
+                    u=(0.000394, 0.000350, 0.000106,
+                       -0.000057, 0.000027, -0.000005)),
+    xray.scatterer( #20
+                    label="C4A",
+                    site=(-0.784860, -0.407601, -0.402050),
+                    u=(0.000238, 0.000296, 0.000064,
+                       0.000002, 0.000011, -0.000016)),
+    xray.scatterer( #21
+                    label="C5A",
+                    site=(-0.784185, -0.399716, -0.475491),
+                    u=(0.000310, 0.000364, 0.000062,
+                       0.000044, -0.000011, -0.000017)),
+    xray.scatterer( #22
+                    label="N4A",
+                    site=(-0.630284, -0.043981, -0.333143),
+                    u=(0.000290, 0.000275, 0.000074,
+                       0.000021, 0.000027, 0.000013)),
+    xray.scatterer( #23
+                    label="C10A",
+                    site=(-0.545465, 0.166922, -0.272829),
+                    u=(0.000369, 0.000253, 0.000117,
+                       0.000015, -0.000002, -0.000008)),
+    xray.scatterer( #24
+                    label="C9A",
+                    site=(-0.567548, 0.102272, -0.339923),
+                    u=(0.000346, 0.000335, 0.000103,
+                       -0.000016, 0.000037, 0.000023)),
+    xray.scatterer( #25
+                    label="C11B",
+                    site=(-1.089943, -0.146930, -0.253779),
+                    u=(0.000262, 0.000422, 0.000102,
+                       -0.000018, -0.000002, 0.000029)),
+    xray.scatterer( #26
+                    label="N2A",
+                    site=(-0.843385, -0.537780, -0.366515),
+                    u=(0.000273, 0.000309, 0.000055,
+                       -0.000012, -0.000005, -0.000018)),
+    xray.scatterer( #27
+                    label="C7A",
+                    site=(-0.674021, -0.136086, -0.457790),
+                    u=(0.000362, 0.000378, 0.000074,
+                       0.000043, 0.000034, 0.000016)),
+    xray.scatterer( #28
+                    label="C8B",
+                    site=(-0.843625, -0.264182, -0.102023),
+                    u=(0.000264, 0.000275, 0.000072,
+                       -0.000025, 0.000019, -0.000005)),
+    xray.scatterer( #29
+                    label="C6A",
+                    site=(-0.726731, -0.261702, -0.502366),
+                    u=(0.000339, 0.000472, 0.000064,
+                       0.000062, -0.000003, 0.000028)),
+    xray.scatterer( #30
+                    label="C5B",
+                    site=(-0.577197, -0.376753, -0.020800),
+                    u=(0.000349, 0.000353, 0.000066,
+                       -0.000082, -0.000022, 0.000014)),
+    xray.scatterer( #31
+                    label="C2B",
+                    site=(-0.252088, -0.497338, -0.175057),
+                    u=(0.000251, 0.000342, 0.000119,
+                       0.000020, 0.000034, -0.000018)),
+    xray.scatterer( #32
+                    label="C7B",
+                    site=(-0.843956, -0.268811, -0.028080),
+                    u=(0.000344, 0.000377, 0.000078,
+                       -0.000029, 0.000059, -0.000007)),
+    xray.scatterer( #33
+                    label="F4B",
+                    site=(-0.680814, -0.696808, -0.115056),
+                    u=(0.000670, 0.000408, 0.000109,
+                       -0.000099, 0.000139, -0.000031)),
+    xray.scatterer( #34
+                    label="F1B",
+                    site=(-0.780326, -0.921249, -0.073962),
+                    u=(0.000687, 0.000357, 0.000128,
+                       -0.000152, -0.000011, 0.000021)),
+    xray.scatterer( #35
+                    label="B1B",
+                    site=(-0.795220, -0.758128, -0.075955),
+                    u=(0.000413, 0.000418, 0.000075,
+                       0.000054, 0.000045, 0.000023)),
+    xray.scatterer( #36
+                    label="F2B",
+                    site=(-0.945140, -0.714626, -0.105820),
+                    u=(0.000584, 0.001371, 0.000108,
+                       0.000420, 0.000067, 0.000134)),
+    xray.scatterer( #37
+                    label="F3B",
+                    site=(-0.768914, -0.701660, -0.005161),
+                    u=(0.000678, 0.000544, 0.000079,
+                       -0.000000, 0.000090, -0.000021)),
+    xray.scatterer( #38
+                    label="F1A",
+                    site=(-0.109283, -0.252334, -0.429288),
+                    u=(0.000427, 0.001704, 0.000125,
+                       0.000407, 0.000041, 0.000035)),
+    xray.scatterer( #39
+                    label="F4A",
+                    site=(-0.341552, -0.262864, -0.502023),
+                    u=(0.000640, 0.000557, 0.000081,
+                       -0.000074, 0.000042, -0.000052)),
+    xray.scatterer( #40
+                    label="F3A",
+                    site=(-0.324533, -0.142292, -0.393215),
+                    u=(0.000471, 0.001203, 0.000134,
+                       0.000333, -0.000057, -0.000220)),
+    xray.scatterer( #41
+                    label="F2A",
+                    site=(-0.312838, -0.405405, -0.400231),
+                    u=(0.002822, 0.000831, 0.000092,
+                       -0.000648, 0.000115, 0.000027)),
+    xray.scatterer( #42
+                    label="B1A",
+                    site=(-0.271589, -0.268874, -0.430724),
+                    u=(0.000643, 0.000443, 0.000079,
+                       0.000040, 0.000052, -0.000034)),
+    xray.scatterer( #43
+                    label="H5B",
+                    site=(-0.475808, -0.413802, 0.004402),
+                    u=0.005270),
+    xray.scatterer( #44
+                    label="H6B",
+                    site=(-0.699519, -0.326233, 0.062781),
+                    u=0.019940),
+    xray.scatterer( #45
+                    label="H3B",
+                    site=(-0.283410, -0.484757, -0.063922),
+                    u=0.029990),
+    xray.scatterer( #46
+                    label="H1B",
+                    site=(-0.357103, -0.451819, -0.284911),
+                    u=0.031070),
+    xray.scatterer( #47
+                    label="H10A",
+                    site=(-0.495517, 0.268296, -0.256187),
+                    u=0.027610),
+    xray.scatterer( #48
+                    label="H2B",
+                    site=(-0.147129, -0.535141, -0.174699),
+                    u=0.017930),
+    xray.scatterer( #49
+                    label="H7A",
+                    site=(-0.643658, -0.031387, -0.475357),
+                    u=0.020200),
+    xray.scatterer( #50
+                    label="H1A",
+                    site=(-0.912757, -0.691043, -0.227554),
+                    u=0.033320),
+    xray.scatterer( #51
+                    label="H7B",
+                    site=(-0.933670, -0.241189, -0.010263),
+                    u=0.021310),
+    xray.scatterer( #52
+                    label="H11B",
+                    site=(-1.107736, -0.155470, -0.311996),
+                    u=0.041500),
+    xray.scatterer( #53
+                    label="H9A",
+                    site=(-0.539908, 0.139753, -0.382281),
+                    u=0.007130),
+    xray.scatterer( #54
+                    label="H10B",
+                    site=(-1.265944, -0.029610, -0.212398),
+                    u=0.030910),
+    xray.scatterer( #55
+                    label="H3A",
+                    site=(-0.934728, -0.691149, -0.450551),
+                    u=0.038950),
+    xray.scatterer( #56
+                    label="H5A",
+                    site=(-0.833654, -0.487479, -0.508239),
+                    u=0.031150),
+    xray.scatterer( #57
+                    label="H6A",
+                    site=(-0.742871, -0.242269, -0.558157),
+                    u=0.050490),
+    xray.scatterer( #58
+                    label="H9B",
+                    site=(-1.120150, -0.093752, -0.090706),
+                    u=0.039310),
+    xray.scatterer( #59
+                    label="H11A",
+                    site=(-0.593074, 0.054973, -0.180370),
+                    u=0.055810),
+    xray.scatterer( #60
+                    label="H2A",
+                    site=(-0.999576, -0.842158, -0.340837),
+                    u=0.057030)
+    ]))
+  fo_sq = xs0.structure_factors(d_min=0.8).f_calc().norm()
+  fo_sq = fo_sq.customized_copy(sigmas=flex.double(fo_sq.size(), 1.))
+  for hydrogen_flag in (True, False):
+    xs = xs0.deep_copy_scatterers()
+    if not hydrogen_flag:
+      xs.select_inplace(~xs.element_selection('H'))
+    xs.shake_adp()
+    xs.shake_sites_in_place(rms_difference=0.1)
+    for sc in xs.scatterers():
+      sc.flags.set_grad_site(True).set_grad_u_aniso(False)
+    ls = tested_crystallographic_ls(
+      fo_sq.as_xray_observations(),
+      constraints.reparametrisation(
+        structure=xs,
+        constraints=[],
+        connectivity_table=smtbx.utils.connectivity_table(xs)),
+      non_linear_ls_with_separable_scale_factor=ls_engine,
+      may_parallelise=parallelise,
+      weighting_scheme=least_squares.unit_weighting(),
+      origin_fixing_restraints_type=
+      origin_fixing_restraints.atomic_number_weighting)
+
+    ls.build_up()
+    lambdas = eigensystem.real_symmetric(
+      ls.normal_matrix_packed_u().matrix_packed_u_as_symmetric()).values()
+    # assert the restrained L.S. problem is not too ill-conditionned
+    cond = math.log10(lambdas[0]/lambdas[-1])
+    msg = ("one heavy element + light elements (real data) %s Hydrogens: %.1f"
+           % (['without', 'with'][hydrogen_flag], cond))
+    if verbose: print(msg)
+    assert cond < worst_condition_number_acceptable, msg
+
+
+    # are esd's for x,y,z coordinates of the same order of magnitude?
+    var_cart = covariance.orthogonalize_covariance_matrix(
+      ls.covariance_matrix(),
+      xs.unit_cell(),
+      xs.parameter_map())
+    var_site_cart = covariance.extract_covariance_matrix_for_sites(
+        flex.size_t_range(len(xs.scatterers())),
+        var_cart,
+        xs.parameter_map())
+    site_esds = var_site_cart.matrix_packed_u_diagonal()
+    indicators = flex.double()
+    for i in range(0, len(site_esds), 3):
+      stats = scitbx.math.basic_statistics(site_esds[i:i+3])
+      indicators.append(stats.bias_corrected_standard_deviation/stats.mean)
+    assert indicators.all_lt(1)
+
+
+def run():
+  libtbx.utils.show_times_at_exit()
+  import sys
+  from libtbx.option_parser import option_parser
+  command_line = (option_parser()
+    .option(None, "--start_with_parallel",
+            action="store_true",
+            default=False)
+    .option(None, "--fix_random_seeds",
+            action="store_true",
+            default=False)
+    .option(None, "--runs",
+            type='int',
+            default=1)
+    .option(None, "--verbose",
+            action="store_true",
+            default=False)
+    .option(None, "--skip-twin-test",
+            dest='skip_twin_test',
+            action="store_true",
+            default=False)
+  ).process(args=sys.argv[1:])
+  opts = command_line.options
+  if opts.fix_random_seeds:
+    flex.set_random_seed(1)
+    random.seed(2)
+  n_runs = opts.runs
+  if n_runs > 1: refinement_test.ls_cycle_repeats = n_runs
+
+  for parallelise in ((True, False) if opts.start_with_parallel else
+                      (False, True)):
+    print (("Parallel" if parallelise else "Serial") +
+           " computation of all Fc(h) and their derivatives")
+    for ls_engine in tested_ls_engines:
+      m = re.search(r'BLAS_(\d)', ls_engine.__name__)
+      print("\tNormal matrix accumulation with BLAS level %s" %(m.group(1)))
+      exercise_normal_equations(ls_engine, parallelise)
+      exercise_floating_origin_dynamic_weighting(ls_engine, parallelise,
+                                                 opts.verbose)
+      special_positions_test(ls_engine, parallelise, n_runs).run()
+      if not opts.skip_twin_test:
+        twin_test(ls_engine, parallelise).run()
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/refinement/tests/tst_weighting_schemes.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from libtbx.test_utils import show_diff
+import libtbx.utils
+from libtbx.test_utils import Exception_expected
+import scitbx.random
+from smtbx.refinement import least_squares
+import smtbx.development
+
+import random
+import math
+from six.moves import range
+
+def exercise_optimise_shelxl_weights():
+  def calc_goof(fo2, fc, w, k, n_params):
+    fc2 = fc.as_intensity_array()
+    w = w(fo2.data(), fo2.sigmas(), fc2.data(), k)
+    return math.sqrt(flex.sum(
+      w * flex.pow2(fo2.data() - k*fc2.data()))/(fo2.size() - n_params))
+  xs = smtbx.development.sucrose()
+  k = 0.05 + 10 * flex.random_double()
+  fc = xs.structure_factors(anomalous_flag=False, d_min=0.7).f_calc()
+  fo = fc.as_amplitude_array()
+  fo = fo.customized_copy(data=fo.data()*math.sqrt(k))
+  fo = fo.customized_copy(sigmas=0.03*fo.data())
+  sigmas = fo.sigmas()
+  for i in range(fo.size()):
+    fo.data()[i] += 2 * scitbx.random.variate(
+      scitbx.random.normal_distribution(sigma=sigmas[i]))() \
+      + 0.5*random.random()
+  fo2 = fo.as_intensity_array()
+  fc2 = fc.as_intensity_array()
+  w = least_squares.mainstream_shelx_weighting(a=0.1)
+  s = calc_goof(fo2, fc, w, k, xs.n_parameters())
+  w2 = w.optimise_parameters(fo2, fc2, k, xs.n_parameters())
+  s2 = calc_goof(fo2, fc, w2, k, xs.n_parameters())
+  # sort data and setup binning by fc/fc_max
+  fc_sq = fc.as_intensity_array()
+  fc_sq_over_fc_sq_max = fc_sq.data()/flex.max(fc_sq.data())
+  permutation = flex.sort_permutation(fc_sq_over_fc_sq_max)
+  fc_sq_over_fc_sq_max = fc_sq.customized_copy(
+    data=fc_sq_over_fc_sq_max).select(permutation)
+  fc_sq = fc_sq.select(permutation)
+  fo_sq = fo2.select(permutation)
+  n_bins = 10
+  bin_max = 0
+  bin_limits = flex.size_t(1, 0)
+  bin_count = flex.size_t()
+  for i in range(n_bins):
+    bin_limits.append(int(math.ceil((i+1) * fc_sq.size()/n_bins)))
+    bin_count.append(bin_limits[i+1] - bin_limits[i])
+  goofs_w = flex.double()
+  goofs_w2 = flex.double()
+  for i_bin in range(n_bins):
+    sel = flex.size_t_range(bin_limits[i_bin], bin_limits[i_bin+1])
+    goofs_w2.append(calc_goof(fo_sq.select(sel),
+                              fc_sq.select(sel),
+                              w2, k, xs.n_parameters()))
+    goofs_w.append(calc_goof(fo_sq.select(sel),
+                              fc_sq.select(sel),
+                              w, k, xs.n_parameters()))
+  a = flex.mean_and_variance(goofs_w).unweighted_sample_variance()
+  b = flex.mean_and_variance(goofs_w2).unweighted_sample_variance()
+  assert a > b or abs(1-s) > abs(1-s2)
+  assert a > b # flat analysis of variance
+  assert abs(1-s) > abs(1-s2) # GooF close to 1
+
+def exercise_weighting_schemes():
+  unit_weighting = least_squares.unit_weighting()
+  assert unit_weighting.type() == "unit"
+  assert str(unit_weighting) == "w=1"
+  shelx_weighting = least_squares.mainstream_shelx_weighting(0.1234, 0.5678)
+  assert shelx_weighting.type() == "calc"
+  assert not show_diff(
+    str(shelx_weighting),
+    "w=1/[\\s^2^(Fo^2^)+(0.1234P)^2^+0.5678P] where P=(Fo^2^+2Fc^2^)/3")
+  try:
+    shelx_weighting(fo_sq=1, sigma=1, fc_sq=1, scale_factor=None)
+  except RuntimeError as e:
+    assert 'SMTBX_ASSERT' in str(e)
+  else:
+    raise Exception_expected("scale_factor must have a definite value")
+
+
+def run(args):
+  if "--fix_random_seeds" in args:
+    random.seed(1)
+    flex.set_random_seed(1)
+    scitbx.random.set_random_seed(1)
+  libtbx.utils.show_times_at_exit()
+  for i in range(10):
+    exercise_optimise_shelxl_weights()
+  exercise_weighting_schemes()
+
+if __name__ == '__main__':
+  import sys
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/refinement/weighting_schemes.py
+""" Weighting schemes.
+
+They all feature:
+
+  o __str__: a string representation of the weighting scheme in a format
+             that is appropriate for the CIF item _refine_ls_weighting_details;
+
+  o type: the kind of weighting scheme,
+          that is appropriate for the CIF item _refine_ls_weighting_scheme
+"""
+
+
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+ext = bp.import_ext("smtbx_refinement_least_squares_ext")
+
+
+from cctbx.array_family import flex
+
+import math
+
+
+@bp.inject_into(ext.mainstream_shelx_weighting)
+class _():
+
+  def __str__(self):
+    if round(self.a, 4) in (0.1, 0.2):
+      a = "%.1f" %self.a
+    else:
+      a = "%.4f" %self.a
+    if round(self.b, 4) == 0: b_part=""
+    else: b_part = "+%.4fP" %self.b
+    return (r"w=1/[\s^2^(Fo^2^)+(%sP)^2^%s]"
+            " where P=(Fo^2^+2Fc^2^)/3" %(a, b_part))
+
+  def type(self):
+    return "calc"
+
+  def optimise_parameters(self, fo_sq, fc_sq,
+                          scale_factor, n_independent_params):
+    """ Find optimal values of a and b that give a flat analysis of the variance
+        when binned by Fc/max(Fc), and a goodness of fit close to 1.
+
+        This is done in a grid search fashion similar to Shelxl.
+
+        self is not modified in place; instead a new instance of the weighting
+        scheme is returned.
+
+        It is intended that f_calc should already contain the contribution from
+        f_mask (if a solvent mask is used).
+    """
+    assert fc_sq.is_xray_intensity_array()
+    weighting = ext.mainstream_shelx_weighting(a=self.a, b=self.b)
+
+    def compute_chi_sq(fo_sq, fc_sq, a,b):
+      weighting.a = a
+      weighting.b = b
+      weights = weighting(
+        fo_sq.data(), fo_sq.sigmas(), fc_sq.data(), scale_factor)
+      return (flex.sum(
+        weights * flex.pow2(fo_sq.data() - scale_factor * fc_sq.data())))
+
+    fo_sq = fo_sq.deep_copy()
+    fo_sq.data().set_selected(fo_sq.data() < 0, 0)
+
+    fo2 = fo_sq.data().deep_copy()
+    fo2 /= scale_factor
+    sigmas = fo_sq.sigmas() / scale_factor
+    sigmas_sq = flex.pow2(sigmas)
+    fc2 = fc_sq.data()
+
+    # determine starting values for a and b, formulae taken from shelxl code
+    p = (fo2 + 2 * fc2)/3
+    p_sq = flex.pow2(p)
+    x = flex.sum((flex.pow2(fo2-fc2)-sigmas) * (p_sq/sigmas_sq))
+    y = flex.sum( flex.pow2(p_sq)/sigmas_sq)
+    z = flex.sum(p)
+    start_a = math.sqrt(max(0.0001, 0.64*x/max(1e-8, y)))
+    start_b = 0.5 * z * start_a**2 /fo_sq.size()
+    a_step = 0.2 * start_a
+    b_step = 0.4 * start_b
+
+    # sort data and setup binning by fc/fc_max
+    fc_sq_over_fc_sq_max = fc_sq.data()/flex.max(fc_sq.data())
+    permutation = flex.sort_permutation(fc_sq_over_fc_sq_max)
+    fc_sq_over_fc_sq_max = fc_sq.customized_copy(
+      data=fc_sq_over_fc_sq_max).select(permutation)
+    fc_sq = fc_sq.select(permutation)
+    fo_sq = fo_sq.select(permutation)
+    n_bins = 10
+    bin_max = 0
+    bin_limits = flex.size_t(1, 0)
+    bin_count = flex.size_t()
+    for i in range(n_bins):
+      bin_limits.append(int(math.ceil((i+1) * fc_sq.size()/n_bins)))
+      bin_count.append(bin_limits[i+1] - bin_limits[i])
+
+    n = fo_sq.size()//(fo_sq.size()-n_independent_params)
+
+    # search on a 9x9 grid to determine best values of a and b
+    gridding = flex.grid(9,9)
+    while (a_step > 1e-4 and b_step > 5e-3):
+      tmp = flex.double(gridding, 0)
+      binned_chi_sq = [tmp.deep_copy() for i in range(n_bins)]
+      start_a = max(start_a, 4*a_step) - 4*a_step
+      start_b = max(start_b, 4*b_step) - 4*b_step
+      for i_bin in range(n_bins):
+        sel = flex.size_t_range(bin_limits[i_bin], bin_limits[i_bin+1])
+        fc2 = fc_sq.select(sel)
+        fo2 = fo_sq.select(sel)
+        b = start_b
+        for j in range(9):
+          a = start_a
+          b += b_step
+          for k in range(9):
+            a += a_step
+            binned_chi_sq[i_bin][j,k] += compute_chi_sq(fo2, fc2, a, b)
+      min_variance = 9e9
+      j_min, k_min = (0, 0)
+      for j in range(9):
+        for k in range(9):
+          variance = 0
+          for i_bin in range(n_bins):
+            if bin_count[i_bin] == 0: continue
+            goof = math.sqrt(binned_chi_sq[i_bin][j,k]*n/bin_count[i_bin])
+            variance += (goof-1)**2
+          min_variance = min(variance, min_variance)
+          if variance == min_variance:
+            j_min = j
+            k_min = k
+      start_a += k_min*a_step
+      start_b += j_min*b_step
+      if k_min == 8:
+        a_step *= 2
+        continue
+      elif k_min != 0:
+        a_step /= 4
+      if j_min == 8:
+        b_step *= 2
+        continue
+      elif j_min != 0:
+        b_step /=4
+      if start_a <= 1e-4: a_step /= 4
+      if start_b <= 1e-3: b_step /= 4
+    if start_a > 0.2:
+      start_a = 0.2
+      start_b = 0
+    weighting.a = start_a
+    weighting.b = start_b
+    return weighting
+
+@bp.inject_into(ext.unit_weighting)
+class _():
+
+  def __str__(self):
+    return "w=1"
+
+  def type(self):
+    return "unit"
+
+  def optimise_parameters(self, fo_sq, fc_sq,
+                          scale_factor, n_independent_params):
+    # no parameters to optimise!
+    return self
+
+@bp.inject_into(ext.sigma_weighting)
+class _():
+
+  def __str__(self): return "w=1/sigma^2"
+
+  def type(self): return "sigma"
+
+  def optimise_parameters(self, fo_sq, fc_sq,
+                          scale_factor, n_independent_params):
+    # no parameters to optimise!
+    return self
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/regression/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/regression/test_data/__init__.py
+from __future__ import division
+import os
+
+test_data_dir = os.path.dirname(__file__)
+
+class fnames(object):
+  thpp_ins = os.path.join(test_data_dir, 'thpp.ins')
+  thpp_hkl = os.path.join(test_data_dir, 'thpp.hkl')
+  thpp_cif = os.path.join(test_data_dir, 'thpp.cif')
+  thpp_out = os.path.join(test_data_dir, 'thpp_out.cif')
+
+  sucrose_p1_res = os.path.join(test_data_dir, 'sucrose_p1.res')
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/regression/tst_commandline_anomrefine.py
+from __future__ import division
+from libtbx.easy_run import fully_buffered
+from libtbx.test_utils import approx_equal
+from smtbx.regression.test_data import fnames
+
+ciffile=fnames.thpp_cif
+insfile=fnames.thpp_ins
+hklfile=fnames.thpp_hkl
+
+commands = [
+  "smtbx.anom_refine {} {} F -e13000 -t -O -d0 -s0 -c25".format(
+      ciffile, hklfile),
+  "smtbx.anom_refine {} {} F -e13000 -T -O -d0 -s0 -c25".format(
+      insfile, hklfile)
+  ]
+
+expected_results = [
+  [13000, .152, -.053, .743, 1.303],
+  [13000, -.032, .001, .005, .008, .015, .016, 3.674, 4.279]
+  ]
+
+def run():
+  for command, expected_result in zip(commands, expected_results):
+    error_text = "Wrong result for '{}'".format(command)
+    print(command)
+    run_buf = fully_buffered(command)
+    run_buf.raise_if_errors()
+    out_lines = run_buf.stdout_lines
+    result = []
+    for line in out_lines:
+      for val in line.split():
+        result.append(float(val))
+    assert len(result) == len(expected_result), error_text
+    for x, y in zip(result, expected_result):
+      assert approx_equal(x, y, eps=.0015), error_text
+
+run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/regression/tst_commandline_refine.py
+from __future__ import division
+import os
+from smtbx.command_line import refine
+from smtbx.refinement import model
+from libtbx.test_utils import approx_equal
+from smtbx.regression.test_data import fnames
+
+insfile = fnames.thpp_ins
+hklfile = fnames.thpp_hkl
+ciffile = fnames.thpp_cif
+outfile = fnames.thpp_out
+
+class run_options:
+  def __init__(self):
+    self.overwrite = True
+    self.profile = None
+    self.max_cycles = 8
+    self.stop_if_max_derivative_below = 1e-7
+    self.stop_if_shift_norm_below = 1e-7
+
+def check_result(value):
+  xm = model.from_cif(model=outfile, reflections=hklfile+'=hklf4')
+  assert approx_equal(xm.xray_structure.scatterers()[0].site[0], value)
+
+def run_tests():
+  run_args = [insfile, hklfile, outfile]
+  refine.run(run_args, run_options())
+  check_result(0.167193)
+  run_args = [ciffile, hklfile+'=hklf4', outfile]
+  refine.run(run_args, run_options())
+  check_result(0.166661)
+  os.remove(outfile)
+
+run_tests()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx import test_utils
+import libtbx.load_env
+
+tst_list = [
+    ["$D/absolute_structure/tests/tst_absolute_structure.py",
+     "--fix_random_seeds"],
+    "$D/ab_initio/tests/tst_ab_initio_ext.py",
+    ["$D/ab_initio/tests/tst_charge_flipping.py", '--fix_seed', '--on=E',
+     '"hall: P 1"', '"hall: P 3"', '"hall: -P 2ybc"' ],
+    "$D/masks/tests/tst_masks.py",
+    "$D/structure_factors/direct/tests/tst_standard_xray.py",
+    ["$D/refinement/tests/tst_weighting_schemes.py",
+     "--fix_random_seeds"],
+    "$D/refinement/constraints/tests/tst_lbfgs.py",
+    "$B/refinement/constraints/tests/tst_reparametrisation",
+    "$D/refinement/constraints/tests/tst_occupancies.py",
+    "$B/refinement/constraints/tests/tst_geometrical_hydrogens",
+    "$D/refinement/constraints/tests/tst_same_group.py",
+    "$B/refinement/constraints/tests/tst_special_position",
+    "$D/refinement/constraints/tests/tst_reparametrisation.py",
+    ["$D/refinement/constraints/tests/tst_constrained_structure.py",
+     '--normal_eqns_solving_method=naive'],
+    "$D/refinement/constraints/tests/tst_disorder.py",
+    ["$D/refinement/constraints/tests/tst_constrained_structure.py",
+     '--normal_eqns_solving_method=levenberg-marquardt'],
+     "$D/refinement/constraints/tests/tst_rigid.py",
+    "$D/refinement/constraints/tests/tst_direction.py",
+    "$D/refinement/restraints/tests/tst_adp_restraints.py",
+    "$D/refinement/restraints/tests/tst_manager.py",
+    ["$D/refinement/restraints/tests/tst_restraints.py",
+     '--verbose', '--scatterers=5', '--resolution=0.2'],
+    "$D/regression/tst_commandline_refine.py",
+    "$D/regression/tst_commandline_anomrefine.py",
+    "$D/tests/tst_utils.py",
+]
+
+# unstable test
+tst_list_expected_unstable = [
+  "$D/refinement/tests/tst_least_squares.py",
+  ]
+
+def run():
+  build_dir = libtbx.env.under_build("smtbx")
+  dist_dir = libtbx.env.dist_path("smtbx")
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/source_generators/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/source_generators/flex_fwd_h.py
+from __future__ import absolute_import, division, print_function
+from scitbx.source_generators.flex_fwd_h import write
+
+this = "cctbx.source_generators.flex_fwd_h"
+
+common_code = """\
+#ifndef SMTBX_BOOST_PYTHON_FLEX_FWD_H
+#define SMTBX_BOOST_PYTHON_FLEX_FWD_H
+
+#include <cctbx/boost_python/flex_fwd.h>
+
+%s#endif // SMTBX_BOOST_PYTHON_FLEX_FWD_H
+"""
+
+full_code = """\
+%s
+
+#if defined(__sgi) && !defined(__GNUC__)
+
+namespace smtbx { namespace boost_python {
+
+  template <typename T>
+  struct flex_fwd
+  {
+  };
+
+  inline void
+  flex_fwd_types()
+  {
+  }
+
+}} // namespace cctbx::boost_python
+
+#endif // defined(__sgi) && !defined(__GNUC__)
+
+"""
+
+def run(target_dir):
+  write(this, target_dir, common_code, full_code)
+
+if (__name__ == "__main__"):
+  run(".")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/stl/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/stl/map.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("smtbx_stl_map_ext")
+from smtbx_stl_map_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/structure_factors/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/structure_factors/direct/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("smtbx_structure_factors_direct_ext")
+
+class constructed_with_xray_structure(object):
+
+  def __init__(self, xray_structure, table_file_name=None, reflections=None,
+               *args, **kwds):
+    xs = xray_structure
+    if not table_file_name:
+      if reflections:
+          self.scatterer_contribution = ext.isotropic_scatterer_contribution(
+            xs.scatterers(),
+            xs.scattering_type_registry(),
+            unit_cell=xs.unit_cell(),
+            reflections=reflections)
+      else:
+          self.scatterer_contribution = ext.isotropic_scatterer_contribution(
+            xs.scatterers(),
+            xs.scattering_type_registry())
+    else:
+      if "__test__" == table_file_name:
+        assert reflections
+        self.scatterer_contribution = ext.table_based_scatterer_contribution.\
+          build_lookup_based_for_tests(
+          xs.unit_cell(),
+          xs.space_group(),
+          xs.scatterers(),
+          xs.scattering_type_registry(),
+          reflections.indices())
+      else:
+        self.scatterer_contribution = ext.table_based_scatterer_contribution.build(
+          xs.scatterers(),
+          table_file_name,
+          xs.space_group(),
+          not xs.space_group().is_origin_centric())
+
+    args = (xs.unit_cell(),
+            xs.space_group(),
+            xs.scatterers()) + args + (self.scatterer_contribution,)
+    super(constructed_with_xray_structure, self).__init__(*args, **kwds)
+    self.xray_structure = xray_structure
+
+class f_calc_modulus_squared_with_std_trigonometry(
+  constructed_with_xray_structure,
+  ext.f_calc_modulus_squared_with_std_trigonometry):
+  pass
+
+class f_calc_modulus_squared_with_custom_trigonometry(
+  constructed_with_xray_structure,
+  ext.f_calc_modulus_squared_with_custom_trigonometry):
+  pass
+
+class f_calc_modulus_with_std_trigonometry(
+  constructed_with_xray_structure,
+  ext.f_calc_modulus_with_std_trigonometry):
+  pass
+
+class f_calc_modulus_with_custom_trigonometry(
+  constructed_with_xray_structure,
+  ext.f_calc_modulus_with_custom_trigonometry):
+  pass
+
+
+def f_calc_modulus_squared(xray_structure,
+                           table_file_name=None,
+                           reflections=None,
+                           exp_i_2pi_functor=None):
+  if exp_i_2pi_functor is None:
+    return f_calc_modulus_squared_with_std_trigonometry(xray_structure,
+                                                        table_file_name=table_file_name,
+                                                        reflections=reflections)
+  else:
+    return f_calc_modulus_squared_with_custom_trigonometry(xray_structure,
+                                                           table_file_name,
+                                                           reflections,
+                                                           exp_i_2pi_functor)
+def f_calc_modulus(xray_structure,
+                   exp_i_2pi_functor=None):
+  if exp_i_2pi_functor is None:
+    return f_calc_modulus_with_std_trigonometry(xray_structure)
+  else:
+    return f_calc_modulus_with_custom_trigonometry(xray_structure,
+                                                   exp_i_2pi_functor)
+#for tests
+def generate_isc_table_file(file_name,
+                            xray_structure,
+                            indices):
+  xs = xray_structure.deep_copy_scatterers()
+  for sc in xs.scatterers():
+    sc.flags.set_use_fp_fdp(False)
+  isc = ext.isotropic_scatterer_contribution(
+    xs.scatterers(),
+    xs.scattering_type_registry())
+  with open(file_name, "w") as out:
+    out.write("Title: generated from isotropic AFF")
+    out.write("\nScatterers:")
+    for sc in xs.scatterers():
+      out.write(" %s" %sc.label)
+    out.write("\nSymm: expanded")
+    sg = xs.space_group()
+    ml = list(sg.smx())
+    out.write("\nData:")
+    for idx_ in indices:
+      d_star_sq = xs.unit_cell().d_star_sq(idx_)
+      isc.at_d_star_sq(d_star_sq)
+      for m in ml:
+        idx = [int(x) for x in (m.r() * idx_)]
+        out.write("\n%s %s %s" %(idx[0], idx[1], idx[2]))
+        for sci in range(xs.scatterers().size()):
+          val = isc.get(sci, idx_)
+          out.write(" %.6f,%.6f" %(val.real, val.imag))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/structure_factors/direct/tests/tst_standard_xray.py
+from __future__ import absolute_import, division, print_function
+
+from cctbx.array_family import flex
+from cctbx import sgtbx, xray, crystal, miller, eltbx
+import cctbx.eltbx.wavelengths
+import smtbx.development
+from cctbx.development.space_group_option_parser\
+     import space_group_option_parser
+import smtbx.structure_factors.direct as structure_factors
+from libtbx.test_utils import approx_equal
+from scitbx.math import approx_equal_relatively
+import libtbx.utils
+import random
+from itertools import islice
+from six.moves import zip
+from scitbx import matrix
+from scitbx.math import median_statistics
+from six.moves import range
+
+
+class test_case(object):
+
+  def __init__(self, inelastic_scattering):
+    self.inelastic_scattering = inelastic_scattering
+
+  def random_structure(self, space_group_info, set_grads):
+    xs = smtbx.development.random_xray_structure(
+      space_group_info,
+      elements="random",
+      n_scatterers=5,
+      u_iso_xor_u_aniso=False,
+      use_u_aniso=True,
+      use_u_iso=True,
+      random_u_iso=True,
+    )
+    if self.inelastic_scattering:
+      xs.set_inelastic_form_factors(
+        photon=eltbx.wavelengths.characteristic('Mo'),
+        table="sasaki")
+    for sc in xs.scatterers():
+      (
+        sc.flags.set_grad_site(set_grads)
+                .set_grad_u_iso(set_grads).set_grad_u_aniso(set_grads)
+                .set_grad_occupancy(set_grads)
+      )
+      if self.inelastic_scattering:
+        sc.flags.set_grad_fp(set_grads)
+        sc.flags.set_grad_fdp(set_grads)
+        sc.flags.set_use_fp_fdp(True)
+      assert sc.flags.use_u_iso()
+      assert sc.flags.use_u_aniso()
+    return xs
+
+  def miller_indices(self, space_group_info):
+    space_group = space_group_info.group()
+    return flex.miller_index(miller.index_generator(
+      space_group.type(),
+      anomalous_flag=True,
+      max_index=(10, 10, 10)))
+
+  def exercise(self, xray_structure=None, space_group_info=None,
+               verbose=False, fixed_random_seed=True, **kwds):
+    assert [xray_structure, space_group_info].count(None) == 1
+    if xray_structure is None:
+      self.xs = self.random_structure(space_group_info, set_grads=True)
+    else:
+      self.xs = xray_structure
+
+    if fixed_random_seed:
+      random.seed(1)
+      flex.set_random_seed(1)
+
+    self.do_exercise(verbose)
+
+
+class consistency_test_cases(test_case):
+
+  def __init__(self, n_directions, inelastic_scattering):
+    super(consistency_test_cases, self).__init__(inelastic_scattering)
+    self.n_directions = n_directions
+
+  def structures_forward(self, xs, xs_forward, eta_norm):
+    while True:
+      direction = flex.random_double(xs.n_parameters())
+      direction /= direction.norm()
+      eta = eta_norm * direction
+
+      i = 0
+      for sc_forward, sc in zip(xs_forward.scatterers(), xs.scatterers()):
+        eta_site = matrix.col(eta[i:i+3])
+        eta_iso = eta[i+3]
+        eta_aniso = matrix.col(eta[i+4:i+10])
+        eta_occ = eta[i+10]
+        if self.inelastic_scattering:
+          eta_fp = eta[i+11]
+          eta_fdp = eta[i+12]
+          i += 13
+        else:
+          i += 11
+
+        sc_forward.site = matrix.col(sc.site) + eta_site
+        sc_forward.u_iso = sc.u_iso + eta_iso
+        sc_forward.u_star = matrix.col(sc.u_star) + eta_aniso
+        sc_forward.occupancy = sc.occupancy + eta_occ
+        if self.inelastic_scattering:
+          sc_forward.fp = sc.fp + eta_fp
+          sc_forward.fdp = sc.fdp + eta_fdp
+      yield direction
+
+  def do_exercise(self, verbose=False):
+    xs = self.xs
+    sg = xs.space_group_info().group()
+    origin_centric_case = sg.is_origin_centric()
+
+    indices = self.miller_indices(xs.space_group_info())
+    f = structure_factors.f_calc_modulus_squared(xs)
+    f1 = structure_factors.f_calc_modulus_squared(xs)
+
+    for h in indices:
+      f.linearise(h)
+      fl = f.f_calc
+      f1.evaluate(h)
+      fe = f1.f_calc
+      assert f1.grad_f_calc is None
+      assert approx_equal_relatively(fe, fl, relative_error=1e-12), (fe, fl)
+
+    if (xs.space_group().is_origin_centric() and not self.inelastic_scattering):
+      for h in indices:
+        f.linearise(h)
+        assert f.f_calc.imag == 0
+        assert flex.imag(f.grad_f_calc).all_eq(0)
+
+    eta = 1e-8
+    xs_forward = xs.deep_copy_scatterers()
+    f_forward = structure_factors.f_calc_modulus_squared(xs_forward)
+
+    deltas = flex.double()
+    for direction in islice(self.structures_forward(xs, xs_forward, eta),
+                            self.n_directions):
+      for h in indices:
+        f.linearise(h)
+        assert approx_equal(abs(f.f_calc)**2, f.observable)
+        f_forward.linearise(h)
+        diff_num = (f_forward.observable - f.observable) / eta
+        diff = f.grad_observable.dot(direction)
+        delta = abs(1 - diff/diff_num)
+        deltas.append(delta)
+    stats = median_statistics(deltas)
+    tol = 1e-5
+    assert stats.median < tol, (
+        xs.space_group_info().symbol_and_number(), stats.median)
+    assert stats.median_absolute_deviation < tol, (
+        xs.space_group_info().symbol_and_number(), stats.median_absolute_deviation)
+
+class smtbx_against_cctbx_test_case(test_case):
+
+  def do_exercise(self, verbose=False):
+    xs = self.xs
+    indices = self.miller_indices(xs.space_group_info())
+    cctbx_structure_factors = xray.structure_factors.from_scatterers_direct(
+      xray_structure=xs,
+      miller_set=miller.set(
+        crystal.symmetry(unit_cell=xs.unit_cell(),
+                         space_group_info=xs.space_group_info()),
+        indices))
+    f = structure_factors.f_calc_modulus_squared(xs)
+    for h, fc in cctbx_structure_factors.f_calc():
+      f.linearise(h)
+      if fc == 0:
+        assert f.f_calc == 0
+      else:
+        delta = abs((f.f_calc - fc)/fc)
+        assert delta < 1e-6
+
+class custom_vs_std_test_case(test_case):
+
+  def __init__(self, *args, **kwds):
+    self.has_printed_header = False
+    test_case.__init__(self, *args, **kwds)
+
+  def do_exercise(self, verbose=False):
+    xs = self.xs
+    indices = self.miller_indices(xs.space_group_info())
+    exp_i_2pi_functor = cctbx.math_module.cos_sin_table(1024)
+    custom_fc_sq = (
+      structure_factors.f_calc_modulus_squared(
+        xs, None, None, exp_i_2pi_functor))
+    std_fc_sq = (
+      structure_factors.f_calc_modulus_squared(xs))
+    deltas = flex.double()
+    for h in indices:
+      custom_fc_sq.linearise(h)
+      std_fc_sq.linearise(h)
+      deltas.append(abs(custom_fc_sq.f_calc - std_fc_sq.f_calc)
+                    /abs(std_fc_sq.f_calc))
+    stats = median_statistics(deltas)
+    if verbose:
+      if not self.has_printed_header:
+        print("f_calc and sin/cos: |tabulated - std|/|std|")
+        print("median & median absolute deviation")
+        self.has_printed_header = True
+      print("%s: %.12g +/- %.12g" % (xs.space_group_info().type().hall_symbol(),
+                                     stats.median,
+                                     stats.median_absolute_deviation))
+    assert stats.median < 0.01, (str(xs.space_group_info()), stats.median)
+    assert stats.median_absolute_deviation < 0.005, (
+      str(xs.space_group_info()), stats.median_absolute_deviation)
+
+
+class f_vs_f_sq_test_case(test_case):
+
+  def do_exercise(self, verbose=False):
+    xs = self.xs
+    indices = self.miller_indices(xs.space_group_info())
+    f = structure_factors.f_calc_modulus(xs)
+    f_sq = structure_factors.f_calc_modulus_squared(xs)
+    for h in indices:
+      f.linearise(h)
+      f_sq.linearise(h)
+      assert approx_equal_relatively(f.observable**2,
+                                     f_sq.observable,
+                                     relative_error=1e-10)
+      grad_f_sq = f_sq.grad_observable
+      two_f_grad_f = (2*f.observable*f.grad_observable)
+      flex.compare_derivatives(two_f_grad_f, grad_f_sq, eps=1e-12)
+
+
+def exercise_trigonometric_ff():
+  from math import cos, sin,pi
+  sgi = sgtbx.space_group_info("P1")
+  cs = sgi.any_compatible_crystal_symmetry(volume=1000)
+  miller_set = miller.build_set(cs, anomalous_flag=False, d_min=1)
+  miller_set = miller_set.select(flex.random_double(miller_set.size()) < 0.2)
+  for i in range(5):
+    sites = flex.random_double(9)
+    x1, x2, x3 = (matrix.col(sites[:3]),
+                  matrix.col(sites[3:6]),
+                  matrix.col(sites[6:]))
+    xs = xray.structure(crystal.special_position_settings(cs))
+    for x in (x1, x2, x3):
+      sc = xray.scatterer(site=x, scattering_type="const")
+      sc.flags.set_grad_site(True)
+      xs.add_scatterer(sc)
+    f_sq = structure_factors.f_calc_modulus_squared(xs)
+    for h in miller_set.indices():
+      h = matrix.col(h)
+      phi1, phi2, phi3 = 2*pi*h.dot(x1), 2*pi*h.dot(x2), 2*pi*h.dot(x3)
+      fc_mod_sq = 3 + 2*(cos(phi1 - phi2) + cos(phi2 - phi3) + cos(phi3 - phi1))
+      g = []
+      g.extend( -2*(sin(phi1 - phi2) - sin(phi3 - phi1))*2*pi*h )
+      g.extend( -2*(sin(phi2 - phi3) - sin(phi1 - phi2))*2*pi*h )
+      g.extend( -2*(sin(phi3 - phi1) - sin(phi2 - phi3))*2*pi*h )
+      grad_fc_mod_sq = g
+
+      f_sq.linearise(h)
+      assert approx_equal(f_sq.observable, fc_mod_sq)
+      assert approx_equal(f_sq.grad_observable, grad_fc_mod_sq)
+
+def run(args):
+  libtbx.utils.show_times_at_exit()
+  parser = space_group_option_parser()
+  parser.option('-x', '--xray_structure_pickle', default=None)
+  parser.option(None, '--fixed_random_seed', default=True)
+  commands = parser.process(args)
+
+  n_directions = 2
+
+  if hasattr(commands.options, 'xray_structure_pickle'):
+    from libtbx import easy_pickle
+    xs = easy_pickle.load(commands.options.xray_structure_pickle)
+
+    t = consistency_test_cases(n_directions, inelastic_scattering=False)
+    t.exercise(xray_structure=xs)
+
+  else:
+    exercise_trigonometric_ff()
+
+    t = f_vs_f_sq_test_case(inelastic_scattering=False)
+    commands.loop_over_space_groups(t.exercise)
+
+    t = f_vs_f_sq_test_case(inelastic_scattering=True)
+    commands.loop_over_space_groups(t.exercise)
+
+    t = custom_vs_std_test_case(inelastic_scattering=None)
+    commands.loop_over_space_groups(t.exercise)
+
+    t = smtbx_against_cctbx_test_case(inelastic_scattering=False)
+    commands.loop_over_space_groups(t.exercise)
+
+    t = consistency_test_cases(n_directions, inelastic_scattering=False)
+    commands.loop_over_space_groups(t.exercise)
+
+    t = consistency_test_cases(n_directions, inelastic_scattering=True)
+    commands.loop_over_space_groups(t.exercise)
+
+if __name__ == '__main__':
+  import sys
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/tests/tst_utils.py
+from __future__ import absolute_import, division, print_function
+
+from cctbx import sgtbx
+from libtbx.test_utils import approx_equal
+from smtbx import development, utils
+
+def exercise_connectivity_table():
+  xs = development.sucrose()
+  connectivity = utils.connectivity_table(xs)
+  pair_counts = [
+    2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 4, 1, 4, 1,
+    4, 1, 4, 1, 1, 4, 1, 4, 1, 4, 4, 1, 1, 4, 1, 4, 1, 4, 1, 4, 1, 1]
+  assert approx_equal(connectivity.pair_asu_table.pair_counts(), pair_counts)
+  connectivity.add_bond(0, 1)
+  assert approx_equal(
+    connectivity.pair_asu_table.pair_counts(),
+    [3, 3, 1, 2, 1, 2, 1, 2, 1, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 4, 1, 4, 1,
+     4, 1, 4, 1, 1, 4, 1, 4, 1, 4, 4, 1, 1, 4, 1, 4, 1, 4, 1, 4, 1, 1])
+  connectivity.add_bond(5, 5, rt_mx_ji=sgtbx.rt_mx("x+1,y,z"))
+  assert connectivity.pair_asu_table.pair_counts()[5] == 4
+  connectivity.remove_bond(0, 1)
+  connectivity.remove_bond(5,5, rt_mx_ji=sgtbx.rt_mx("x+1,y,z"))
+  assert approx_equal(connectivity.pair_asu_table.pair_counts(), pair_counts)
+
+if __name__ == '__main__':
+  exercise_connectivity_table()
+  print('OK')
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+smtbx/utils.py
+from __future__ import absolute_import, division, print_function
+from cctbx import crystal, sgtbx
+import libtbx
+
+class connectivity_table(object):
+  """ Bond connectivity tabulated """
+
+  covalent_bond_tolerance = 0.5 # Angstrom
+  conformer_indices=None
+  sym_excl_indices=None
+  radii=None
+  # TODO: add possibility to fine tune connectivity by addition and deletion
+  #       of individual bonds
+
+  def __init__(self,
+               structure,
+               **kwds):
+    from cctbx.eltbx import covalent_radii
+    self.structure = structure
+    libtbx.adopt_optional_init_args(self, kwds)
+    max_r = 0
+    for st in structure.scattering_type_registry().type_index_pairs_as_dict():
+      r = 0
+      if self.radii:
+        r = self.radii.get(st, 0)
+      if r == 0:
+        r = covalent_radii.table(st).radius()
+      if r > max_r: max_r = r
+    self.structure = structure
+    self.buffer_thickness = 2*max_r + self.covalent_bond_tolerance
+    asu_mappings = structure.asu_mappings(
+      buffer_thickness=self.buffer_thickness)
+    self._pair_asu_table = crystal.pair_asu_table(asu_mappings)
+    self._pair_asu_table_needs_updating = False
+    if self.radii is None:
+      self.radii = {}
+    self._pair_asu_table.add_covalent_pairs(
+      structure.scattering_types(),
+      conformer_indices=self.conformer_indices,
+      sym_excl_indices=self.sym_excl_indices,
+      tolerance=self.covalent_bond_tolerance,
+      radii=self.radii
+    )
+    self.pair_sym_table = self.pair_asu_table.extract_pair_sym_table()
+
+
+  @property
+  def pair_asu_table(self):
+    if self._pair_asu_table_needs_updating:
+      self._pair_asu_table = crystal.pair_asu_table(
+        asu_mappings=self._pair_asu_table.asu_mappings())
+      self._pair_asu_table.add_pair_sym_table(self.pair_sym_table)
+      self.pair_sym_table = self._pair_asu_table.extract_pair_sym_table()
+    return self._pair_asu_table
+
+  def remove_bond(self, i_seq, j_seq, rt_mx_ji=sgtbx.rt_mx()):
+    space_group = self.pair_asu_table.asu_mappings().space_group()
+    r_den, t_den = space_group.r_den(), space_group.t_den()
+    if j_seq < i_seq:
+      i_seq, j_seq = j_seq, i_seq
+      if not rt_mx_ji.is_unit_mx():
+        rt_mx_ji = rt_mx_ji.inverse()
+    if j_seq not in self.pair_sym_table[i_seq]:
+      return
+    for i, rt_mx in enumerate(self.pair_sym_table[i_seq][j_seq]):
+      if (rt_mx.new_denominators(r_den, t_den) ==
+          rt_mx_ji.new_denominators(r_den, t_den)):
+        del self.pair_sym_table[i_seq][j_seq][i]
+    self._pair_asu_table_needs_updating = True
+
+  def add_bond(self, i_seq, j_seq, rt_mx_ji=sgtbx.rt_mx()):
+    try:
+      self.pair_asu_table.add_pair(i_seq, j_seq, rt_mx_ji)
+    except RuntimeError:
+      sites_frac = self.structure.sites_frac()
+      sites = [sites_frac[i_seq], sites_frac[j_seq]]
+      if not rt_mx_ji.is_unit_mx():
+        sites[-1] = rt_mx_ji * sites[-1]
+      d = self.structure.unit_cell().distance(sites[0], sites[1])
+      self.pair_sym_table = self.pair_asu_table.extract_pair_sym_table()
+      self._pair_asu_table = crystal.pair_asu_table(self.structure.asu_mappings(
+        buffer_thickness=max(self.buffer_thickness, d)))
+      self._pair_asu_table.add_pair_sym_table(self.pair_sym_table)
+      self.pair_asu_table.add_pair(i_seq, j_seq, rt_mx_ji)
+
+
+ *******************************************************************************

@@ -1,0 +1,4291 @@
+
+
+ *******************************************************************************
+xfel/metrology/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("xfel_metrology_ext")
+from xfel_metrology_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/flatfile.py
+# -*- mode: python; coding: utf-8; indent-tabs-mode: nil; python-indent: 2 -*-
+#
+# $Id$
+
+# TODO (1) OUTPUT TO SENSIBLE COORDINATES (2) WEIGHTING
+
+
+"""
+For Mikhail:
+
+  Quad 3, pair 0 should have S2 20907 (not 20904).
+
+  Quad 3, pair 4 should have L2 43477 (not 43476), but that may be
+  rounding error.
+
+  Quad 3, pair 0 has L2 43857 which is 300 um longer than others
+
+  XXX Really need to be able to visualise this in 3D!
+
+Other open issues:
+
+  Possible to participate in next optical measurement?
+
+  Is the center of the rectangle the center of the pixel arrays?
+"""
+
+from __future__ import absolute_import, division, print_function
+
+import copy
+import math
+import sys
+
+from scitbx import matrix
+from scitbx.array_family import flex
+
+#from scitbx import matrix
+#from scitbx.array_family import flex
+#from xfel.cxi.cspad_ana.parse_calib import calib2sections
+
+from scitbx import lbfgs
+from six.moves import range
+import six
+
+
+class optimise_rectangle(object):
+  """Misnomer, optimises everything."""
+
+  def __init__(self, vertices, weights, c, u, v, l):
+    """Not really, it's actually first and second coordinate in
+    whatever coordinate frame is in use, most likely x and y.  First
+    and second spatial coordinate.  XXX Try lbfgsb, for constrained
+    optimisation?
+
+    @param coords Data to optimise, five-tuple
+    @param theta  Starting guess, rotation angle
+    @param t_s    Starting guess, slow displacement
+    @param t_f    Starting guess, fast displacement
+    """
+
+    self.x = flex.double((c(0, 0), c(1, 0), c(2, 0),
+                          u(0, 0), u(1, 0), u(2, 0),
+                          v(0, 0), v(1, 0), v(2, 0)))
+    self.vertices = vertices
+    self.weights = weights
+    self.minimizer = lbfgs.run(target_evaluator=self)
+
+
+  def compute_functional_and_gradients(self):
+    """Compute sum of squared residual, and derivatives of theta,
+    slow, and fast.  XXX THIS IS ALL DIFFERENT FROM MY PEN-AND-PAPER
+    WORK"""
+
+    c = matrix.col((self.x[0], self.x[1], self.x[2]))
+    u = matrix.col((self.x[3], self.x[4], self.x[5]))
+    v = matrix.col((self.x[6], self.x[7], self.x[8]))
+
+    f =   self.weights[0] * (self.vertices[0] - c + v).norm_sq() \
+        + self.weights[1] * (self.vertices[1] - c - u).norm_sq() \
+        + self.weights[2] * (self.vertices[2] - c - v).norm_sq() \
+        + self.weights[3] * (self.vertices[3] - c + u).norm_sq() \
+        + (u.norm_sq() - v.norm_sq())**2
+
+    dfdc = -2 * self.weights[0] * (self.vertices[0] - c + v) \
+        -   2 * self.weights[1] * (self.vertices[1] - c - u) \
+        -   2 * self.weights[2] * (self.vertices[2] - c - v) \
+        -   2 * self.weights[3] * (self.vertices[3] - c + u)
+    dfdu = -2 * self.weights[1] * (self.vertices[1] - c - u) \
+        +   2 * self.weights[3] * (self.vertices[3] - c + u) \
+        +   4 * (u.norm_sq() - v.norm_sq()) * u
+    dfdv = +2 * self.weights[0] * (self.vertices[0] - c + v) \
+        -   2 * self.weights[2] * (self.vertices[2] - c - v) \
+        -   4 * (u.norm_sq() - v.norm_sq()) * v
+
+    g = flex.double((dfdc(0, 0), dfdc(1, 0), dfdc(2, 0),
+                     dfdu(0, 0), dfdu(1, 0), dfdu(2, 0),
+                     dfdv(0, 0), dfdv(1, 0), dfdv(2, 0)))
+    return (f, g)
+
+
+class optimise_rectangle_2(object):
+  """Misnomer, optimises everything."""
+
+  def __init__(self, vertices, weights, c, u, v, l):
+    """Not really, it's actually first and second coordinate in
+    whatever coordinate frame is in use, most likely x and y.  First
+    and second spatial coordinate.  XXX Try lbfgsb, for constrained
+    optimisation?
+
+    @param coords Data to optimise, five-tuple
+    @param theta  Starting guess, rotation angle
+    @param t_s    Starting guess, slow displacement
+    @param t_f    Starting guess, fast displacement
+    """
+
+    self.x = flex.double((c(0, 0), c(1, 0), c(2, 0),
+                          u(0, 0), u(1, 0), u(2, 0),
+                          v(0, 0), v(1, 0), v(2, 0)))
+    self.vertices = vertices
+    self.weights = weights
+    self.minimizer = lbfgs.run(target_evaluator=self)
+
+
+  def compute_functional_and_gradients(self):
+    """Compute sum of squared residual, and derivatives of theta,
+    slow, and fast.  XXX THIS IS ALL DIFFERENT FROM MY PEN-AND-PAPER
+    WORK"""
+
+    c = matrix.col((self.x[0], self.x[1], self.x[2]))
+    u = matrix.col((self.x[3], self.x[4], self.x[5]))
+    v = matrix.col((self.x[6], self.x[7], self.x[8]))
+
+    f =   self.weights[0] * (self.vertices[0] - c + v).length() \
+        + self.weights[1] * (self.vertices[1] - c - u).length() \
+        + self.weights[2] * (self.vertices[2] - c - v).length() \
+        + self.weights[3] * (self.vertices[3] - c + u).length() \
+        + (u.norm_sq() - v.norm_sq())**2
+
+    # XXX normalize() will fail for zero-vectors.
+    dfdc = -1 * self.weights[0] * (self.vertices[0] - c + v).normalize() \
+        -   1 * self.weights[1] * (self.vertices[1] - c - u).normalize() \
+        -   1 * self.weights[2] * (self.vertices[2] - c - v).normalize() \
+        -   1 * self.weights[3] * (self.vertices[3] - c + u).normalize()
+    dfdu = -1 * self.weights[1] * (self.vertices[1] - c - u).normalize() \
+        +   1 * self.weights[3] * (self.vertices[3] - c + u).normalize() \
+        +   4 * (u.norm_sq() - v.norm_sq()) * u
+    dfdv = +1 * self.weights[0] * (self.vertices[0] - c + v).normalize() \
+        -   1 * self.weights[2] * (self.vertices[2] - c - v).normalize() \
+        -   4 * (u.norm_sq() - v.norm_sq()) * v
+
+    g = flex.double((dfdc(0, 0), dfdc(1, 0), dfdc(2, 0),
+                     dfdu(0, 0), dfdu(1, 0), dfdu(2, 0),
+                     dfdv(0, 0), dfdv(1, 0), dfdv(2, 0)))
+    return (f, g)
+
+
+class optimise_rectangle_3(object):
+
+  def __init__(self, vertices, weights, u, v, side_long, side_short):
+    """
+    Four 3D vertices, four weights.  u and v are 3D vectors.
+    Optimises weights, u, and v.
+
+    @param vertices Must be ordered in counter-clockwise direction
+    @param weights  Four scalars corresponding to @p vertices XXX or w?
+    @param u        3D vector
+    @param v        3D vector
+    """
+
+    self.x = flex.double(
+      (weights.elems[0], weights.elems[1], weights.elems[2], weights.elems[3],
+       u.elems[0], u.elems[1], u.elems[2],
+       v.elems[0], v.elems[1], v.elems[2]))
+
+    self._vertices = vertices
+    self._weights = weights
+
+    self._side_long = side_long
+    self._side_short = side_short
+
+    self.minimizer = lbfgs.run(target_evaluator=self)
+
+
+  def compute_functional_and_gradients(self):
+
+    """
+    while True:
+      t = self.x[0]**2 + self.x[1]**2 + self.x[2]**2 + self.x[3]**2
+#      print "Got weights", self.x[0]**2 / t, self.x[1]**2 / t, self.x[2]**2 / t, self.x[3]**2 / t
+
+      for i in range(4):
+        w = self.x[i]**2 / t
+
+        ok = True
+        self.x[i] = math.sqrt(w)
+        if w > 0.35:
+          self.x[i] = 0.3 / w * math.sqrt(w)
+          ok = False
+
+        if ok:
+          break
+    """
+
+    w1 = flex.double((self.x[0],
+                      self.x[1],
+                      self.x[2],
+                      self.x[3]))
+
+    w2 = flex.double((w1[0]**2,
+                      w1[1]**2,
+                      w1[2]**2,
+                      w1[3]**2))
+
+    w2_tot = w2[0] + w2[1] + w2[2] + w2[3]
+    assert w2_tot > 0 # XXX Pathology
+    # w2 /= w2_tot # XXX Dangerous!  Don't do this!
+
+    u = matrix.col((self.x[4], self.x[5], self.x[6]))
+    v = matrix.col((self.x[7], self.x[8], self.x[9]))
+
+    # Compute optimal rectangle center, with weights.  NOTE: center is
+    # a function of (p, u, v, w).  See pen-and-paper derivation,
+    # obtained from df/dc = 0.
+    c = (w2[0] * (self._vertices[0] + v) +
+         w2[1] * (self._vertices[1] - u) +
+         w2[2] * (self._vertices[2] - v) +
+         w2[3] * (self._vertices[3] + u)) / w2_tot
+
+    # Weighted residual, the function (XXX functional) to optimize.
+    f = (w2[0] * (self._vertices[0] - c + v).norm_sq() +
+         w2[1] * (self._vertices[1] - c - u).norm_sq() +
+         w2[2] * (self._vertices[2] - c - v).norm_sq() +
+         w2[3] * (self._vertices[3] - c + u).norm_sq()) / w2_tot
+    #f += (u.norm_sq() - v.norm_sq())**2
+    #f += math.fabs(u.norm_sq() - v.norm_sq())
+    f += (u.length() - v.length())**2
+    f += ((u + v).length() - self._side_long)**2
+    f += ((u - v).length() - self._side_short)**2
+#    f += math.fabs((u + v).norm_sq() - self._side_long**2)
+#    f += math.fabs((u - v).norm_sq() - self._side_short**2)
+
+#    f += math.fabs(u.length() - v.length())
+#    f += math.fabs((u + v).length() - self._side_long)
+#    f += math.fabs((u - v).length() - self._side_short)
+
+#    print "*** CHECK", math.fabs((u - v).length() - self._side_short), (u - v).length(), self._side_short
+
+    # Derivatives of f w.r.t. weights
+    t = 2 / w2_tot * (w2[0] * (self._vertices[0] - c + v) +
+                      w2[1] * (self._vertices[1] - c - u) +
+                      w2[2] * (self._vertices[2] - c - v) +
+                      w2[3] * (self._vertices[3] - c + u))
+
+    dfdw0 = 2 * w1[0] / w2_tot * (
+      (self._vertices[0] - c + v).norm_sq() - t.dot(self._vertices[0] + v) + f)
+    dfdw1 = 2 * w1[1] / w2_tot * (
+      (self._vertices[1] - c - u).norm_sq() - t.dot(self._vertices[1] - u) + f)
+    dfdw2 = 2 * w1[2] / w2_tot * (
+      (self._vertices[2] - c - v).norm_sq() - t.dot(self._vertices[2] - v) + f)
+    dfdw3 = 2 * w1[3] / w2_tot * (
+      (self._vertices[3] - c + u).norm_sq() - t.dot(self._vertices[3] + u) + f)
+
+    # These are vectors.  XXX Need to divide these by w2_tot
+    dfdu = -2 * (w2[0] * (self._vertices[0] - c + v) +
+                 w2[2] * (self._vertices[2] - c - v)) * (w2[3] - w2[1]) / w2_tot \
+                 - 2 * w2[1] * (self._vertices[1] - c - u) * (w2[0] + w2[2] + 2 * w2[3]) / w2_tot \
+                 + 2 * w2[3] * (self._vertices[3] - c + u) * (w2[0] + 2 * w2[1] + w2[2]) / w2_tot
+    dfdu = dfdu / w2_tot
+    dfdu += 2 * (1 - v.length() / u.length()) * u
+    dfdu += 2 * (1 - self._side_long / (u + v).length()) * (u + v)
+    dfdu += 2 * (1 - self._side_short / (u - v).length()) * (u - v)
+#    dfdu += 4 * (u.norm_sq() - v.norm_sq()) * u
+#    dfdu += +math.copysign(2, u.norm_sq() - v.norm_sq()) * u
+#    dfdu += +math.copysign(2, (u + v).norm_sq() - self._side_long**2) * (u + v)
+#    dfdu += +math.copysign(2, (u - v).norm_sq() - self._side_short**2) * (u - v)
+
+#    if math.fabs(u.length() - v.length()) > 1e-6:
+#      dfdu += (1 - v.length() / u.length()) / math.fabs(u.length() - v.length()) * u
+#    dfdu += (1 - self._side_long / (u + v).length()) / math.fabs((u + v).length() - self._side_long) * (u + v)
+#    dfdu += (1 - self._side_short / (u - v).length()) / math.fabs((u - v).length() - self._side_short) * (u - v)
+
+
+    dfdv = -2 * (w2[1] * (self._vertices[1] - c - u) +
+                 w2[3] * (self._vertices[3] - c + u)) * (w2[0] - w2[2]) / w2_tot \
+                 + 2 * w2[0] * (self._vertices[0] - c + v) * (w2[1] + 2 * w2[2] + w2[3]) / w2_tot \
+                 - 2 * w2[2] * (self._vertices[2] - c - v) * (2 * w2[0] + w2[1] + w2[3]) / w2_tot
+    dfdv = dfdv / w2_tot
+    dfdv +=  2 * (1 - u.length() / v.length()) * v
+    dfdv +=  2 * (1 - self._side_long / (u + v).length()) * (u + v)
+    dfdv += -2 * (1 - self._side_short / (u - v).length()) * (u - v)
+#    dfdv += -4 * (u.norm_sq() - v.norm_sq()) * v
+#    dfdv += -math.copysign(2, u.norm_sq() - v.norm_sq()) * v
+#    dfdv += +math.copysign(2, (u + v).norm_sq() - self._side_long**2) * (u + v)
+#    dfdv += -math.copysign(2, (u - v).norm_sq() - self._side_short**2) * (u - v)
+
+#    if math.fabs(u.length() - v.length()) > 1e-6:
+#      dfdv += (1 - u.length() / v.length()) / math.fabs(u.length() - v.length()) * v
+#    dfdv += (1 - self._side_long / (u + v).length()) / math.fabs((u + v).length() - self._side_long) * (u + v)
+#    dfdv += (1 - self._side_short / (u - v).length()) / math.fabs((u - v).length() - self._side_short) * (u - v) * (-1)
+
+    g = flex.double(
+      (dfdw0, dfdw1, dfdw2, dfdw3,
+       dfdu.elems[0], dfdu.elems[1], dfdu.elems[2],
+       dfdv.elems[0], dfdv.elems[1], dfdv.elems[2]))
+
+    #print "*** DID ITERATION ***"
+
+    return (f, g)
+
+
+def _find_long_short(quadrants,
+                     l_int=(-float('inf'), +float('inf')),
+                     s_int=(-float('inf'), +float('inf'))):
+  """The _find_long_short() function returns the average length of the
+  long and short sides of the rectangles whose vertices are given in
+  @p quadrants.
+
+  @param quadrants XXX
+  @param l_int     XXX Permitted interval for long (XXX even?) side
+  @param s_int     XXX Permitted interval for short (XXX odd?) side
+  @return          Three-tuple of the long side length, short side
+                   length, and standard deviation from the mean XXX Could really return a struct (erm... class instance)
+  """
+
+  # Now assumes correct ordering.  XXX Does this do adequate checking?
+  l_sum = l_ssq = 0
+  s_sum = s_ssq = 0
+  l_N = 0
+  s_N = 0
+
+  for (q, sensors) in six.iteritems(quadrants):
+    for (s, vertices) in six.iteritems(sensors):
+      if len(vertices) != 4:
+        raise RuntimeError("Sensor in quadrant does not have four vertices")
+      l = (vertices[1] - vertices[0]).length()
+#      print "SIDE long:", l
+      if l > l_int[0] and l < l_int[1]:
+        l_sum += l
+        l_ssq += l**2
+        l_N += 1
+
+      l = (vertices[3] - vertices[2]).length()
+#      print "SIDE long:", l
+      if l > l_int[0] and l < l_int[1]:
+        l_sum += l
+        l_ssq += l**2
+        l_N += 1
+
+      s = (vertices[2] - vertices[1]).length()
+#      print "SIDE short:", s
+      if s > s_int[0] and s < s_int[1]:
+        s_sum += s
+        s_ssq += s**2
+        s_N += 1
+
+      s = (vertices[0] - vertices[3]).length()
+#      print "SIDE short:", s
+      if s > s_int[0] and s < s_int[1]:
+        s_sum += s
+        s_ssq += s**2
+        s_N += 1
+
+  l_var = (l_ssq - l_sum**2 / l_N) / (l_N - 1)
+  s_var = (s_ssq - s_sum**2 / s_N) / (s_N - 1)
+  l_mu = l_sum / l_N
+  s_mu = s_sum / s_N
+  return (l_mu, math.sqrt(l_var), l_N, s_mu, math.sqrt(s_var), s_N)
+
+
+
+  # Compute all the side lengths from all the sensors in all quadrants
+  # using every pair of successive vertices.
+  d = []
+  for (q, sensors) in six.iteritems(quadrants):
+    for (s, vertices) in six.iteritems(sensors):
+      if len(vertices) != 4:
+        raise RuntimeError("Sensor in quadrant does not have four vertices")
+      for i in range(len(vertices)):
+        d.append((vertices[i] - vertices[(i + 1) % len(vertices)]).length())
+  if len(d) < 4:
+    return (0, 0, 0)
+
+  # Sort the side-lengths in-place, and compute separate averages for
+  # the lower and upper half of the array.
+  d.sort()
+  h = len(d) // 2
+
+  l_mu = s_mu = 0
+  for i in range(h):
+    s_mu += d[i]
+  s_mu /= h
+  for i in range(h, 2 * h):
+    l_mu += d[i]
+  l_mu /= h
+
+  # Compute standard deviation XXX biased or unbiased?
+  sigma = 0
+  for i in range(h):
+    sigma += (d[i] - s_mu)**2
+  for i in range(h, 2 * h):
+    sigma += (d[i] - l_mu)**2
+  sigma = math.sqrt(sigma / (2 * h - 2))
+
+  return (l_mu, s_mu, sigma)
+
+
+def _find_aspect_ratio(quadrants, r_int=(-float('inf'), +float('inf'))):
+  """The _find_aspect_ratio() function returns the average aspect
+  ratio (long side divided by short side) of the rectangles whose
+  vertices are given in @p quadrants.
+
+  @param quadrants XXX
+  @param r_int     XXX Permitted interval for aspect ratio
+  @return          Three-tuple of the long side length, short side
+                   length, and standard deviation from the mean XXX Could really return a struct (erm... class instance)
+  """
+
+  # Now assumes correct ordering.  XXX Does this do adequate checking?
+  r_sum = r_ssq = 0
+  r_N = 0
+
+  for (q, sensors) in six.iteritems(quadrants):
+    for (s, vertices) in six.iteritems(sensors):
+      if len(vertices) != 4:
+        raise RuntimeError("Sensor in quadrant does not have four vertices")
+      s = (vertices[2] - vertices[1]).length() + (vertices[0] - vertices[3]).length()
+      if s > 0:
+        l = (vertices[1] - vertices[0]).length() + (vertices[3] - vertices[2]).length()
+        r = l / s
+        if r > r_int[0] and r < r_int[1]:
+          r_sum += r
+          r_ssq += r**2
+          r_N += 1
+
+  r_var = (r_ssq - r_sum**2 / r_N) / (r_N - 1)
+  r_mu = r_sum / r_N
+  return (r_mu, math.sqrt(r_var), r_N)
+
+
+def _order_sensors(sensors):
+  """The _order_senors() function reshuffles the sensors and vertices
+  within a quadrant to match the indexing in the XTC stream.  The
+  coordinates themselves are not changed.
+
+  The _longest_side() function returns the coordinate index of the
+  longest side of the polygon defined by the vertices in @p.  Here, it
+  should be either 0 for x or 1 for y.
+
+  The _check_rectangle() function verifies that the vertices, when
+  traversed in order of increasing indices define normals that point
+  along the positive z-axis.  XXX Name?!
+
+  Returns dictionary
+
+  @param sensors List of 4-tuples of 3D-vertices of a polygon
+  @return  @c True if the normals of all vertices point along the
+           positive z-axis
+
+  """
+
+  from collections import deque
+
+  # Split the set of sensors into two disjoint (XXX) subsets depending
+  # on orientation: either x-major or y-major.  Record their centers
+  # for subsequent sorting.
+  sensors_x = []
+  sensors_y = []
+  for v in sensors:
+    if len(v) == 0:
+      continue
+
+    # Compute the center of the sensor.
+    m = v[0]
+    for j in range(1, len(v)):
+      m += v[j]
+    m /= len(v)
+
+    # Order the vertices in counter-clockwise direction in the
+    # xy-plane.
+    sorted(v, key=lambda x: math.atan2((x - m).elems[1], (x - m).elems[0]))
+
+    # Compute extent in all three dimensions, and determine longest
+    # dimension.  l = 0, sensor is oriented along the x-axis, l = 1,
+    # sensor is oriented along the y-axis.
+    l = flex.double()
+    for i in range(len(m.elems)):
+      c = [v[j].elems[i] for j in range(len(v))]
+      l.append(max(c) - min(c))
+    l = flex.max_index(l)
+
+    if l == 0:
+      sensors_x.append((v, m))
+    elif l == 1:
+      sensors_y.append((v, m))
+    else:
+      raise RuntimeError("XXX This should not happen")
+
+  # Sort x-major sensors by increasing y-value of the center, and
+  # y-major sensors by increasing x-value of the center.
+  sorted(sensors_x, key=lambda v_m: v_m[1].elems[1])
+  sorted(sensors_y, key=lambda v_m1: v_m1[1].elems[0])
+
+  # Write a dictionary with the sensors in the correct order, and
+  # discard the sensor centers and convert to deque.  Now remains only
+  # to cyclically permute the vertices within the sensors.
+  #
+  # 5 4 6 6  x
+  # 5 4 7 7  ^
+  # 2 2 0 1  |
+  # 3 3 0 1  |
+  #     y <--+
+  assert len(sensors_x) == 4 and len(sensors_y) == 4 # XXX
+  sensors_dict = {
+    0: deque(sensors_x[1][0]), 1: deque(sensors_x[0][0]),
+    2: deque(sensors_y[1][0]), 3: deque(sensors_y[0][0]),
+    4: deque(sensors_x[2][0]), 5: deque(sensors_x[3][0]),
+    6: deque(sensors_y[3][0]), 7: deque(sensors_y[2][0])}
+
+  # Reshuffle vertices in sensors by cyclic permutation.
+  for (i, v) in six.iteritems(sensors_dict):
+    assert len(v) >= 3 # XXX
+    d1 = v[1] - v[0]
+    d2 = v[2] - v[1]
+
+    # Ensure v[0] starts a long edge.
+    if d1.length() < d2.length():
+      d1 = d2
+      v.rotate(-1)
+
+    # Ensure v[0] corresponds to origin.  XXX Explain better.
+    if    ((i == 0 or i == 1) and d1.elems[0] < 0) or \
+          ((i == 2 or i == 3) and d1.elems[1] > 0) or \
+          ((i == 4 or i == 5) and d1.elems[0] > 0) or \
+          ((i == 6 or i == 7) and d1.elems[1] < 0):
+      v.rotate(2)
+    sensors_dict[i] = list(v)
+
+  return sensors_dict
+
+
+def _find_weight(p0, p1, p2, l, s):
+  #print "Finding weight using %f and %f" % (l, s)
+
+
+  # Rotate the p0 and p2 into the z-plane, use p1 as origin Find
+  # rotation axis: this is the cross product of n and [0, 0, 1], where
+  # n is the cross product of (p0 - p1) and (p2 - p1).  Rotation angle
+  # is the arccos of the dot product of n and [0, 0, 1].
+  n = (p0 - p1).cross(other=(p2 - p1)).normalize()
+  r = matrix.col((+n(1, 0), -n(0, 0), 0))
+  if r.length() > 0:
+    R = r.axis_and_angle_as_r3_rotation_matrix(angle=math.acos(n(2, 0)))
+  else:
+    print("TOOK funny branch")
+    R = matrix.identity(3)
+
+  # Rotate, and make p1 the origin.  This is now a 2D-problem.
+  q0 = matrix.col((R(0, 0) * (p0 - p1)(0, 0) + R(0, 1) * (p0 - p1)(1, 0),
+                   R(1, 0) * (p0 - p1)(0, 0) + R(1, 1) * (p0 - p1)(1, 0)))
+  q1 = matrix.col((0, 0))
+  q2 = matrix.col((R(0, 0) * (p2 - p1)(0, 0) + R(0, 1) * (p2 - p1)(1, 0),
+                   R(1, 0) * (p2 - p1)(0, 0) + R(1, 1) * (p2 - p1)(1, 0)))
+
+  #if abs(q0(2, 0)) > 1e-7 or abs(q2(2, 0)) > 1e-7:
+  #  print "B0RKED", q0(2, 0), q2(2, 0)
+
+
+  # Find best fit against [l, 0] and [0, s]
+  theta = math.atan2(
+    q0(1, 0) * l - q2(0, 0) * s, q0(0, 0) * l + q2(1, 0) * s)
+  r1 =  (q0 - l * matrix.col((+math.cos(theta), +math.sin(theta)))).length() \
+      + (q2 - s * matrix.col((-math.sin(theta), +math.cos(theta)))).length()
+
+  theta = math.atan2(
+    q0(1, 0) * s - q2(0, 0) * l, q0(0, 0) * s + q2(1, 0) * l)
+  r2 =  (q0 - s * matrix.col((+math.cos(theta), +math.sin(theta)))).length() \
+      + (q2 - l * matrix.col((-math.sin(theta), +math.cos(theta)))).length()
+
+
+  r_min = min(r1, r2)
+  r_max = max(r1, r2)
+
+  #print "Got", math.sqrt(r_min), math.sqrt(r_max)
+
+  # Alternative: find best fit against [s, 0] and [0, l]
+
+  # Return best fit of the two
+
+  return math.sqrt(r_min)
+#  return 1
+#  return 1 / (1 + math.sqrt(r_min))
+
+
+def _fit_rectangle(vertices, side_long, side_short): #p1, p2, p3, p4):
+  """Least-squares fit a rectangle to four points.  Points must be
+  given in counter-clockwise order.  XXX Check again all against
+  pen-and-paper!
+
+  XXX Need three vertices for plane.
+
+  XXX IMPORTANT: the rectangle size is not constrained?!
+  """
+
+  from sys import float_info
+
+  """
+
+  #Mikhail's statistics, from
+  # https://confluence.slac.stanford.edu/display/PCDS/2011-08-10+CSPad+alignment+parameters
+  # Only minor discrepancies (typos?), and reordering of S1/S2, L1/L2,
+  # etc, and signs.  Assumes the z-coordinate has been discarded XXX
+  # do it here instead?  Make this it's own function?
+
+  # Discard the z-component (XXX coordinate?)
+  v = []
+  for vertex in vertices:
+    v.append(matrix.col((vertex(0, 0), vertex(1, 0))))
+
+  L1 = (v[1] - v[0]).length()
+  L2 = (v[3] - v[2]).length()
+  S1 = (v[2] - v[1]).length()
+  S2 = (v[0] - v[3]).length()
+
+  if abs((v[1] - v[0])(0, 0)) > abs((v[1] - v[0])(1, 0)):
+    # For horizontal sensors
+    orientation = "H"
+    dL1 = v[1][0] - v[2][0]
+    dL2 = v[0][0] - v[3][0]
+    dS2 = v[1][1] - v[0][1]
+    dS1 = v[2][1] - v[3][1]
+  else:
+    # For vertical sensors
+    orientation = "V"
+    dL1 = v[1][1] - v[2][1]
+    dL2 = v[0][1] - v[3][1]
+    dS1 = v[1][0] - v[0][0]
+    dS2 = v[2][0] - v[3][0]
+
+  dS_L = (dS1 + dS2) / (L1 + L2)
+  angle = math.atan(dS_L) * 180 / math.pi
+  print "%c: S1 % 6d S2 % 6d dS1 % 6d dS2 % 6d " \
+      "L1 % 6d L2 % 6d dL1 % 6d dL2 % 6d " \
+      "<dS/L> % 8.5f angle % 8.5f"% \
+      (orientation,
+       int(S1), int(S2), int(dS1), int(dS2),
+       int(L1), int(L2), int(dL1), int(dL2),
+       dS_L, angle)
+  return
+  """
+
+  # The center is always the mean of the four corners.
+  c = 0.25 * (vertices[0] + vertices[1] + vertices[2] + vertices[3])
+
+  # Determine Lagrange multiplier, lambda.
+  d02 = (vertices[0] - vertices[2]).norm_sq()
+  d13 = (vertices[1] - vertices[3]).norm_sq()
+
+  # XXX Establish absolute tolerance for equality.  Square root of
+  # smallest increment from maximum.  XXX Use something from cctbx
+  # instead?
+  tol = math.sqrt(math.ldexp(
+      float_info.epsilon,
+      math.frexp(flex.max(flex.abs(flex.double([d02, d13]))))[1] - 1))
+
+  if abs(d02 - d13) < tol:
+    l = 0
+  else:
+    l1 = 2 / (d02 - d13) * (-(d02 + d13) + 2 * math.sqrt(d02 * d13))
+    l2 = 2 / (d02 - d13) * (-(d02 + d13) - 2 * math.sqrt(d02 * d13))
+    if abs(l1) < 2 and abs(l2) >= 2:
+      l = l1
+    elif abs(l1) >= 2 and abs(l2) < 2:
+      l = l2
+    else:
+      raise RuntimeError("Cannot determine Lagrange multiplier")
+
+  u = (vertices[1] - vertices[3]) / (2 + l)
+  v = (vertices[2] - vertices[0]) / (2 - l)
+  r =   (vertices[0] - c + v).norm_sq() \
+      + (vertices[1] - c - u).norm_sq() \
+      + (vertices[2] - c - v).norm_sq() \
+      + (vertices[3] - c + u).norm_sq() \
+      + l * (u.norm_sq() - v.norm_sq())
+
+  w = (u - v).length()
+  h = (u + v).length()
+  if w < h:
+    t = h
+    h = w
+    w = t
+
+#  print "%7.3f %7.3f %7.3f %7.3f -- %d %d" % (
+#    (vertices[0] - c + v).length(),
+#    (vertices[1] - c - u).length(),
+#    (vertices[2] - c - v).length(),
+#    (vertices[3] - c + u).length(),
+#    w, h)
+
+
+  # WEIGHT DETERMINATION, use (side_long, side_short) or (w, h) --
+  # USELESS?
+
+  weights = []
+  for i in range(len(vertices)):
+    weights.append(_find_weight(vertices[(i - 1) % len(vertices)],
+                                vertices[i],
+                                vertices[(i + 1) % len(vertices)],
+                                side_long, side_short))
+#                                w, h))
+
+  """
+  weights[0] = 1 / (weights[3] + weights[0] + weights[1])
+  weights[1] = 1 / (weights[0] + weights[1] + weights[2])
+  weights[2] = 1 / (weights[1] + weights[2] + weights[3])
+  weights[3] = 1 / (weights[2] + weights[3] + weights[0])
+  #print "Got residuals", weights
+  """
+
+  """
+  weights = [0, 0, 0, 0]
+  normal = u.cross(other=v).normalize()
+  weights[0] = (1 - abs(normal.dot( \
+          other=(vertices[0] - c).normalize()))) \
+          *    (1 - abs((vertices[3] - vertices[0]).normalize().dot( \
+          other=(vertices[1] - vertices[0]).normalize())))
+  weights[1] = (1 - abs(normal.dot( \
+          other=(vertices[1] - c).normalize()))) \
+          *    (1 - abs((vertices[0] - vertices[1]).normalize().dot( \
+          other=(vertices[2] - vertices[1]).normalize())))
+  weights[2] = (1 - abs(normal.dot(\
+          other=(vertices[2] - c).normalize()))) \
+          *    (1 - abs((vertices[1] - vertices[2]).normalize().dot( \
+          other=(vertices[3] - vertices[2]).normalize())))
+  weights[3] = (1 - abs(normal.dot( \
+          other=(vertices[3] - c).normalize()))) \
+          *    (1 - abs((vertices[2] - vertices[3]).normalize().dot( \
+          other=(vertices[0] - vertices[3]).normalize())))
+  #print "Got angle-stuff", weights
+  """
+
+  #"""
+  weights[0] = 1
+  weights[1] = 1
+  weights[2] = 1
+  weights[3] = 1
+  #"""
+
+  wtot = weights[0] + weights[1] + weights[2] + weights[3]
+  weights[0] /= wtot
+  weights[1] /= wtot
+  weights[2] /= wtot
+  weights[3] /= wtot
+
+  #print "Got weight vector", weights
+
+
+  """
+  t0 = vertices[3] - vertices[0]
+  t1 = vertices[1] - vertices[0]
+  a  = 180 * t0.angle(t1) / math.pi
+  print "GOT %.4f %.4f" % (a, math.fabs(a - 90))
+
+  t0 = vertices[0] - vertices[1]
+  t1 = vertices[2] - vertices[1]
+  a  = 180 * t0.angle(t1) / math.pi
+  print "GOT %.4f %.4f" % (a, math.fabs(a - 90))
+
+  t0 = vertices[1] - vertices[2]
+  t1 = vertices[3] - vertices[2]
+  a  = 180 * t0.angle(t1) / math.pi
+  print "GOT %.4f %.4f" % (a, math.fabs(a - 90))
+
+  t0 = vertices[2] - vertices[3]
+  t1 = vertices[0] - vertices[3]
+  a  = 180 * t0.angle(t1) / math.pi
+  print "GOT %.4f %.4f" % (a, math.fabs(a - 90))
+  """
+
+  # THIS IS THE NEW CODE, weighted optimisation, using the unweighted
+  # values as starting guesses.  The non-least squares target seems
+  # better (more resistant to outliers).  But again tricky and almost
+  # useless.
+  if False:
+    o = optimise_rectangle(vertices, weights, c, u, v, l)
+    c = matrix.col((o.x[0], o.x[1], o.x[2]))
+    u = matrix.col((o.x[3], o.x[4], o.x[5]))
+    v = matrix.col((o.x[6], o.x[7], o.x[8]))
+  elif False:
+    o = optimise_rectangle_2(vertices, weights, c, u, v, l)
+    c = matrix.col((o.x[0], o.x[1], o.x[2]))
+    u = matrix.col((o.x[3], o.x[4], o.x[5]))
+    v = matrix.col((o.x[6], o.x[7], o.x[8]))
+  else:
+    pass
+    """
+    o = optimise_rectangle_3(vertices, matrix.col(weights), u, v, side_long, side_short)
+    weights = matrix.col((o.x[0]**2, o.x[1]**2, o.x[2]**2, o.x[3]**2)) / (
+      o.x[0]**2 + o.x[1]**2 + o.x[2]**2 + o.x[3]**2)
+    u = matrix.col((o.x[4], o.x[5], o.x[6]))
+    v = matrix.col((o.x[7], o.x[8], o.x[9]))
+    c = (weights[0] * (vertices[0] + v) +
+         weights[1] * (vertices[1] - u) +
+         weights[2] * (vertices[2] - v) +
+         weights[3] * (vertices[3] + u))
+    """
+
+  w = (u - v).length()
+  h = (u + v).length()
+  if w < h:
+    t = h
+    h = w
+    w = t
+
+  vertices_lsq = [c - v, c + u, c + v, c - u]
+  rss = weights[0] * (vertices[0] - vertices_lsq[0]).length() \
+      + weights[1] * (vertices[1] - vertices_lsq[1]).length() \
+      + weights[2] * (vertices[2] - vertices_lsq[2]).length() \
+      + weights[3] * (vertices[3] - vertices_lsq[3]).length()
+  rss = (vertices[0] - vertices_lsq[0]).norm_sq() \
+      + (vertices[1] - vertices_lsq[1]).norm_sq() \
+      + (vertices[2] - vertices_lsq[2]).norm_sq() \
+      + (vertices[3] - vertices_lsq[3]).norm_sq()
+
+
+  """
+  # This is for printing Gnuplot files for visualisation.
+
+  #print "set arrow from %f,%f,%f to %f,%f,%f nohead" % (tuple(vertices[0]) + tuple(vertices[1]))
+  #print "set arrow from %f,%f,%f to %f,%f,%f nohead" % (tuple(vertices[1]) + tuple(vertices[2]))
+  #print "set arrow from %f,%f,%f to %f,%f,%f nohead" % (tuple(vertices[2]) + tuple(vertices[3]))
+  #print "set arrow from %f,%f,%f to %f,%f,%f nohead" % (tuple(vertices[3]) + tuple(vertices[0]))
+
+  print "%f %f %f" % tuple(vertices[0])
+  print "%f %f %f" % tuple(vertices[1])
+  print "%f %f %f" % tuple(vertices[2])
+  print "%f %f %f" % tuple(vertices[3])
+  print "%f %f %f" % tuple(vertices[0])
+  print ""
+  print "%f %f %f" % tuple(vertices_lsq[0])
+  print "%f %f %f" % tuple(vertices_lsq[1])
+  print "%f %f %f" % tuple(vertices_lsq[2])
+  print "%f %f %f" % tuple(vertices_lsq[3])
+  print "%f %f %f" % tuple(vertices_lsq[0])
+  """
+
+  """
+  print "R: %7.3f %7.3f %7.3f %7.3f -- %d %d -- %f" % (
+    (vertices[0] - c + v).length(),
+    (vertices[1] - c - u).length(),
+    (vertices[2] - c - v).length(),
+    (vertices[3] - c + u).length(),
+    (u + v).length(), # max((u - v).length(), (u + v).length()),
+    (u - v).length(), # min((u - v).length(), (u + v).length()),
+    rss)
+  print "W: %7.3f %7.3f %7.3f %7.3f -- %f" % (
+    weights[0], weights[1], weights[2], weights[3], math.fabs(u.length() - v.length()))
+  print "S: %5d %5d %5d %5d" % ((vertices[1] - vertices[0]).length(),
+                                (vertices[2] - vertices[1]).length(),
+                                (vertices[3] - vertices[2]).length(),
+                                (vertices[0] - vertices[3]).length())
+
+  """
+
+  #sys.exit(0)
+
+
+  return (vertices_lsq, rss)
+
+
+def _fit_angles(vertices):
+  """
+  Just a bunch of heuristics.
+  """
+
+  # Determine the number of good angles.  An angle is good if it's no
+  # more than 0.1 degrees deviation from 90.  Note that it is
+  # impossible to have three good angles (because the fourth would
+  # have to be good to close the polygon).
+
+  ANGLE_THRESHOLD = 0.01
+
+  good_angles = []
+  for i in range(4):
+    u = vertices[(i - 1) % 4] - vertices[i]
+    v = vertices[(i + 1) % 4] - vertices[i]
+
+    good_angles.append(math.fabs(u.angle(v, deg=True) - 90) < ANGLE_THRESHOLD)
+    #print "Vertex", i, "angle", u.angle(v, deg=True), math.fabs(u.angle(v, deg=True) - 90)
+
+  #print "Good angles", good_angles
+
+  if good_angles.count(True) == 0:
+    # Must have two parallel edges for this to work (XXX illustrate
+    # the non-parallel case).  XXX Need an artificial test case for
+    # this!
+
+    a1 = (vertices[1] - vertices[0]).angle(vertices[3] - vertices[2], deg=True)
+    a2 = (vertices[3] - vertices[0]).angle(vertices[2] - vertices[1], deg=True)
+    if a1 < ANGLE_THRESHOLD:
+      print("IN FIX 0a")
+      return (vertices, 0)
+
+    elif a2 < ANGLE_THRESHOLD:
+      print("IN FIX 0b")
+      return (vertices, 0)
+
+  elif good_angles.count(True) == 1:
+    # Move the vertex opposite the good angle into its expected
+    # position.
+
+    #print "IN FIX 1"
+
+    i = good_angles.index(True)
+    u = vertices[(i + 1) % 4] + vertices[(i - 1) % 4] - vertices[i]
+
+    vertices_fixed = copy.deepcopy(vertices)
+    vertices_fixed[(i + 2) % 4] = u
+
+    return (vertices_fixed, (vertices[(i + 2) % 4] - u).norm_sq())
+
+
+  elif good_angles.count(True) == 2:
+    # Move the two vertices with bad angles so they line up.  Must be
+    # adjacent for this to work (XXX illustrate the non-adjacent case
+    # mean)?
+
+    i = good_angles.index(True)
+    j = good_angles.index(True, i + 1)
+    if i == 0 and j == 3:
+      i = 3
+      j = 0
+    if (i + 1) % 4 != j:
+      return (vertices, 0)
+
+    #print "IN FIX 2" # XXX CHECK THIS AGAIN!!
+
+    u = vertices[(i - 1) % 4] - vertices[i]
+    v = vertices[(j + 1) % 4] - vertices[j]
+    l = 0.5 * (u.length() + v.length())
+
+    u = vertices[i] + l / u.length() * u
+    v = vertices[j] + l / v.length() * v
+
+    vertices_fixed = copy.deepcopy(vertices)
+    vertices_fixed[(i - 1) % 4] = u
+    vertices_fixed[(j + 1) % 4] = v
+
+    return (vertices_fixed,
+            (vertices[(i - 1) % 4] - u).norm_sq() +
+            (vertices[(j + 1) % 4] - v).norm_sq())
+
+
+  # Nuttin' to do.
+  return (vertices, 0)
+
+def _fit_plane(vertices):
+  """
+  Fit least-squares plane (see Schomaker et al. (1959) Acta Cryst 12,
+  600-604 and Blow (1960) Acta Cryst 13, 168 XXX check WOS).
+
+  @return The residual sum of squares
+  """
+
+  # The center is always the mean of the four corners.
+  c = 0.25 * (vertices[0] + vertices[1] + vertices[2] + vertices[3])
+
+  # Compute covariance matrix.
+  C = matrix.rec(
+    elems=tuple(vertices[0] - c) \
+      +   tuple(vertices[1] - c) \
+      +   tuple(vertices[2] - c) \
+      +   tuple(vertices[3] - c),
+    n=(4, 3))
+  cov = C.transpose_multiply(C)
+
+  # Obtain eigenvalues of covariance matrix.  XXX Ouch, this is ugly.
+  from tntbx import svd
+  cov_flex = flex.double(flex.grid(3, 3))
+  cov_flex += flex.double((cov(0, 0), cov(0, 1), cov(0, 2),
+                           cov(1, 0), cov(1, 1), cov(1, 2),
+                           cov(2, 0), cov(2, 1), cov(2, 2)))
+  svd = svd(cov_flex)
+
+  # Get least-squares residual (smallest eigenvalue) and plane normal
+  # (eigenvector corresponding to smallest eigenvalue) from SVD.
+  rss = svd.s()[2, 2]
+  normal = matrix.col((svd.v()[0, 2], svd.v()[1, 2], svd.v()[2, 2]))
+
+  """
+  rss2 = normal.dot(vertices[0] - c)**2 \
+      +  normal.dot(vertices[1] - c)**2 \
+      +  normal.dot(vertices[2] - c)**2 \
+      +  normal.dot(vertices[3] - c)**2
+  assert math.fabs(rss - rss2) < 1e-5
+  """
+
+  # Project each vertex into the plane.  Normal must have unit length.
+  vertices_lsq = [(vertices[0] - c) - normal.dot(vertices[0] - c) * normal + c,
+                  (vertices[1] - c) - normal.dot(vertices[1] - c) * normal + c,
+                  (vertices[2] - c) - normal.dot(vertices[2] - c) * normal + c,
+                  (vertices[3] - c) - normal.dot(vertices[3] - c) * normal + c]
+
+  return (vertices_lsq, rss)
+
+
+
+def parse_metrology(path, detector = 'CxiDs1', plot = True, do_diffs = True, old_style_diff_path = None):
+  """Measurement file has all units in micrometers.  The coordinate
+  system is right-handed XXX verify this.  The origin is at the lower,
+  left corner of sensor 1.  XXX Are quadrants still 0, 1, 2, 3 in
+  counter-clockwise order beginning at top left corner?"""
+
+  assert detector in ['CxiDs1', 'XppDs1']
+
+  import re
+
+  # Regular expressions for the four kinds of lines that may appear in
+  # the metrology definition (XXX measurement file?).  As an
+  # extension, everything following a hash mark is ignored.
+  # Continuation lines (i.e. backslash preceding a newline) are not
+  # permitted.
+  pattern_blank = \
+      re.compile(r'^\s*(#.*)?$')
+  pattern_quadrant = \
+      re.compile(r'^\s*[Qq][Uu][Aa][Dd]\s+\d+\s*(#.*)?$')
+  pattern_sensor = \
+      re.compile(r'^\s*[Ss][Ee][Nn][Ss][Oo][Rr]\s+[Xx]\s+[Yy]\s+[Zz]\s*(#.*)?$')
+  pattern_sxyz = \
+      re.compile(r'^\s*\d+\s+[+-]?\d+\s+[+-]?\d+\s+[+-]?\d+\s*(#.*)?$')
+
+  # Parse the file into dict of dict of four-tuples, indexed by
+  # quadrant indices and sensor indices, respectively.
+  quadrants = {}
+  stream = open(path, 'r')
+  for line in stream.readlines():
+    if pattern_blank.match(line) or pattern_sensor.match(line):
+      pass
+
+    elif pattern_quadrant.match(line):
+      q = int(line.split()[1])
+
+    elif pattern_sxyz.match(line):
+      if 'q' not in locals():
+        raise RuntimeError("Unknown quadrant for sensor")
+
+      (s, x, y, z) = [int(i) for i in line.split()[0:4]]
+      p = matrix.col((x, y, z))
+      if q in quadrants:
+        if s in quadrants[q]:
+          raise RuntimeError("Multiple definitions for sensor")
+        quadrants[q][s] = p
+      else:
+        quadrants[q] = {s: p}
+
+    else:
+      raise RuntimeError("Syntax error")
+  stream.close()
+
+  if plot:
+    def center(coords):
+      """ Returns the average of a list of vectors
+      @param coords List of vectors to return the center of
+      """
+      for c in coords:
+        if 'avg' not in locals():
+          avg = c
+        else:
+          avg += c
+      return avg / len(coords)
+
+    print("Showing un-adjusted, parsed metrology")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
+    fig = plt.figure()
+    ax = fig.add_subplot(111, aspect='equal')
+    cents = []
+
+    for q_id, quadrant in six.iteritems(quadrants):
+      s = []
+      for s_id, sensor_pt in six.iteritems(quadrant):
+        s.append(sensor_pt)
+        if len(s) == 4:
+          ax.add_patch(Polygon([p[0:2] for p in s], closed=True, color='green', fill=False, hatch='/'))
+          cents.append(center(s)[0:2])
+          s = []
+
+    for i, c in enumerate(cents):
+      ax.annotate("%d:%d"%(i//8,i%8),c)
+    ax.set_xlim((0, 200000))
+    ax.set_ylim((0, 200000))
+    plt.show()
+
+  # More error checking and resolve out-of-order definitions.
+  l_diff = []
+  s_diff = []
+  l_len = []
+  s_len = []
+  for (q, s) in six.iteritems(quadrants):
+    # Sort the sensor vertices and ensure every sensor has four
+    # vertices.
+    s_sorted = sorted(s.keys())
+    if len(s_sorted) % 4 != 0:
+      raise RuntimeError(
+        "Sensor in quadrant does not have integer number of sensors")
+
+    # Ensure the vertices of the sensor are contiguously numbered.
+    vertices = []
+    for i in range(0, len(s_sorted), 4):
+      if    s_sorted[i] + 1 != s_sorted[i + 1] or \
+            s_sorted[i] + 2 != s_sorted[i + 2] or \
+            s_sorted[i] + 3 != s_sorted[i + 3]:
+        raise RuntimeError(
+          "Sensor vertices in quadrant not contiguously numbered")
+      vertices.append((s[s_sorted[i + 0]],
+                       s[s_sorted[i + 1]],
+                       s[s_sorted[i + 2]],
+                       s[s_sorted[i + 3]]))
+
+    # Organise the quadrant's sensors in XTC stream order.  XXX Open
+    # question: should this be done or not?  Should probably require
+    # the input to be correctly ordered.  In either case, must ensure
+    # first vertex starts a long side.
+    if detector == 'CxiDs1': # XXX This applies to the CXI rear detector as well!
+      quadrants[q] = _order_sensors(vertices)
+
+    elif detector == 'XppDs1':
+      quadrants[q] = {}
+      for i in range(len(vertices)):
+        v = vertices[i]
+        if (v[1] - v[0]).length() < (v[2] - v[1]).length():
+          quadrants[q][i] = (v[1], v[2], v[3], v[0])
+        else:
+          quadrants[q][i] = (v[0], v[1], v[2], v[3])
+
+    # Compute absolute difference between long sides and short sides.
+    for i in range(len(vertices)):
+      v = vertices[i]
+
+      l = ((v[1] - v[0]).length(), (v[3] - v[2]).length())
+      s = ((v[2] - v[1]).length(), (v[0] - v[3]).length())
+      if l[0] + l[1] < s[0] + s[1]:
+        (l, s) = (s, l)
+
+      l_len.extend(l)
+      s_len.extend(s)
+
+      l_diff.append(abs(l[0] - l[1]))
+      s_diff.append(abs(s[0] - s[1]))
+
+  l_diff_stat = flex.mean_and_variance(flex.double(l_diff))
+  s_diff_stat = flex.mean_and_variance(flex.double(s_diff))
+  print("Difference between opposing long  sides: " \
+    "%.3f+/-%.3f [%.3f, %.3f] (N = %d)" % (
+      l_diff_stat.mean(),
+      l_diff_stat.unweighted_sample_standard_deviation(),
+      min(l_diff),
+      max(l_diff),
+      len(l_diff)))
+  print("Difference between opposing short sides: " \
+    "%.3f+/-%.3f [%.3f, %.3f] (N = %d)" % (
+      s_diff_stat.mean(),
+      s_diff_stat.unweighted_sample_standard_deviation(),
+      min(s_diff),
+      max(s_diff),
+      len(s_diff)))
+
+
+  # Get side length distribution parameters with outlier rejection,
+  # set SIDE_MAX_SIGMA = float('inf') (in um) to skip iteration.  For
+  # stability, stop iterating once no more changes.  XXX What
+  # percentage does five sigma correspond to again?
+  SIDE_MAX_SIGMA = float('inf')
+  (l_mu, l_sigma, l_N, s_mu, s_sigma, s_N) = _find_long_short(quadrants)
+  while l_sigma > SIDE_MAX_SIGMA or s_sigma > SIDE_MAX_SIGMA:
+    (l_N_old, s_N_old) = (l_N, s_N)
+    l_int = (l_mu - 5 * l_sigma, l_mu + 5 * l_sigma)
+    s_int = (s_mu - 5 * s_sigma, s_mu + 5 * s_sigma)
+    (l_mu, l_sigma, l_N, s_mu, s_sigma, s_N) = _find_long_short(
+      quadrants, l_int, s_int)
+    if l_N >= l_N_old and s_N >= s_N_old:
+      break
+  print("Long  side: %.3f+/-%.3f [%.3f, %.3f] (N = %d)" % \
+    (l_mu, l_sigma, min(l_len), max(l_len), l_N))
+  print("Short side: %.3f+/-%.3f [%.3f, %.3f] (N = %d)" % \
+    (s_mu, s_sigma, min(s_len), max(s_len), s_N))
+
+  # XXX Would really expect this to be (2 * 194 + 3) / 185 = 2.11, but
+  # it ain't.  Hart et al. (2012) says this should be 20.9 mm by 43.5 mm
+  (r_mu, r_sigma, r_N) = _find_aspect_ratio(quadrants)
+  print("Aspect ratio: %.3f+/-%.3f (N = %d)" % (r_mu, r_sigma, r_N))
+
+
+  # Corrections appear to be necessary for 2011-06-20 Ds1 metrology,
+  # but no the the 2012-11-08 Dsd ditto.
+  corrections = 0
+
+  # For each sensor in each quadrant, determine least-squares fit
+  # rectangle with sides (l_mu, s_mu) to the four vertices.
+  quadrants_lsq = {}
+  for (q, sensors) in six.iteritems(quadrants):
+    print("Q: %1d" % q)
+    quadrants_lsq[q] = {}
+    for (s, vertices) in six.iteritems(sensors):
+
+      #if q != 0 or s != 3:
+      #  continue
+
+      # XXX This should be optional, really!  It's not really
+      # useful (except for quadrant 2, sensor 1).
+
+      vertices_lsq = vertices
+      if corrections > 0:
+        (vertices_lsq, rss) = _fit_plane(vertices)
+        #(vertices_lsq, rss) = _fit_plane(vertices_lsq)
+        #print "corrected out-of-plane r.m.s.d.", math.sqrt(0.25 * rss)
+
+      if corrections > 1:
+        (vertices_lsq, rss) = _fit_angles(vertices_lsq)
+        #print "Corrected bad angles r.m.s.d.", math.sqrt(0.25 * rss)
+
+#      (vertices_lsq, rss) = _fit_rectangle(vertices, l_mu, s_mu)
+      (vertices_lsq, rss) = _fit_rectangle(vertices_lsq, l_mu, s_mu)
+      quadrants_lsq[q][s] = vertices_lsq
+      print("Q: %1d S: %1d r.m.s.d. = %8.3f" % (q, s, math.sqrt(0.25 * rss)))
+
+  # XXX What is aspect ratio after fitting rectangles?
+#  (r_mu, r_sigma, r_N) = _find_aspect_ratio(quadrants_lsq)
+#  print "Aspect ratio: %.3f+/-%.3f (N = %d)" % (r_mu, r_sigma, r_N)
+
+  # This is a measure of success.
+  (l_mu, l_sigma, l_N, s_mu, s_sigma, s_N) = _find_long_short(quadrants_lsq)
+  print("Long  side: %.3f+/-%.3f (N = %d)\n" \
+      "Short side: %.3f+/-%.3f (N = %d)" % \
+      (l_mu, l_sigma, l_N, s_mu, s_sigma, s_N))
+
+
+  if old_style_diff_path is None:
+    return quadrants_lsq
+
+  ##################################
+  # METROLOGY REFINEMENT ENDS HERE #
+  ##################################
+
+
+  # The rest is mildly cctbx.xfel specific at the moment.  First,
+  # apply transformations: bring to order (slow, fast) <=> (column,
+  # row).  This takes care of quadrant rotations, and projects into
+  # 2D-space.
+  quadrants_trans = {}
+  if detector == 'CxiDs1':
+    # XXX This applies to the CXI rear detector as well!
+    #
+    # There is no global origin for the CSPAD:s at CXI, because all
+    # four quadrants are measured independently.
+    for (q, sensors) in six.iteritems(quadrants_lsq):
+      quadrants_trans[q] = {}
+
+      if q == 0:
+        # Q0:
+        #   x -> -slow
+        #   y -> -fast
+        for (s, vertices) in six.iteritems(sensors):
+          quadrants_trans[q][s] = [matrix.col((-v[0], -v[1]))
+                                   for v in quadrants_lsq[q][s]]
+      elif q == 1:
+        # Q1:
+        #   x -> +fast
+        #   y -> -slow
+        for (s, vertices) in six.iteritems(sensors):
+          quadrants_trans[q][s] = [matrix.col((-v[1], +v[0]))
+                                   for v in quadrants_lsq[q][s]]
+      elif q == 2:
+        # Q2:
+        #   x -> +slow
+        #   y -> +fast
+        for (s, vertices) in six.iteritems(sensors):
+          quadrants_trans[q][s] = [matrix.col((+v[0], +v[1]))
+                                   for v in quadrants_lsq[q][s]]
+      elif q == 3:
+        # Q3:
+        #   x -> -fast
+        #   y -> +slow
+        for (s, vertices) in six.iteritems(sensors):
+          quadrants_trans[q][s] = [matrix.col((+v[1], -v[0]))
+                                   for v in quadrants_lsq[q][s]]
+      else:
+        # NOTREACHED
+        raise RuntimeError(
+          "Detector does not have exactly four quadrants")
+  elif detector == 'XppDs1':
+
+    # The XPP CSPAD has fixed quadrants.  For 2013-01-24 measurement,
+    # they are all defined in a common coordinate system.
+    #
+    #   x -> +fast
+    #   y -> -slow
+    #
+    # Fix the global origin to the center of mass of sensor 1 in the
+    # four quadrants.
+    o = matrix.col((0, 0, 0))
+    N = 0
+    for (q, sensors) in six.iteritems(quadrants_lsq):
+      for v in sensors[1]:
+        o += v
+        N += 1
+    o /= N
+
+    for (q, sensors) in six.iteritems(quadrants_lsq):
+      quadrants_trans[q] = {}
+      for (s, vertices) in six.iteritems(sensors):
+        quadrants_trans[q][s] = [matrix.col((-v[1] - (-o[1]), +v[0] - (+o[0])))
+                                 for v in quadrants_lsq[q][s]]
+  else:
+    raise RuntimeError(
+      "Unknown convention '%s'" % detector)
+
+  # Read old-style metrology.
+  from xfel.cxi.cspad_ana.parse_calib import calib2sections
+  calib_dir = old_style_diff_path
+
+  sections = calib2sections(calib_dir)
+
+  aa_new = []
+
+  # Now working with (slow, fast) in 2D.  Enforce right angles and
+  # integer pixel positions.  Temporary thingy: output the vertices in
+  # Q0 convention to stdout.  Scale factor (micrometers per pixel).
+  if plot:
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
+    fig = plt.figure()
+    ax = fig.add_subplot(111, aspect='equal')
+
+  pixel_size = 109.92 # Correct pixel size at 20 degrees (Hart et al., 2012).
+  corrections = {}
+
+  # XXX Whoa!!  Either (1, 1) or (1, -1), possibly (-1, 1).
+  sign_hack_s = (1, 1)
+  sign_hack_l = sign_hack_s
+
+  for (q, sensors) in six.iteritems(quadrants_trans):
+    corrections[q] = {}
+
+    # Figure out quadrant offset from old-style data.  Get bottom ASIC
+    # of sensor 1.  Lower right corner of all the unrotated quadrants
+    # is always origin.  XXX This is really a bunch of
+    # magic-number-hacks for February 2013 Dsd to make things look
+    # nice--we don't know exactly where the ASIC corner is with
+    # respect to the nearest measurement point.
+    offset = (0, 0)
+    c = sections[q][1].corners_asic()[0]
+
+    if detector == 'CxiDs1':
+      if q == 0:
+        offset = (c[2] + 2, c[3] + 3)
+      elif q == 1:
+        offset = (c[2] + 3, c[1] - 3)
+      elif q == 2:
+        offset = (c[0] - 3, c[1] - 2)
+      elif q == 3:
+        offset = (c[0] - 3, c[3] + 3)
+
+    for (s, vertices) in six.iteritems(sensors):
+      corrections[q][s] = {}
+
+      # Compute differences against old-style metrology.
+      corners_old = sections[q][s].corners_asic()
+
+      # l is the unit vector oriented along the sensor's long side
+      # (from the first ASIC to the second).  ns will be the unit
+      # vector oriented along the sensor's short side.  XXX Should
+      # this reordering have been resolved above?  The sensor rotation
+      # is *very* poorly defined at the moment!  Sensors 6 and 7 do
+      # not follow the pattern!
+#      if s == 6 or s == 7:
+#        l = (vertices[0] - vertices[1]).normalize()
+#      else:
+#        l = (vertices[1] - vertices[0]).normalize()
+
+      l = (vertices[1] - vertices[0]).normalize()
+      if   q == 0 and s in [0, 1]       or \
+           q == 2 and s in [4, 5]       or \
+           q == 3 and s in [2, 3, 6, 7]:
+        # l should point in -slow direction
+        if l.elems[0] > 0:
+          l *= -1
+      elif q == 0 and s in [2, 3, 6, 7] or \
+           q == 1 and s in [0, 1]       or \
+           q == 3 and s in [4, 5]:
+        # l should point in +fast direction
+        if l.elems[1] < 0:
+          l *= -1
+      elif q == 0 and s in [4, 5]       or \
+           q == 1 and s in [2, 3, 6, 7] or \
+           q == 2 and s in [0, 1]:
+        # l should point in +slow direction
+        if l.elems[0] < 0:
+          l *= -1
+      elif q == 1 and s in [4, 5]       or \
+           q == 2 and s in [2, 3, 6, 7] or \
+           q == 3 and s in [0, 1]:
+        # l should point in -fast direction
+        if l.elems[1] > 0:
+          l *= -1
+      else:
+        # NOTREACHED
+        raise RuntimeError(
+          "Unknown direction for sensor %d in quadrant %d" % (s, q))
+
+      # Force l to right angle
+      if l.elems[0] < -0.5:
+        l = matrix.col((-1, 0))
+      elif l.elems[0] > +0.5:
+        l = matrix.col((+1, 0))
+      elif l.elems[1] < -0.5:
+        l = matrix.col((0, -1))
+      elif l.elems[1] > +0.5:
+        l = matrix.col((0, +1))
+      else:
+        print("This should not happen!")
+
+      # According to Henrik Lemke, the XPP detector is actually
+      # rotated by 180 degrees with respect to the optical metrology
+      # measurements.
+      if detector == 'XppDs1':
+        l *= -1
+        for i in range(len(vertices)):
+          vertices[i] *= -1
+
+#      print "Quadrant %d sensor %d vector l [% 3.2f, % 3.2f]" % \
+#        (q, s, l.elems[0], l.elems[1])
+
+      # m is the 2D center of mass, in units of pixels.  XXX With the
+      # most recent change, c is no longer used?  Done to ensure
+      # ASIC:s on sensor align, and three-pixel gap is correct (even
+      # though rotations are completely discarded).
+      m = 0.25 * (vertices[0] +
+                  vertices[1] +
+                  vertices[2] +
+                  vertices[3]) / pixel_size
+
+      if abs(l.elems[0]) > abs(l.elems[1]):
+        # Sensor is standing up.
+
+        # First ASIC, now in units of pixels.  XXX Note, no longer
+        # considering center of pixels.  Pixel coordinate is at top
+        # left corner of pixel?  XXX Note: this aint't always the top
+        # or the bottom ASIC.
+        c = m - (194 + 3) / 2 * l
+        corners_new = [
+          int(math.floor(c.elems[0] - (194 - 1) / 2)) + offset[0],
+          int(math.floor(c.elems[1] - (185 - 1) / 2)) + offset[1],
+          int(math.ceil( c.elems[0] + (194 - 1) / 2)) + offset[0],
+          int(math.ceil( c.elems[1] + (185 - 1) / 2)) + offset[1]]
+        assert  corners_new[2] - corners_new[0] == 194 \
+            and corners_new[3] - corners_new[1] == 185
+
+        # XXX Sign of correction!
+        corrections_tl = [sign_hack_s[0] * (corners_new[0] - corners_old[0][0]),
+                          sign_hack_s[1] * (corners_new[1] - corners_old[0][1])]
+        corrections_br = [sign_hack_s[0] * (corners_new[2] - corners_old[0][2]),
+                          sign_hack_s[1] * (corners_new[3] - corners_old[0][3])]
+        assert corrections_tl == corrections_br # XXX for test
+        corrections[q][s][0] = corrections_tl
+
+        if q == 0 and s == 0:
+          print("HATTNE diag PRUTT #0", corrections_tl)
+
+        if plot:
+          v_new = ((corners_new[0], corners_new[1]),
+                   (corners_new[2], corners_new[1]),
+                   (corners_new[2], corners_new[3]),
+                   (corners_new[0], corners_new[3]))
+          v_old = ((corners_old[0][0], corners_old[0][1]),
+                   (corners_old[0][2], corners_old[0][1]),
+                   (corners_old[0][2], corners_old[0][3]),
+                   (corners_old[0][0], corners_old[0][3]))
+          ax.add_patch(Polygon(
+              v_new, closed=True, color='green', fill=False, hatch='/'))
+          ax.add_patch(Polygon(
+              v_old, closed=True, color='red', fill=False))
+
+          aa_new += [corners_new[0], corners_new[1],
+                     corners_new[2], corners_new[3]]
+
+        # Second ASIC, now in units of pixels.  XXX Note: this aint't
+        # always the top or the bottom ASIC.
+
+        c = m + (194 + 3) / 2 * l
+        corners_new = [
+          int(math.floor(c.elems[0] - (194 - 1) / 2)) + offset[0],
+          int(math.floor(c.elems[1] - (185 - 1) / 2)) + offset[1],
+          int(math.ceil( c.elems[0] + (194 - 1) / 2)) + offset[0],
+          int(math.ceil( c.elems[1] + (185 - 1) / 2)) + offset[1]]
+        assert  corners_new[2] - corners_new[0] == 194 \
+            and corners_new[3] - corners_new[1] == 185
+
+        # XXX Sign of correction!
+        corrections_tl = [sign_hack_s[0] * (corners_new[0] - corners_old[1][0]),
+                          sign_hack_s[1] * (corners_new[1] - corners_old[1][1])]
+        corrections_br = [sign_hack_s[0] * (corners_new[2] - corners_old[1][2]),
+                          sign_hack_s[1] * (corners_new[3] - corners_old[1][3])]
+        assert corrections_tl == corrections_br # XXX for test
+        corrections[q][s][1] = corrections_tl
+
+        if q == 0 and s == 0:
+          print("HATTNE diag PRUTT #1", corrections_tl)
+
+
+        if plot:
+          v_new = ((corners_new[0], corners_new[1]),
+                   (corners_new[2], corners_new[1]),
+                   (corners_new[2], corners_new[3]),
+                   (corners_new[0], corners_new[3]))
+          v_old = ((corners_old[1][0], corners_old[1][1]),
+                   (corners_old[1][2], corners_old[1][1]),
+                   (corners_old[1][2], corners_old[1][3]),
+                   (corners_old[1][0], corners_old[1][3]))
+          ax.add_patch(Polygon(
+              v_new, closed=True, color='green', fill=False, hatch='/'))
+          ax.add_patch(Polygon(
+              v_old, closed=True, color='red', fill=False))
+
+          aa_new += [corners_new[0], corners_new[1],
+                     corners_new[2], corners_new[3]]
+
+      else:
+        # Sensor is laying down.
+
+        # First ASIC (not necessarily the left), now in units of
+        # pixels .
+        c = m - (194 + 3) / 2 * l
+        corners_new = [
+          int(math.floor(c.elems[0] - (185 - 1) / 2)) + offset[0],
+          int(math.floor(c.elems[1] - (194 - 1) / 2)) + offset[1],
+          int(math.ceil( c.elems[0] + (185 - 1) / 2)) + offset[0],
+          int(math.ceil( c.elems[1] + (194 - 1) / 2)) + offset[1]]
+        assert  corners_new[2] - corners_new[0] == 185 \
+            and corners_new[3] - corners_new[1] == 194
+
+        # XXX Sign of correction!
+        corrections_tl = [sign_hack_l[0] * (corners_new[0] - corners_old[0][0]),
+                          sign_hack_l[1] * (corners_new[1] - corners_old[0][1])]
+        corrections_br = [sign_hack_l[0] * (corners_new[2] - corners_old[0][2]),
+                          sign_hack_l[1] * (corners_new[3] - corners_old[0][3])]
+        assert corrections_tl == corrections_br # XXX for test
+        corrections[q][s][0] = corrections_tl
+
+#        if q == 0 and s == 6:
+#          print "HATTNE diag #0", corrections_tl
+
+        if plot:
+          v_new = ((corners_new[0], corners_new[1]),
+                   (corners_new[2], corners_new[1]),
+                   (corners_new[2], corners_new[3]),
+                   (corners_new[0], corners_new[3]))
+          v_old = ((corners_old[0][0], corners_old[0][1]),
+                   (corners_old[0][2], corners_old[0][1]),
+                   (corners_old[0][2], corners_old[0][3]),
+                   (corners_old[0][0], corners_old[0][3]))
+          ax.add_patch(Polygon(
+              v_new, closed=True, color='green', fill=False, hatch='/'))
+          ax.add_patch(Polygon(
+              v_old, closed=True, color='red', fill=False))
+
+          aa_new += [corners_new[0], corners_new[1],
+                     corners_new[2], corners_new[3]]
+
+        # Second ASIC (not necessarily the right), now in units of
+        # pixels.
+        c = m + (194 + 3) / 2 * l
+        corners_new = [
+          int(math.floor(c.elems[0] - (185 - 1) / 2)) + offset[0],
+          int(math.floor(c.elems[1] - (194 - 1) / 2)) + offset[1],
+          int(math.ceil( c.elems[0] + (185 - 1) / 2)) + offset[0],
+          int(math.ceil( c.elems[1] + (194 - 1) / 2)) + offset[1]]
+        assert  corners_new[2] - corners_new[0] == 185 \
+            and corners_new[3] - corners_new[1] == 194
+
+        # XXX Sign of correction!
+        corrections_tl = [sign_hack_l[0] * (corners_new[0] - corners_old[1][0]),
+                          sign_hack_l[1] * (corners_new[1] - corners_old[1][1])]
+        corrections_br = [sign_hack_l[0] * (corners_new[2] - corners_old[1][2]),
+                          sign_hack_l[1] * (corners_new[3] - corners_old[1][3])]
+        assert corrections_tl == corrections_br # XXX for test
+        corrections[q][s][1] = corrections_tl
+
+#        if q == 0 and s == 6:
+#          print "HATTNE diag #1", corrections_tl
+
+        if plot:
+          v_new = ((corners_new[0], corners_new[1]),
+                   (corners_new[2], corners_new[1]),
+                   (corners_new[2], corners_new[3]),
+                   (corners_new[0], corners_new[3]))
+          v_old = ((corners_old[1][0], corners_old[1][1]),
+                   (corners_old[1][2], corners_old[1][1]),
+                   (corners_old[1][2], corners_old[1][3]),
+                   (corners_old[1][0], corners_old[1][3]))
+          ax.add_patch(Polygon(
+              v_new, closed=True, color='green', fill=False, hatch='/'))
+          ax.add_patch(Polygon(
+              v_old, closed=True, color='red', fill=False))
+
+          aa_new += [corners_new[0], corners_new[1],
+                     corners_new[2], corners_new[3]]
+
+  if plot:
+    #ax.set_xlim((0, 1850))
+    #ax.set_ylim((0, 1850))
+    ax.set_xlim((-1000, 2000))
+    ax.set_ylim((-1000, 2000))
+    plt.show()
+
+  # Build list and output differences to old-style metrology.
+  corrections_list = flex.int(4 * 8 * 2 * 2)
+  for (q, sensors) in six.iteritems(corrections):
+    for (s, correction) in six.iteritems(sensors):
+      corrections_list[q * 8 * 2 * 2 + s * 2 * 2 + 0 * 2 + 0] = correction[0][0]
+      corrections_list[q * 8 * 2 * 2 + s * 2 * 2 + 0 * 2 + 1] = correction[0][1]
+      corrections_list[q * 8 * 2 * 2 + s * 2 * 2 + 1 * 2 + 0] = correction[1][0]
+      corrections_list[q * 8 * 2 * 2 + s * 2 * 2 + 1 * 2 + 1] = correction[1][1]
+  print("corrected_auxiliary_translations =", list(corrections_list))
+
+  for i in range(len(aa_new)):
+    if detector == 'XppDs1':
+      # XXX Not actually tested for XPP.  XXX magic number, again!
+      aa_new[i] += 1765 // 2
+
+    assert aa_new[i] >= 0 and aa_new[i] <= 1765
+
+  print("new active areas", len(aa_new), aa_new)
+
+
+  if plot:
+    print("Showing active areas")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
+    fig = plt.figure()
+    ax = fig.add_subplot(111, aspect='equal')
+    cents = []
+
+    for item in [(aa_new[(i*4)+0],
+                 aa_new[(i*4)+1],
+                 aa_new[(i*4)+2],
+                 aa_new[(i*4)+3]) for i in range(64)]:
+      x1,y1,x2,y2 = item
+      tile = [(x1,y1),(x2,y1),(x2,y2),(x1,y2)]
+      ax.add_patch(Polygon(tile, closed=True, color='green', fill=False, hatch='/'))
+      cents.append(center([matrix.col(p) for p in tile])[0:2])
+
+    for i, c in enumerate(cents):
+      ax.annotate(i,c)
+    ax.set_xlim((0, 2000))
+    ax.set_ylim((0, 2000))
+    plt.show()
+
+
+  return quadrants_lsq
+
+
+# phenix.python flatfile.py 2011-08-10-Metrology.txt
+if __name__ == '__main__':
+  import libtbx.load_env
+  assert len(sys.argv[1:]) == 1
+  parse_metrology(sys.argv[1],
+                  old_style_diff_path=libtbx.env.find_in_repositories("xfel/metrology/CSPad/run4/CxiDs1.0_Cspad.0"))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/legacy_scale/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("xfel_legacy_scale_ext")
+from xfel_legacy_scale_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/mark0.py
+"""Main idea:  having already done
+      1) indexing & integration --> allresults
+      2) metrology assessment --> mysql store tag_spotfinder
+      3) cxi.merge --> mysql store tag_frame
+   ...now do a detailed metrology refinement to simultaneously optimize
+   metrology and crystal orientation.
+"""
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from cctbx.array_family import flex
+import iotbx.phil
+import math
+from scitbx import matrix
+from xfel import get_radial_tangential_vectors
+from xfel.merging.database.merging_database import manager
+from xfel import correction_vector_store
+from libtbx.development.timers import Timer
+
+from xfel.merging.database.merging_database import mysql_master_phil
+from six.moves import zip
+master_phil="""
+bravais_setting_id = None
+  .type = int
+  .help = ID number for the Bravais setting of interest (Labelit format).  eg, 1=triclinic, 12=hexagonal
+show_plots = False
+  .type = bool
+  .help = Show graphical plots using matplotlib
+show_consistency = False
+  .type = bool
+  .help = Run the consistency controls
+effective_tile_boundaries = None
+  .type = ints
+  .help = effective integer tile boundaries applied to convert xtc stream to pickled image files. Must be 64 * 4 integers.
+max_frames = 0
+  .type = int
+  .help = for the SQL query, maximum number of frames to return (generally for development testing only). 0->return all frames
+""" + mysql_master_phil
+
+def consistency_controls(DATA,params,annotate=False):#DATA is an instance of correction_vectors()
+  PIXEL_SZ = 0.11 # mm/pixel
+  CART = manager(params)
+  db = CART.connection()
+  cursor = db.cursor()
+
+  for iframe in range(len(DATA.FRAMES["frame_id"])):
+    frame = DATA.FRAMES["frame_id"][iframe]
+    selection = (DATA.frame_id == frame)
+    match_count = selection.count(True)
+    if match_count>0:
+      print(frame, DATA.frame_id.select(selection)[0], end=' ') # frame number
+      frame_beam_x = DATA.FRAMES["beam_x"][iframe]
+      obs_beam_x = DATA.refined_cntr_x.select(selection)[0] * PIXEL_SZ
+      print("%7.3f"%(frame_beam_x - obs_beam_x), end=' ') # agreement of beam_x in mm
+      frame_beam_y = DATA.FRAMES["beam_y"][iframe]
+      obs_beam_y = DATA.refined_cntr_y.select(selection)[0] * PIXEL_SZ
+      print("%7.3f"%(frame_beam_y - obs_beam_y), end=' ') # agreement of beam_y in mm
+      #...The labelit-refined direct beam position agrees with CV_listing logfile output
+
+      file_name = DATA.FRAMES["unique_file_name"][iframe]
+
+      cursor.execute("SELECT COUNT(*) FROM %s_observation WHERE frame_id_0_base=%d-1;"%(params.mysql.runtag,frame))
+      integrated_observations = cursor.fetchall()[0][0]
+      print("%4d <? %4d"%(match_count,integrated_observations),file_name, end=' ')
+
+      cursor.execute(
+        """SELECT t1.detector_x, t1.detector_y, t1.original_h, t1.original_k, t1.original_l
+           FROM %s_observation AS t1
+           WHERE t1.frame_id_0_base=%d-1
+        """%(
+           params.mysql.runtag,frame))
+      fetched = cursor.fetchall()
+      detector_x = [a[0] for a in fetched]
+      detector_y = [a[1] for a in fetched]
+      spotfx = DATA.spotfx.select(selection)
+      spotfy = DATA.spotfy.select(selection)
+      spotcx = DATA.spotcx.select(selection)
+      spotcy = DATA.spotcy.select(selection)
+      hkl = DATA.HKL.select(selection)
+      integrated_hkl = [(int(a[2]),int(a[3]),int(a[4])) for a in fetched]
+
+
+      # Now compute the displacement between integrated and calculated spot position.
+      # presumably tells us about the empirical nudge factor.
+      sq_displace = flex.double()
+      sq_cv = flex.double()
+      for icalc,calc_hkl in enumerate(hkl):
+        try:
+          jinteg = integrated_hkl.index(calc_hkl)
+          sq_displace.append(  (spotcx[icalc]-detector_x[jinteg])**2 + (spotcy[icalc]-detector_y[jinteg])**2 )
+        except ValueError: pass
+        sq_cv.append( (spotcx[icalc]-spotfx[icalc])**2 + (spotcy[icalc]-spotfy[icalc])**2 )
+      if len(sq_displace) > 2:
+        print("rmsd=%7.3f"%math.sqrt(flex.mean(sq_displace)), end=' ')
+      else:
+        print("rmsd    None", end=' ')
+      rmsd_cv = math.sqrt(flex.mean(sq_cv))
+      print("cv%7.3f"%rmsd_cv)
+
+      if params.show_plots is True:
+        import os
+        os.environ["BOOST_ADAPTBX_FPE_DEFAULT"]="1"
+        from matplotlib import pyplot as plt
+        plt.figure(figsize=(9,9))
+        plt.plot(spotcx,spotcy,
+          markerfacecolor="g",marker=".",markeredgewidth=0,linestyle="None")
+        plt.plot(spotfx, spotfy,
+          markerfacecolor="r",marker=".",markeredgewidth=0,linestyle="None")
+        plt.plot(detector_x,detector_y,
+          markerfacecolor="b",marker=".",markeredgewidth=0,linestyle="None")
+        if annotate:
+          for idx in range(len(spotfx)):
+            plt.annotate("%s"%str(hkl[idx]), xy=(spotfx[idx],spotfy[idx]),
+                         xytext=None, xycoords="data", textcoords="data", arrowprops=None,
+                         color="red",size=8)
+            plt.annotate("%s"%str(hkl[idx]), xy=(spotcx[idx],spotcy[idx]),
+                         xytext=None, xycoords="data", textcoords="data", arrowprops=None,
+                         color="green",size=8)
+          for idx in range(len(fetched)):
+            plt.annotate("%s"%str(integrated_hkl[idx]), xy=(detector_x[idx],detector_y[idx]),
+                         xytext=None, xycoords="data", textcoords="data", arrowprops=None,
+                         color="blue",size=8)
+        plt.axes().set_aspect("equal")
+        plt.show()
+        #...confirms that integrated spot position (observation table) aligns with
+        #   spotfinder spot position (spotfinder table) in both approximate position
+        #   (match is not exact due to empirical positional nudge factor that is applied
+        #   after spotfinder table and before observation table)
+        #   and Miller index tag.
+
+class correction_vectors(correction_vector_store):
+
+ def get_obs_from_mysql(self,params):
+   T = Timer("database")
+   CART = manager(params)
+   db = CART.connection()
+   cursor = db.cursor()
+   cursor.execute("SELECT DISTINCT frame_id FROM %s_spotfinder;"%params.mysql.runtag)
+   AAA = cursor.fetchall()
+   print("From the CV log file text output there are %d distinct frames with spotfinder spots"%len(AAA))
+
+   if params.max_frames==0:
+     cursor.execute("SELECT * FROM %s_spotfinder;"%params.mysql.runtag)
+   else:
+     cursor.execute("SELECT * FROM %s_spotfinder WHERE frame_id<%d;"%(
+       params.mysql.runtag, params.max_frames))
+   return cursor.fetchall()
+
+ def get_frames_from_mysql(self,params):
+   T = Timer("frames")
+   CART = manager(params)
+   db = CART.connection()
+   cursor = db.cursor()
+   cursor.execute("SELECT * FROM %s_frame;"%params.mysql.runtag)
+   ALL = cursor.fetchall()
+   from cctbx.crystal_orientation import crystal_orientation
+   orientations = [crystal_orientation(
+     (a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],a[16]),False) for a in ALL]
+   return dict( frame_id = flex.int( [a[0] for a in ALL] ),
+               wavelength = flex.double( [a[1] for a in ALL] ),
+                   beam_x = flex.double( [a[2] for a in ALL] ),
+                   beam_y = flex.double( [a[3] for a in ALL] ),
+                 distance = flex.double( [a[4] for a in ALL] ),
+              orientation = orientations,
+          rotation100_rad = flex.double([a[17] for a in ALL] ),
+          rotation010_rad = flex.double([a[18] for a in ALL] ),
+          rotation001_rad = flex.double([a[19] for a in ALL] ),
+       half_mosaicity_deg = flex.double([a[20] for a in ALL] ),
+              wave_HE_ang = flex.double([a[21] for a in ALL] ),
+              wave_LE_ang = flex.double([a[22] for a in ALL] ),
+          domain_size_ang = flex.double([a[23] for a in ALL] ),
+         unique_file_name = [a[24] for a in ALL],
+  )
+
+ def delrsq_functional(self,calcx,calcy):
+   delx = calcx - self.spotfx
+   dely = calcy - self.spotfy
+   delrsq = delx*delx + dely*dely
+   self.last_functional = delrsq
+   return delrsq
+
+ INCIDENT_BEAM = (0.,0.,-1.)
+ DETECTOR_NORMAL = (0.,0.,-1.)
+
+ @staticmethod
+ def standalone_check(self,setting_id,entry,d,cutoff):
+
+    wavelength = (d['wavelength'])
+    beam_x = (d['xbeam'])
+    beam_y = (d['ybeam'])
+    distance = (d['distance'])
+    orientation = (d['current_orientation'][0])
+
+    print("testing frame....................",entry)
+
+    for cv in d['correction_vectors'][0]:
+
+      from rstbx.bandpass import use_case_bp3, parameters_bp3
+      from scitbx.matrix import col
+      from math import hypot, pi
+      indices = flex.miller_index()
+      indices.append(cv['hkl'])
+      parameters = parameters_bp3(
+        indices=indices,
+        orientation=orientation,
+        incident_beam=col(self.INCIDENT_BEAM),
+        packed_tophat=col((1.,1.,0.)),
+        detector_normal=col(self.DETECTOR_NORMAL),
+        detector_fast=col((0.,1.,0.)),detector_slow=col((1.,0.,0.)),
+        pixel_size=col((0.11,0.11,0)), # XXX hardcoded, twice!
+        pixel_offset=col((0.,0.,0.0)),
+        distance=distance,
+        detector_origin=col((-beam_x,-beam_y,0))
+      )
+      ucbp3 = use_case_bp3(parameters=parameters)
+      ucbp3.set_active_areas(self.tiles)
+      integration_signal_penetration=0.5
+      ucbp3.set_sensor_model(thickness_mm=0.5,
+                             mu_rho=8.36644, # CS_PAD detector at 1.3 Angstrom
+                             signal_penetration=integration_signal_penetration)
+
+      ucbp3.set_mosaicity(0.)
+      ucbp3.set_bandpass(wavelength,
+                         wavelength)
+      ucbp3.set_orientation(orientation)
+      ucbp3.set_domain_size(5000.)
+
+      ucbp3.picture_fast_slow_force()
+
+      ucbp3_prediction = 0.5 * (ucbp3.hi_E_limit + ucbp3.lo_E_limit)
+      diff = hypot(ucbp3_prediction[0][0] - cv['predspot'][1],
+                   ucbp3_prediction[0][1] - cv['predspot'][0])
+
+      if diff > cutoff:
+        print("Correction vector too long: %6.2f pixels; ignore image or increase diff_cutoff (current value=%5.1f)"%(diff,cutoff))
+        return False
+
+      # For some reason, the setting_id is recorded for each
+      # correction vector as well--assert that it is consistent.
+      #if cv['setting_id'] != setting_id:
+      #  print "HATTNE BIG SLIPUP 2"
+      if not cv['setting_id'] == setting_id: return False
+
+      # For each observed spot, figure out what tile it is on, and
+      # store in itile.  XXX This is probably not necessary here, as
+      # correction_vector_store::register_line() does the same thing.
+      obstile = None
+      for i in range(0, len(self.tiles), 4):
+        if     cv['obsspot'][0] >= self.tiles[i + 0] \
+           and cv['obsspot'][0] <= self.tiles[i + 2] \
+           and cv['obsspot'][1] >= self.tiles[i + 1] \
+           and cv['obsspot'][1] <= self.tiles[i + 3]:
+          obstile = i
+          break
+      if obstile is None: return False
+
+      spotfx = (cv['obsspot'][0])
+      spotfy = (cv['obsspot'][1])
+      spotcx = (cv['predspot'][0])
+      spotcy = (cv['predspot'][1])
+      correction_vector_x = spotcx - spotfx
+      correction_vector_y = spotcy - spotfy
+      length = hypot(correction_vector_x, correction_vector_y)
+      if length > 8:
+        print("LENGTH SLIPUP",length)
+        return False
+
+    return True
+
+ def read_data(self,params):
+  from os import listdir, path
+  from libtbx import easy_pickle
+  from cctbx.crystal_orientation import crystal_orientation # XXX Necessary later?
+
+  #directory = "/net/viper/raid1/hattne/L220/merging/05fs"
+  #directory = "/reg/d/psdm/cxi/cxib8113/scratch/sauter/metrology/008"
+  #directory = "/reg/d/psdm/xpp/xpp74813/scratch/sauter/metrology/204"
+  #directory = "/net/viper/raid1/hattne/L220/merging/test"
+  #directory = "/reg/d/psdm/xpp/xppb4313/scratch/brewster/results/r0243/003/integration"
+  #directory = "/reg/d/psdm/cxi/cxic0614/scratch/sauter/metrology/004/integration"
+  #directory = "/reg/d/psdm/cxi/cxic0614/scratch/sauter/metrology/150/integration"
+  #directory = "/reg/d/psdm/cxi/cxic0614/scratch/sauter/metrology/152/integration"
+  directory = "/reg/d/psdm/cxi/cxib6714/scratch/sauter/metrology/009/integration"
+  dir_glob = "/reg/d/psdm/CXI/cxib6714/scratch/sauter/results/r*/009/integration"
+  dir_glob = "/reg/d/psdm/CXI/cxib6714/scratch/sauter/results/r*/801/integration"
+  dir_glob = "/reg/d/psdm/xpp/xpp74813/scratch/sauter/r*/216/integration"
+  dir_glob = "/reg/d/psdm/xpp/xpp74813/ftc/sauter/result/r*/104/integration"
+  dir_glob = "/reg/d/psdm/cxi/cxid9114/scratch/sauter/metrology/001/integration"
+  dir_glob = "/reg/d/psdm/CXI/cxid9114/ftc/brewster/results/r00[3-4]*/003/integration"
+  dir_glob = "/reg/d/psdm/CXI/cxid9114/ftc/sauter/results/r00[3-4]*/004/integration"
+  dir_glob = "/reg/d/psdm/CXI/cxid9114/ftc/sauter/results/r00[3-4]*/006/integration"
+  dir_list = ["/reg/d/psdm/CXI/cxid9114/ftc/brewster/results/r%04d/006/integration"%seq for seq in range(95,115)]
+  dir_list = ["/reg/d/psdm/CXI/cxid9114/ftc/sauter/results/r%04d/018/integration"%seq for seq in range(102,115)]
+  dir_list = params.data
+
+  T = Timer("populate C++ store with register line")
+
+  itile = flex.int()
+  self.spotfx = flex.double()
+  self.spotfy = flex.double()
+  self.spotcx = flex.double()
+  self.spotcy = flex.double()
+  self.observed_cntr_x = flex.double()
+  self.observed_cntr_y = flex.double()
+  self.refined_cntr_x = flex.double()
+  self.refined_cntr_y = flex.double()
+  self.HKL = flex.miller_index()
+  self.radial = flex.double()
+  self.azimut = flex.double()
+
+  self.FRAMES = dict(
+    frame_id=flex.int(),
+    wavelength=flex.double(),
+    beam_x=flex.double(),
+    beam_y=flex.double(),
+    distance=flex.double(),
+    orientation=[],
+    rotation100_rad=flex.double(),
+    rotation010_rad=flex.double(),
+    rotation001_rad=flex.double(),
+    half_mosaicity_deg=flex.double(),
+    wave_HE_ang=flex.double(),
+    wave_LE_ang=flex.double(),
+    domain_size_ang=flex.double(),
+    unique_file_name=[]
+  )
+
+  self.frame_id = flex.int()
+  import glob
+  #for directory in glob.glob(dir_glob):
+  for directory in dir_list:
+   if self.params.max_frames is not None and len(self.FRAMES['frame_id']) >= self.params.max_frames:
+      break
+   for entry in listdir(directory):
+    tttd = d = easy_pickle.load(path.join(directory, entry))
+
+    # XXX Hardcoded, should honour the phil!  And should be verified
+    # to be consistent for each correction vector later on!
+    #import pdb; pdb.set_trace()
+    setting_id = d['correction_vectors'][0][0]['setting_id']
+
+    #if setting_id != 5:
+    #if setting_id != 12:
+    if setting_id != self.params.bravais_setting_id:
+    #if setting_id != 22:
+      #print "HATTNE BIG SLIPUP 1"
+      continue
+
+    # Assert that effective_tiling is consistent, and a non-zero
+    # multiple of eight (only whole sensors considered for now--see
+    # mark10.fit_translation4.print_table()).  self.tiles is
+    # initialised to zero-length in the C++ code.  XXX Should now be
+    # able to retire the "effective_tile_boundaries" parameter.
+    #
+    # XXX Other checks from correction_vector plot, such as consistent
+    # setting?
+    if hasattr(self, 'tiles') and len(self.tiles) > 0:
+      assert (self.tiles == d['effective_tiling']).count(False) == 0
+    else:
+      assert len(d['effective_tiling']) > 0 \
+        and  len(d['effective_tiling']) % 8 == 0
+      self.tiles = d['effective_tiling']
+
+    if not self.standalone_check(self,setting_id,entry,d,params.diff_cutoff): continue
+
+    # Reading the frame data.  The frame ID is just the index of the
+    # image.
+    self.FRAMES['frame_id'].append(len(self.FRAMES['frame_id']) + 1) # XXX try zero-based here
+    self.FRAMES['wavelength'].append(d['wavelength'])
+    self.FRAMES['beam_x'].append(d['xbeam'])
+    self.FRAMES['beam_y'].append(d['ybeam'])
+    self.FRAMES['distance'].append(d['distance'])
+    self.FRAMES['orientation'].append(d['current_orientation'][0])
+    self.FRAMES['rotation100_rad'].append(0) # XXX FICTION
+    self.FRAMES['rotation010_rad'].append(0) # XXX FICTION
+    self.FRAMES['rotation001_rad'].append(0) # XXX FICTION
+    self.FRAMES['half_mosaicity_deg'].append(0) # XXX FICTION
+#    self.FRAMES['wave_HE_ang'].append(0.995 * d['wavelength']) # XXX FICTION -- what does Nick use?
+#    self.FRAMES['wave_LE_ang'].append(1.005 * d['wavelength']) # XXX FICTION
+    self.FRAMES['wave_HE_ang'].append(d['wavelength'])
+    self.FRAMES['wave_LE_ang'].append(d['wavelength'])
+    self.FRAMES['domain_size_ang'].append(5000) # XXX FICTION
+    self.FRAMES['unique_file_name'].append(path.join(directory, entry))
+
+    print("added frame", self.FRAMES['frame_id'][-1],entry)
+
+
+    for cv in d['correction_vectors'][0]:
+
+      # Try to reproduce every predicition using the model from the
+      # frame -- skip CV if fail.  Could be because of wrong HKL:s?
+      #
+      # Copy these two images to test directory to reproduce:
+      #  int-s01-2011-02-20T21:27Z37.392_00000.pickle
+      #  int-s01-2011-02-20T21:27Z37.725_00000.pickle
+      from rstbx.bandpass import use_case_bp3, parameters_bp3
+      from scitbx.matrix import col
+      from math import hypot, pi
+      indices = flex.miller_index()
+      indices.append(cv['hkl'])
+      parameters = parameters_bp3(
+        indices=indices,
+        orientation=self.FRAMES['orientation'][-1],
+        incident_beam=col(self.INCIDENT_BEAM),
+        packed_tophat=col((1.,1.,0.)),
+        detector_normal=col(self.DETECTOR_NORMAL),
+        detector_fast=col((0.,1.,0.)),detector_slow=col((1.,0.,0.)),
+        pixel_size=col((0.11,0.11,0)), # XXX hardcoded, twice!
+        pixel_offset=col((0.,0.,0.0)),
+        distance=self.FRAMES['distance'][-1],
+        detector_origin=col((-self.FRAMES['beam_x'][-1],
+                             -self.FRAMES['beam_y'][-1],
+                             0))
+      )
+      ucbp3 = use_case_bp3(parameters=parameters)
+      ucbp3.set_active_areas(self.tiles)
+      integration_signal_penetration=0.5
+      ucbp3.set_sensor_model(thickness_mm=0.5,
+                             mu_rho=8.36644, # CS_PAD detector at 1.3 Angstrom
+                             signal_penetration=integration_signal_penetration)
+      half_mosaicity_rad = self.FRAMES['half_mosaicity_deg'][-1] * pi/180.
+      ucbp3.set_mosaicity(half_mosaicity_rad)
+      ucbp3.set_bandpass(self.FRAMES['wave_HE_ang'][-1],
+                         self.FRAMES['wave_LE_ang'][-1])
+      ucbp3.set_orientation(self.FRAMES['orientation'][-1])
+      ucbp3.set_domain_size(self.FRAMES['domain_size_ang'][-1])
+
+      ucbp3.picture_fast_slow_force()
+
+      ucbp3_prediction = 0.5 * (ucbp3.hi_E_limit + ucbp3.lo_E_limit)
+      diff = hypot(ucbp3_prediction[0][0] - cv['predspot'][1],
+                   ucbp3_prediction[0][1] - cv['predspot'][0])
+
+      if diff > self.params.diff_cutoff:
+        print("HATTNE INDEXING SLIPUP")
+        continue
+
+      # For some reason, the setting_id is recorded for each
+      # correction vector as well--assert that it is consistent.
+      #if cv['setting_id'] != setting_id:
+      #  print "HATTNE BIG SLIPUP 2"
+      assert cv['setting_id'] == setting_id
+
+      # For each observed spot, figure out what tile it is on, and
+      # store in itile.  XXX This is probably not necessary here, as
+      # correction_vector_store::register_line() does the same thing.
+      obstile = None
+      for i in range(0, len(self.tiles), 4):
+        if     cv['obsspot'][0] >= self.tiles[i + 0] \
+           and cv['obsspot'][0] <= self.tiles[i + 2] \
+           and cv['obsspot'][1] >= self.tiles[i + 1] \
+           and cv['obsspot'][1] <= self.tiles[i + 3]:
+          obstile = i
+          break
+      assert obstile is not None
+      itile.append(obstile) # XXX unused variable?
+
+      # ID of current frame.
+      self.frame_id.append(self.FRAMES['frame_id'][-1])
+
+      self.spotfx.append(cv['obsspot'][0])
+      self.spotfy.append(cv['obsspot'][1])
+      self.spotcx.append(cv['predspot'][0])
+      self.spotcy.append(cv['predspot'][1])
+
+      self.observed_cntr_x.append(cv['obscenter'][0])
+      self.observed_cntr_y.append(cv['obscenter'][1])
+      self.refined_cntr_x.append(cv['refinedcenter'][0])
+      self.refined_cntr_y.append(cv['refinedcenter'][1])
+
+      self.HKL.append(cv['hkl'])
+
+      self.azimut.append(cv['azimuthal'])
+      self.radial.append(cv['radial'])
+    #print self.FRAMES['frame_id'][-1]
+    # Should honour the max_frames phil parameter
+    #if len(self.FRAMES['frame_id']) >= 1000:
+    if self.params.max_frames is not None and \
+      len(self.FRAMES['frame_id']) >= self.params.max_frames:
+      break
+
+    """
+For 5000 first images:
+STATS FOR TILE 14
+  sel_delx           -6.59755265524 -4.41676757746e-10 5.7773557278
+  sel_dely           -6.30796620634 -8.3053734774e-10 6.3362200841
+  symmetric_offset_x -6.5975526548 -2.73229417105e-15 5.77735572824
+  symmetric_offset_y -6.30796620551 1.16406818748e-15 6.33622008493
+  symmetric rsq      0.000255199593417 2.95803352999 56.1918083904
+  rmsd               1.71989346472
+
+For 10000 first images:
+STATS FOR TILE 14
+  sel_delx           -6.92345292727 6.9094552919e-10 611.497770006
+  sel_dely           -6.39690476093 1.1869355797e-09 894.691806871
+  symmetric_offset_x -6.92345292796 1.28753258216e-14 611.497770005
+  symmetric_offset_y -6.39690476212 -2.10251420168e-15 894.69180687
+  symmetric rsq      1.58067791823e-05 30.3331143761 1174402.952
+  rmsd               5.50755066941
+    """
+
+
+  # This is mark3.fit_translation2.nominal_tile_centers()
+  self.To_x = flex.double(len(self.tiles) // 4)
+  self.To_y = flex.double(len(self.tiles) // 4)
+  for x in range(len(self.tiles) // 4):
+    self.To_x[x] = (self.tiles[4 * x + 0] + self.tiles[4 * x + 2]) / 2
+    self.To_y[x] = (self.tiles[4 * x + 1] + self.tiles[4 * x + 3]) / 2
+
+
+  delx = self.spotcx - self.spotfx
+  dely = self.spotcy - self.spotfy
+  self.delrsq = self.delrsq_functional(calcx = self.spotcx, calcy = self.spotcy)
+
+  self.initialize_per_tile_sums()
+  self.tile_rmsd = [0.]*(len(self.tiles) // 4)
+  self.asymmetric_tile_rmsd = [0.]*(len(self.tiles) // 4)
+
+
+  # XXX Is (beam1x, beam1y) really observed center and (beamrx,
+  # beamry) refined center?  Nick thinks YES!
+  #
+  #itile2 = flex.int([self.register_line(a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9]) for a in ALL])
+  itile2 = flex.int(
+    [self.register_line(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7])
+     for a in zip(self.observed_cntr_x, self.observed_cntr_y,
+                  self.refined_cntr_x, self.refined_cntr_y,
+                  self.spotfx, self.spotfy,
+                  self.spotcx, self.spotcy)])
+  if params.show_consistency: consistency_controls(self,params)
+
+  T = Timer("calcs based on C++ store")
+  self.selections = []
+  self.selection_counts = []
+  for x in range(len(self.tiles) // 4):
+      if self.tilecounts[x]==0:
+        self.radii[x] = 0
+        self.mean_cv[x] = matrix.col((0, 0))
+      else:
+        self.radii[x]/=self.tilecounts[x]
+        self.mean_cv[x] = matrix.col(self.mean_cv[x]) / self.tilecounts[x]
+
+      selection = (self.master_tiles == x)
+      self.selections.append(selection)
+      selected_cv = self.master_cv.select(selection)
+      self.selection_counts.append(selected_cv.size()) # for curvatures
+
+      if len(selected_cv)>0:
+        self.asymmetric_tile_rmsd[x] = math.sqrt(flex.mean (self.delrsq.select(selection)))
+        sel_delx = delx.select(selection)
+        sel_dely = dely.select(selection)
+        symmetric_offset_x = sel_delx - self.mean_cv[x][0]
+        symmetric_offset_y = sel_dely - self.mean_cv[x][1]
+        symmetricrsq = symmetric_offset_x*symmetric_offset_x + symmetric_offset_y*symmetric_offset_y
+
+        self.tile_rmsd[x] =math.sqrt(flex.mean(symmetricrsq))
+      else:
+        self.asymmetric_tile_rmsd[x]=0.
+        self.tile_rmsd[x]=0.
+
+  self.overall_N = flex.sum(flex.int( [int(t) for t in self.tilecounts] ))
+  self.overall_cv = matrix.col(self.overall_cv)/self.overall_N
+  self.overall_rmsd = math.sqrt( self.sum_sq_cv / self.overall_N )
+
+  # master weights for mark3 calculation takes 0.3 seconds
+  self.master_weights = flex.double(len(self.master_tiles))
+  self.largest_sample = max(self.tilecounts)
+  for x in range(len(self.tiles) // 4):
+    self.master_weights.set_selected( self.selections[x], self.tile_weight(x))
+
+  print("AFTER read     cx,     cy", flex.mean(self.spotcx), flex.mean(self.spotcy))
+  print("AFTER read     fx,     fy", flex.mean(self.spotfx), flex.mean(self.spotfy))
+  print("AFTER read rmsd_x, rmsd_y", math.sqrt(flex.mean(flex.pow(self.spotcx - self.spotfx, 2))), \
+                                     math.sqrt(flex.mean(flex.pow(self.spotcy - self.spotfy, 2))))
+
+  return
+
+
+ def tile_weight(self,idx):
+   # at most, a tile is allow to be upweighted 10x due to low sample count, but no more.
+   # A tile with no observations carries zero weight.
+   if self.tilecounts[idx] == 0:
+     return 0
+   return min(10.,self.largest_sample / self.tilecounts[idx])
+
+ def print_table(self):
+  from libtbx import table_utils
+  from libtbx.str_utils import format_value
+
+  table_header = ["Tile","Dist","Nobs","aRmsd","Rmsd","delx","dely","disp","rotdeg","Rsigma","Tsigma"]
+  table_data = []
+  table_data.append(table_header)
+  sort_radii = flex.sort_permutation(flex.double(self.radii))
+  tile_rmsds = flex.double()
+  radial_sigmas = flex.double(len(self.tiles) // 4)
+  tangen_sigmas = flex.double(len(self.tiles) // 4)
+  for idx in range(len(self.tiles) // 4):
+    x = sort_radii[idx]
+    if self.tilecounts[x] < 3:
+      wtaveg = 0.0
+      radial = (0,0)
+      tangential = (0,0)
+      rmean,tmean,rsigma,tsigma=(0,0,1,1)
+    else:
+      wtaveg = self.weighted_average_angle_deg_from_tile(x)
+      radial,tangential,rmean,tmean,rsigma,tsigma = get_radial_tangential_vectors(self,x)
+
+    radial_sigmas[x]=rsigma
+    tangen_sigmas[x]=tsigma
+    table_data.append(  [
+      format_value("%3d",   x),
+      format_value("%7.2f", self.radii[x]),
+      format_value("%6d",  self.tilecounts[x]),
+      format_value("%5.2f", self.asymmetric_tile_rmsd[x]),
+      format_value("%5.2f", self.tile_rmsd[x]),
+      format_value("%5.2f", self.mean_cv[x][0]),
+      format_value("%5.2f", self.mean_cv[x][1]),
+      format_value("%5.2f", matrix.col(self.mean_cv[x]).length()),
+      format_value("%6.2f", wtaveg),
+      format_value("%6.2f", rsigma),
+      format_value("%6.2f", tsigma),
+    ])
+  table_data.append([""]*len(table_header))
+  rstats = flex.mean_and_variance(radial_sigmas,self.tilecounts.as_double())
+  tstats = flex.mean_and_variance(tangen_sigmas,self.tilecounts.as_double())
+  table_data.append(  [
+      format_value("%3s",   "ALL"),
+      format_value("%s", ""),
+      format_value("%6d",  self.overall_N),
+      format_value("%5.2f", math.sqrt(flex.mean(self.delrsq))),
+      format_value("%5.2f", self.overall_rmsd),
+      format_value("%5.2f", self.overall_cv[0]),
+      format_value("%5.2f", self.overall_cv[1]),
+      format_value("%5.2f", flex.mean(flex.double([matrix.col(cv).length() for cv in self.mean_cv]))),
+      format_value("%s", ""),
+      format_value("%6.2f", rstats.mean()),
+      format_value("%6.2f", tstats.mean()),
+    ])
+
+  print()
+  print(table_utils.format(table_data,has_header=1,justify='center',delim=" "))
+
+#-----------------------------------------------------------------------
+def get_phil(args):
+  phil = iotbx.phil.process_command_line(args=args, master_string=master_phil).show()
+  work_params = phil.work.extract()
+  if ("--help" in args) :
+    libtbx.phil.parse(master_phil.show())
+    return
+
+  if work_params.show_plots is True:
+    from matplotlib import pyplot as plt # special import
+  return work_params
+
+def run(args):
+
+  work_params = get_phil(args)
+  C = correction_vectors()
+  C.read_data(work_params)
+  C.print_table()
+
+  return None
+
+if (__name__ == "__main__"):
+
+  result = run(args=["mysql.runtag=for_may060corner","mysql.passwd=sql789",
+                     "mysql.user=nick","mysql.database=xfelnks",
+#                     "effective_tile_boundaries=700, 447, 894, 632, 505, 447, 699, 632, 700, 658, 894, 843, 505, 658, 699, 843, 496, 26, 681, 220, 495, 224, 680, 418, 706, 27, 891, 221, 706, 224, 891, 418, 75, 241, 269, 426, 272, 241, 466, 426, 74, 27, 268, 212, 270, 28, 464, 213, 95,  454, 280, 648, 96, 650, 281, 844, 309, 455, 494, 649, 308, 650, 493, 844, 433, 860, 618, 1054, 433, 1056, 618, 1250, 643, 860, 828, 1054, 643, 1055, 828, 1249, 15, 1077, 209, 1262, 212, 1076, 406, 1261, 14, 865, 208, 1050, 212, 865, 406, 1050, 228, 1485, 413, 1679, 228, 1288, 413, 1482, 15, 1494, 200, 1688, 15, 1290, 200, 1484, 439, 1473, 633, 1658, 635, 1473, 829, 1658, 440, 1261, 634, 1446, 636, 1261, 830, 1446, 842, 1133, 1036, 1318, 1037, 1133, 1231, 1318, 841, 922, 1035, 1107, 1036, 922, 1230, 1107, 1055, 1541, 1240, 1735, 1055, 1344, 1240, 1538, 843, 1542, 1028, 1736, 843, 1345, 1028, 1539, 1464, 1338, 1658, 1523, 1267, 1337, 1461, 1522, 1467, 1550, 1661, 1735, 1269, 1550, 1463, 1735, 1454, 1117, 1639, 1311, 1453, 921, 1638, 1115, 1241, 1117, 1426, 1311, 1241, 922, 1426, 1116, 1120, 716, 1305, 910, 1121, 521, 1306, 715, 910, 717, 1095, 911, 910, 522, 1095, 716, 1533, 515, 1727, 700, 1336, 514, 1530, 699, 1532, 726, 1726, 911, 1335, 725, 1529, 910, 1329, 93, 1514, 287, 1327, 291, 1512, 485, 1543, 91, 1728, 285, 1540, 290, 1725, 484, 1106, 113, 1300, 298, 911, 113, 1105, 298, 1105, 325, 1299, 510, 910, 325, 1104, 510".replace(" ",""),
+#                                               713, 437, 907, 622, 516, 438, 710, 623, 713, 650, 907, 835, 516, 650, 710, 835, 509, 18, 694, 212, 507, 215, 692, 409, 721, 19, 906, 213, 720, 215, 905, 409, 86, 231, 280, 416, 283, 231, 477, 416, 85, 19, 279, 204, 283, 19, 477, 204, 106, 444, 291, 638, 106, 640, 291, 834, 318, 443, 503, 637, 318, 640, 503, 834, 434, 849, 619, 1043, 436, 1046, 621, 1240, 647, 848, 832, 1042, 648, 1045, 833, 1239, 18, 1066, 212, 1251, 214, 1065, 408, 1250, 17, 853, 211, 1038, 213, 853, 407, 1038, 229, 1474, 414, 1668, 229, 1277, 414, 1471, 15, 1474, 200, 1668, 16, 1278, 201, 1472, 442, 1464, 636, 1649, 638, 1464, 832, 1649, 441, 1252, 635, 1437, 638, 1252, 832, 1437, 846, 1134, 1040, 1319, 1042, 1133, 1236, 1318, 845, 922, 1039, 1107, 1042, 922, 1236, 1107, 1060, 1542, 1245, 1736, 1060, 1346, 1245, 1540, 848, 1543, 1033, 1737, 847, 1348, 1032, 1542, 1469, 1336, 1663, 1521, 1272, 1337, 1466, 1522, 1472, 1550, 1666, 1735, 1274, 1549, 1468, 1734, 1460, 1117, 1645, 1311, 1460, 921, 1645, 1115, 1247, 1117, 1432, 1311, 1248, 921, 1433, 1115, 1130, 718, 1315, 912, 1130, 522, 1315, 716, 918, 719, 1103, 913, 917, 523, 1102, 717, 1543, 514, 1737, 699, 1346, 513, 1540, 698, 1543, 725, 1737, 910, 1346, 725, 1540, 910, 1338, 94, 1523, 288, 1339, 290, 1524, 484, 1552, 93, 1737, 287, 1551, 289, 1736, 483, 1115, 114, 1309, 299, 918, 113, 1112, 298, 1115, 326, 1309, 511, 918, 326, 1112, 511".replace(" ",""),
+  ])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/mark1.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+import math,copy
+import scitbx.math
+from scitbx.array_family import flex
+from xfel.metrology.mark0 import get_phil,correction_vectors
+from scitbx import matrix
+from xfel import get_radial_tangential_vectors
+from scitbx.lbfgs.tst_curvatures import lbfgs_with_curvatures_mix_in
+
+class fit_translation(correction_vectors,lbfgs_with_curvatures_mix_in):
+  def __init__(self,params):
+    correction_vectors.__init__(self)
+    self.read_data(params)
+    self.x = flex.double([0.]*128) # x & y displacements for each of 64 tiles
+    lbfgs_with_curvatures_mix_in.__init__(self,
+      min_iterations=0,
+      max_iterations=1000,
+      use_curvatures=True)
+
+  def curvatures(self):
+    curvs = flex.double([0.]*128)
+    for x in range(64):
+      curvs[2*x] = 2. * self.selection_counts[x]
+      curvs[2*x+1]=2. * self.selection_counts[x]
+    return curvs
+
+  def compute_functional_and_gradients(self):
+    # HATTNE does never enter this function
+    print("HATTNE entering mark1.compute_functional_and_gradients")
+
+    self.model_calcx = self.spotcx.deep_copy()
+    self.model_calcy = self.spotcy.deep_copy()
+
+    for x in range(64):
+      selection = self.selections [x]
+      self.model_calcx.set_selected(selection, self.model_calcx + self.x[2*x])
+      self.model_calcy.set_selected(selection, self.model_calcy + self.x[2*x+1])
+
+    squares = self.delrsq_functional(self.model_calcx, self.model_calcy)
+
+    f = flex.sum(squares)
+    calc_obs_diffx = self.model_calcx - self.spotfx
+    calc_obs_diffy = self.model_calcy - self.spotfy
+
+    gradients = flex.double([0.]*128)
+    for x in range(64):
+      selection = self.selections [x]
+      gradients[2*x] = 2. * flex.sum( calc_obs_diffx.select(selection) )
+      gradients[2*x+1]=2. * flex.sum( calc_obs_diffy.select(selection) )
+    print("Functional ",math.sqrt(flex.mean(squares)))
+
+    return f,gradients
+
+  def post_min_recalc(self):
+
+    print("ENTERING post_min_recalc cx, cy", \
+      flex.mean(self.spotcx), \
+      flex.mean(self.spotcy), \
+      len(self.spotcx), \
+      len(self.spotcy))
+    print("ENTERING post_min_recalc fx, fy", \
+      flex.mean(self.spotfx), \
+      flex.mean(self.spotfy), \
+      len(self.spotfx), \
+      len(self.spotfy))
+    print("HATTNE check input 0", \
+      flex.mean(self.model_calcx), \
+      flex.mean(self.model_calcy), \
+      len(self.model_calcx), \
+      len(self.model_calcy))
+
+    self.delrsq = self.delrsq_functional(calcx = self.model_calcx, calcy = self.model_calcy)
+    self.tile_rmsd = [0.]*(len(self.tiles) // 4)
+    self.asymmetric_tile_rmsd = [0.]*(len(self.tiles) // 4)
+
+    self.correction_vector_x = self.model_calcx -self.spotfx
+    self.correction_vector_y = self.model_calcy -self.spotfy
+
+    self.post_mean_cv = []
+
+    print("HATTNE post_min_recalc input CV x,y", \
+      flex.mean(flex.pow(self.correction_vector_x, 2)), \
+      flex.mean(flex.pow(self.correction_vector_y, 2)))
+    print("HATTNE post_min_recalc input model ", \
+      flex.mean(self.model_calcx), \
+      flex.mean(self.model_calcy))
+
+    for x in range(len(self.tiles) // 4):
+        #if self.tilecounts[x]==0: continue
+        selection = self.selections[x]
+        selected_cv = self.master_cv.select(selection)
+
+        if selection.count(True) == 0:
+          self.post_mean_cv.append(matrix.col((0, 0)))
+          self.asymmetric_tile_rmsd[x] = 0
+          self.tile_rmsd[x] = 0
+        else:
+          self.post_mean_cv.append(
+            matrix.col([flex.mean(self.correction_vector_x.select(selection)),
+                        flex.mean(self.correction_vector_y.select(selection))]))
+          self.asymmetric_tile_rmsd[x] = math.sqrt(flex.mean(self.delrsq.select(selection)))
+
+          sel_delx = self.correction_vector_x.select(selection)
+          sel_dely = self.correction_vector_y.select(selection)
+          symmetric_offset_x = sel_delx - self.post_mean_cv[x][0]
+          symmetric_offset_y = sel_dely - self.post_mean_cv[x][1]
+          symmetricrsq = symmetric_offset_x*symmetric_offset_x + symmetric_offset_y*symmetric_offset_y
+
+          """
+          if x == 14:
+            print "STATS FOR TILE 14"
+
+            aa = list(self.tiles[x * 4:(x + 1)*4])
+            print "EFFECTIVE tiling", aa
+            print "EFFECTIVE center", \
+              ((aa[0] + aa[2]) / 2, (aa[1] + aa[3]) / 2), \
+              (aa[2] - aa[0], aa[3] - aa[1])
+
+            print "sel_delx", list(sel_delx)
+            #print "sel_dely", list(sel_dely)
+            print "model_calcx", list(self.model_calcx.select(selection))
+            #print "model_calcy", list(self.model_calcy.select(selection))
+            print "spotfx", list(self.spotfx.select(selection))
+            #print "spotfy", list(self.spotfy.select(selection))
+            print "spotcx", list(self.spotcx.select(selection))
+            #print "spotcy", list(self.spotcy.select(selection))
+
+            print "  sel_delx          ", flex.min(sel_delx), \
+              flex.mean(sel_delx), flex.max(sel_delx)
+            print "  sel_dely          ", flex.min(sel_dely), \
+              flex.mean(sel_dely), flex.max(sel_dely)
+
+            print "  symmetric_offset_x", flex.min(symmetric_offset_x), \
+              flex.mean(symmetric_offset_x), flex.max(symmetric_offset_x)
+            print "  symmetric_offset_y", flex.min(symmetric_offset_y), \
+              flex.mean(symmetric_offset_y), flex.max(symmetric_offset_y)
+            print "  symmetric rsq     ", flex.min(symmetricrsq), \
+              flex.mean(symmetricrsq), flex.max(symmetricrsq)
+            print "  rmsd              ", math.sqrt(flex.mean(symmetricrsq))
+
+            #import sys
+            #sys.exit(0)
+          """
+
+          self.tile_rmsd[x] =math.sqrt(flex.mean(symmetricrsq))
+
+    self.overall_N = flex.sum(flex.int( [int(t) for t in self.tilecounts] ))
+    self.overall_cv = matrix.col([flex.mean ( self.correction_vector_x),
+                                  flex.mean ( self.correction_vector_y) ])
+    self.overall_rmsd = math.sqrt(flex.mean(self.delrsq_functional(self.model_calcx, self.model_calcy)))
+
+    print("HATTNE post_min_recalc post_min_recalc 1", list(self.overall_cv))
+    print("HATTNE post_min_recalc post_min_recalc 2", self.overall_rmsd)
+
+
+  def print_table(self):
+    from libtbx import table_utils
+    from libtbx.str_utils import format_value
+    table_header = ["Tile","Dist","Nobs","aRmsd","Rmsd","delx","dely","disp","rotdeg",
+                    "Rsigma","Tsigma","Transx","Transy","DelRot"]
+    table_data = []
+    table_data.append(table_header)
+    sort_radii = flex.sort_permutation(flex.double(self.radii))
+    tile_rmsds = flex.double()
+    radial_sigmas = flex.double(64)
+    tangen_sigmas = flex.double(64)
+
+    wtaveg = [0.]*64
+    for x in range(64):
+      if self.tilecounts[x] >= 3:
+        wtaveg[x] = self.weighted_average_angle_deg_from_tile(x, self.post_mean_cv[x], self.correction_vector_x,
+          self.correction_vector_y)
+
+    for idx in range(64):
+      x = sort_radii[idx]
+      if self.tilecounts[x] < 3:
+        radial = (0,0)
+        tangential = (0,0)
+        rmean,tmean,rsigma,tsigma=(0,0,1,1)
+      else:
+        radial,tangential,rmean,tmean,rsigma,tsigma = get_radial_tangential_vectors(self,x)
+
+      # paired rotations of two ASICS on the same sensor
+      if x%2==0:
+        delrot = "%5.2f"%(wtaveg[x]-wtaveg[x+1])
+      else:
+        delrot = ""
+
+      radial_sigmas[x]=rsigma
+      tangen_sigmas[x]=tsigma
+      table_data.append(  [
+        format_value("%3d",   x),
+        format_value("%7.2f", self.radii[x]),
+        format_value("%6d",  self.tilecounts[x]),
+        format_value("%5.2f", self.asymmetric_tile_rmsd[x]),
+        format_value("%5.2f", self.tile_rmsd[x]),
+        format_value("%5.2f", self.post_mean_cv[x][0]),
+        format_value("%5.2f", self.post_mean_cv[x][1]),
+        format_value("%5.2f", matrix.col(self.post_mean_cv[x]).length()),
+        format_value("%6.2f", wtaveg[x]),
+        format_value("%6.2f", rsigma),
+        format_value("%6.2f", tsigma),
+        format_value("%5.2f", self.x[2*x]),
+        format_value("%5.2f", self.x[2*x+1]),
+        copy.copy(delrot)
+      ])
+    table_data.append([""]*len(table_header))
+    rstats = flex.mean_and_variance(radial_sigmas,self.tilecounts.as_double())
+    tstats = flex.mean_and_variance(tangen_sigmas,self.tilecounts.as_double())
+    table_data.append(  [
+        format_value("%3s",   "ALL"),
+        format_value("%s", ""),
+        format_value("%6d",  self.overall_N),
+        format_value("%5.2f", math.sqrt(flex.mean(self.delrsq))),
+        format_value("%5.2f", self.overall_rmsd),
+        format_value("%5.2f", self.overall_cv[0]),
+        format_value("%5.2f", self.overall_cv[1]),
+        format_value("%5.2f", flex.mean(flex.double([cv.length() for cv in self.post_mean_cv]))),
+        format_value("%s", ""),
+        format_value("%6.2f", rstats.mean()),
+        format_value("%6.2f", tstats.mean()),
+        format_value("%s", ""),
+        format_value("%s", ""),
+        format_value("%s", ""),
+      ])
+
+    print()
+    print(table_utils.format(table_data,has_header=1,justify='center',delim=" "))
+
+
+def run(args):
+
+  work_params = get_phil(args)
+  C = fit_translation(work_params)
+  C.post_min_recalc()
+  C.print_table()
+
+  return None
+
+if (__name__ == "__main__"):
+
+  result = run(args=["mysql.runtag=for_may060corner","mysql.passwd=sql789",
+                     "mysql.user=nick","mysql.database=xfelnks",
+                     "effective_tile_boundaries=713, 437, 907, 622, 516, 438, 710, 623, 713, 650, 907, 835, 516, 650, 710, 835, 509, 18, 694, 212, 507, 215, 692, 409, 721, 19, 906, 213, 720, 215, 905, 409, 86, 231, 280, 416, 283, 231, 477, 416, 85, 19, 279, 204, 283, 19, 477, 204, 106, 444, 291, 638, 106, 640, 291, 834, 318, 443, 503, 637, 318, 640, 503, 834, 434, 849, 619, 1043, 436, 1046, 621, 1240, 647, 848, 832, 1042, 648, 1045, 833, 1239, 18, 1066, 212, 1251, 214, 1065, 408, 1250, 17, 853, 211, 1038, 213, 853, 407, 1038, 229, 1474, 414, 1668, 229, 1277, 414, 1471, 15, 1474, 200, 1668, 16, 1278, 201, 1472, 442, 1464, 636, 1649, 638, 1464, 832, 1649, 441, 1252, 635, 1437, 638, 1252, 832, 1437, 846, 1134, 1040, 1319, 1042, 1133, 1236, 1318, 845, 922, 1039, 1107, 1042, 922, 1236, 1107, 1060, 1542, 1245, 1736, 1060, 1346, 1245, 1540, 848, 1543, 1033, 1737, 847, 1348, 1032, 1542, 1469, 1336, 1663, 1521, 1272, 1337, 1466, 1522, 1472, 1550, 1666, 1735, 1274, 1549, 1468, 1734, 1460, 1117, 1645, 1311, 1460, 921, 1645, 1115, 1247, 1117, 1432, 1311, 1248, 921, 1433, 1115, 1130, 718, 1315, 912, 1130, 522, 1315, 716, 918, 719, 1103, 913, 917, 523, 1102, 717, 1543, 514, 1737, 699, 1346, 513, 1540, 698, 1543, 725, 1737, 910, 1346, 725, 1540, 910, 1338, 94, 1523, 288, 1339, 290, 1524, 484, 1552, 93, 1737, 287, 1551, 289, 1736, 483, 1115, 114, 1309, 299, 918, 113, 1112, 298, 1115, 326, 1309, 511, 918, 326, 1112, 511".replace(" ",""),
+  ])
+  """mark0: no minimization; just evaluate tiles like cxi.plot_cv
+     mark1: lsq fitting of translation of spot predictions, to bring them on top of
+             the fictitious tile montage containing spotfinder spots.
+     mark2: mark1 plus tile rotations following the translation step; spinning around tile center.
+  """
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/mark10.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from scipy.optimize import leastsq # special import
+import math,copy
+import scitbx.math
+from cctbx.sgtbx import tensor_rank_2_constraints
+from scitbx.array_family import flex
+from xfel.metrology.mark0 import correction_vectors
+from xfel.metrology.mark3 import fit_translation2
+from xfel.metrology import mark3_collect_data
+from xfel import get_radial_tangential_vectors
+from scitbx.lbfgs.tst_curvatures import lbfgs_with_curvatures_mix_in
+from rstbx.bandpass import parameters_bp3
+from scitbx.matrix import col
+from cctbx.crystal import symmetry
+from math import pi
+from scitbx import matrix
+from xfel.metrology.legacy_scale import mark5_iteration,vector_collection
+from xfel.metrology.legacy_scale import bandpass_gaussian
+from rstbx.symmetry.constraints import AGconvert
+from six.moves import zip
+#XXX remove the xfel/metrology/legacy_scale wrapping for AGconvert; not needed
+
+class fit_translation4(mark5_iteration,fit_translation2):
+  def parameter_based_model(self,params):
+    PIXEL_SZ = 0.11 # mm/pixel
+    all_model = mark3_collect_data(self.frame_id, self.HKL)
+    self.FRAMES["refined_detector_origin"] = flex.vec3_double(len(self.FRAMES["frame_id"]))
+
+    for iframe in range(len(self.FRAMES["frame_id"])):
+      frame_id = self.FRAMES["frame_id"][iframe]
+      self.frame_id_to_param_no[frame_id] = iframe
+
+      detector_origin = self.parameter_based_model_one_frame_detail(frame_id,iframe,all_model)
+      try:
+        self.bandpass_models[frame_id].gaussian_fast_slow()
+      except Exception as e:
+        print("Exception from picture",e)
+        raise e
+
+      try:
+       all_model.collect_mean_position(self.bandpass_models[frame_id].mean_position,
+                        self.bandpass_models[frame_id].observed_flag,
+                        frame_id);
+       all_model.collect_distance(self.bandpass_models[frame_id].part_distance,frame_id)
+       self.FRAMES["refined_detector_origin"][iframe] = detector_origin/(-PIXEL_SZ)
+
+      except Exception as e:
+          print("Exception from collect",e)
+          raise e
+
+      #print "HATTNE check 0", list(self.bandpass_models[frame_id].mean_position), len(self.bandpass_models[frame_id].mean_position)
+      #print "HATTNE check 1", list(self.bandpass_models[frame_id].observed_flag), len(self.bandpass_models[frame_id].observed_flag)
+
+
+    sq_displacements = ((all_model.cx - self.spotcx)*(all_model.cx - self.spotcx) +
+                        (all_model.cy - self.spotcy)*(all_model.cy - self.spotcy))
+
+
+#    print "In parameter_based_model, HATTNE got sqdisplacements", flex.mean(sq_displacements)
+#    print "  * am, am", flex.mean(all_model.cx), flex.mean(all_model.cy), len(all_model.cx), len(all_model.cy)
+#    print "  * cx, cy", flex.mean(self.spotcx), \
+#                        flex.mean(self.spotcy), \
+#                        len(self.spotcx), len(self.spotcy)
+#    print "  * diffs ", flex.mean(all_model.cx - self.spotcx), flex.mean(all_model.cy - self.spotcy), flex.max(flex.abs(all_model.cx - self.spotcx)), flex.max(flex.abs(all_model.cy - self.spotcy))
+
+#    from matplotlib import pyplot as plt
+#    plt.plot(self.spotfx, self.spotfy, "r.")
+##    plt.plot(self.spotcx, self.spotcy, "g.")
+#    plt.plot(all_model.cx, all_model.cy, "g.")
+#    plt.show()
+
+
+    #print list(all_model.cx - self.spotcx)
+
+
+
+    selected_sq_displacements = sq_displacements.select( all_model.flags == True )
+    #print "Root Mean squared displacement all spots      %8.3f"%math.sqrt(
+    #  flex.sum(selected_sq_displacements)/len(selected_sq_displacements))
+    return all_model.cx, all_model.cy, all_model.flags, all_model.part_distance
+
+  def detector_origin_analysis(self):
+    self.FRAMES["detector_origin_x_refined"]=flex.double()
+    self.FRAMES["detector_origin_y_refined"]=flex.double()
+    self.FRAMES["distance_refined"]=flex.double()
+    for iframe in range(len(self.FRAMES["frame_id"])):
+      if iframe < self.n_refined_frames:
+        SIGN = -1.
+        PIXEL_SZ = 0.11 # mm/pixel
+        detector_origin = col((-self.FRAMES["beam_x"][iframe]
+                               + SIGN * PIXEL_SZ * self.frame_translations.x[2*iframe],
+                               -self.FRAMES["beam_y"][iframe]
+                               + SIGN * PIXEL_SZ * self.frame_translations.x[1+2*iframe],
+                               0.))
+        self.FRAMES["detector_origin_x_refined"].append(detector_origin[0])
+        self.FRAMES["detector_origin_y_refined"].append(detector_origin[1])
+        self.FRAMES["distance_refined"].append(
+           self.frame_distances.x[iframe] +
+           self.FRAMES["distance"][iframe]
+        )
+
+    xm = flex.mean_and_variance(self.FRAMES["detector_origin_x_refined"])
+    ym = flex.mean_and_variance(self.FRAMES["detector_origin_y_refined"])
+    print("Beam x mean %7.3f sigma %7.3f mm"%(
+      xm.mean(), xm.unweighted_sample_standard_deviation()))
+    print("Beam y mean %7.3f sigma %7.3f mm"%(
+      ym.mean(), ym.unweighted_sample_standard_deviation()))
+
+    time_series = False
+    import os
+    files = [os.path.basename(f) for f in self.FRAMES["unique_file_name"]]
+    longs = [long("".join([a for a in name if a.isdigit()]))//1000 for name in files]
+    floats = flex.double([float(L) for L in longs])[
+      :len(self.FRAMES["detector_origin_x_refined"])]
+
+    order = flex.sort_permutation(floats)
+    time_sorted_x_beam = self.FRAMES["detector_origin_x_refined"].select(order)
+    time_sorted_y_beam = self.FRAMES["detector_origin_y_refined"].select(order)
+
+    if time_series:
+      from matplotlib import pyplot as plt
+      plt.plot(range(len(order)),time_sorted_x_beam,"r-")
+      plt.plot(range(len(order)),time_sorted_y_beam,"b-")
+      plt.show()
+
+    for item in order:
+      print(files[item], "%8.3f %8.3f dist %8.3f"%(
+        self.FRAMES["detector_origin_x_refined"][item],
+        self.FRAMES["detector_origin_y_refined"][item],
+        self.FRAMES["distance_refined"][item]))
+
+  def __init__(self,params):
+    self.optional_params = None
+    self.frame_id_to_param_no = {}
+    correction_vectors.__init__(self)
+    # XXX Set in mark0.correction_vectors.read_data()
+    #self.nominal_tile_centers(params.effective_tile_boundaries)
+    self.params = params
+    self.read_data(params)
+    # for eventual write-out, deep copy the input:
+    self.OUTPUT = copy.deepcopy(self.FRAMES)
+
+    if params.max_frames==None:
+      FR_LIMIT = len(self.FRAMES["frame_id"]) # don't adjust for degrees of freedom
+      self.n_refined_frames = FR_LIMIT
+    else:
+      self.n_refined_frames = params.max_frames
+
+    # XXX CHECK THIS BLOCK MORE CAREFULLY!
+    mark5_iteration.__init__(self)
+    self.tile_translations=self.register(
+      "tile_trans",ndata=len(self.tiles) // 4,kdim=2,data=[0.]*(len(self.tiles) // 2)) # x & y displacements for each of 64 tiles
+    self.tile_rotations=self.register("tile_rot",ndata=len(self.tiles) // 4,data=[0.]*(len(self.tiles) // 4))
+    self.frame_translations=self.register(
+      "frame_trans",ndata=self.n_refined_frames,kdim=2,data=[0.]*(2*self.n_refined_frames))
+    self.frame_distances=self.register("frame_distance",
+      ndata=self.n_refined_frames,data=[0.]*self.n_refined_frames)
+    self.frame_rotz=self.register("frame_rotz",
+      ndata=self.n_refined_frames,data=[0.]*self.n_refined_frames)
+
+    self.frame_roty=self.register_local("frame_roty",
+      ndata=self.n_refined_frames,data=[0.]*self.n_refined_frames)
+    self.frame_rotx=self.register_local("frame_rotx",
+      ndata=self.n_refined_frames,data=[0.]*self.n_refined_frames)
+    self.mean_energy_factor=self.register_local("mean_energy_factor",
+      ndata=self.n_refined_frames,data=[1.]*self.n_refined_frames)
+    self.bandpass_logfac=self.register_local("bandpass_logfac",
+      ndata=self.n_refined_frames,data=[0.]*self.n_refined_frames)
+    self.mosaicity_factor=self.register_local("mosaicity_factor",
+      ndata=self.n_refined_frames,data=[1.]*self.n_refined_frames)
+    self.g_factor=self.register_local("g_factor",
+      ndata=self.n_refined_frames,kdim=6,data=[1.]*6*self.n_refined_frames)
+
+    self.vector_data = vector_collection(self.frame_id, self.HKL)
+    self.jacobian_frame_roty = self.vector_data.register(tag="frame_roty")
+    self.jacobian_frame_rotx = self.vector_data.register(tag="frame_rotx")
+    """0. Read in only 500 frames, refine only 20
+       1. Define the new parameter here.
+       2. Define its new behavior in parameter_based_function()
+       3. set use_curvatures=False
+       4. implement refinement with finite differences:
+            include the array name in setting compute_finite_difference_gradients_if_requested()
+            fix the requirement for "zip"
+            verify fd_gradients go to zero upon convergence
+            verify parameter vector has reasonable values
+       5. implement analytic gradients, list out comparison columns
+       6. document the gradients in a tex file
+       7. implement curvatures & flag them in here
+    """
+    self.x = self.as_x_array()
+
+
+
+
+
+  def compute_finite_difference_gradients_if_requested(self):
+    for param_array,tag in zip([self.frame_rotz],["frame_rotz"]):
+      result = flex.double()
+      for np in range(len(param_array.x)):
+        reserve = param_array.x[np]
+        epsilon = 0.00001
+        param_array.x[np] = reserve + epsilon
+        hicx, hicy, hiflags, hipart_distance = self.parameter_based_model(self.params)
+        parameter_nos = flex.int([self.frame_id_to_param_no[f] for f in self.frame_id])
+
+        functional_hi = self.compute_functional_only(
+          tox = self.To_x, toy = self.To_y,
+          spotcx = hicx, spotcy = hicy,
+          spotfx = self.spotfx, spotfy = self.spotfy,
+          master_tiles = self.master_tiles,
+          frames = parameter_nos,
+          part_distance = hipart_distance)
+
+        param_array.x[np] = reserve - epsilon
+        locx, locy, loflags, lopart_distance = self.parameter_based_model(self.params)
+
+        functional_lo = self.compute_functional_only(
+          tox = self.To_x, toy = self.To_y,
+          spotcx = locx, spotcy = locy,
+          spotfx = self.spotfx, spotfy = self.spotfy,
+          master_tiles = self.master_tiles,
+          frames = parameter_nos,
+          part_distance = lopart_distance)
+
+        #print "GRADIENT ",dist_parm," finite diff",(plus_funct-nega_funct)/(2.*epsilon),"analytical",newgrad[dist_parm]
+        param_array.x[np]=reserve
+        result.append( ( functional_hi - functional_lo )/(2.*epsilon) )
+
+      print("Setting fd grads", end=' ')
+      for a in result:  print("%8.3f"%a, end=' ')
+      print()
+      print("       on values", end=' ')
+      for a in param_array.x:  print("%8.3f"%a, end=' ')
+      print()
+      print("   cpp gradients", end=' ')
+      for a in param_array.gradients: print("%8.3f"%a, end=' ')
+      print()
+      print()
+      self.set_gradient_array(tag,result)
+
+  def compute_functional_and_gradients(self):
+
+    #print "HATTNE in compute_functional_and_gradients"
+
+    self.from_x_array(self.x)
+    self.cx, self.cy, self.flags, part_distance = self.parameter_based_model(self.params)
+
+    #print "HATTNE in compute_functional_and_gradients", flex.mean(self.cx), flex.mean(self.cy), len(self.cx)
+
+
+    #import sys
+    #sys.exit(0) # HATTNE
+
+
+
+
+
+    parameter_nos = flex.int([self.frame_id_to_param_no[f] for f in self.frame_id])
+    self.rezero_gradients_curvatures()
+    self.set_refined_origins_to_c(self.FRAMES["refined_detector_origin"])
+    functional = self.compute_target(
+       tox = self.To_x, toy = self.To_y,
+       spotcx = self.cx.deep_copy(), spotcy = self.cy.deep_copy(),
+       spotfx = self.spotfx, spotfy = self.spotfy,
+       master_tiles = self.master_tiles,
+       frames = parameter_nos,
+       part_distance = part_distance)
+
+    #self.compute_finite_difference_gradients_if_requested()
+
+    gradients = self.get_gradient_array()
+    self.c_curvatures = self.get_curvature_array()
+
+#    print "CURVATURES", len(self.c_curvatures)
+#    lst = list(self.c_curvatures)
+#    print " block 1: ", lst[0:20]
+#    print " block 2: ", lst[20:20 + 58]
+#    print " block 3: ", lst[20 + 58:20 + 2 * 58]
+#    print " block 4: ", lst[20 + 2* 58:20 + 3 * 58]
+
+    print("Functional ",functional, math.sqrt(functional/self.cx.size()))
+    return functional,gradients
+
+  def radial_transverse_analysis(self):
+    # very time consuming; should be recoded (C++?)
+    SIGN = -1.
+    PIXEL_SZ = 0.11 # mm/pixel
+    zunit = col([0.,0.,1.])
+    self.frame_del_radial = {}
+    self.frame_del_azimuthal = {}
+    for x in range(len(self.frame_id)):
+      frame_id = self.frame_id[x]
+      frame_param_no = self.frame_id_to_param_no[frame_id]
+      if frame_param_no >= self.n_refined_frames: continue
+      if frame_id not in self.frame_del_radial:
+        self.frame_del_radial[frame_id] = flex.double()
+        self.frame_del_azimuthal[frame_id] = flex.double()
+
+      correction_vector = col([self.correction_vector_x[x],self.correction_vector_y[x],0.])
+      position_vector = col([self.spotfx[x] -
+                      SIGN * self.FRAMES["detector_origin_x_refined"][frame_param_no]/PIXEL_SZ,
+                             self.spotfy[x] -
+                      SIGN * self.FRAMES["detector_origin_y_refined"][frame_param_no]/PIXEL_SZ,
+                             0.])
+      position_unit = position_vector.normalize()
+      transverse_unit = position_unit.cross(zunit)
+
+      self.frame_del_radial[frame_id].append(correction_vector.dot(position_unit))
+      self.frame_del_azimuthal[frame_id].append(correction_vector.dot(transverse_unit))
+
+  def print_table(self):
+    from libtbx import table_utils
+    from libtbx.str_utils import format_value
+    table_header = ["Tile","Dist","Nobs","aRmsd","Rmsd","delx","dely","disp","rotdeg",
+                    "Rsigma","Tsigma","Transx","Transy","DelRot","Rotdeg"]
+    table_data = []
+    table_data.append(table_header)
+    sort_radii = flex.sort_permutation(flex.double(self.radii))
+    tile_rmsds = flex.double()
+    radial_sigmas = flex.double(len(self.tiles) // 4)
+    tangen_sigmas = flex.double(len(self.tiles) // 4)
+
+    wtaveg = [0.]*(len(self.tiles) // 4)
+    for x in range(len(self.tiles) // 4):
+      if self.tilecounts[x] >= 3:
+        wtaveg[x] = self.weighted_average_angle_deg_from_tile(x, self.post_mean_cv[x], self.correction_vector_x,
+          self.correction_vector_y)
+
+    for idx in range(len(self.tiles) // 4):
+      x = sort_radii[idx]
+      if self.tilecounts[x] < 3:
+        radial = (0,0)
+        tangential = (0,0)
+        rmean,tmean,rsigma,tsigma=(0,0,1,1)
+      else:
+        radial,tangential,rmean,tmean,rsigma,tsigma = get_radial_tangential_vectors(self,x,
+          self.post_mean_cv[x],
+          self.correction_vector_x, self.correction_vector_y,
+          self.model_calcx-self.refined_cntr_x,
+          self.model_calcy-self.refined_cntr_y)
+
+      # paired rotations of two ASICS on the same sensor
+      if x%2==0:
+        # previous method: delrot = "%5.2f"%(wtaveg[x]-wtaveg[x+1])
+        delrot = "%5.2f"%(self.tile_rotations.x[x] - self.tile_rotations.x[1+x])
+      else:
+        delrot = ""
+
+      radial_sigmas[x]=rsigma
+      tangen_sigmas[x]=tsigma
+      table_data.append(  [
+        format_value("%3d",   x),
+        format_value("%7.2f", self.radii[x]),
+        format_value("%6d",  self.tilecounts[x]),
+        format_value("%5.2f", self.asymmetric_tile_rmsd[x]),
+        format_value("%5.2f", self.tile_rmsd[x]),
+        format_value("%5.2f", self.post_mean_cv[x][0]),
+        format_value("%5.2f", self.post_mean_cv[x][1]),
+        format_value("%5.2f", matrix.col(self.post_mean_cv[x]).length()),
+        format_value("%6.2f", wtaveg[x]),
+        format_value("%6.2f", rsigma),
+        format_value("%6.2f", tsigma),
+        format_value("%5.2f", self.tile_translations.x[2*x]),
+        format_value("%5.2f", self.tile_translations.x[2*x+1]),
+        copy.copy(delrot),
+        format_value("%5.2f", self.tile_rotations.x[x])
+      ])
+    table_data.append([""]*len(table_header))
+    rstats = flex.mean_and_variance(radial_sigmas,self.tilecounts.as_double())
+    tstats = flex.mean_and_variance(tangen_sigmas,self.tilecounts.as_double())
+    table_data.append(  [
+        format_value("%3s",   "ALL"),
+        format_value("%s", ""),
+        format_value("%6d",  self.overall_N),
+        format_value("%5.2f", math.sqrt(flex.mean(self.delrsq))),
+        format_value("%5.2f", self.overall_rmsd),
+        format_value("%5.2f", self.overall_cv[0]),
+        format_value("%5.2f", self.overall_cv[1]),
+        format_value("%5.2f", flex.mean(flex.double([cv.length() for cv in self.post_mean_cv]))),
+        format_value("%s", ""),
+        format_value("%6.2f", rstats.mean()),
+        format_value("%6.2f", tstats.mean()),
+        format_value("%s", ""),
+        format_value("%s", ""),
+        #root mean squared difference in same-sensor (adjacent)-ASIC rotations, weighted by minimum # of observations on either ASIC of the sensor
+        format_value("%5.2f", math.sqrt(
+           flex.sum(
+             flex.double([
+               (min([self.tilecounts[2*isen],self.tilecounts[2*isen+1]])) *
+                    (self.tile_rotations.x[2*isen] - self.tile_rotations.x[1+2*isen])**2
+               for isen in range(len(self.tiles) // 8)]
+             )
+           )/
+           flex.sum(
+             flex.double(
+               [(min([self.tilecounts[2*isen],self.tilecounts[2*isen+1]])) for isen in range(len(self.tiles) // 8)]
+             )
+           )
+        )),
+        format_value("%s", ""),
+    ])
+
+    print()
+    print(table_utils.format(table_data,has_header=1,justify='center',delim=" "))
+
+  def print_table_2(self):
+
+    from libtbx import table_utils
+    from libtbx.str_utils import format_value
+    table_header = ["Tile","Dist","Nobs","aRmsd","Rmsd","delx","dely","disp","rotdeg",
+                    "Rsigma","Tsigma","Transx","Transy","DelRot","Rotdeg"]
+    table_data = []
+    table_data.append(table_header)
+    sort_radii = flex.sort_permutation(flex.double(self.radii))
+    tile_rmsds = flex.double()
+    radial_sigmas = flex.double(len(self.tiles) // 4)
+    tangen_sigmas = flex.double(len(self.tiles) // 4)
+
+    wtaveg = [0.]*(len(self.tiles) // 4)
+    for x in range(len(self.tiles) // 4):
+      if self.tilecounts[x] >= 3:
+        wtaveg[x] = self.weighted_average_angle_deg_from_tile(x, self.post_mean_cv[x], self.correction_vector_x,
+          self.correction_vector_y)
+
+    def add_line_to_table(idx):
+      x = sort_radii[idx]
+      if self.tilecounts[x] < 3:
+        radial = (0,0)
+        tangential = (0,0)
+        rmean,tmean,rsigma,tsigma=(0,0,1,1)
+      else:
+        radial,tangential,rmean,tmean,rsigma,tsigma = get_radial_tangential_vectors(self,x,
+          self.post_mean_cv[x],
+          self.correction_vector_x, self.correction_vector_y,
+          self.model_calcx-self.refined_cntr_x,
+          self.model_calcy-self.refined_cntr_y)
+
+      table_data.append(  [
+        format_value("%3d",   x),
+        format_value("%7.2f", self.radii[x]),
+        format_value("%6d",  self.tilecounts[x]),
+        format_value("%5.2f", self.asymmetric_tile_rmsd[x]),
+        format_value("%5.2f", self.tile_rmsd[x]),
+        format_value("%5.2f", self.post_mean_cv[x][0]),
+        format_value("%5.2f", self.post_mean_cv[x][1]),
+        format_value("%5.2f", matrix.col(self.post_mean_cv[x]).length()),
+        format_value("%6.2f", wtaveg[x]),
+        format_value("%6.2f", rsigma),
+        format_value("%6.2f", tsigma),
+        format_value("%5.2f", self.tile_translations.x[2*x]),
+        format_value("%5.2f", self.tile_translations.x[2*x+1]),
+        "",
+        format_value("%5.2f", self.tile_rotations.x[x])
+      ])
+
+    # order the printout by sensor, starting from innermost
+    new_order = []
+    mutable = list(sort_radii)
+    idx = 0
+    unit_translation_increments = flex.double(len(mutable)*2)
+    while 1:
+      if idx >= len(mutable): break
+      if self.radii[mutable[idx]]==0.0:
+        idx+=1; continue
+      tile_select = mutable[idx]
+      if tile_select%2 == 0:
+        # even
+        sensor_tiles = (tile_select, tile_select+1)
+        sensor_ptrs = (idx, mutable.index(tile_select+1))
+      else:
+        # odd
+        sensor_tiles = (tile_select-1, tile_select)
+        sensor_ptrs = ( mutable.index(tile_select-1), idx)
+
+      if self.tilecounts[mutable[sensor_ptrs[0]]] + self.tilecounts[mutable[sensor_ptrs[1]]] < \
+         self.params.min_count:
+         idx+=1
+         continue
+
+      sum_weight = 0.0
+      sum_wt_x = 0.0
+      sum_wt_y = 0.0
+      for iptr, ptr in enumerate(sensor_ptrs):
+        if ptr in new_order: break
+        if self.tilecounts[mutable[ptr]] > 0:
+          #print mutable[ptr]
+          add_line_to_table (ptr)
+          sum_weight += self.tilecounts[mutable[ptr]]
+          sum_wt_x += self.tilecounts[mutable[ptr]] * self.tile_translations.x[2*mutable[ptr]]
+          sum_wt_y += self.tilecounts[mutable[ptr]] * self.tile_translations.x[2*mutable[ptr]+1]
+        new_order.append(ptr)
+        if iptr==1:
+          #print
+          sensor_line = [""]*len(table_header)
+          sensor_line[2]="%6d"%sum_weight
+          sensor_line[11]="%5.2f"%round(sum_wt_x/sum_weight,0)
+          sensor_line[12]="%5.2f"%round(sum_wt_y/sum_weight,0)
+          unit_translation_increments[2*mutable[ptr]-2] = round(sum_wt_x/sum_weight,0)
+          unit_translation_increments[2*mutable[ptr]-1] = round(sum_wt_y/sum_weight,0)
+          unit_translation_increments[2*mutable[ptr]] = round(sum_wt_x/sum_weight,0)
+          unit_translation_increments[2*mutable[ptr]+1] = round(sum_wt_y/sum_weight,0)
+          table_data.append(sensor_line)
+          table_data.append([""]*len(table_header))
+      idx+=1
+      if idx>=len(mutable): break
+
+    print("Grouped by sensor, listing lowest Q-angle first:")
+    print(table_utils.format(table_data,has_header=1,justify='center',delim=" "))
+    return unit_translation_increments
+
+  def same_sensor_table(self,verbose=True):
+    radii = flex.double() # from-instrument-center distance in pixels
+    delrot= flex.double() # delta rotation in degrees
+    meanrot=flex.double() # mean rotation in degrees
+    weight= flex.double() #
+    displacement = [] # vector between two same-sensor ASICS in pixels
+    for x in range(len(self.tiles) // 8):
+      delrot.append(self.tile_rotations.x[2*x] - self.tile_rotations.x[1+2*x])
+      meanrot.append(0.5*(self.tile_rotations.x[2*x] + self.tile_rotations.x[1+2*x]))
+      radii.append((self.radii[2*x]+self.radii[2*x+1])/2)
+      weight.append(min([self.tilecounts[2*x],self.tilecounts[2*x+1]]))
+      displacement.append(   col((self.To_x[2*x+1], self.To_y[2*x+1]))
+                            -col((self.tile_translations.x[2*(2*x+1)], self.tile_translations.x[2*(2*x+1)+1]))
+                            -col((self.To_x[2*x], self.To_y[2*x]))
+                            +col((self.tile_translations.x[2*(2*x)], self.tile_translations.x[2*(2*x)+1]))  )
+
+    unrotated_displacement = [] # same, except correct for the off-square rotation of this sensor
+    for i,a in enumerate(displacement):
+      corrected_a = a.rotate_2d(angle=meanrot[i],deg=True)
+      while (corrected_a[0] < 0. or abs(corrected_a[1]) > abs(corrected_a[0])):
+        corrected_a = corrected_a.rotate_2d(angle=90., deg=True)
+      unrotated_displacement.append( corrected_a )
+
+    order = flex.sort_permutation(radii)
+    if verbose:
+      for x in order:
+        print("%02d %02d %5.0f"%(2*x,2*x+1,weight[x]), end=' ')
+        print("%6.1f"%radii[x], end=' ')
+        print("%5.2f"%(delrot[x]), end=' ')
+        print("%6.3f"%(displacement[x].length()-194.), end=' ') # ASIC is 194; just print gap
+        #print "  %6.3f"%(self.tile_distances.x[x])
+        print("lateral %7.3f transverse %7.3f pix"%(unrotated_displacement[x][0], unrotated_displacement[x][1]))
+    stats = flex.mean_and_variance(flex.double([t.length()-194. for t in displacement]),weight)
+    print(" sensor gap is %7.3f px +/- %7.3f"%(stats.mean(), stats.gsl_stats_wsd()))
+    stats = flex.mean_and_variance(flex.double([t[0] for t in unrotated_displacement]),weight)
+    print("lateral gap is %7.3f px +/- %7.3f"%(stats.mean(), stats.gsl_stats_wsd()))
+    stats = flex.mean_and_variance(flex.double([t[1] for t in unrotated_displacement]),weight)
+    print("transverse gap is %7.3f px +/- %7.3f"%(stats.mean(), stats.gsl_stats_wsd()))
+
+  @staticmethod
+  def print_unit_translations(data, params, optional):
+    from scitbx.array_family import flex
+    def pretty_format(data):
+      out = """"""
+      for quad in [0,1,2,3]:
+        for blockof2 in [0,1,2,3]:
+          format = "%3.0f,"*8
+          if quad==3 and blockof2==3:
+            format = format[0:-1]
+          format = "     %s"%format
+          out+=format+"""
+"""
+        if quad<3: out += """
+"""
+      # reality check here in case the PAD is not 64-tiles
+      Nparam = len(data)
+      decoration = out.split("%3.0f,")
+      if len(decoration)>Nparam+1:
+        decoration = decoration[len(decoration)-Nparam:]
+        return "%3.0f,".join(decoration)
+
+      return out
+
+    from spotfinder.applications.xfel.cxi_phil import cxi_versioned_extract
+    if params.detector_format_version is not None:
+      base_arguments = ["distl.detector_format_version=%s"%params.detector_format_version]
+
+      if optional is not None:
+
+        if optional.distl.quad_translations is not None:
+          base_arguments.append("distl.quad_translations="+",".join([str(s) for s in optional.distl.quad_translations]))
+        if optional.distl.tile_translations is not None:
+          base_arguments.append("distl.tile_translations="+",".join([str(s) for s in optional.distl.tile_translations]))
+
+      stuff = cxi_versioned_extract(base_arguments)
+      old = flex.double(stuff.distl.tile_translations)
+      print("cctbx already defines unit pixel translations for detector format version %s:"%params.detector_format_version)
+      print(pretty_format(old)%tuple(old))
+      print("new unit pixel increments will be SUBTRACTED off these to get final translations")
+      print()
+
+    else:
+      print("no pre-existing translations were input")
+      print()
+      old = flex.double(128)
+
+    print("Unit translations to be pasted into spotfinder/applications/xfel/cxi_phil.py:")
+
+    new = old - flex.double(data)
+    #overall_format = """    working_extract.distl.tile_translations = [
+    overall_format = '''distl {\n  tile_translations = """
+'''+pretty_format(new)+'''    """}'''
+
+    print(overall_format%tuple(new))
+
+
+  def run_cycle_a(self):
+    self.bandpass_models = {}
+
+
+    #print "HATTNE MARKER #0"
+    lbfgs_with_curvatures_mix_in.__init__(self,
+      min_iterations=0,
+      max_iterations=1000,
+      traditional_convergence_test_eps=1.0, # new for LD91; to shorten the run time
+      use_curvatures=True)
+    #print "HATTNE MARKER #1"
+
+    C = self
+    C.post_min_recalc()
+
+    #import sys
+    #sys.exit(0) # HATTNE
+
+    C.print_table()
+    unit_translations = C.print_table_2()
+    self.print_unit_translations(unit_translations, self.params, self.optional_params)
+
+    #import sys
+    #sys.exit(0) # HATTNE
+
+    sum_sq = 0.
+    for key in C.frame_delx.keys():
+      param_no = C.frame_id_to_param_no[key]
+      if param_no >= C.n_refined_frames:continue
+      mn_x = flex.mean(C.frame_delx[key])
+      mn_y = flex.mean(C.frame_dely[key])
+      print("frame %4d count %4d delx %7.2f  dely %7.2f"%(key,
+        len(C.frame_delx[key]),
+        mn_x,
+        mn_y ), end=' ')
+      sum_sq += mn_x*mn_x + mn_y*mn_y
+      if param_no<C.n_refined_frames:
+        print("%7.2f %7.2f"%(C.frame_translations.x[2*param_no],C.frame_translations.x[1+2*param_no]))
+      else:  print("N/A")
+    displacement = math.sqrt(sum_sq / len(C.frame_delx))
+    print("rms displacement of frames %7.2f"%displacement)
+
+    C.detector_origin_analysis()
+    C.radial_transverse_analysis()
+    sum_sq_r = 0.
+    sum_sq_a = 0.
+    for key in C.frame_del_radial.keys():
+      mn_r = flex.mean(C.frame_del_radial[key])
+      mn_a = flex.mean(C.frame_del_azimuthal[key])
+      print("frame %4d count %4d delrad %7.2f  delazi %7.2f"%(key,
+        len(C.frame_del_radial[key]),
+        mn_r,
+        mn_a ), end=' ')
+      sum_sq_r += mn_r*mn_r
+      sum_sq_a += mn_a*mn_a
+      param_no = C.frame_id_to_param_no[key]
+      print("deldist %7.3f mm"%C.frame_distances.x[param_no], end=' ')
+
+      print("distance %7.3f mm"%(
+        C.frame_distances.x[param_no] +
+        C.FRAMES["distance"][param_no]), end=' ')
+
+      print("rotz_deg=%6.2f"%( (180./math.pi)*C.frame_rotz.x[param_no] ))
+    print("rms radial displacement %7.2f"%(math.sqrt(sum_sq_r/len(C.frame_del_radial))))
+    print("rms azimut displacement %7.2f"%(math.sqrt(sum_sq_a/len(C.frame_del_radial))))
+    C.same_sensor_table()
+
+    print("Cycle A translations & rotations")
+    print({"translations": list(self.tile_translations.x),
+           "rotations": list(self.tile_rotations.x)})
+    print("integration {")
+    print("  subpixel_joint_model{")
+    print("rotations= \\")
+    for irot in range(len(self.tile_rotations.x)):
+      print(" %11.8f "%self.tile_rotations.x[irot], end=' ')
+      if irot%4==3 and irot!=len(self.tile_rotations.x)-1: print("\\")
+    print()
+    print("translations= \\")
+    for irot in range(len(self.tile_translations.x)):
+      print(" %11.8f"%self.tile_translations.x[irot], end=' ')
+      if irot%4==3 and irot!=len(self.tile_translations.x)-1: print("\\")
+    print()
+    print("  }")
+    print("}")
+    print()
+
+
+
+  def run_cycle_b(self,iteration):
+    for iframe in range(len(self.FRAMES["frame_id"])):
+      frame_id = self.FRAMES["frame_id"][iframe]
+      self.frame_id_to_param_no[frame_id] = iframe
+
+    self.bandpass_models = {}
+    all_model = mark3_collect_data(self.frame_id, self.HKL)
+    for iframe in range(min(self.n_refined_frames,len(self.FRAMES["frame_id"]))):
+      frame_id = self.FRAMES["frame_id"][iframe]
+      file_name = self.FRAMES["unique_file_name"][iframe]
+
+      self.parameter_based_model_one_frame_detail(frame_id,iframe,all_model)
+      #instantiate a helper class for holding the per-frame data
+      class per_frame_helper:
+        def __init__(pfh):
+          pfh.master_tiles = flex.int()
+          pfh.spotfx = flex.double()
+          pfh.spotfy = flex.double()
+          pfh.cosine = [math.cos(self.tile_rotations.x[tidx]*(math.pi/180))
+                        for tidx in range(len(self.To_x))]
+          pfh.sine   = [math.sin(self.tile_rotations.x[tidx]*(math.pi/180))
+                        for tidx in range(len(self.To_x))]
+          self.parameter_based_model_one_frame_detail(frame_id,iframe,all_model)
+          self.bandpass_models[frame_id].gaussian_fast_slow()
+          mean_position = self.bandpass_models[frame_id].mean_position
+          first_index = all_model.get_first_index(frame_id)
+          for ridx in range(mean_position.size()):
+            pfh.master_tiles.append( self.master_tiles[first_index + ridx] );
+            pfh.spotfx.append( self.spotfx[first_index + ridx] );
+            pfh.spotfy.append( self.spotfy[first_index + ridx] );
+        def fvec_callable(pfh,current_values,frame_id,iframe,all_model):
+
+          #print "HATTNE entering fvec_callable()"
+
+          self.frame_roty.x[iframe] = current_values[0]
+          self.frame_rotx.x[iframe] = current_values[1]
+#          self.mean_energy_factor.x[iframe] = current_values[2]
+#          self.bandpass_logfac.x[iframe] = current_values[3]
+#          self.mosaicity_factor.x[iframe] = current_values[4]
+          for iparam in range(self.bandpass_models["n_independent"]):
+            self.g_factor.x[iparam+6*iframe] = current_values[2+iparam]
+          try:
+            self.parameter_based_model_one_frame_detail(frame_id,iframe,all_model)
+          except Exception as e:
+            print("Failed on", iframe, self.FRAMES["unique_file_name"][iframe])
+            raise e
+
+          #print "  HATTNE marker #0", frame_id, type(self.bandpass_models), self.bandpass_models.keys(), type(self.bandpass_models[frame_id])
+
+          self.bandpass_models[frame_id].gaussian_fast_slow()
+          #print "  HATTNE marker #1"
+          mean_position = self.bandpass_models[frame_id].mean_position
+
+          translations    = self.tile_translations.x
+          fval = []
+          for ridx in range(mean_position.size()):
+            itile = pfh.master_tiles[ridx];
+
+            calc_minus_To_x = mean_position[ridx][1] - self.To_x[itile];
+            calc_minus_To_y = mean_position[ridx][0] - self.To_y[itile];
+
+            rotated_o_x = calc_minus_To_x * pfh.cosine[itile]\
+                        - calc_minus_To_y * pfh.sine[itile];
+            rotated_o_y = calc_minus_To_x * pfh.sine[itile]\
+                        + calc_minus_To_y * pfh.cosine[itile];
+
+            model_calcx = rotated_o_x + (self.To_x[itile] + translations[2*itile]);
+            model_calcy = rotated_o_y + (self.To_y[itile] + translations[2*itile+1]);
+
+            delx = model_calcx - pfh.spotfx[ridx];
+            dely = model_calcy - pfh.spotfy[ridx];
+
+            fval.append(delx)
+            fval.append(dely)
+
+          cum = 0.
+          for item in fval:
+            cum += item*item
+
+          rmsd = math.sqrt( cum / (len(fval)/2) )
+          print("rmsd", rmsd)
+          return fval
+
+      self.helper = per_frame_helper()
+
+      print("Trying iframe",iframe,"independent=%d"%self.bandpass_models["n_independent"], end=' ')
+
+      results = leastsq(
+        func = self.helper.fvec_callable,
+        x0 = [self.frame_roty.x[iframe],self.frame_rotx.x[iframe],
+#              self.mean_energy_factor.x[iframe],self.bandpass_logfac.x[iframe],
+#              self.mosaicity_factor.x[iframe]
+             ] + [self.g_factor.x[n+6*iframe]
+                  for n in range(self.bandpass_models["n_independent"])],
+        args = (frame_id,iframe,all_model),
+        Dfun = None, #estimate the Jacobian
+        full_output = True)
+
+      print("with %d reflections"%self.bandpass_models[frame_id].mean_position.size(), end=' ')
+      print("result %6.2f degrees"%(results[0][0]*180./math.pi), end=' ')
+      print("result %6.2f degrees"%(results[0][1]*180./math.pi), end=' ')
+      #modify this line to deal with cubic space group
+      print("energy factor %6.4f"%(results[0][2]),"metrical%1d %7.5f %7.5f"%(iteration,results[0][2],results[0][3]), end=' ')
+      fff = results[2]["fvec"]
+      cum = 0.
+      for item in fff:
+        cum += item*item
+      rmsd = math.sqrt( cum / (len(fff)/2) )
+      print("rmsd", rmsd, end=' ')
+      print(file_name)
+      #print results[4]
+
+  def parameter_based_model_one_frame_detail(self,frame_id,iframe,all_model):
+      PIXEL_SZ = 0.11 # mm/pixel
+      SIGN = -1.
+      if iframe < self.n_refined_frames:
+        detector_origin = col((-self.FRAMES["beam_x"][iframe]
+                             + SIGN * PIXEL_SZ * self.frame_translations.x[2*iframe],
+                             -self.FRAMES["beam_y"][iframe]
+                             + SIGN * PIXEL_SZ * self.frame_translations.x[1+2*iframe],
+                             0.))
+        self.OUTPUT["beam_x"][iframe] = -detector_origin[0]
+        self.OUTPUT["beam_y"][iframe] = -detector_origin[1]
+      else:
+        detector_origin = col((-self.FRAMES["beam_x"][iframe],-self.FRAMES["beam_y"][iframe],0.))
+
+      if frame_id not in self.bandpass_models:
+
+        reserve_orientation = self.FRAMES["orientation"][iframe]
+        effective_orientation = reserve_orientation
+
+        #Not necessary to apply the 3 offset rotations; they have apparently
+        #  been applied already.\
+        #  .rotate_thru((1,0,0),self.FRAMES["rotation100_rad"][iframe]
+        # ).rotate_thru((0,1,0),self.FRAMES["rotation010_rad"][iframe]
+        # ).rotate_thru((0,0,1),self.FRAMES["rotation001_rad"][iframe])
+
+        crystal = symmetry(unit_cell=effective_orientation.unit_cell(),space_group = "P1")
+        indices = all_model.frame_indices(frame_id)
+
+        parameters = parameters_bp3(
+           indices=indices, orientation=effective_orientation,
+           incident_beam=col(correction_vectors.INCIDENT_BEAM),
+           packed_tophat=col((1.,1.,0.)),
+           detector_normal=col(correction_vectors.DETECTOR_NORMAL),
+           detector_fast=col((0.,1.,0.)),detector_slow=col((1.,0.,0.)),
+           pixel_size=col((PIXEL_SZ,PIXEL_SZ,0)),
+           pixel_offset=col((0.,0.,0.0)),
+           distance=self.FRAMES["distance"][iframe],
+           detector_origin=detector_origin
+        )
+
+        #print "PARAMETER check   ", effective_orientation
+        #print "PARAMETER distance", self.FRAMES['distance'][iframe]
+        #print "PARAMETER origin  ", detector_origin
+
+        ucbp3 = bandpass_gaussian(parameters=parameters)
+        ucbp3.set_active_areas( self.tiles ) #self.params.effective_tile_boundaries
+        integration_signal_penetration=0.0 # easier to calculate distance derivatives
+
+        ucbp3.set_sensor_model( thickness_mm = 0.5, mu_rho = 8.36644, # CS_PAD detector at 1.3 Angstrom
+          signal_penetration = integration_signal_penetration)
+        #ucbp3.set_subpixel( flex.double(tp038_trans_values) ) #back off this; let minimizer figure it out.
+
+        half_mosaicity_rad = self.FRAMES["half_mosaicity_deg"][iframe] * pi/180.
+        ucbp3.set_mosaicity(half_mosaicity_rad)
+        ucbp3.set_bandpass(self.FRAMES["wave_HE_ang"][iframe],self.FRAMES["wave_LE_ang"][iframe])
+        ucbp3.set_orientation(effective_orientation)
+        ucbp3.set_domain_size(self.FRAMES["domain_size_ang"][iframe])
+        ucbp3.set_vector_output_pointers(self.vector_data,
+                                         frame_id,iframe<self.n_refined_frames)
+
+        if "best_index" not in self.bandpass_models:
+          from labelit.dptbx import lepage
+          M = lepage.character(effective_orientation)
+          s = len(M.best())
+          for index in M.best():
+            index['counter'] = s
+            s-=1
+            if index["max_angular_difference"]==0.0:
+              best_index = index
+              break
+
+          self.bandpass_models["best_index"] = best_index
+          self.bandpass_models["constraints"] = tensor_rank_2_constraints(space_group=best_index['reduced_group'],reciprocal_space=True)
+          self.bandpass_models["n_independent"] = self.bandpass_models["constraints"].n_independent_params()
+
+        self.bandpass_models[frame_id]=ucbp3
+
+      if iframe < self.n_refined_frames:
+        self.bandpass_models[frame_id].set_detector_origin(detector_origin)
+        self.bandpass_models[frame_id].set_distance(
+          self.FRAMES["distance"][iframe] + self.frame_distances.x[iframe])
+        self.OUTPUT["distance"][iframe] = self.FRAMES["distance"][iframe] + self.frame_distances.x[iframe]
+        #half_mosaicity_rad = self.FRAMES["half_mosaicity_deg"][iframe] * pi/180. + \
+        #                     self.half_mosaicity_rad.x[iframe]
+        #self.bandpass_models[frame_id].set_mosaicity(half_mosaicity_rad)
+        reserve_orientation = self.FRAMES["orientation"][iframe]
+        effective_orientation =   reserve_orientation.rotate_thru((0,0,1),self.frame_rotz.x[iframe])
+        effective_orientation = effective_orientation.rotate_thru((0,1,0),self.frame_roty.x[iframe])
+        effective_orientation = effective_orientation.rotate_thru((1,0,0),self.frame_rotx.x[iframe])
+
+        convert = AGconvert()
+        convert.forward(effective_orientation)
+        u_independent = list(self.bandpass_models["constraints"].independent_params(all_params=convert.G))
+        for x in range(self.bandpass_models["n_independent"]):
+          u_independent[x] *= self.g_factor.x[x+6*iframe]
+        u_star = self.bandpass_models["constraints"].all_params(independent_params=tuple(u_independent))
+        convert.validate_and_setG(u_star)
+        effective_orientation = convert.back_as_orientation()
+        self.OUTPUT["orientation"][iframe]=effective_orientation
+        self.bandpass_models[frame_id].set_orientation(effective_orientation)
+        mean_wave = (self.FRAMES["wave_HE_ang"][iframe] + self.FRAMES["wave_LE_ang"][iframe])/2.
+        #mean_wave *= self.mean_energy_factor.x[iframe]
+        bandpassHW =(self.FRAMES["wave_LE_ang"][iframe] - self.FRAMES["wave_HE_ang"][iframe])/2.
+        self.bandpass_models[frame_id].set_bandpass(mean_wave - bandpassHW, mean_wave + bandpassHW)
+
+      return detector_origin
+
+if (__name__ == "__main__"):
+
+  result = run(args=[#"mysql.runtag=L785v_120corner","mysql.passwd=sql789",
+                     #"mysql.user=nick","mysql.database=xfelnks",
+                     #"show_plots=True",
+                     #"show_consistency=True",
+                     "max_frames=1001",
+#                     "effective_tile_boundaries=713, 437, 907, 622, 516, 438, 710, 623, 713, 650, 907, 835, 516, 650, 710, 835, 509, 18, 694, 212, 507, 215, 692, 409, 721, 19, 906, 213, 720, 215, 905, 409, 86, 231, 280, 416, 283, 231, 477, 416, 85, 19, 279, 204, 283, 19, 477, 204, 106, 444, 291, 638, 106, 640, 291, 834, 318, 443, 503, 637, 318, 640, 503, 834, 434, 849, 619, 1043, 436, 1046, 621, 1240, 647, 848, 832, 1042, 648, 1045, 833, 1239, 18, 1066, 212, 1251, 214, 1065, 408, 1250, 17, 853, 211, 1038, 213, 853, 407, 1038, 229, 1474, 414, 1668, 229, 1277, 414, 1471, 15, 1474, 200, 1668, 16, 1278, 201, 1472, 442, 1464, 636, 1649, 638, 1464, 832, 1649, 441, 1252, 635, 1437, 638, 1252, 832, 1437, 846, 1134, 1040, 1319, 1042, 1133, 1236, 1318, 845, 922, 1039, 1107, 1042, 922, 1236, 1107, 1060, 1542, 1245, 1736, 1060, 1346, 1245, 1540, 848, 1543, 1033, 1737, 847, 1348, 1032, 1542, 1469, 1336, 1663, 1521, 1272, 1337, 1466, 1522, 1472, 1550, 1666, 1735, 1274, 1549, 1468, 1734, 1460, 1117, 1645, 1311, 1460, 921, 1645, 1115, 1247, 1117, 1432, 1311, 1248, 921, 1433, 1115, 1130, 718, 1315, 912, 1130, 522, 1315, 716, 918, 719, 1103, 913, 917, 523, 1102, 717, 1543, 514, 1737, 699, 1346, 513, 1540, 698, 1543, 725, 1737, 910, 1346, 725, 1540, 910, 1338, 94, 1523, 288, 1339, 290, 1524, 484, 1552, 93, 1737, 287, 1551, 289, 1736, 483, 1115, 114, 1309, 299, 918, 113, 1112, 298, 1115, 326, 1309, 511, 918, 326, 1112, 511".replace(" ",""),
+#                     "effective_tile_boundaries=719, 434, 913, 619, 521, 434, 715, 619, 719, 648, 913, 833, 521, 648, 715, 833, 515, 13, 700, 207, 512, 210, 697, 404, 727, 14, 912, 208, 726, 211, 911, 405, 90, 225, 284, 410, 288, 226, 482, 411, 89, 13, 283, 198, 288, 13, 482, 198, 109, 439, 294, 633, 109, 637, 294, 831, 322, 439, 507, 633, 322, 637, 507, 831, 438, 847, 623, 1041, 440, 1045, 625, 1239, 652, 847, 837, 1041, 653, 1045, 838, 1239, 21, 1064, 215, 1249, 217, 1064, 411, 1249, 20, 850, 214, 1035, 217, 851, 411, 1036, 232, 1474, 417, 1668, 232, 1277, 417, 1471, 17, 1474, 202, 1668, 18, 1277, 203, 1471, 446, 1464, 640, 1649, 642, 1465, 836, 1650, 445, 1252, 639, 1437, 643, 1252, 837, 1437, 851, 1134, 1045, 1319, 1048, 1134, 1242, 1319, 851, 921, 1045, 1106, 1048, 922, 1242, 1107, 1065, 1543, 1250, 1737, 1066, 1347, 1251, 1541, 853, 1544, 1038, 1738, 852, 1349, 1037, 1543, 1475, 1338, 1669, 1523, 1278, 1339, 1472, 1524, 1477, 1550, 1671, 1735, 1279, 1550, 1473, 1735, 1466, 1118, 1651, 1312, 1466, 921, 1651, 1115, 1253, 1118, 1438, 1312, 1255, 921, 1440, 1115, 1137, 717, 1322, 911, 1137, 520, 1322, 714, 924, 718, 1109, 912, 923, 521, 1108, 715, 1550, 513, 1744, 698, 1353, 512, 1547, 697, 1550, 725, 1744, 910, 1353, 725, 1547, 910, 1346, 91, 1531, 285, 1347, 288, 1532, 482, 1560, 92, 1745, 286, 1558, 288, 1743, 482, 1122, 111, 1316, 296, 925, 109, 1119, 294, 1122, 324, 1316, 509, 925, 323, 1119, 508".replace(" ",""),
+
+  ])
+  """mark0: no minimization; just evaluate tiles like cxi.plot_cv
+            reports fewer spots than cxi.plot_cv because it ignores frames with < 10 spots not
+            producing a spot output.
+     mark1: lsq fitting of translation of spot predictions, to bring them on top of
+             the fictitious tile montage containing spotfinder spots.
+     mark2: mark1 plus tile rotations following the translation step; spinning around tile center.
+            Controls: Same-sensor tile rotations should be equal; found rmsd difference 0.02 degrees
+     mark3: same as mark2, but predictions come from the model instead of the log file.
+            The refined tile positions include all sub-pixel corrections (replacing tp038), instead of using the
+            log file predictions that implicitly include the tp038 model.
+            Controls:
+              Agreement of labelit-refined direct beam (frame table) with CV logfile (spotfinder table)
+              Agreement of integrated spot position(observation table) w/ CV obs (spotfinder table)
+                 ... in both approximate position as well as Miller index tag, when the tp038 model
+                     is included.
+              Same-sensor ASIC displacement is 2.55 pixels with sigma=0.26 pixels.  It was thought
+              that this sigma should be much closer to zero, and this suggests that the current
+              sensor placement is is not as accurate as hoped.
+     mark4: Independently refine the beam position of each shot.  Before
+              refinement, the rmsd displacement is 0.65 pixels.  After, 0.00 pixels.
+              Total spot position rmsd is reduced from 1.36 pixels to 1.23 pixels.
+              Displacement, per frame:  beam x (sigma=0.037 mm) beam y (sigma=0.027 mm)
+                            radial, rms=0.42 pixels, azimuthal, rms=0.50 pixels
+              Brings global spot rmsd down to 1.23 pixels.
+     mark5: Independent refine distance of each shot.  Set penetration to 0.0 so spots have
+              an exactly linear dependence on distance, easier to calculate gradient & curvature.
+     mark6: 1) independent refinement of rotz for each shot.
+            2) Redesign so that any set of parameters can be chosen for refinement.
+              --self.x set defined dynamically; no hardcode of parameter order or semantics. DONE
+              --Python/C++ translation is automatic; set defined in Python, executed in C++. DONE
+              --Object defines its own semantics "refine on frames, refine distance" or
+                 "refine on tiles, refine distance". HARD CODED
+              --All C++ code should be centralized in one module. IN PROGRESS
+              --C++ code can test if refinement is enabled on a parameter; so control with Python constructor DONE
+              --Reorganize so it is very easy to define new parameters. IN PROGRESS
+              --Also, the reporting code should be more transparent. DONE
+              --The refinement class should be refactored ao it is easy to
+                test out finite differences on any given paramaeter. IN PROGRESS
+              --Facility to add in chain rule easily; reducing # of parameters.
+              --Ability to corefine PSII and thermolysin data.
+              --Ability to switch between finite diff, analytical, side-by-side,
+                and mix&match production analytical with selected finite diff.  IN PROGRESS
+              --for same sensor, compute lateral and transverse asic separation. DONE
+     mark7: same as mark6, except the bandpass model is re-expressed so the predicted spot position is
+            smooth (twice differentiable) w.r.t. bandpass and mosaicity; use Gaussians instead of
+            top hat functions.
+     mark9: introduce macrocycles.  Each cycle consists of a) refine tile xy, tile rotation,
+            frame xy, frame distance, frame rotz by LBFGS using curvatures. b) each frame:  refine
+            rotx and roty by Gauss-Newton non-linear least squares. However, due to the difficulty
+            in deriving and then implementing derivatives, let the code estimate the Jacobian
+            by finite differences.  It turns out that the scipy
+            implementation of NL-LSQ has extension modules incompatible with boost python
+            (segmentation fault).  Option 1) use Luc Bourhis' code: either Gauss-Newton
+            or Levenburg Marqhardt.  Option 2) (used) import scipy optimize before anything else;
+            seems to work.
+     mark10:Continue using scipy NL-LSQ with global/per-frame macrocycle.
+            Refine mean energy factor.  Can't refine bandwidth factor, mosaicity factor without
+            a radial spotwidth target (future).  Instead, refine metrical_matrix g-factors for the
+            independent parameters (2 for hexagonal thermolysin).  Abandon mean energy refinement;
+            too strongly correlated with g-factor for non-gradient method. Achieved 0.89 pixel rmsd.
+            Write out refined parameters for reintroduction into data integration script.
+  """
+"""
+   gradients available from the python layer
+"""
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/mark3.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+import math,copy
+import scitbx.math
+from scitbx.array_family import flex
+from xfel.metrology.mark0 import get_phil,correction_vectors
+from scitbx import matrix
+from xfel import get_radial_tangential_vectors
+from xfel.metrology.mark1 import fit_translation
+from xfel.metrology import mark2_iteration,mark3_collect_data
+from scitbx.lbfgs.tst_curvatures import lbfgs_with_curvatures_mix_in
+from rstbx.bandpass import use_case_bp3,parameters_bp3
+from scitbx.matrix import col
+from cctbx.crystal import symmetry
+from math import pi
+
+class fit_translation2(fit_translation):
+  def parameter_based_model(self,params):
+    PIXEL_SZ = 0.11 # mm/pixel
+    all_model = mark3_collect_data(self.frame_id, self.HKL)
+
+    for iframe in range(len(self.FRAMES["frame_id"])):
+      frame_id = self.FRAMES["frame_id"][iframe]
+      if frame_id not in self.bandpass_models:
+
+        reserve_orientation = self.FRAMES["orientation"][iframe]
+        effective_orientation = reserve_orientation
+
+        #Not necessary to apply the 3 offset rotations; they have apparently
+        #  been applied already.\
+        #  .rotate_thru((1,0,0),self.FRAMES["rotation100_rad"][iframe]
+        # ).rotate_thru((0,1,0),self.FRAMES["rotation010_rad"][iframe]
+        # ).rotate_thru((0,0,1),self.FRAMES["rotation001_rad"][iframe])
+
+        detector_origin = col((-self.FRAMES["beam_x"][iframe],
+                               -self.FRAMES["beam_y"][iframe], 0.))
+        crystal = symmetry(unit_cell=effective_orientation.unit_cell(),space_group = "P1")
+        indices = all_model.frame_indices(frame_id)
+
+        parameters = parameters_bp3(
+           indices=indices, orientation=effective_orientation,
+           incident_beam=col(correction_vectors.INCIDENT_BEAM),
+           packed_tophat=col((1.,1.,0.)),
+           detector_normal=col(correction_vectors.DETECTOR_NORMAL),
+           detector_fast=col((0.,1.,0.)),detector_slow=col((1.,0.,0.)),
+           pixel_size=col((PIXEL_SZ,PIXEL_SZ,0)),
+           pixel_offset=col((0.,0.,0.0)),
+           distance=self.FRAMES["distance"][iframe],
+           detector_origin=detector_origin
+        )
+        ucbp3 = use_case_bp3(parameters=parameters)
+
+        ucbp3.set_active_areas( self.tiles ) #params.effective_tile_boundaries
+        integration_signal_penetration=0.5
+
+        ucbp3.set_sensor_model( thickness_mm = 0.5, mu_rho = 8.36644, # CS_PAD detector at 1.3 Angstrom
+          signal_penetration = integration_signal_penetration)
+
+        half_mosaicity_rad = self.FRAMES["half_mosaicity_deg"][iframe] * pi/180.
+        ucbp3.set_mosaicity(half_mosaicity_rad)
+        ucbp3.set_bandpass(self.FRAMES["wave_HE_ang"][iframe],self.FRAMES["wave_LE_ang"][iframe])
+        ucbp3.set_orientation(effective_orientation)
+        ucbp3.set_domain_size(self.FRAMES["domain_size_ang"][iframe])
+
+        ucbp3.picture_fast_slow_force()
+        self.bandpass_models[frame_id]=ucbp3
+
+      all_model.collect(self.bandpass_models[frame_id].hi_E_limit,
+                        self.bandpass_models[frame_id].lo_E_limit,
+                        self.bandpass_models[frame_id].observed_flag,
+                        frame_id);
+
+    sq_displacements = ((all_model.cx - self.spotcx)*(all_model.cx - self.spotcx) +
+                        (all_model.cy - self.spotcy)*(all_model.cy - self.spotcy))
+    selected_sq_displacements = sq_displacements.select( all_model.flags == True )
+    print("Root Mean squared displacement all spots      %8.3f"%math.sqrt(
+      flex.sum(selected_sq_displacements)/len(selected_sq_displacements)))
+    return all_model.cx, all_model.cy, all_model.flags
+
+  def __init__(self,params):
+    self.bandpass_models = {}
+    correction_vectors.__init__(self)
+    #self.nominal_tile_centers(params.effective_tile_boundaries)
+    self.read_data(params)
+    self.params = params
+
+
+    self.x = flex.double([0.]*(len(self.tiles) // 2)+[0.]*(len(self.tiles) // 4)) # x & y displacements for each of 64 tiles
+
+    lbfgs_with_curvatures_mix_in.__init__(self,
+      min_iterations=0,
+      max_iterations=1000,
+      use_curvatures=True)
+
+  def curvatures(self):
+    return self.c_curvatures
+
+  def nominal_tile_centers(self,corners):
+    self.To_x =flex.double(64)
+    self.To_y = flex.double(64)
+    for x in range(64):
+      self.To_x[x] = (corners[4*x] + corners[4*x+2])/2.
+      self.To_y[x] = (corners[4*x+1] + corners[4*x+3])/2.
+
+  def compute_functional_and_gradients(self):
+
+    self.cx, self.cy, self.flags = self.parameter_based_model(self.params)
+    engine = mark2_iteration(values = self.x, tox = self.To_x,
+                                              toy = self.To_y,
+                                              spotcx = self.cx.deep_copy(),
+                                              spotcy = self.cy.deep_copy(),
+#                                              spotcx = self.spotcx,
+#                                              spotcy = self.spotcy,
+                                              spotfx = self.spotfx,
+                                              spotfy = self.spotfy,
+                                              master_tiles = self.master_tiles)
+
+    print("Functional ",math.sqrt(engine.f()/self.cx.size()))
+    self.c_curvatures = engine.curvatures()
+    self.model_calcx = engine.model_calcx
+    self.model_calcy = engine.model_calcy
+
+
+    ### HATTNE ADDITION FOR TILE 14 ###
+    #selection = self.selections[14]
+    #print "HATTNE additional 1", self.To_x[14], self.To_y[14], len(self.To_x), len(self.To_y)
+    #print "HATTNE additional 2", list(self.model_calcx.select(selection))
+    #print "HATTNE additional 3", self.c_curvatures[2 * 14], self.c_curvatures[2 * 14 + 1]
+    #import sys
+    #sys.exit(0)
+    ### HATTNE ADDITION FOR TILE 14 ###
+
+
+    return engine.f(),engine.gradients()
+
+  def post_min_recalc(self):
+    fit_translation.post_min_recalc(self)
+    self.frame_delx = {}
+    self.frame_dely = {}
+    for x in range(len(self.frame_id)):
+      frame_id = self.frame_id[x]
+      if frame_id not in self.frame_delx:
+        self.frame_delx[frame_id] = flex.double()
+        self.frame_dely[frame_id] = flex.double()
+      self.frame_delx[frame_id].append(self.correction_vector_x[x])
+      self.frame_dely[frame_id].append(self.correction_vector_y[x])
+
+  def same_sensor_table(self,verbose=True):
+    radii = flex.double() # from-instrument-center distance in pixels
+    delrot= flex.double() # delta rotation in degrees
+    weight= flex.double() #
+    displacement = [] # vector between two same-sensor ASICS in pixels
+    for x in range(len(self.tiles) // 8):
+      delrot.append(self.x[len(self.tiles) // 2 +2*x] - self.x[len(self.tiles) // 2 + 1 +2*x])
+      radii.append((self.radii[2*x]+self.radii[2*x+1])/2)
+      weight.append(min([self.tilecounts[2*x],self.tilecounts[2*x+1]]))
+      displacement.append(   col((self.To_x[2*x+1], self.To_y[2*x+1]))
+                            -col((self.x[2*(2*x+1)], self.x[2*(2*x+1)+1]))
+                            -col((self.To_x[2*x], self.To_y[2*x]))
+                            +col((self.x[2*(2*x)], self.x[2*(2*x)+1]))  )
+    order = flex.sort_permutation(radii)
+    if verbose:
+      for x in order:
+        print("%02d %02d %5.0f"%(2*x,2*x+1,weight[x]), end=' ')
+        print("%6.1f"%radii[x], end=' ')
+        print("%5.2f"%(delrot[x]), end=' ')
+        print("%6.3f"%(displacement[x].length()-194.)) # ASIC is 194; just print gap
+    stats = flex.mean_and_variance(flex.double([t.length()-194. for t in displacement]),weight)
+    print("sensor gap is %7.3f px +/- %7.3f"%(stats.mean(), stats.gsl_stats_wsd()))
+
+  def print_table(self):
+    from libtbx import table_utils
+    from libtbx.str_utils import format_value
+    table_header = ["Tile","Dist","Nobs","aRmsd","Rmsd","delx","dely","disp","rotdeg",
+                    "Rsigma","Tsigma","Transx","Transy","DelRot","Rotdeg"]
+    table_data = []
+    table_data.append(table_header)
+    sort_radii = flex.sort_permutation(flex.double(self.radii))
+    tile_rmsds = flex.double()
+    radial_sigmas = flex.double(len(self.tiles) // 4)
+    tangen_sigmas = flex.double(len(self.tiles) // 4)
+
+    wtaveg = [0.]*(len(self.tiles) // 4)
+    for x in range(len(self.tiles) // 4):
+      if self.tilecounts[x] >= 3:
+        wtaveg[x] = self.weighted_average_angle_deg_from_tile(x, self.post_mean_cv[x], self.correction_vector_x,
+          self.correction_vector_y)
+
+    for idx in range(len(self.tiles) // 4):
+      x = sort_radii[idx]
+      if self.tilecounts[x] < 3:
+        radial = (0,0)
+        tangential = (0,0)
+        rmean,tmean,rsigma,tsigma=(0,0,1,1)
+      else:
+        radial,tangential,rmean,tmean,rsigma,tsigma = get_radial_tangential_vectors(self,x,
+          self.post_mean_cv[x],
+          self.correction_vector_x, self.correction_vector_y,
+          self.model_calcx-self.refined_cntr_x,
+          self.model_calcy-self.refined_cntr_y)
+
+      # paired rotations of two ASICS on the same sensor
+      if x%2==0:
+        # previous method: delrot = "%5.2f"%(wtaveg[x]-wtaveg[x+1])
+        delrot = "%5.2f"%(self.x[len(self.tiles) // 2 +x] - self.x[len(self.tiles) // 2 + 1 +x])
+      else:
+        delrot = ""
+
+      radial_sigmas[x]=rsigma
+      tangen_sigmas[x]=tsigma
+      table_data.append(  [
+        format_value("%3d",   x),
+        format_value("%7.2f", self.radii[x]),
+        format_value("%6d",  self.tilecounts[x]),
+        format_value("%5.2f", self.asymmetric_tile_rmsd[x]),
+        format_value("%5.2f", self.tile_rmsd[x]),
+        format_value("%5.2f", self.post_mean_cv[x][0]),
+        format_value("%5.2f", self.post_mean_cv[x][1]),
+        format_value("%5.2f", matrix.col(self.post_mean_cv[x]).length()),
+        format_value("%6.2f", wtaveg[x]),
+        format_value("%6.2f", rsigma),
+        format_value("%6.2f", tsigma),
+        format_value("%5.2f", self.x[2*x]),
+        format_value("%5.2f", self.x[2*x+1]),
+        copy.copy(delrot),
+        format_value("%5.2f", self.x[len(self.tiles) // 2 +x])
+      ])
+    table_data.append([""]*len(table_header))
+    rstats = flex.mean_and_variance(radial_sigmas,self.tilecounts.as_double())
+    tstats = flex.mean_and_variance(tangen_sigmas,self.tilecounts.as_double())
+    table_data.append(  [
+        format_value("%3s",   "ALL"),
+        format_value("%s", ""),
+        format_value("%6d",  self.overall_N),
+        format_value("%5.2f", math.sqrt(flex.mean(self.delrsq))),
+        format_value("%5.2f", self.overall_rmsd),
+        format_value("%5.2f", self.overall_cv[0]),
+        format_value("%5.2f", self.overall_cv[1]),
+        format_value("%5.2f", flex.mean(flex.double([cv.length() for cv in self.post_mean_cv]))),
+        format_value("%s", ""),
+        format_value("%6.2f", rstats.mean()),
+        format_value("%6.2f", tstats.mean()),
+        format_value("%s", ""),
+        format_value("%s", ""),
+        #root mean squared difference in same-sensor (adjacent)-ASIC rotations, weighted by minimum # of observations on either ASIC of the sensor
+        format_value("%5.2f", math.sqrt(
+           flex.sum(
+             flex.double([
+               (min([self.tilecounts[2*isen],self.tilecounts[2*isen+1]])) * (self.x[len(self.tiles) // 2 +2*isen] - self.x[len(self.tiles) // 2 + 1 +2*isen])**2
+               for isen in range(len(self.tiles) // 8)]
+             )
+           )/
+           flex.sum(
+             flex.double(
+               [(min([self.tilecounts[2*isen],self.tilecounts[2*isen+1]])) for isen in range(len(self.tiles) // 8)]
+             )
+           )
+        )),
+        format_value("%s", ""),
+    ])
+
+    print()
+    print(table_utils.format(table_data,has_header=1,justify='center',delim=" "))
+
+def run(args):
+
+  work_params = get_phil(args)
+  C = fit_translation2(work_params)
+  C.post_min_recalc()
+  C.print_table()
+  sum_sq = 0.
+  for key in C.frame_delx.keys():
+    mn_x = flex.mean(C.frame_delx[key])
+    mn_y = flex.mean(C.frame_dely[key])
+    print("frame %d count %4d delx %7.2f  dely %7.2f"%(key,
+      len(C.frame_delx[key]),
+      mn_x,
+      mn_y ))
+    sum_sq += mn_x*mn_x + mn_y*mn_y
+  displacement = math.sqrt(sum_sq / len(C.frame_delx))
+  print("rms displacement of frames %7.2f"%displacement)
+  C.same_sensor_table()
+  return None
+
+if (__name__ == "__main__"):
+
+  result = run(args=["mysql.runtag=for_may060corner","mysql.passwd=sql789",
+                     "mysql.user=nick","mysql.database=xfelnks",
+                     #"show_plots=True",
+                     #"show_consistency=True",
+  ])
+  """mark0: no minimization; just evaluate tiles like cxi.plot_cv
+            reports fewer spots than cxi.plot_cv because it ignores frames with < 10 spots not
+            producing a spot output.
+     mark1: lsq fitting of translation of spot predictions, to bring them on top of
+             the fictitious tile montage containing spotfinder spots.
+     mark2: mark1 plus tile rotations following the translation step; spinning around tile center.
+            Controls: Same-sensor tile rotations should be equal; found rmsd difference 0.02 degrees
+     mark3: same as mark2, but predictions come from the model instead of the log file.
+            The refined tile positions include all sub-pixel corrections (replacing tp038), instead of using the
+            log file predictions that implicitly include the tp038 model.
+            Controls:
+              Agreement of labelit-refined direct beam (frame table) with CV logfile (spotfinder table)
+              Agreement of integrated spot position(observation table) w/ CV obs (spotfinder table)
+                 ... in both approximate position as well as Miller index tag, when the tp038 model
+                     is included.
+              Same-sensor ASIC displacement is 2.55 pixels with sigma=0.26 pixels.  It was thought
+              that this sigma should be much closer to zero, and this suggests that the current
+              sensor placement is is not as accurate as hoped.
+  """
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/panel_fitting.py
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function
+
+import math
+from dials.array_family import flex
+import numpy as np
+from matplotlib import pyplot as plt
+from sklearn.covariance import EmpiricalCovariance, MinCovDet
+
+class Panel_MCD_Filter(object):
+  """For analyzing CALC-OBS residuals on a detector panel, look at a population
+of Bragg spots from a refl table.  Calculate a 3-feature fit using Minimum
+Covariance Determinat, using Δx, Δy, ΔΨ(deg) as the 3 features.  Then filter
+the refls using a Mahalanobis cutoff.
+"""
+  def __init__(self, lab_coords_x, lab_coords_y, data, i_panel, delta_scalar, params, verbose=True):
+    training_data = []
+
+    mean_x = flex.mean(lab_coords_x)
+    mean_y = flex.mean(lab_coords_y)
+    limit=delta_scalar * 10
+
+    for ix in range(len(data)):
+      if abs(lab_coords_x[ix] - mean_x) > limit: continue
+      if abs(lab_coords_y[ix] - mean_y) > limit: continue
+      if abs(data[ix])>1: continue
+      training_data.append((lab_coords_x[ix],lab_coords_y[ix],data[ix]))
+    if verbose: print("Training data is less",len(lab_coords_x) - len(training_data),end=" ")
+    colorcode_set = []
+    for ix in range(len(data)):
+      colorcode_set.append((lab_coords_x[ix],lab_coords_y[ix],data[ix]))
+
+    from sklearn.covariance import EmpiricalCovariance, MinCovDet
+    # compare estimators learnt from the full data set with true parameters
+    emp_cov = EmpiricalCovariance(assume_centered=False, store_precision=True).fit(X=training_data)
+    # fit a Minimum Covariance Determinant (MCD) robust estimator to data
+    robust_cov = MinCovDet(assume_centered=False, store_precision=True).fit(X=training_data)
+
+    features = ["Δx","Δy","ΔΨ(deg)"]
+    if verbose:
+      print("%3d"%i_panel,end=" ")
+      print("%4d items "%(len(training_data),),end=" ")
+    for idx_report in range(len(features)):
+      feature = features[idx_report]
+      diag_elem = math.sqrt(emp_cov.covariance_[idx_report,idx_report])
+      if verbose: print( "%s=%7.2f±%6.2f"%(feature, emp_cov.location_[idx_report], diag_elem),end=" ")
+
+    if verbose: print("%4d items:"%(flex.bool(robust_cov.support_).count(True)),end=" ")
+    for idx_report in range(len(features)):
+      feature = features[idx_report]
+      diag_elem = math.sqrt(robust_cov.covariance_[idx_report,idx_report])
+      if verbose: print( "%s=%7.2f±%6.2f"%(feature, robust_cov.location_[idx_report], diag_elem),end=" ")
+
+    disc = flex.double(robust_cov.mahalanobis(X=colorcode_set)) # this metric represents malahanobis ** 2
+    disc_select = disc < (params.residuals.mcd_filter.mahalanobis_distance)**2
+    if params.residuals.mcd_filter.keep == "outliers":
+      disc_select = (disc_select==False)
+    if verbose: print("OK %4.1f%%"%(100*(disc_select.count(True))/len(training_data)))
+    self.lab_coords_x = lab_coords_x.select(disc_select)
+    self.lab_coords_y = lab_coords_y.select(disc_select)
+    self.data = data.select(disc_select)
+    self.n_input = len(lab_coords_x)
+    self.n_output = len(self.lab_coords_x)
+    self.emp_cov = emp_cov
+    self.rob_cov = robust_cov
+
+  def scatter_coords(self): return self.lab_coords_x, self.lab_coords_y, self.data
+
+  def plot_contours(self, ax, show=False):
+    COV = self.emp_cov
+    COV_slice = EmpiricalCovariance()
+    COV_slice.location_ = np.array([ COV.location_[0], COV.location_[1] ])
+    COV_slice.covariance_ = np.array([ COV.covariance_[ 0,0 ], COV.covariance_[ 0,1 ],
+                                       COV.covariance_[ 1,0 ], COV.covariance_[ 1,1 ] ])
+    COV_slice.covariance_ = COV_slice.covariance_.reshape((2,2))
+    COV_slice.precision_ = np.array([ COV.precision_[ 0,0 ], COV.precision_[ 0,1 ],
+                                      COV.precision_[ 1,0 ], COV.precision_[ 1,1 ] ])
+    COV_slice.precision_ = COV_slice.precision_.reshape((2,2))
+
+    # Show contours of the distance functions
+    xx, yy = np.meshgrid(
+          np.linspace(COV_slice.location_[0]-5*math.sqrt(COV_slice.covariance_[0,0]), COV_slice.location_[0]+5*math.sqrt(COV_slice.covariance_[0,0]), 100),
+          np.linspace(COV_slice.location_[1]-5*math.sqrt(COV_slice.covariance_[1,1]), COV_slice.location_[1]+5*math.sqrt(COV_slice.covariance_[1,1]), 100),
+    )
+    zz = np.c_[xx.ravel(), yy.ravel()]
+
+    # Empirical fit is not so good.  Don't plot this
+    if False: # keep for debugging
+      mahal_emp_cov = COV_slice.mahalanobis(zz)
+      mahal_emp_cov = mahal_emp_cov.reshape(xx.shape)
+      emp_cov_contour = ax.contour(xx, yy, np.sqrt(mahal_emp_cov),
+                                  levels=[1.,2.,3.,4.,5.],
+                                  #cmap=plt.get_cmap('PuBu_r'),
+                                  cmap=plt.get_cmap('cool_r'),
+                                  linestyles='dashed')
+
+    COV = self.rob_cov
+    COV_slice = EmpiricalCovariance()
+    COV_slice.location_ = np.array([ COV.location_[0], COV.location_[1] ])
+    COV_slice.covariance_ = np.array([ COV.covariance_[ 0,0 ], COV.covariance_[ 0,1 ],
+                                       COV.covariance_[ 1,0 ], COV.covariance_[ 1,1 ] ])
+    COV_slice.covariance_ = COV_slice.covariance_.reshape((2,2))
+    COV_slice.precision_ = np.array([ COV.precision_[ 0,0 ], COV.precision_[ 0,1 ],
+                                      COV.precision_[ 1,0 ], COV.precision_[ 1,1 ] ])
+    COV_slice.precision_ = COV_slice.precision_.reshape((2,2))
+    self.robust_model_XY = COV_slice
+
+    # robust is better
+    if show:
+      mahal_robust_cov = COV_slice.mahalanobis(zz)
+      mahal_robust_cov = mahal_robust_cov.reshape(xx.shape)
+      robust_contour = ax.contour(xx, yy, np.sqrt(mahal_robust_cov),
+                                 levels=[1.,2.,3.,4.,5.],
+                                 #cmap=plt.get_cmap('YlOrBr_r'),
+                                 cmap=plt.get_cmap('spring_r'),
+                                 linestyles='dotted')
+
+class three_feature_fit(Panel_MCD_Filter):
+  """Analyze the relationship between radial, transverse, and deltapsi.
+     Calculate a 3-feature fit using Minimum Covariance Determinant, using ΔR, ΔT, ΔΨ(deg)
+     as the 3 features.
+  """
+  def __init__(self, delta_radial, delta_transverse, delta_psi, i_panel, params=None, verbose=True):
+    training_data = []
+    assert len(delta_radial) == len(delta_transverse) == len(delta_psi)
+    for ix in range(len(delta_radial)):
+      training_data.append((1000.*delta_radial[ix], 1000*delta_transverse[ix], delta_psi[ix]))
+
+    from sklearn.covariance import EmpiricalCovariance, MinCovDet
+    # compare estimators learnt from the full data set with true parameters
+    self.emp_cov = EmpiricalCovariance(assume_centered=True, store_precision=True).fit(X=training_data)
+
+    features = ["ΔR","ΔT","ΔΨ(deg)"]
+    if verbose:
+      print("%3d"%i_panel,end=" ")
+      print("%4d items "%(len(training_data),),end=" ")
+    diag_elem = flex.double(3)
+    self.cross_correl = flex.double(3)
+    for idx_report in range(len(features)):
+      feature = features[idx_report]
+      diag_elem[idx_report] = math.sqrt(self.emp_cov.covariance_[idx_report,idx_report])
+      if verbose: print( "%s=%7.2f±%6.2f"%(feature, self.emp_cov.location_[idx_report], diag_elem[idx_report]),end=" ")
+    for ic, cross_correlation in enumerate([(0,1),(1,2),(0,2)]):
+      feature1 = features[cross_correlation[0]]
+      feature2 = features[cross_correlation[1]]
+      self.cross_correl[ic] = self.emp_cov.covariance_[cross_correlation[0],cross_correlation[1]] / (
+                           diag_elem[cross_correlation[0]]*diag_elem[cross_correlation[1]]) # convert Cov to Corr
+      if verbose: print( "%s,%s cc=%5.1f%%"%(feature1,feature2,100*self.cross_correl[ic]),end=" ")
+    if verbose: print()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/metrology/quadrant.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from scitbx.matrix import sqr,col
+from math import sin,cos,pi
+from scitbx.array_family import flex
+import sys
+class one_sensor(object):
+  def __init__(self,image,sensor,manager):
+    self.image = image
+    self.sensor = sensor
+    self.manager = manager
+    self.tiling = self.manager.effective_tiling_as_flex_int(
+                    encode_inactive_as_zeroes=True)
+
+    print(list( self.tiling[4*self.sensor[0]:4+4*self.sensor[0]] ))
+
+
+
+    grid_radius = 20
+    mapp = flex.double(flex.grid(2*grid_radius+1, 2*grid_radius+1))
+    print(mapp.focus())
+
+    # not sure if this is the correct beam center; take provisional value
+    beam_center = col((float(880.5),float(880.5)))
+    gmax = 0.0
+    coordmax = (0,0)
+    for xi in range(-grid_radius, grid_radius+1):
+      for yi in range(-grid_radius, grid_radius+1):
+        VV = self.CC(beam_center + col((xi,yi)))
+        if VV>gmax:
+          gmax = VV
+          coordmax = col((xi,yi))
+        mapp[(xi+grid_radius,yi+grid_radius)]=VV
+
+    print("max cc %7.4F is at "%gmax, end=' ')
+    if False:
+      npy = mapp.as_numpy_array()
+      from matplotlib import pyplot as plt
+      plt.imshow(npy, cmap="hot")
+      plt.plot([coordmax[1]+grid_radius],[coordmax[0]+grid_radius],"k.")
+      plt.show()
+
+    self.coordmax = coordmax
+
+  def CC(self, beam_center):
+    quad = self.tiling[4*self.sensor[0]:4+4*self.sensor[0]]
+
+    asic = self.image.linearintdata.matrix_copy_block(quad[0],quad[1],
+                                    quad[2]-quad[0],quad[3]-quad[1])
+
+    #npy = asic.as_numpy_array()
+    #from matplotlib import pyplot as plt
+    #plt.imshow(npy, cmap="hot")
+    #plt.show()
+
+    asci_origin = col((float(quad[0]),float(quad[1])))
+
+    rot45 = sqr((sin(pi/4.),-cos(pi/4.),cos(pi/4.),sin(pi/4.)))
+
+    from xfel.metrology.legacy_scale import quadrant_self_correlation
+    min_value = self.image.get_detector()[0].get_trusted_range()[0]
+    REF,ROT = quadrant_self_correlation(asic,asci_origin,beam_center,rot45,min_value)
+    CCRR = flex.linear_correlation(REF,ROT)
+
+    """initial python implementation
+    #rot_asic = flex.double(asic.accessor())
+    F0,F1 = asic.focus()
+
+    ref_data = flex.double()
+    rot_data = flex.double()
+    constant = rot45*(asci_origin - beam_center) +beam_center - asci_origin
+    for xcoord in range(quad[2]-quad[0]):
+      for ycoord in range(quad[3]-quad[1]):
+
+        acoord = col((float(xcoord),float(ycoord)))
+        #prime = rot45*(acoord + asci_origin - beam_center) + beam_center - asci_origin
+        prime = rot45*acoord + constant
+        prime = (int(round(prime[0],0)),int(round(prime[1],0)))
+        if 0<=prime[0]<F0 and 0<=prime[1]<F1:
+          #rot_asic[(xcoord,ycoord)]=asic[prime]
+
+          ref_data.append(asic[(xcoord,ycoord)])
+          rot_data.append(asic[prime])
+    CC = flex.linear_correlation(ref_data,rot_data)
+
+    print "Correlation_coefficient %7.4f %7.4f"%(CC.coefficient(),CCRR.coefficient())
+    """
+
+    return CCRR.coefficient()
+
+    #npy = rot_asic.as_numpy_array()
+    #from matplotlib import pyplot as plt
+    #plt.imshow(npy,cmap="hot")
+    #plt.show()
+
+class one_panel(object):
+  def __init__(self,image,panel,i_quad,quad,plot=False,multi_angle=True,plot_range=None,show=True):
+    self.image = image
+    self.panel = panel
+    self.i_quad = i_quad
+    self.quad = quad
+    if multi_angle:
+      angles = [20.,22.5, 25.,27.5, 30.,32.5, 35.,37.5,40.,42.5,45.,47.5,50.,52.5,55.,57.5,60.,62.5,65.,67.5,70.]
+    else:
+      angles = [45.]
+
+    grid_radius = 20
+    mapp = flex.double(flex.grid(2*grid_radius+1, 2*grid_radius+1))
+    print("Searching a grid with dimensions", mapp.focus())
+
+    beam = image.get_beam()
+    beam_center = col(panel.get_beam_centre_lab(beam.get_s0())[0:2])
+    gmax = 0.0
+    coordmax = (0,0)
+    print("Rastering row", end=' ')
+    for xi in range(-grid_radius, grid_radius+1):
+      print(xi, end=' '); sys.stdout.flush()
+      for yi in range(-grid_radius, grid_radius+1):
+        delta = col((xi,yi))
+        all_VV = flex.double()
+        for deg in angles:
+          ang_rad = deg * pi/180.
+          rotmat = sqr(  (sin(ang_rad), -cos(ang_rad), cos(ang_rad), sin(ang_rad))  )
+          all_VV.append(self.CC(beam_center + delta, rotmat))
+        #VV = self.CC(beam_center + delta)
+        VV = flex.max(all_VV)
+        if VV>gmax:
+          gmax = VV
+          coordmax = delta
+        mapp[(xi+grid_radius,yi+grid_radius)]=VV
+    print()
+
+    print("max cc %7.4F is at (%d, %d)"%(gmax, coordmax[0], coordmax[1]))
+    if plot:
+      npy = mapp.as_numpy_array().T # T: transpose
+      from matplotlib import pyplot as plt
+      fig = plt.figure()
+      if plot_range is None:
+        vmin = vmax = None
+      else:
+        vmin, vmax = plot_range
+      plt.imshow(npy, cmap="hot", interpolation="nearest", extent=[-grid_radius-1, grid_radius+1, grid_radius+1, -grid_radius-1],
+                 vmin = vmin, vmax = vmax)
+      ax = plt.colorbar()
+      ax.set_label("CC")
+      plt.plot([coordmax[0]],[coordmax[1]],"k.")
+      plt.title("Rotational autocorrelation of quadrant %d"%i_quad)
+      plt.xlabel("X offset (pixels)")
+      plt.ylabel("Y offset (pixels)")
+
+      if show:
+        plt.show()
+
+    self.coordmax = coordmax
+    self.ccmax = gmax
+
+  def CC(self, beam_center, rotmat=None):
+    detector = self.image.get_detector()
+    angle = [0,3,2,1][self.i_quad] #
+
+    asic = self.image.get_raw_data()[list(detector.get_names()).index(self.panel.get_name())].matrix_rot90(angle)
+
+    p_w, p_h = self.panel.get_image_size()
+    b = [self.panel.get_pixel_lab_coord((0    ,0    )),
+         self.panel.get_pixel_lab_coord((p_w-1,0    )),
+         self.panel.get_pixel_lab_coord((p_w-1,p_h-1)),
+         self.panel.get_pixel_lab_coord((0    ,p_h-1))]
+    asic_origin = col(self.panel.millimeter_to_pixel((min([p[0] for p in b]),
+                                                      min([p[1] for p in b]))))
+
+    if rotmat is None:
+      rot45 = sqr((sin(pi/3.),-cos(pi/3.),cos(pi/3.),sin(pi/3.)))
+    else: rot45 = rotmat
+
+    from xfel.metrology.legacy_scale import quadrant_self_correlation
+    min_value = self.image.get_detector()[0].get_trusted_range()[0]
+    REF,ROT = quadrant_self_correlation(asic.as_double(),asic_origin,beam_center,rot45,min_value)
+    CCRR = flex.linear_correlation(REF,ROT)
+
+    return CCRR.coefficient()
+
+    #npy = rot_asic.as_numpy_array()
+    #from matplotlib import pyplot as plt
+    #plt.imshow(npy,cmap="hot")
+    #plt.show()
+
+
+ *******************************************************************************

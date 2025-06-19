@@ -1,0 +1,708 @@
+
+
+ *******************************************************************************
+mmtbx/ions/tst_symmetry_axis.py
+
+from __future__ import absolute_import, division, print_function
+import os
+from six.moves import cStringIO as StringIO
+from libtbx.utils import null_out
+from libtbx import group_args, Auto
+import iotbx.pdb
+import mmtbx.ions.identify
+from mmtbx.ions.svm.dump_sites import master_phil
+from iotbx.data_manager import DataManager
+
+
+def exercise():
+  from mmtbx.regression import make_fake_anomalous_data
+  import mmtbx.ions.utils
+  pdb_in = """\
+CRYST1   51.491   51.491   35.389  90.00  90.00 120.00 P 31 2 1
+SCALE1      0.019421  0.011213  0.000000        0.00000
+SCALE2      0.000000  0.022425  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.028257        0.00000
+HETATM   32  CA  CGU A  17       7.453  25.360  36.702  1.00 25.21           C
+HETATM   33  C   CGU A  17       6.252  24.666  36.060  1.00 24.08           C
+HETATM   34  O   CGU A  17       6.408  23.698  35.327  1.00 22.85           O
+HETATM   35  CB  CGU A  17       7.547  24.924  38.163  1.00 28.34           C
+HETATM   36  CG  CGU A  17       8.807  24.090  38.525  1.00 29.46           C
+HETATM   37  CD1 CGU A  17       9.396  23.286  37.336  1.00 28.04           C
+HETATM   38  CD2 CGU A  17       8.411  23.255  39.740  1.00 32.29           C
+HETATM   39 OE11 CGU A  17      10.339  23.775  36.690  1.00 31.46           O
+HETATM   40 OE12 CGU A  17       8.917  22.160  37.075  1.00 26.97           O
+HETATM   41 OE21 CGU A  17       7.958  23.926  40.668  1.00 35.00           O
+HETATM   42 OE22 CGU A  17       8.527  22.036  39.780  1.00 33.69           O
+ATOM     43  N   PRO A  18       5.029  25.135  36.349  1.00 23.16           N
+ATOM     62  CA  ARG A  20       7.902  23.943  32.052  1.00 22.37           C
+ATOM     63  C   ARG A  20       7.515  22.468  32.019  1.00 24.90           C
+ATOM     64  O   ARG A  20       7.956  21.738  31.130  1.00 24.00           O
+ATOM     65  CB  ARG A  20       9.024  24.136  33.067  1.00 26.75           C
+ATOM     67  CD  ARG A  20      10.812  25.597  34.000  1.00 36.42           C
+HETATM   72  N   CGU A  21       6.701  22.022  32.980  1.00 24.22           N
+HETATM   73  CA  CGU A  21       6.293  20.612  33.012  1.00 23.24           C
+HETATM   74  C   CGU A  21       5.432  20.293  31.805  1.00 23.70           C
+HETATM   75  O   CGU A  21       5.561  19.221  31.216  1.00 20.30           O
+HETATM   76  CB  CGU A  21       5.506  20.267  34.289  1.00 24.58           C
+HETATM   77  CG  CGU A  21       6.392  20.445  35.528  1.00 26.52           C
+HETATM   78  CD1 CGU A  21       7.353  19.249  35.754  1.00 27.96           C
+HETATM   79  CD2 CGU A  21       5.507  20.718  36.738  1.00 29.78           C
+HETATM   80 OE11 CGU A  21       8.366  19.406  36.482  1.00 27.23           O
+HETATM   81 OE12 CGU A  21       7.056  18.159  35.217  1.00 25.25           O
+HETATM   82 OE21 CGU A  21       4.695  21.625  36.586  1.00 36.91           O
+HETATM   83 OE22 CGU A  21       5.664  20.139  37.797  1.00 32.02           O
+ATOM     93  C   CYS A  23       7.212  20.248  27.692  1.00 25.63           C
+ATOM     94  O   CYS A  23       7.306  19.599  26.656  1.00 22.02           O
+HETATM   97  N   CGU A  24       7.761  19.852  28.842  1.00 26.69           N
+HETATM   98  CA  CGU A  24       8.527  18.607  28.931  1.00 29.70           C
+HETATM   99  C   CGU A  24       7.665  17.456  28.476  1.00 31.08           C
+HETATM  100  O   CGU A  24       8.143  16.541  27.812  1.00 32.94           O
+HETATM  101  CB  CGU A  24       8.981  18.304  30.367  1.00 26.05           C
+HETATM  102  CG  CGU A  24       9.966  19.357  30.876  1.00 26.18           C
+HETATM  103  CD1 CGU A  24      11.275  19.290  30.093  1.00 24.75           C
+HETATM  104  CD2 CGU A  24      10.148  19.172  32.390  1.00 27.43           C
+HETATM  105 OE11 CGU A  24      12.023  18.293  30.233  1.00 29.79           O
+HETATM  106 OE12 CGU A  24      11.537  20.244  29.348  1.00 24.99           O
+HETATM  107 OE21 CGU A  24       9.100  19.190  33.043  1.00 28.87           O
+HETATM  108 OE22 CGU A  24      11.260  19.084  32.908  1.00 24.87           O
+ATOM    143  O   CYS A  29      10.353  21.841  23.789  1.00 30.74           O
+ATOM    146  N   ASP A  30       9.604  19.770  24.234  1.00 32.83           N
+ATOM    147  CA  ASP A  30      10.776  19.402  25.014  1.00 34.15           C
+ATOM    148  C   ASP A  30      12.026  19.580  24.177  1.00 36.29           C
+ATOM    149  O   ASP A  30      12.937  20.322  24.544  1.00 34.50           O
+ATOM    150  CB  ASP A  30      10.685  17.949  25.464  1.00 33.18           C
+ATOM    151  CG  ASP A  30      11.714  17.607  26.523  1.00 32.22           C
+ATOM    152  OD1 ASP A  30      12.621  18.428  26.752  1.00 32.53           O
+ATOM    153  OD2 ASP A  30      11.608  16.524  27.125  1.00 31.78           O
+ATOM    154  N   GLU A  31      12.056  18.885  23.045  1.00 39.34           N
+ATOM    155  CA  GLU A  31      13.186  18.954  22.135  1.00 40.16           C
+ATOM    172  CA  ALA A  33      13.225  23.877  24.346  1.00 39.26           C
+ATOM    173  C   ALA A  33      14.746  23.914  24.481  1.00 38.24           C
+ATOM    175  CB  ALA A  33      12.600  23.326  25.630  1.00 37.33           C
+ATOM    176  N   ASP A  34      15.400  22.799  24.170  1.00 39.56           N
+ATOM    177  CA  ASP A  34      16.857  22.723  24.258  1.00 40.96           C
+ATOM    180  CB  ASP A  34      17.352  21.300  23.976  1.00 40.20           C
+ATOM    181  CG  ASP A  34      17.006  20.327  25.083  1.00 38.93           C
+ATOM    182  OD1 ASP A  34      16.981  20.742  26.262  1.00 41.79           O
+ATOM    183  OD2 ASP A  34      16.777  19.140  24.778  1.00 37.45           O
+TER
+HETATM  316 CA    CA A  71      13.077  17.433  32.271  1.00 22.23          CA
+HETATM  317 CA    CA A  72      13.835  18.867  28.887  1.00 30.50          CA
+HETATM  318 CA    CA A  73      10.897  18.813  35.385  1.00 50.79          CA
+HETATM  320  O   HOH A  75      13.387  22.461  33.530  1.00 24.93           O
+HETATM  323  O   HOH A  78      10.578  15.304  29.567  1.00 23.15           O
+HETATM  324  O   HOH A  79       5.020  20.563  40.636  1.00 44.02           O
+HETATM  325  O   HOH A  80       2.823  22.144  38.546  1.00 36.74           O
+HETATM  326  O   HOH A  81      10.434  22.631  29.604  1.00 25.89           O
+HETATM  327  O   HOH A  82       6.522  15.691  36.473  1.00 27.82           O
+HETATM  332  O   HOH A  87      11.624  15.358  31.822  1.00 24.92           O
+HETATM  333  O   HOH A  88      13.763  16.798  28.667  1.00 29.47           O
+HETATM  334  O   HOH A  89       6.350  16.973  32.340  1.00 37.83           O
+HETATM  338  O   HOH A  93      10.474  21.054  34.739  1.00 25.48           O
+HETATM  342  O   HOH A  97      16.203  18.688  27.720  1.00 28.10           O
+HETATM  343  O   HOH A  98       8.186  14.327  30.477  1.00 49.44           O
+HETATM  344  O   HOH A  99       8.625  16.477  33.868  1.00 48.13           O
+HETATM  347  O   HOH A 102      15.462  16.714  24.789  1.00 42.90           O
+HETATM  356  O   HOH A 111       4.757  17.423  38.879  1.00 34.26           O
+HETATM  358  O   HOH A 113      10.313  14.495  25.452  1.00 40.66           O
+HETATM  359  O   HOH A 114       1.979  18.616  37.760  1.00 34.25           O
+HETATM  363  O   HOH A 118      13.926  20.627  27.271  1.00 29.62           O
+HETATM  365  O   HOH A 120      16.240  23.471  27.700  1.00 48.79           O
+HETATM  370  O   HOH A 125       2.747  18.823  35.170  1.00 50.30           O
+HETATM  372  O   HOH A 127       5.228  23.553  41.559  1.00 42.02           O
+HETATM  373  O   HOH A 128       5.298  21.833  43.473  1.00 41.96           O
+HETATM  377  O   HOH A 132      13.181  22.613  29.210  1.00 35.43           O
+TER
+"""
+  file_base = "tst_symmetry_axis"
+  with open(file_base + ".pdb", "w") as f:
+    f.write(pdb_in)
+  pdb_inp = iotbx.pdb.input(file_base + ".pdb")
+  hierarchy = pdb_inp.construct_hierarchy()
+  xrs = pdb_inp.xray_structure_simple()
+  hierarchy, n = mmtbx.ions.utils.anonymize_ions(hierarchy, log=null_out())
+  assert (n == 3)
+  with open(file_base + "_in.pdb", "w") as f:
+    f.write(hierarchy.as_pdb_string(crystal_symmetry=xrs))
+  mtz_file = make_fake_anomalous_data.generate_mtz_file(
+    file_base=file_base,
+    d_min=1.5,
+    anomalous_scatterers=[group_args(
+      selection="element CA",
+      fp=0.0,
+      fdp=0.4)])
+
+  dm = DataManager()
+  m = dm.get_model(file_base + "_in.pdb")
+  dm.process_miller_array_file(mtz_file)
+  fmo = dm.get_fmodel(scattering_table="n_gaussian")
+  params = master_phil().extract()
+  params.use_phaser=False
+  #params.skip_twin_test=True
+  params.elements='CA'
+  params.input.wavelength = 0.9792
+  out = StringIO()
+  results = get_analyze_waters_result(m,fmo,params,out)
+  assert "Valence sum:  1.916" in out.getvalue()
+  assert out.getvalue().count("Probable cation: CA+2") >= 1
+  os.remove(file_base + ".pdb")
+  os.remove(file_base + "_in.pdb")
+  os.remove(file_base + ".mtz")
+  os.remove(file_base + "_fmodel.eff")
+
+
+def get_analyze_waters_result(m,fmo,params,out,manager_class = None):
+  m.process(make_restraints=True)
+  grm = m.get_restraints_manager()
+  manager = mmtbx.ions.identify.create_manager(
+    pdb_hierarchy = m.get_hierarchy(),
+    fmodel = fmo,
+    geometry_restraints_manager = grm.geometry,
+    wavelength = params.input.wavelength,
+    params = params,
+    nproc = params.nproc,
+    log = out,
+    manager_class = manager_class)
+  candidates = Auto
+  if (params.elements is not Auto) and (params.elements is not None):
+    from cctbx.eltbx import chemical_elements
+    lu = chemical_elements.proper_upper_list()
+    elements = params.elements.replace(",", " ")
+    candidates = elements.split()
+    for elem in candidates :
+      if (elem.upper() not in lu):
+        raise Sorry("Unrecognized element '%s'" % elem)
+
+  results = manager.analyze_waters(
+    out = out,
+    candidates = candidates)
+
+  return results
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ions/tst_utils.py
+
+from __future__ import absolute_import, division, print_function
+
+from libtbx.test_utils import show_diff
+
+def exercise():
+  from mmtbx.ions import utils as ion_utils
+  import iotbx.pdb
+  pdb_in = iotbx.pdb.input(source_info=None, lines="""\
+CRYST1   20.000   60.000   50.000  90.00  90.00  90.00 P 1
+HETATM 1690 ZN    ZN X   1     -14.031  10.147  -2.484  1.00 14.71      ION ZN2+
+HETATM 1699 CL    CL X  10     -16.305  10.413  -3.294  0.94 15.45      ION CL1-
+HETATM 1700 CL    CL X  11     -13.440   1.272 -23.660  0.64 21.31      ION CL1-
+HETATM 1691 MG    MG X   2     -14.099  16.408  -0.840  1.00 14.87      ION MG2+
+HETATM 1692 CD    CD X   3      -5.302  -1.809  -1.327  1.00 14.78      ION CD2+
+HETATM 1693 CD    CD X   4      -8.287 -11.927 -43.776  1.00 14.70      ION CD2+
+HETATM 1703 CL    CL X  14      -2.713  20.673 -12.004  0.79 20.10      ION CL1-
+HETATM 1694 NI    NI X   5      -5.160  20.798 -11.755  0.93 14.92      ION NI2+
+HETATM 1695 CA    CA X   6      -7.922 -11.718  -0.402  0.74 16.82      ION CA2+
+HETATM 1696 CD    CD X   7     -16.886 -19.039 -34.333  0.61 15.22      ION CD2+
+HETATM 1701 CL    CL X  12     -10.068 -10.650   0.239  0.53 22.83      ION CL1-
+""")
+  xrs = pdb_in.xray_structure_simple()
+  h = pdb_in.construct_hierarchy()
+  pdb_atoms = h.atoms()
+  perm = ion_utils.sort_atoms_permutation(
+    pdb_atoms=pdb_atoms,
+    xray_structure=xrs)
+  pdb_atoms = pdb_atoms.select(perm)
+  xrs = xrs.select(perm)
+  hierarchy = iotbx.pdb.hierarchy.root()
+  model = iotbx.pdb.hierarchy.model()
+  hierarchy.append_model(model)
+  chain = iotbx.pdb.hierarchy.chain(id="X")
+  model.append_chain(chain)
+  for k, atom in enumerate(pdb_atoms):
+    rg = iotbx.pdb.hierarchy.residue_group(resseq="%4d" % (k+1))
+    chain.append_residue_group(rg)
+    ag = iotbx.pdb.hierarchy.atom_group(resname=atom.parent().resname)
+    rg.append_atom_group(ag)
+    ag.append_atom(atom.detached_copy())
+  assert not show_diff (hierarchy.as_pdb_string(crystal_symmetry=xrs), """\
+CRYST1   20.000   60.000   50.000  90.00  90.00  90.00 P 1
+SCALE1      0.050000  0.000000  0.000000        0.00000
+SCALE2      0.000000  0.016667  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.020000        0.00000
+HETATM    5 CD    CD X   1      -5.302  -1.809  -1.327  1.00 14.78      ION CD2+
+HETATM    6 CD    CD X   2      -8.287 -11.927 -43.776  1.00 14.70      ION CD2+
+HETATM   10 CD    CD X   3     -16.886 -19.039 -34.333  0.61 15.22      ION CD2+
+HETATM    1 ZN    ZN X   4     -14.031  10.147  -2.484  1.00 14.71      ION ZN2+
+HETATM    8 NI    NI X   5      -5.160  20.798 -11.755  0.93 14.92      ION NI2+
+HETATM    9 CA    CA X   6      -7.922 -11.718  -0.402  0.74 16.82      ION CA2+
+HETATM    2 CL    CL X   7     -16.305  10.413  -3.294  0.94 15.45      ION CL1-
+HETATM    7 CL    CL X   8      -2.713  20.673 -12.004  0.79 20.10      ION CL1-
+HETATM    3 CL    CL X   9     -13.440   1.272 -23.660  0.64 21.31      ION CL1-
+HETATM   11 CL    CL X  10     -10.068 -10.650   0.239  0.53 22.83      ION CL1-
+HETATM    4 MG    MG X  11     -14.099  16.408  -0.840  1.00 14.87      ION MG2+
+""")
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ions/tst_validate_ca.py
+
+from __future__ import absolute_import, division, print_function
+import os, time
+from six.moves import cStringIO as StringIO
+from iotbx.data_manager import DataManager
+from mmtbx.regression.make_fake_anomalous_data import generate_calcium_inputs
+import iotbx.phil
+import mmtbx.ions.identify
+
+def exercise():
+  base = "tst_validate_ca"
+  mtz_file, pdb_file = generate_calcium_inputs(file_base=base, anonymize=False)
+  time.sleep(2)
+  dm = DataManager()
+  m = dm.get_model(pdb_file)
+  m.process(make_restraints=True)
+  grm = m.get_restraints_manager()
+  dm.process_miller_array_file(mtz_file)
+  fmo = dm.get_fmodel(scattering_table="n_gaussian")
+  from mmtbx.ions.identify import ion_identification_phil_str
+  params = iotbx.phil.parse(input_string = ion_identification_phil_str).extract()
+  out = StringIO()
+  manager = mmtbx.ions.identify.create_manager(
+    pdb_hierarchy = m.get_hierarchy(),
+    fmodel=fmo,
+    geometry_restraints_manager=grm.geometry,
+    wavelength=1.12,
+    params=params,
+    nproc = 1,
+    log= out)
+  result = manager.validate_ions(out = out)
+  n_ca, n_bad = 0, 0
+  for line in out.getvalue().splitlines():
+    if "| CA" in line:
+      n_ca += 1
+    if "!!!" in line:
+      n_bad += 1
+  assert n_ca == 1 and n_bad == 0
+  for ext in [".pdb", ".mtz", "_fmodel.eff"]:
+    os.remove(base + ext)
+  print("OK")
+
+if (__name__ == "__main__"):
+  #print("WARNING: TEST TOO SLOW. MAKE IT RUN UNDER 300s AND ENABLE BACK.")
+  t0 = time.time()
+  exercise()
+  print("Time: %6.2f"%(time.time()-t0))
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ions/tst_validate_mg.py
+
+from __future__ import absolute_import, division, print_function
+import os, time
+from six.moves import cStringIO as StringIO
+from iotbx.data_manager import DataManager
+from mmtbx.regression.make_fake_anomalous_data import generate_magnessium_inputs
+import iotbx.phil
+import mmtbx.ions.identify
+
+def exercise():
+  base = "tst_validate_mg"
+  mtz_file, pdb_file = generate_magnessium_inputs(file_base=base, anonymize=False)
+  time.sleep(2)
+  dm = DataManager()
+  m = dm.get_model(pdb_file)
+  m.process(make_restraints=True)
+  grm = m.get_restraints_manager()
+  ma = dm.get_miller_arrays(filename = mtz_file)
+  fmo = dm.get_fmodel(scattering_table="n_gaussian")
+  from mmtbx.ions.identify import ion_identification_phil_str
+  params = iotbx.phil.parse(input_string = ion_identification_phil_str).extract()
+  out = StringIO()
+  manager = mmtbx.ions.identify.create_manager(
+    pdb_hierarchy = m.get_hierarchy(),
+    fmodel=fmo,
+    geometry_restraints_manager=grm.geometry,
+    wavelength=None,
+    params=params,
+    nproc = 1,
+    log= out)
+  result = manager.validate_ions(out = out)
+  n_mg, n_bad = 0, 0
+  for line in out.getvalue().splitlines():
+    if "| MG" in line:
+      n_mg += 1
+    if "!!!" in line:
+      n_bad += 1
+  assert n_mg == 2 and n_bad == 0
+  for ext in [".pdb", ".mtz", "_fmodel.eff"]:
+    os.remove(base + ext)
+  print("OK")
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ions/utils.py
+# -*- coding: utf-8; py-indent-offset: 2 -*-
+from __future__ import absolute_import, division, print_function
+
+from collections import defaultdict
+from math import cos, pi, sin, sqrt
+import sys
+
+from cctbx import crystal
+from cctbx.eltbx import sasaki, chemical_elements
+from iotbx.pdb import common_residue_names_water as WATER_RES_NAMES
+from libtbx.utils import null_out, xfrange
+from mmtbx.ions import server
+from scitbx.array_family import flex
+from scitbx.math import gaussian_fit_1d_analytical
+from six.moves import zip
+from six.moves import range
+
+def anonymize_ions(pdb_hierarchy, log=sys.stdout):
+  """
+  Convert any elemental ions in the PDB hierarchy to water, resetting the
+  occupancy and scaling the B-factor.  The atom segids will be set to the old
+  resname.  NOTE: this does not change the corresponding scatterer in the xray
+  structure, but a new xray structure can be obtained by calling
+  hierarchy.extract_xray_structure(crystal_symmetry).
+
+  Parameters
+  ----------
+  pdb_hierarchy : iotbx.pdb.hierarchy.root
+  log : file, optional
+
+  Returns
+  -------
+  iotbx.pdb.hierarchy.root
+      New pdb hierarchy with its ions anonymized
+  int
+      Number of atoms that were anonymized.
+  """
+  ion_resnames = set(chemical_elements.proper_upper_list())
+  for resname in server.params["_lib_charge.resname"]:
+    if resname not in WATER_RES_NAMES:
+      ion_resnames.add(resname)
+  n_converted = 0
+  pdb_hierarchy = pdb_hierarchy.deep_copy()
+  for model in pdb_hierarchy.models():
+    for chain in model.chains():
+      for residue_group in chain.residue_groups():
+        for atom_group in residue_group.atom_groups():
+          if atom_group.resname.strip() in ion_resnames:
+            atoms = atom_group.atoms()
+            id_strs = []
+            for atom in atoms:
+              elem = atom.element.strip()
+              if elem in ["H", "D"]:
+                atomic_number = 1
+              elif elem in ["HE"]:
+                atomic_number = 2
+              else:
+                atomic_number = sasaki.table(elem).atomic_number()
+              id_strs.append(atom.id_str())
+              atom.segid = atom_group.resname
+              atom.name = " O  "
+              atom.element = "O"
+              atom.charge = ""
+              atom.occupancy = 1.0
+              atom.b = atom.b * (10 / atomic_number)
+            atom_group.resname = "HOH"
+            for atom, id_str in zip(atoms, id_strs):
+              print("%s --> %s, B-iso = %.2f" % (id_str, atom.id_str(),
+                atom.b), file=log)
+              n_converted += 1
+  return pdb_hierarchy, n_converted
+
+def sort_atoms_permutation(pdb_atoms, xray_structure):
+  """
+  Creates a list of atoms in pdb_atoms, sorted first by their atomic number,
+  then by occupancy, and finally, by isotropic b-factor.
+
+  Parameters
+  ----------
+  pdb_atoms : iotbx.pdb.hierarchy.af_shared_atom
+  xray_structure : cctbx.xray.structure.structure
+
+  Returns
+  -------
+  flex.size_t of int
+      i_seqs of sorted atoms
+  """
+  assert pdb_atoms.size() == xray_structure.scatterers().size()
+  pdb_atoms.reset_i_seq()
+  atoms_sorted = sorted(
+    pdb_atoms,
+    key=lambda x:
+    (sasaki.table(x.element.strip().upper()).atomic_number(), x.occ, x.b),
+    reverse=True,
+    )
+  sele = flex.size_t([atom.i_seq for atom in atoms_sorted])
+  return sele
+
+def collect_ions(pdb_hierarchy):
+  """
+  Collects a list of all ions in pdb_hierarchy.
+
+  Parameters
+  ----------
+  pdb_hierarchy : iotbx.pdb.hierarchy.root
+
+  Returns
+  -------
+  list of iotbx.pdb.hierarchy.atom
+  """
+  elements = chemical_elements.proper_upper_list()
+  ions = []
+  for model in pdb_hierarchy.models():
+    for chain in model.chains():
+      for residue_group in chain.residue_groups():
+        for atom_group in residue_group.atom_groups():
+          if atom_group.resname.strip() in elements:
+            atoms = atom_group.atoms()
+            assert len(atoms) == 1
+            for atom in atoms:
+              ions.append(atom)
+  return ions
+
+# TODO add test
+def compare_ions(hierarchy, reference_hierarchy, reference_xrs,
+    distance_cutoff=2.0, log=None, ignore_elements=(), only_elements=(),
+    sel_str_base="segid ION"):
+  """
+  Compares two pdb structures to determine the number of ions that appear in the
+  reference structure and are either matched or missing in the other structure.
+
+  Parameters
+  ----------
+  hierarchy : iotbx.pdb.hierarchy.root
+  reference_hierarchy : iotbx.pdb.hierarchy.root
+  reference_xrs : ...
+  distance_cutoff : float, optional
+  log : file, optional
+  ignore_element : iterable, optional
+  only_elements : iterable, optional
+  sel_str_base : str, optional
+
+  Returns
+  -------
+  int
+      Number of ions in reference_hierarchy that were also found in hierarchy.
+  int
+      Number of ions in reference_hierarchy that were not found in hierarchy.
+  """
+  if log is None:
+    log = null_out()
+  sel_cache = hierarchy.atom_selection_cache()
+  sel_str = sel_str_base
+  if len(only_elements) > 0:
+    sel_str += " and (%s)" % " or ".join(
+      ["element %s" % e for e in only_elements])
+  elif len(ignore_elements) > 0:
+    sel_str += " and not (%s)" % " or ".join(
+      ["element %s" % e for e in ignore_elements])
+  ion_isel = sel_cache.selection(sel_str).iselection()
+  if len(ion_isel) == 0:
+    return [], []
+  pdb_atoms = hierarchy.atoms()
+  pdb_atoms.reset_i_seq()
+  ions = pdb_atoms.select(ion_isel)
+  asu_mappings = reference_xrs.asu_mappings(
+    buffer_thickness=distance_cutoff+0.1)
+  unit_cell = reference_xrs.unit_cell()
+  sites_cart = ions.extract_xyz()
+  sites_frac = unit_cell.fractionalize(sites_cart=sites_cart)
+  asu_mappings.process_sites_frac(sites_frac,
+    min_distance_sym_equiv=reference_xrs.min_distance_sym_equiv())
+  pair_generator = crystal.neighbors_fast_pair_generator(
+    asu_mappings=asu_mappings,
+    distance_cutoff=distance_cutoff)
+  reference_atoms = reference_hierarchy.atoms()
+  n_xray = reference_xrs.scatterers().size()
+  ion_ref_i_seqs = []
+  for k in range(len(ions)):
+    ion_ref_i_seqs.append([])
+  for pair in pair_generator:
+    if ((pair.i_seq < n_xray and pair.j_seq < n_xray) or
+        (pair.i_seq >= n_xray and pair.j_seq >= n_xray)):
+      continue
+    if pair.i_seq < n_xray:
+      ion_seq, ref_seq = pair.j_seq, pair.i_seq
+    else:
+      ion_seq, ref_seq = pair.i_seq, pair.j_seq
+    site_frac = sites_frac[ion_seq - n_xray]
+    dxyz = sqrt(pair.dist_sq)
+    j_seq = ion_seq - n_xray
+    ion_ref_i_seqs[j_seq].append(ref_seq)
+  # FIXME better filtering needed - right now we risk double-counting ions in
+  # the reference model, although I haven't found a case of this yet
+  matched = []
+  missing = []
+  for i_seq, ref_i_seqs in enumerate(ion_ref_i_seqs):
+    ion = ions[i_seq]
+    if len(ref_i_seqs) == 0:
+      print("No match for %s" % ion.id_str(), file=log)
+      missing.append(ion.id_str())
+    else:
+      ref_ions = []
+      for i_seq in ref_i_seqs:
+        ref_atom = reference_atoms[i_seq]
+        if ion.element.upper() == ref_atom.element.upper():
+          ref_ions.append(ref_atom.id_str())
+      if len(ref_ions) >= 1:
+        matched.append(ion.id_str())
+        if len(ref_ions) > 1:
+          print("Multiple matches for %s:" % ion.id_str(), file=log)
+          for ref_ion in ref_ions:
+            print("  %s" % ref_ion, file=log)
+        else:
+          print("Ion %s matches %s" % (ion.id_str(),
+            ref_ions[0]), file=log)
+      else:
+        print("No match for %s" % ion.id_str(), file=log)
+        missing.append(ion.id_str())
+  return matched, missing
+
+def _get_points_within_radius(point, radius, radius_step=0.2,
+                              angle_step=pi / 5):
+  """
+  Generates a list of points and their associated radius in steps around a
+  sphere.
+
+  Parameters
+  ----------
+  point : tuple of float, float, float
+      X, Y, Z, coordinates to center the sampling around.
+  radius : float
+      Max radius around the center to sample.
+  radius_step : float, optional
+      Steps along the radius to use when sampling.
+  angle_step : float, optional
+      Steps around each radii distance to use when sampling. Amount is in
+      radians.
+
+  Returns
+  -------
+  list of tuple of float, float, float
+      List of points to be sampled.
+  list of float
+      List of radii corresponding to each point.
+  """
+
+  points = [point]
+  radiuses = [0]
+  for r in xfrange(radius_step, radius, radius_step):
+    for theta in xfrange(-pi, pi, angle_step):
+      for phi in xfrange(-pi, pi, angle_step):
+        x = r * cos(theta) * sin(phi) + point[0]
+        y = r * sin(theta) * sin(phi) + point[1]
+        z = r * cos(phi) + point[2]
+        points.append((x, y, z))
+        radiuses.append(r)
+
+  return points, radiuses
+
+def fit_gaussian(unit_cell, site_cart, real_map, radius=1.6):
+  """
+  Fit a gaussian function to the map around a site. Samples points in concentric
+  spheres up to radius away from the site.
+
+  f(x) = a * exp(-b * x ** 2)
+
+  Parameters
+  ----------
+  unit_cell : uctbx.unit_cell
+  site_cart : tuple of float, float, float
+      The site's cartesian coordinates to sample the density around.
+  real_map : scitbx.array_family.flex
+      Real space map of the electron density in the unit cell.
+  radius : float, optional
+      The max radius to use for sampling.
+
+  Returns
+  -------
+  float
+      Height of gaussian curve.
+  float
+      Spread of guassian curve.
+
+  See Also
+  --------
+  scitbx.math.gaussian_fit_1d_analytical
+  """
+  points, radiuses = _get_points_within_radius(site_cart, radius)
+
+  map_heights = \
+    [real_map.tricubic_interpolation(unit_cell.fractionalize(i))
+     for i in points]
+
+  # Gaussian functions can't have negative values, filter sampled points below
+  # zero to allow us to find the analytical solution (radius = 2.0 is too big
+  # for most atoms anyways)
+  x, y = flex.double(), flex.double()
+  for rad, height in zip(radiuses, map_heights):
+    if height > 0:
+      x.append(rad)
+      y.append(height)
+
+  try:
+    fit = gaussian_fit_1d_analytical(x=x, y=y)
+  except RuntimeError as err:
+    print(err)
+    return 0., 0.
+  else:
+    return fit.a, fit.b
+
+def count_coordinating_residues(nearby_atoms, distance_cutoff=3.0):
+  """
+  Count the number of residues of each type involved in the coordination
+  sphere.  This may yield additional clues to the identity of ions, e.g. only
+  Zn will have 4 Cys residues.
+
+  Parameters
+  ----------
+  nearby_atoms : list of mmtbx.ions.environment.atom_contact
+  distance_cutoff : float, optional
+
+  Returns
+  -------
+  dict of str, int
+  """
+  unique_residues = []
+  residue_counts = defaultdict(int)
+  for contact in nearby_atoms:
+    if contact.distance() <= distance_cutoff:
+      parent = contact.atom.parent()
+      for residue in unique_residues:
+        if residue == parent:
+          break
+      else:
+        resname = parent.resname
+        residue_counts[resname] += 1
+        unique_residues.append(parent)
+  return residue_counts
+
+
+ *******************************************************************************

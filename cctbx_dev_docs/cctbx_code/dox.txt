@@ -1,0 +1,1048 @@
+
+
+ *******************************************************************************
+dox/compcomm/newsletter08/f_square_refinement.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx import crystal
+from cctbx import miller
+from cctbx.development import random_structure
+
+indices = miller.build_set(
+  crystal_symmetry=crystal.symmetry(unit_cell=(10,11,12, 90,105,90),
+                                    space_group_symbol="P21/c"),
+  anomalous_flag=False,
+  d_min=0.8)
+structure = random_structure.xray_structure(indices.space_group_info(),
+                                            elements=['C']*6 + ['O']*2 + ['N'],
+                                            volume_per_atom=18.6,
+                                            random_u_iso=True)
+f_ideal = structure.structure_factors(d_min=indices.d_min()).f_calc()
+
+f_obs = f_ideal.amplitudes()
+f_obs *= 2
+f_obs.set_observation_type_xray_amplitude()
+f_obs_square = f_ideal.norm()
+f_obs_square *= 3
+f_obs_square.set_observation_type_xray_intensity()
+
+ls_against_f = xray.unified_least_squares_residual(f_obs)
+ls_against_f_square = xray.unified_least_squares_residual(f_obs_square)
+
+residuals = ls_against_f(f_ideal, compute_derivatives=True)
+print("against F: value=%.3f, scale=%.3f" % (residuals.target(),
+                                             residuals.scale_factor()))
+residuals = ls_against_f_square(f_ideal, compute_derivatives=True)
+print("against F^2: value=%.3f, scale=%.3f" % (residuals.target(),
+                                               residuals.scale_factor()))
+
+perturbed_structure = structure.random_shift_sites(max_shift_cart=0.2)
+for s in perturbed_structure.scatterers():
+  s.flags.set_grad_site(True)
+
+refining_structure = perturbed_structure.deep_copy_scatterers()
+optimiser = xray.lbfgs(
+    target_functor=ls_against_f_square,
+    xray_structure=refining_structure,
+    structure_factor_algorithm="direct")
+print("Initial L.S. residual:%.3f" % optimiser.first_target_value)
+structure.show_scatterers()
+print("Final L.S. residual:%.3f" % optimiser.final_target_value)
+refining_structure.show_scatterers()
+
+weighting = xray.weighting_schemes.shelx_weighting()
+shelx_weighted_ls_against_f_square = xray.unified_least_squares_residual(
+  f_obs_square, weighting=weighting)
+refining_structure = perturbed_structure.deep_copy_scatterers()
+optimiser = xray.lbfgs(
+    target_functor=ls_against_f_square,
+    xray_structure=refining_structure,
+    structure_factor_algorithm="direct")
+print("Initial L.S. residual:%.3f" % optimiser.first_target_value)
+structure.show_scatterers()
+print("Final L.S. residual:%.3f" % optimiser.final_target_value)
+refining_structure.show_scatterers()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+dox/compcomm/newsletter08/special_positions.py
+from __future__ import absolute_import, division, print_function
+from cctbx import crystal
+from cctbx.array_family import flex
+
+crystal_symmetry = crystal.symmetry(
+    unit_cell=(10,10,10,90,90,90),
+    space_group_symbol="Pm3m")
+crystal_symmetry.show_summary()
+
+special_position_settings = crystal_symmetry.special_position_settings(
+  min_distance_sym_equiv=0.5)
+
+site_symmetry = special_position_settings.site_symmetry(site=(0.3, 0.31, 0.111))
+print("special position operator:", site_symmetry.special_op())
+print("exact location of special position:", site_symmetry.exact_site())
+
+site_constraints = site_symmetry.site_constraints()
+
+n_indep = site_constraints.n_independent_params()
+print("n_indep:", n_indep)
+
+site_indep = site_constraints.independent_params(
+  all_params=site_symmetry.exact_site())
+assert len(site_indep) == n_indep
+
+site_indep_shifted = list(site_indep) # copy site_indep
+site_indep_shifted[0] += 0.1
+
+site_shifted = site_constraints.all_params(
+  independent_params=site_indep_shifted)
+print("site_shifted:", site_shifted)
+
+site_constraints_2 = special_position_settings.site_symmetry(
+  site=(0.5, 0.111, 0.222)).site_constraints()
+
+
+def f(u,v):
+  x, y, z = site_constraints.all_params((u,v))
+  return -x + 2*y + 3*z
+u,v = 0.111, 0.888
+h = 1e-12
+df_du = (f(u+h,v) - f(u-h,v))/(2*h)
+df_dv = (f(u,v+h) - f(u,v-h))/(2*h)
+print(df_du, df_dv)
+independent_gradients = site_constraints.independent_gradients(
+  all_gradients=flex.double((-1,2,3)))
+print("independent_gradients:", independent_gradients)
+
+frac_adp_constraints = site_symmetry.adp_constraints()
+cart_adp_constraints = site_symmetry.cartesian_adp_constraints(
+  crystal_symmetry.unit_cell())
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+dox/compcomm/newsletter09/sf_times.py
+from __future__ import absolute_import, division, print_function
+from libtbx.test_utils import approx_equal
+from libtbx.utils import Usage
+from libtbx import easy_run
+from libtbx import easy_pickle
+from libtbx.path import full_command_path
+import platform
+import sys, os
+op = os.path
+
+__this_script__ = "cctbx_project/compcomm/newsletter09/sf_times.py"
+
+fortran_template = r"""C %(this_script)s
+
+      subroutine cos_wrapper(result, arg)
+      REAL result
+      REAL arg
+      result = COS(arg)
+      return
+      end
+
+      subroutine exp_wrapper(result, arg)
+      REAL result
+      REAL arg
+      result = EXP(arg)
+      return
+      end
+
+      subroutine sf(abcss, n_scatt, xyz, b_iso, n_refl, hkl, f_calc)
+      implicit none
+      REAL abcss(3)
+      integer n_scatt
+      REAL xyz(3, *)
+      REAL b_iso(*)
+      integer n_refl
+      integer hkl(3, *)
+      REAL f_calc(2, *)
+      integer i_refl, i_scatt, j, h
+      REAL phi, cphi, sphi, dss, ldw, dw, a, b
+      DO i_refl=1,n_refl
+        a = 0
+        b = 0
+        DO i_scatt=1,n_scatt
+          phi = 0
+          DO j=1,3
+            phi = phi + hkl(j,i_refl) * xyz(j,i_scatt)
+          enddo
+          phi = phi * 2 * 3.1415926535897931
+          call cos_wrapper(cphi, phi)
+          call cos_wrapper(sphi, phi - 3.1415926535897931*0.5)
+          dss = 0
+          DO j=1,3
+            h = hkl(j,i_refl)
+            dss = dss + h*h * abcss(j)
+          enddo
+          ldw = -0.25 * dss * b_iso(i_scatt)
+          call exp_wrapper(dw, ldw)
+          a = a + dw * cphi
+          b = b + dw * sphi
+        enddo
+        f_calc(1, i_refl) = a
+        f_calc(2, i_refl) = b
+      enddo
+      return
+      end
+
+      program run
+      implicit none
+      REAL abcss(3)
+      integer n_scatt
+      parameter(n_scatt=%(n_scatt)s)
+      REAL xyz(3, n_scatt)
+      REAL b_iso(n_scatt)
+      integer n_refl
+      parameter(n_refl=%(n_refl)s)
+      integer hkl(3, n_refl)
+      REAL f_calc(2, n_refl)
+      integer i, j, jr
+      REAL a, b, max_a, max_b
+      abcss(1) = 1/(11.0*11.0)
+      abcss(2) = 1/(12.0*12.0)
+      abcss(3) = 1/(13.0*13.0)
+      jr = 0
+      DO i=1,n_scatt
+        DO j=1,3
+          jr = mod(jr*1366+150889, 714025)
+          xyz(j,i) = (mod(jr, 20000) - 10000) / 10000.0
+        enddo
+      enddo
+      DO i=1,n_scatt
+        jr = mod(jr*1366+150889, 714025)
+        b_iso(i) = mod(jr, 10000) / 100.0
+      enddo
+      if (n_scatt .le. 10) then
+        DO i=1,n_scatt
+          write(6, '(4(1x,f9.6))')
+     &      xyz(1,i), xyz(2,i), xyz(3, i), b_iso(i)
+        enddo
+      endif
+      DO i=1,n_refl
+        DO j=1,3
+          jr = mod(jr*1366+150889, 714025)
+          hkl(j,i) = mod(jr, 10) - 5
+        enddo
+      enddo
+      call sf(abcss, n_scatt, xyz, b_iso, n_refl, hkl, f_calc)
+      if (n_refl .le. 100) then
+        DO i=1,n_refl
+          write(6, '(3(1x,i3),1x,f12.6,1x,f12.6)')
+     &      hkl(1,i), hkl(2,i), hkl(3,i),
+     &      f_calc(1,i), f_calc(2,i)
+        enddo
+      else
+        max_a = 0
+        max_b = 0
+        DO i=1,n_refl
+          a = f_calc(1,i)
+          b = f_calc(2,i)
+          if (max_a .lt. a) max_a = a
+          if (max_b .lt. b) max_b = b
+        enddo
+        write(6, '(2(1x,f12.6))') max_a, max_b
+      endif
+      end
+"""
+
+cpp_template = r"""// %(this_script)s
+
+#include <vector>
+#include <cstdio>
+#include <cmath>
+#include <cstddef>
+
+#define DO1(i,n) for(i=1;i<=n;i++)
+
+template <typename T>
+struct dim1
+{
+  std::vector<T> data;
+  dim1(int n) : data(n) {}
+  T& operator()(int i) { return data[i-1]; }
+};
+
+template <typename T>
+struct dim2
+{
+  int n1;
+  std::vector<T> data;
+  dim2(int n1_, int n2) : n1(n1_), data(n1*n2) {}
+  T& operator()(int i, int j) { return data[i-1+(j-1)*n1]; }
+};
+
+typedef dim2<int> int2d;
+typedef dim1<float> real1d;
+typedef dim2<float> real2d;
+
+    void
+    cos_wrapper(float& result, float const& arg)
+    {
+      result = std::cos(arg);
+    }
+
+    void
+    exp_wrapper(float& result, float const& arg)
+    {
+      result = std::exp(arg);
+    }
+
+    void
+    sf(real1d& abcss,
+       int n_scatt, real2d& xyz, real1d& b_iso,
+       int n_refl, int2d& hkl, real2d& f_calc)
+    {
+      int i_refl, i_scatt, j, h;
+      float phi, cphi, sphi, dss, ldw, dw, a, b;
+      DO1(i_refl, n_refl) {
+        a = 0;
+        b = 0;
+        DO1(i_scatt, n_scatt) {
+          phi = 0;
+          DO1(j, 3) {
+            phi = phi + hkl(j,i_refl) * xyz(j,i_scatt);
+          }
+          phi = phi * 2 * 3.1415926535897931f;
+          cos_wrapper(cphi, phi);
+          cos_wrapper(sphi, phi - 3.1415926535897931f*0.5f);
+          dss = 0;
+          DO1(j, 3) {
+            h = hkl(j,i_refl);
+            dss = dss + h*h * abcss(j);
+          }
+          ldw = -0.25f * dss * b_iso(i_scatt);
+          exp_wrapper(dw, ldw);
+          a = a + dw * cphi;
+          b = b + dw * sphi;
+        }
+        f_calc(1, i_refl) = a;
+        f_calc(2, i_refl) = b;
+      }
+    }
+
+    int
+    main()
+    {
+      real1d abcss(3);
+      int n_scatt;
+      n_scatt = %(n_scatt)s;
+      real2d xyz(3, n_scatt);
+      real1d b_iso(n_scatt);
+      int n_refl;
+      n_refl = %(n_refl)s;
+      int2d hkl(3, n_refl);
+      real2d f_calc(2, n_refl);
+      int i, j, jr;
+      float a, b, max_a, max_b;
+      abcss(1) = 1/(11.0f*11.0f);
+      abcss(2) = 1/(12.0f*12.0f);
+      abcss(3) = 1/(13.0f*13.0f);
+      jr = 0;
+      DO1(i, n_scatt) {
+        DO1(j, 3) {
+          jr = (jr*1366+150889) %% 714025;
+          xyz(j,i) = (jr %% 20000 - 10000) / 10000.0f;
+        }
+      }
+      DO1(i, n_scatt) {
+        jr = (jr*1366+150889) %% 714025;
+        b_iso(i) = (jr %% 10000) / 100.0f;
+      }
+      if (n_scatt <= 10) {
+        DO1(i, n_scatt) {
+          std::printf(" %%9.6f %%9.6f %%9.6f %%9.6f\n",
+            xyz(1,i), xyz(2,i), xyz(3, i), b_iso(i));
+        }
+      }
+      DO1(i, n_refl) {
+        DO1(j, 3) {
+          jr = (jr*1366+150889) %% 714025;
+          hkl(j,i) = jr %% 10 - 5;
+        }
+      }
+      sf(abcss, n_scatt, xyz, b_iso, n_refl, hkl, f_calc);
+      if (n_refl <= 100) {
+        DO1(i, n_refl) {
+          std::printf(" %%3d %%3d %%3d %%12.6f %%12.6f\n",
+            hkl(1,i), hkl(2,i), hkl(3,i),
+            f_calc(1,i), f_calc(2,i));
+        }
+      }
+      else {
+        max_a = 0.0f;
+        max_b = 0.0f;
+        DO1(i, n_refl) {
+          a = f_calc(1,i);
+          b = f_calc(2,i);
+          if (max_a < a) max_a = a;
+          if (max_b < b) max_b = b;
+        }
+        std::printf(" %%12.6f %%12.6f\n", max_a, max_b);
+      }
+      return 0;
+    }
+"""
+
+def compare_with_cctbx_structure_factors(n_scatt, n_refl, output_lines):
+  from cctbx import xray
+  from cctbx import miller
+  from cctbx import crystal
+  from cctbx.array_family import flex
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=(11,12,13,90,90,90),
+    space_group_symbol="P1")
+  scatterers = flex.xray_scatterer()
+  miller_indices = flex.miller_index()
+  f_calc = flex.complex_double()
+  for line in output_lines:
+    flds = line.split()
+    assert len(flds) in [4,5]
+    if (len(flds) == 4):
+      x,y,z,b_iso = [float(s) for s in flds]
+      scatterers.append(
+        xray.scatterer(site=(x,y,z), b=b_iso, scattering_type="const"))
+    else:
+      miller_indices.append([int(s) for s in flds[:3]])
+      f_calc.append(complex(float(flds[3]), float(flds[4])))
+  assert scatterers.size() == n_scatt
+  assert miller_indices.size() == n_refl
+  xs = xray.structure(
+    crystal_symmetry=crystal_symmetry,
+    scatterers=scatterers)
+  fc = miller_array = miller.set(
+    crystal_symmetry=crystal_symmetry,
+    indices=miller_indices,
+    anomalous_flag=False).array(data=f_calc)
+  fc2 = fc.structure_factors_from_scatterers(
+    xray_structure=xs,
+    algorithm="direct",
+    cos_sin_table=False).f_calc()
+  for f1,f2 in zip(fc.data(), fc2.data()):
+    assert approx_equal(f1, f2, eps=1e-5)
+
+def build_run(a_out, n_scatt, n_refl, build_cmd, check_max_a_b):
+  if (op.isfile("a.out")):
+    os.remove("a.out")
+  assert not op.isfile("a.out")
+  if (a_out is None):
+    easy_run.fully_buffered(command=build_cmd).raise_if_errors_or_output()
+  else:
+    open("a.out", "w").write(a_out)
+    os.chmod("a.out", 0o755)
+  assert op.isfile("a.out")
+  run_cmd = "/usr/bin/time  -p ./a.out"
+  buffers = easy_run.fully_buffered(command=run_cmd)
+  assert len(buffers.stderr_lines) == 3
+  if (n_scatt <= 10 and n_refl <= 100):
+    assert len(buffers.stdout_lines) == n_scatt + n_refl
+  else:
+    assert len(buffers.stdout_lines) == 1
+    max_a, max_b = [float(s) for s in buffers.stdout_lines[0].split()]
+  if (check_max_a_b):
+    if (n_scatt == 2000 and n_refl == 20000):
+      assert approx_equal(max_a, 35.047157, eps=1e-4)
+      assert approx_equal(max_b, 25.212738, eps=1e-4)
+    elif (n_scatt == 100 and n_refl == 1000):
+      assert approx_equal(max_a,  4.493645, eps=1e-4)
+      assert approx_equal(max_b, 10.515532, eps=1e-4)
+    elif (n_scatt <= 10 and n_refl <= 100):
+      compare_with_cctbx_structure_factors(
+        n_scatt=n_scatt,
+        n_refl=n_refl,
+        output_lines=buffers.stdout_lines)
+    else:
+      raise RuntimeError(max_a, max_b)
+  utime = float(buffers.stderr_lines[1].split()[1])
+  return utime
+
+def fortran_write_build_run(
+      a_out, n_scatt, n_refl, real, build_cmd, replace_cos, replace_exp):
+  if (a_out is None):
+    this_script = __this_script__
+    srctxt = fortran_template % vars()
+    if (replace_cos):
+      srctxt = srctxt.replace(
+        "COS(arg)",
+        "arg / (abs(arg)+1.0)")
+    if (replace_exp):
+      srctxt = srctxt.replace(
+        "EXP(arg)",
+        "max(0.0, 1.0 - arg*arg)")
+    srctxt = srctxt.replace("REAL", real)
+    open("tmp.f", "w").write(srctxt)
+    if (not op.isfile("sf_f.f")):
+      open("sf_f.f", "w").write(srctxt)
+  return build_run(
+    a_out=a_out,
+    n_scatt=n_scatt,
+    n_refl=n_refl,
+    build_cmd=build_cmd+" tmp.f",
+    check_max_a_b=(not (replace_cos or replace_exp)))
+
+def cpp_write_build_run(
+      a_out, n_scatt, n_refl, real, build_cmd, replace_cos, replace_exp):
+  if (a_out is None):
+    this_script = __this_script__
+    srctxt = cpp_template % vars()
+    if (replace_cos):
+      srctxt = srctxt.replace(
+        "std::cos(arg)",
+        "arg / (std::abs(arg)+1.0f)")
+    if (replace_exp):
+      srctxt = srctxt.replace(
+        "std::exp(arg)",
+        "std::max(float(0), 1.0f - arg*arg)")
+    srctxt = srctxt.replace("float", real)
+    open("tmp.cpp", "w").write(srctxt)
+    if (not op.isfile("sf_cpp.cpp")):
+      open("sf_cpp.cpp", "w").write(srctxt)
+  return build_run(
+    a_out=a_out,
+    n_scatt=n_scatt,
+    n_refl=n_refl,
+    build_cmd=build_cmd+" tmp.cpp",
+    check_max_a_b=(not (replace_cos or replace_exp)))
+
+def run_combinations(
+      compiler_versions,
+      all_utimes,
+      a_out_archive,
+      write_a_out_archive,
+      n_scatt,
+      n_refl,
+      compiler_build_opts_list,
+      real_list,
+      write_build_run):
+  for compiler,build_opts in compiler_build_opts_list:
+    if (write_a_out_archive):
+      have_compiler = (full_command_path(command=compiler) is not None)
+      if (not have_compiler):
+        compiler_version = "n/a"
+      else:
+        compiler_version = easy_run.fully_buffered(
+          command=compiler+" --version",
+          join_stdout_stderr=True).stdout_lines[0]
+      compiler_versions.append(compiler_version)
+      a_out = None
+    build_cmd = " ".join([compiler, build_opts])
+    print(build_cmd)
+    utimes = []
+    for real in real_list:
+      print("  %s" % real)
+      for replace_cos in [False, True]:
+        print("    replace_cos", replace_cos)
+        for replace_exp in [False, True]:
+          print("      replace_exp", replace_exp)
+          sys.stdout.flush()
+          a_out_key = (build_cmd, replace_cos, replace_exp)
+          if (not write_a_out_archive):
+            compiler_version, a_out = a_out_archive.get(a_out_key, (
+              "n/a", None))
+          if (compiler_version != "n/a"):
+            utime = write_build_run(
+              a_out=a_out,
+              n_scatt=n_scatt,
+              n_refl=n_refl,
+              real=real,
+              build_cmd=build_cmd,
+              replace_cos=replace_cos,
+              replace_exp=replace_exp)
+            print("        %4.2f" % utime)
+            if (write_a_out_archive):
+              a_out_archive[a_out_key] = (
+                compiler_version,
+                open("a.out", "rb").read())
+          else:
+            utime = -1.0
+            print("        n/a")
+          utimes.append(utime)
+          sys.stdout.flush()
+    all_utimes.append(utimes)
+
+def gcc_static_is_available():
+  tmp_cpp = r"""\
+#include <iostream>
+#include <cmath>
+int
+main()
+{
+  std::cout << static_cast<int>(std::cos(0.0)) << std::endl;
+  return 0;
+}
+"""
+  open("tmp.cpp", "w").write(tmp_cpp)
+  buffers = easy_run.fully_buffered(command="g++ -O tmp.cpp")
+  buffers.raise_if_errors_or_output()
+  buffers = easy_run.fully_buffered(command="g++ -static -O tmp.cpp")
+  if (len(buffers.stderr_lines) != 0):
+    return False
+  return True
+
+def usage():
+  raise Usage(
+    "cctbx.python sf_times.py unit_test|quick|production|a_out_archive.pickle")
+
+def run(args):
+  if (len(args) != 1): usage()
+  build_platform = platform.platform()
+  build_node = platform.node()
+  compiler_versions = []
+  gcc_static = "-static "
+  a_out_archive = {}
+  write_a_out_archive = True
+  if (args[0] == "unit_test"):
+    n_scatt, n_refl = 10, 100
+  elif (args[0] == "quick"):
+    n_scatt, n_refl = 100, 1000
+  elif (args[0] == "production"):
+    n_scatt, n_refl = 2000, 20000
+  elif (op.isfile(args[0])):
+    n_scatt, n_refl, \
+    build_platform, build_node, \
+    compiler_versions, gcc_static, a_out_archive = easy_pickle.load(
+      file_name=args[0])
+    write_a_out_archive = False
+  else:
+    usage()
+  if (write_a_out_archive and not gcc_static_is_available()):
+    gcc_static = ""
+  all_utimes = []
+  if (1):
+    run_combinations(
+      compiler_versions,
+      all_utimes,
+      a_out_archive=a_out_archive,
+      write_a_out_archive=write_a_out_archive,
+      n_scatt=n_scatt,
+      n_refl=n_refl,
+      compiler_build_opts_list=[
+        ("ifort", "-O"),
+        ("gfortran", gcc_static+"-O -ffast-math"),
+        ("g77", gcc_static+"-O -ffast-math")],
+      real_list=["real*4", "real*8"],
+      write_build_run=fortran_write_build_run)
+  if (1):
+    run_combinations(
+      compiler_versions,
+      all_utimes,
+      a_out_archive=a_out_archive,
+      write_a_out_archive=write_a_out_archive,
+      n_scatt=n_scatt,
+      n_refl=n_refl,
+      compiler_build_opts_list=[
+        ("icpc", "-static -O"),
+        ("g++", gcc_static+"-O -ffast-math")],
+      real_list=["float", "double"],
+      write_build_run=cpp_write_build_run)
+  if (write_a_out_archive and len(a_out_archive) != 0):
+    print("Writing file: a_out_archive.pickle")
+    easy_pickle.dump(
+      file_name="a_out_archive.pickle",
+      obj=(
+        n_scatt,
+        n_refl,
+        build_platform,
+        build_node,
+        compiler_versions,
+        gcc_static,
+        a_out_archive))
+  print()
+  print("current_platform:", platform.platform())
+  print("current_node:", platform.node())
+  print("build_platform:", build_platform)
+  print("build_node:", build_node)
+  print('gcc_static: "%s"' % gcc_static)
+  for compiler_version in compiler_versions:
+    print("compiler:", compiler_version)
+  print("n_scatt * n_refl: %d * %d" % (n_scatt, n_refl))
+  for utimes in all_utimes:
+    print(" ".join(["%6.2f" % u for u in utimes]))
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+dox/compcomm/newsletter09/sf_times_digest.py
+from __future__ import absolute_import, division, print_function
+import sys, os
+from six.moves import range
+op = os.path
+
+nodes_32bit = set("""\
+ribbon
+longnose
+sharptail
+""".splitlines())
+
+nodes_64bit = set("""\
+krait
+anaconda
+rosie
+chevy
+firtree
+""".splitlines())
+
+def node_os_bits(node):
+  if (node in nodes_32bit): return "32b"
+  if (node in nodes_64bit): return "64b"
+  raise RuntimeError
+
+class table_entry(object):
+
+  __slots__ = [
+    "current_platform",
+    "current_node",
+    "build_platform",
+    "build_node",
+    "gcc_static",
+    "compiler_versions",
+    "n_scatt",
+    "n_refl",
+    "all_utimes"]
+
+  def __init__(O, lines):
+    assert len(lines) == 16
+    for i_line in range(5):
+      line = lines[i_line]
+      slot = O.__slots__[i_line]
+      assert line.startswith(slot+": ")
+      setattr(O, slot, line[len(slot)+2:])
+    O.compiler_versions = []
+    for i_line in range(5, 10):
+      line = lines[i_line]
+      assert line.startswith("compiler: ")
+      O.compiler_versions.append(line[10:])
+    O.current_node = O.current_node.replace(".lbl.gov", "")
+    O.build_node = O.build_node.replace(".lbl.gov", "")
+    line = lines[10]
+    assert line.startswith("n_scatt * n_refl: ")
+    flds = line.split()
+    assert len(flds) == 6
+    O.n_scatt = int(flds[3])
+    O.n_refl = int(flds[5])
+    O.all_utimes = []
+    for i_line in range(11, 16):
+      line = lines[i_line]
+      flds = line.split()
+      assert len(flds) == 8
+      O.all_utimes.append([float(fld) for fld in flds])
+
+  def format_utimes(O, i_compiler):
+    return " ".join(["%6.2f" % u for u in O.all_utimes[i_compiler]])
+
+  def ifort_label(O):
+    ic = 0
+    if (O.all_utimes[0][0] < 0):
+      return None, None
+    v = O.compiler_versions[ic].split()[2]
+    assert v in ["9.1", "11.1"]
+    if (v == "9.1"): v = "_"+v
+    return ic, "if%s_%s" % (v, node_os_bits(O.build_node))
+
+  def gfort_label(O):
+    lbls = {
+      "GNU Fortran (GCC 3.2 20020903 (Red Hat Linux 8.0 3.2-7))"
+        " 3.2 20020903 (Red Hat Linux 8.0 3.2-7)": "gf32",
+      "GNU Fortran (GCC) 3.4.2 20041017 (Red Hat 3.4.2-6.fc3)": "gf34",
+      "GNU Fortran 95 (GCC 4.0.0 20041019 (Red Hat 4.0.0-0.8))": "gf40",
+      "GNU Fortran 95 (GCC 4.0.0 20050519 (Red Hat 4.0.0-8))": "gf40",
+      "GNU Fortran (GCC) 4.1.2 20070925 (Red Hat 4.1.2-33)": "gf41",
+      "GNU Fortran (GCC) 4.2.2": "gf42",
+      "GNU Fortran (GCC) 4.3.4": "gf43",
+      "GNU Fortran (GCC) 4.4.2": "gf44"}
+    if (O.all_utimes[1][0] >= 0):
+      ic = 1
+    elif (O.all_utimes[2][0] >= 0):
+      ic = 2
+    else:
+      return None, None
+    v = lbls[O.compiler_versions[ic]]
+    return ic, "%s_%s" % (v, node_os_bits(O.build_node))
+
+  def gpp_label(O):
+    lbls = {
+      "g++ (GCC) 3.2 20020903 (Red Hat Linux 8.0 3.2-7)": "gc32",
+      "g++ (GCC) 3.3.4 (pre 3.3.5 20040809)": "gc33",
+      "g++ (GCC) 3.4.2 20041017 (Red Hat 3.4.2-6.fc3)": "gc34",
+      "g++ (GCC) 4.0.0 20050519 (Red Hat 4.0.0-8)": "gc40",
+      "g++ (GCC) 4.1.2 20070925 (Red Hat 4.1.2-33)": "gc41",
+      "g++ (GCC) 4.2.2": "gc42",
+      "g++ (GCC) 4.3.4": "gc43",
+      "g++ (GCC) 4.4.2": "gc44"}
+    ic = 4
+    v = lbls[O.compiler_versions[ic]]
+    return ic, "%s_%s" % (v, node_os_bits(O.build_node))
+
+def process_time_tables():
+  import libtbx.load_env
+  time_tables_path = libtbx.env.find_in_repositories(
+    relative_path="compcomm/newsletter09/time_tables",
+    test=op.isfile,
+    optional=False)
+  result = []
+  lines = open(time_tables_path).read().splitlines()
+  assert len(lines) == 22 * 17
+  for i_line in range(0, len(lines), 17):
+    assert lines[i_line] == ""
+    result.append(table_entry(lines=lines[i_line+1:i_line+17]))
+  return result
+
+def run(args):
+  assert len(args) == 0
+  table_entries = process_time_tables()
+  #
+  print("Intel Fortran times on chevy:")
+  tab = {}
+  for entry in table_entries:
+    if (entry.current_node == "chevy"):
+      ic, lbl = entry.ifort_label()
+      if (ic is None): continue
+      if (    lbl == "if_9.1_64b"
+          and entry.build_node != "anaconda"):
+        continue
+      if (    lbl == "if_9.1_32b"
+          and entry.build_node != "longnose"):
+        continue
+      tab[lbl] = (entry.format_utimes(i_compiler=ic), entry.build_node)
+  for key in ["if_9.1_32b", "if_9.1_64b", "if11.1_64b"]:
+    print(key, " ".join(tab[key]))
+  print()
+  #
+  print("GNU Fortran times on chevy:")
+  tab = {}
+  for entry in table_entries:
+    if (entry.current_node == "chevy"):
+      ic, lbl = entry.gfort_label()
+      if (ic is None): continue
+      tab[lbl] = (entry.format_utimes(i_compiler=ic), entry.build_node)
+  for key in sorted(tab.keys()):
+    print(key, " ".join(tab[key]))
+  print()
+  #
+  print("Intel C++ times on chevy:")
+  for entry in table_entries:
+    if (entry.current_node == "chevy" and entry.build_node == "chevy"):
+      if (entry.all_utimes[3][0] >= 0):
+        print(entry.format_utimes(i_compiler=3), \
+          entry.compiler_versions[3].replace(" (ICC)", ""))
+  print()
+  #
+  print("GNU C++ times on chevy:")
+  tab = {}
+  for entry in table_entries:
+    if (entry.current_node == "chevy"):
+      ic, lbl = entry.gpp_label()
+      if (ic is None): continue
+      tab[lbl] = (entry.format_utimes(i_compiler=ic), entry.build_node)
+  for key in sorted(tab.keys()):
+    print(key, " ".join(tab[key]))
+  print()
+  #
+  print("GNU C++ 3.2 32-bit (Red Hat 8.0) executable on all platforms:")
+  for entry in table_entries:
+    if (entry.build_node == "ribbon"):
+      print(entry.format_utimes(i_compiler=4), entry.current_node)
+  print()
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+dox/rst/insert_sourceforge_logo.py
+from __future__ import absolute_import, division, print_function
+import sys
+
+def run(args):
+  assert len(args) == 1
+  s = open(args[0], "rb").read().replace("__SOURCEFORGE_LOGO_HERE__", """\
+<a href="http://sourceforge.net/projects/cctbx"
+><img src="http://sflogo.sourceforge.net/sflogo.php?group_id=24107&type=14"
+width="150" height="40" border="0"
+alt="Get Computational Crystallography Toolbox at SourceForge.net.
+Fast, secure and Free Open Source software downloads" /></a>""")
+  s = open(args[0], "wb").write(s)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+dox/siena2005/d_star_sq_alternative.py
+from __future__ import absolute_import, division, print_function
+from cctbx import uctbx
+
+def d_star_sq(unit_cell, miller_index):
+  """\
+h = {h0,h1,h2}
+g = {{aa,ab,ac},{ab,bb,bc},{ac,bc,cc}}
+dss = FullSimplify[h.Inverse[g].h]
+FortranForm[dss]
+"""
+  aa,bb,cc,ab,ac,bc = unit_cell.metrical_matrix()
+  h0,h1,h2 = miller_index
+  return (
+    (bc**2*h0**2 + h1*(2*ab*cc*h0 + ac**2*h1 - aa*cc*h1) -
+     2*ab*ac*h1*h2 + ab**2*h2**2 -
+     2*bc*(ac*h0*h1 + ab*h0*h2 - aa*h1*h2) -
+     bb*(cc*h0**2 - 2*ac*h0*h2 + aa*h2**2))/
+    (ac**2*bb - 2*ab*ac*bc + ab**2*cc + aa*(bc**2 - bb*cc)))
+
+def exercise():
+  unit_cell = uctbx.unit_cell([11,13,7,83,98,105])
+  for miller_index in [(1,2,3),(-3,4,2),(-1,-2,1)]:
+    dss1 = unit_cell.d_star_sq(miller_index)
+    dss2 = d_star_sq(unit_cell, miller_index)
+    print(dss1, dss2)
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+dox/siena2005/sort_merge.py
+from __future__ import absolute_import, division, print_function
+#
+# cctbx sort-merge solution for Siena exercise given by George Sheldrick
+#
+# sort_merge_initial.py was written in exactly 30 minutes while
+# sitting in the audience as others explained their solutions.
+#
+# sort_merge.py is a slight enhancement (use diff for details).
+# It doesn't solve the exercise exactly, but demonstrates how to
+# work with the high-level cctbx facilities to solve most of the
+# exercise. Note that sort_merge.py produces significantly more
+# information than was requested, e.g. the space group name,
+# data completeness, etc.
+#
+
+from cctbx.array_family import flex
+from cctbx import crystal
+from cctbx import uctbx
+from cctbx import sgtbx
+from cctbx import miller
+import sys
+from six.moves import range
+
+def run(args):
+  assert len(args) == 1
+  lines = open(args[0]).read().splitlines()
+  title = lines[0]
+  unit_cell = uctbx.unit_cell(lines[1])
+  n_symops = int(lines[2].split()[0])
+  space_group = sgtbx.space_group()
+  for line in lines[3:3+n_symops]:
+    coeffs = [float(field) for field in line.split()]
+    space_group.expand_smx(sgtbx.rt_mx(coeffs[:9], coeffs[9:]))
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=unit_cell,
+    space_group=space_group)
+  miller_indices = flex.miller_index()
+  data = flex.double()
+  sigmas = flex.double()
+  for i_line in range(3+n_symops,len(lines)):
+    fields = lines[i_line].split()
+    assert len(fields) == 5
+    miller_indices.append([int(value) for value in fields[:3]])
+    data.append(float(fields[3]))
+    sigmas.append(float(fields[4]))
+  miller_set=miller.set(
+    crystal_symmetry=crystal_symmetry,
+    indices=miller_indices,
+    anomalous_flag=False)
+  miller_array = miller_set.array(
+    data=data,
+    sigmas=sigmas).set_observation_type_xray_intensity()
+  print("Before merging:")
+  miller_array.show_summary()
+  print()
+  merged = miller_array.merge_equivalents()
+  merged.show_summary()
+  print()
+  merged_array = merged.array()
+  print("After merging:")
+  merged_array.show_comprehensive_summary()
+  print()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+dox/siena2005/sort_merge_initial.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from cctbx import crystal
+from cctbx import uctbx
+from cctbx import sgtbx
+from cctbx import miller
+import sys
+from six.moves import range
+
+def run(args):
+  assert len(args) == 1
+  lines = open(args[0]).read().splitlines()
+  title = lines[0]
+  unit_cell = uctbx.unit_cell(lines[1])
+  n_symops = int(lines[2].split()[0])
+  space_group = sgtbx.space_group()
+  for line in lines[3:3+n_symops]:
+    coeffs = [float(field) for field in line.split()]
+    space_group.expand_smx(sgtbx.rt_mx(coeffs[:9], coeffs[9:]))
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=unit_cell,
+    space_group=space_group)
+  miller_indices = flex.miller_index()
+  data = flex.double()
+  sigmas = flex.double()
+  for i_line in range(3+n_symops,len(lines)):
+    fields = lines[i_line].split()
+    assert len(fields) == 5
+    miller_indices.append([int(value) for value in fields[:3]])
+    data.append(float(fields[3]))
+    sigmas.append(float(fields[4]))
+  miller_set=miller.set(
+    crystal_symmetry=crystal_symmetry,
+    indices=miller_indices,
+    anomalous_flag=False)
+  miller_array = miller_set.array(
+    data=data,
+    sigmas=sigmas).set_observation_type_xray_intensity()
+  print("Before merging:")
+  miller_array.show_summary()
+  print()
+  merged = miller_array.merge_equivalents().array().sort(by_value="data")
+  print("After merging:")
+  merged.show_comprehensive_summary().show_array()
+  print()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************

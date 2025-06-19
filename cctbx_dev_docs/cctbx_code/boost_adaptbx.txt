@@ -1,0 +1,5596 @@
+
+
+ *******************************************************************************
+boost_adaptbx/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/boost/__init__.py
+from __future__ import absolute_import, division, print_function
+import libtbx.forward_compatibility
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/boost/optional.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("boost_optional_ext")
+from boost_optional_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/boost/python.py
+from __future__ import absolute_import, division, print_function
+
+import inspect
+import os
+import re
+import sys
+import warnings
+
+from libtbx import cpp_function_name
+
+symbol_not_found_pat = re.compile(
+  r"[Ss]ymbol[ ]not[ ]found: \s* (\w+) $", re.X | re.M | re.S)
+
+def import_ext(name, optional=False):
+  components = name.split(".")
+  if (len(components) > 1):
+    __import__(".".join(components[:-1]))
+  previous_dlopenflags = None
+  if (sys.platform.startswith("linux")) :
+    previous_dlopenflags = sys.getdlopenflags()
+    sys.setdlopenflags(0x100|0x2)
+  try: mod = __import__(name)
+  except ImportError as e:
+    if (optional): return None
+    error_msg = str(e)
+    m = symbol_not_found_pat.search(error_msg)
+    if m:
+      error_msg = (  error_msg[:m.start(1)]
+                   + cpp_function_name.demangle(m.group(1))
+                   + error_msg[m.end(1):])
+    raise ImportError(
+      "\n  ".join(['__import__("%s"): %s' % (name, error_msg), "sys.path:"]
+      + ["  "+p for p in sys.path]))
+  for comp in components[1:]:
+    mod = getattr(mod, comp)
+  if (previous_dlopenflags is not None):
+    sys.setdlopenflags(previous_dlopenflags)
+  return mod
+
+ext = import_ext("boost_python_meta_ext")
+
+try: streambuf = ext.streambuf
+except AttributeError: pass # XXX backward compatibility 2009-11-24
+try: ostream = ext.ostream
+except AttributeError: pass
+
+if os.getenv("BOOST_ADAPTBX_ENABLE_TRACE"):
+  ext.enable_signals_backtrace_if_possible()
+
+class floating_point_exceptions_type(object):
+  __shared_state = {'initialised': False}
+
+  def __init__(self):
+    self.__dict__ = self.__shared_state
+    if not self.initialised:
+      division_by_zero = bool(os.getenv("BOOST_ADAPTBX_TRAP_FPE", self.division_by_zero_trapped))
+      invalid = bool(os.getenv("BOOST_ADAPTBX_TRAP_INVALID",self.invalid_trapped))
+      overflow = bool(os.getenv("BOOST_ADAPTBX_TRAP_OVERFLOW",self.overflow_trapped))
+      ext.trap_exceptions(division_by_zero, invalid, overflow)
+      self.initialised = True
+
+  def division_by_zero_trapped():
+    def fget(self):
+      return ext.is_division_by_zero_trapped()
+    def fset(self, flag):
+      if flag == self.division_by_zero_trapped: return
+      ext.trap_exceptions(division_by_zero=flag,
+                          invalid=self.invalid_trapped,
+                          overflow=self.overflow_trapped)
+    return locals()
+  division_by_zero_trapped = property(**division_by_zero_trapped())
+
+  def invalid_trapped():
+    def fget(self):
+      return ext.is_invalid_trapped()
+    def fset(self, flag):
+      if flag == self.fget(): return
+      ext.trap_exceptions(division_by_zero=self.invalid_trapped,
+                          invalid=flag,
+                          overflow=self.overflow_trapped)
+    return locals()
+  invalid_trapped = property(**invalid_trapped())
+
+  def overflow_trapped():
+    def fget(self):
+      return ext.is_overflow_trapped()
+    def fset(self, flag):
+      if flag == self.fget(): return
+      ext.trap_exceptions(division_by_zero=self.overflow_trapped,
+                          invalid=self.invalid_trapped,
+                          overflow=flag)
+    return locals()
+  overflow_trapped = property(**overflow_trapped())
+
+floating_point_exceptions = floating_point_exceptions_type()
+
+
+class trapping(object):
+  """ Synopsis:
+
+      >>> import boost_adaptbx.boost.python as bp
+      >>> from scitbx.array_family import flex
+      >>> a = flex.double((0, 0, 0))
+      >>> with bp.trapping(division_by_zero=False):
+      >>>   b = 1/a
+      >>> tuple(b)
+      (inf, inf, inf)
+      >>> 1/a
+      ... CRASH ...
+  """
+  def __init__(self, division_by_zero=True, invalid=True, overflow=True):
+    self.division_by_zero = ext.is_division_by_zero_trapped()
+    self.invalid = ext.is_invalid_trapped()
+    self.overflow = ext.is_overflow_trapped()
+    ext.trap_exceptions(division_by_zero, invalid, overflow)
+
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, exc_type, exc_val, exc_tb):
+    ext.trap_exceptions(self.division_by_zero, self.invalid, self.overflow)
+
+
+meta_class = ext.holder.__class__
+platform_info = ext.platform_info()
+assert len(platform_info) > 0 # please disable this assertion and send email to cctbx@cci.lbl.gov
+
+def c_sizeof(typename):
+  pattern = "sizeof(%s) = " % typename
+  for line in platform_info.splitlines():
+    if (line.startswith(pattern)):
+      break
+  else:
+    raise RuntimeError('bp.platform_info: "%s" not found.' % pattern)
+  return int(line[len(pattern):])
+
+sizeof_void_ptr = c_sizeof("void*")
+
+
+class gcc_version(object):
+
+  def __init__(self):
+    pat = r" \s* = \s* (\d+) \s+"
+    m = re.search("__GNUC__ %s __GNUC_MINOR__ %s __GNUC_PATCHLEVEL__ %s"
+                  % ((pat,)*3),
+                  platform_info, re.X|re.M|re.S)
+    if not m:
+      self.major, self.minor, self.patchlevel = None, None, None
+    else:
+      self.major, self.minor, self.patchlevel = tuple(
+        [ int(x) for x in m.groups() ])
+
+  def __bool__(self):
+    return self.major is not None
+
+  __nonzero__ = __bool__
+
+  def __str__(self):
+    if self:
+      return "%i.%i.%i" % (self.major, self.minor, self.patchlevel)
+    else:
+      return "GCC, it is not"
+
+
+def inject(target_class, *mixin_classes):
+   '''Add entries from python class dictionaries to a boost extension class.
+
+      It is used as follows:
+
+            class _():
+              def method(...):
+                ...
+            bp.inject(extension_class, _)
+
+      instead of the previous mechanism of
+
+            class _(bp.injector, extension_class):
+              def method(...):
+                ...
+
+      which does not work in python 3.
+   '''
+   for m in mixin_classes:
+     for key, value in m.__dict__.items():
+       if key not in ("__init__",
+                      "__del__",
+                      "__module__",
+                      "__file__",
+                      "__dict__") and (key != '__doc__' or value):
+         setattr(target_class, key, value)
+
+def inject_into(target_class, *mixin_classes):
+  '''Add entries from python class dictionaries to a boost extension class.
+
+     It is used as follows:
+
+           @bp.inject_into(extension_class)
+           class _():
+             def method(...):
+               ...
+  '''
+  def _inject(c):
+    if inspect.isclass(c):
+      inject(target_class, c, *mixin_classes)
+    else:
+      setattr(target_class, c.__name__, c)
+      class empty_class:
+        pass
+      inject(target_class, empty_class, *mixin_classes)
+  return _inject
+
+def deprecate_method(boost_object, method_name):
+  original_method = getattr(boost_object, method_name)
+
+  def deprecation_helper(*args, **kwargs):
+    warnings.warn(
+      "The method {method_name} is deprecated and will be removed shortly".format(
+        method_name=method_name
+      ),
+      DeprecationWarning,
+      stacklevel=2,
+    )
+    return original_method(*args, **kwargs)
+
+  setattr(boost_object, method_name, deprecation_helper)
+
+
+def process_docstring_options(env_var="BOOST_ADAPTBX_DOCSTRING_OPTIONS"):
+  from_env = os.environ.get(env_var)
+  if (from_env is None): return None
+  try:
+    return eval(
+      "docstring_options(%s)" % from_env,
+      {},
+      {"docstring_options": ext.docstring_options})
+  except KeyboardInterrupt: raise
+  except Exception as e:
+    from libtbx.str_utils import show_string
+    raise RuntimeError(
+      "Error processing %s=%s\n" % (env_var, show_string(from_env))
+      + "  Exception: %s\n" % str(e)
+      + "  Valid example:\n"
+      + '    %s="show_user_defined=True,show_signatures=False"' % env_var)
+
+docstring_options = process_docstring_options()
+
+class py3_make_iterator:
+  def __next__(obj):
+    return obj.next()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/boost/rational.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+ext = bp.import_ext("boost_rational_ext")
+from boost_rational_ext import *
+
+builtin_int = __builtins__["int"]
+
+def from_string(s):
+  flds = [builtin_int(i) for i in s.split("/")]
+  assert len(flds) in (1,2)
+  if (len(flds) == 1):
+    return int(flds[0])
+  return int(flds[0], flds[1])
+
+def vector(numerators, denominators):
+  if (isinstance(denominators, builtin_int)):
+    denominators = [denominators] * len(numerators)
+  else:
+    assert len(numerators) == len(denominators)
+  result = []
+  for i in range(len(numerators)):
+    result.append(int(numerators[i], denominators[i]))
+  return result
+
+def lcm_denominators(array):
+  l = 1
+  for r in array:
+    l = lcm(l, r.denominator())
+  return l
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/boost/std_pair.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("std_pair_ext")
+from std_pair_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/boost/tuple.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("boost_tuple_ext")
+from boost_tuple_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/divide_by_zero.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.divide_by_zero
+
+import boost_adaptbx.boost.python as bp
+import sys
+
+def run(args):
+  assert len(args) <= 1
+  if len(args) == 0:
+    print("Now dividing by zero (in C++) ...")
+    sys.stdout.flush()
+    result = bp.ext.divide_doubles(1, 0)
+    print("Result:", result)
+  else:
+    bp.floating_point_exceptions.division_by_zero_trapped = False
+    print("Dividing by zero in C++: not gonna be caught")
+    result = bp.ext.divide_doubles(1, 0)
+    print("Result:", result)
+    bp.floating_point_exceptions.division_by_zero_trapped = True
+    print()
+    print("Dividing by zero in C++: gonna crash")
+    sys.stdout.flush()
+    result = bp.ext.divide_doubles(1, 0)
+    print("Result:", result)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/double_overflow.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.double_overflow
+
+import boost_adaptbx.boost.python as bp
+import sys
+
+def run(args):
+  assert len(args) == 0
+  sizeof_double = bp.c_sizeof("double")
+  assert sizeof_double == 8
+  x = 1.e300
+  y = 1.e200
+  print("Now multiplying double values %g * %g ..." % (x, y))
+  sys.stdout.flush()
+  result = bp.ext.multiply_doubles(x, y)
+  print("Result:", result)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/gcd.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx.boost.rational import gcd
+from libtbx.utils import Usage
+import libtbx.load_env
+import sys
+
+def run(args, func=gcd):
+  if (len(args) == 0):
+    raise Usage("%s integer [integer...]" % libtbx.env.dispatcher_name)
+  values = [int(arg) for arg in args]
+  result = values[0]
+  for value in values[1:]:
+    result = func(result, value)
+  print(result)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/inexact.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.inexact
+
+import boost_adaptbx.boost.python as bp
+import sys
+
+def run(args):
+  assert len(args) == 0
+  print("Now creating a NaN in C++ as 0/0 ...")
+  sys.stdout.flush()
+  result = bp.ext.divide_doubles(0, 0)
+  print("Result:", result)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/int_overflow.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.int_overflow
+
+import boost_adaptbx.boost.python as bp
+import sys
+
+def run(args):
+  assert len(args) == 0
+  for itype in ["int", "long"]:
+    sizeof_itype = bp.c_sizeof(itype)
+    imax = 2**(8*sizeof_itype-1)-1
+    print("Now adding %s values %d + 1 ..." % (itype, imax))
+    sys.stdout.flush()
+    result = getattr(bp.ext, "add_%ss" % itype)(imax, 1)
+    print("Result:", result)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/lcm.py
+from __future__ import absolute_import, division, print_function
+import gcd
+from boost_adaptbx.boost.rational import lcm
+import sys
+
+def run(args):
+  gcd.run(args=args, func=lcm)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/nested_cpp_loops_with_check_signals.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.nested_cpp_loops_with_check_signals
+
+def run(args):
+  assert len(args) == 2, "iterations_outer, iterations_inner"
+  import boost_adaptbx.boost.python as bp
+  count = bp.ext.nested_cpp_loops_with_check_signals(
+    iterations_outer=int(args[0]),
+    iterations_inner=int(args[1]))
+  print("actual iterations outer:", count)
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/segmentation_fault.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.segmentation_fault
+
+import boost_adaptbx.boost.python as bp
+import sys
+
+def run(args):
+  assert len(args) == 0
+  print("Now dereferencing null-pointer ...")
+  sys.stdout.flush()
+  result = bp.ext.dereference_char_pointer(None)
+  print("Result:", result)
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/show_environ_usage.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.show_environ_usage
+
+import sys
+
+def run(args):
+  assert len(args) == 0
+  print("""
+BOOST_ADAPTBX_SIGNALS_DEFAULT
+  If NOT set, enable Python and libc call stack traces if possible.
+BOOST_ADAPTBX_FPE_DEFAULT
+  If NOT set, trap floating-point exceptions if possible.
+BOOST_ADAPTBX_FE_DIVBYZERO_DEFAULT
+BOOST_ADAPTBX_FE_INVALID_DEFAULT
+BOOST_ADAPTBX_FE_OVERFLOW_DEFAULT
+  If NOT set, trap FE_DIVBYZERO|FE_INVALID|FE_OVERFLOW if possible.
+  See also: man fenv
+
+BOOST_ADAPTBX_DOCSTRING_OPTIONS
+  Example:
+    setenv BOOST_ADAPTBX_DOCSTRING_OPTIONS "show_user_defined=True,show_signatures=False"
+""")
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/command_line/show_platform_info.py
+from __future__ import absolute_import, division, print_function
+
+# LIBTBX_SET_DISPATCHER_NAME boost_adaptbx.show_platform_info
+
+import boost_adaptbx.boost.python as bp
+from libtbx import introspection
+import libtbx.load_env
+import platform
+import sys, os
+op = os.path
+
+class div_probe(object):
+  def __div__(O, other): return "floor"
+  def __truediv__(O, other): return "true"
+
+def run(out=None, omit_unicode_experiment=False):
+  if (out is None): out = sys.stdout
+  out.write(bp.platform_info)
+  tag = libtbx.env.under_dist("boost", "TAG")
+  if (op.isfile(tag)):
+    tag = open(tag).read().strip()
+  else:
+    tag = None
+  print("boost/TAG:", tag, file=out)
+  print("os.name:", os.name, file=out)
+  print("sys.platform:", sys.platform, file=out)
+  print("sys.byteorder:", sys.byteorder, file=out)
+  print("platform.platform():", platform.platform(), file=out)
+  print("platform.architecture():", platform.architecture(), file=out)
+  for attr in ["division_by_zero", "invalid", "overflow"]:
+    attr = "floating_point_exceptions.%s_trapped" % attr
+    print("%s:" % attr, eval("bp.%s" % attr), file=out)
+  print("number of processors:", introspection.number_of_processors(
+    return_value_if_unknown="unknown"), file=out)
+  introspection.machine_memory_info().show(out=out)
+  try: import thread
+  except ImportError: print("import thread: NO", file=out)
+  else: print("import thread: OK", file=out)
+  print("Division operator semantics: %s division" % (div_probe() / 0))
+  c = getattr(bp.ext, "str_or_unicode_as_char_list", None)
+  if (c is not None and not omit_unicode_experiment):
+    print('"hello" =', c("hello"), file=out)
+    print('u"hello" =', c(u"hello"), file=out)
+    e = u"\u00C5".encode("utf-8", "strict")
+    # XXX temp fix for python3 failure: unicode failure in show_platform_info.py
+    # Reason: c(u"\u00C5") fails and c(e) fails
+    try:
+      cc = c(u"\u00C5")
+      ce = c(e)
+    except Exception as ignore_exception:
+      cc = u"\u00C5"
+      ce = e
+
+    print('u"\u00C5" =', cc, 'as utf-8 =', ce, file=out)
+    print("LATIN CAPITAL LETTER A WITH RING ABOVE =", e, file=out)
+  from libtbx.utils import format_cpu_times
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/__init__.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "boost_adaptbx_graph_ext" )
+from boost_adaptbx_graph_ext import *
+
+_abbreviation_for_component = {
+  "set": "set",
+  "list": "list",
+  "vector": "vect",
+  }
+
+_abbreviation_for_type = {
+  "undirected": "undir",
+  "directed": "dir",
+  }
+
+
+def adjacency_list(
+  graph_type = "undirected",
+  vertex_type = "vector",
+  edge_type = "set"
+  ):
+
+  if graph_type not in _abbreviation_for_type:
+    raise ValueError("Unknown graph_type: '%s'" % graph_type)
+
+  if vertex_type not in _abbreviation_for_component:
+    raise ValueError("Unknown vertex_type: '%s'" % vertex_type)
+
+  if edge_type not in _abbreviation_for_component:
+    raise ValueError("Unknown edge_type: '%s'" % edge_type)
+
+  typename = "graph_adjlist_%s_%s_%s" % (
+    _abbreviation_for_type[ graph_type ],
+    _abbreviation_for_component[ vertex_type ],
+    _abbreviation_for_component[ edge_type ],
+    )
+
+  try:
+    return getattr( ext, typename )()
+
+  except AttributeError:
+    raise NotImplementedError
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/breadth_first_search.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "boost_adaptbx_graph_breadth_first_search_ext" )
+from boost_adaptbx_graph_breadth_first_search_ext import *
+
+class visitor(object):
+  """
+  Default visitor for the breadth-first search algorithm and its variants.
+
+  See also:
+    breadth_first_search
+    breadth_first_visit
+
+  Complete C++ documentation is available at:
+    http://www.boost.org/libs/graph/doc/BFSVisitor.html
+  # Copyright 2005 The Trustees of Indiana University.
+
+  # Use, modification and distribution is subject to the Boost Software
+  # License, Version 1.0. (See accompanying file LICENSE_1_0.txt or copy at
+  # http:#www.boost.org/LICENSE_1_0.txt)
+
+  #  Authors: Douglas Gregor
+  #           Andrew Lumsdaine
+  """
+
+  def initialize_vertex(self, vertex, graph):
+    """
+    Invoked on each vertex in the graph when the algorithm initializes it.
+    """
+    pass
+
+
+  def discover_vertex(self, vertex, graph):
+    """
+    Invoked on a vertex when it is first "discovered" by the algorithm.
+    """
+    pass
+
+
+  def examine_vertex(self, vertex, graph):
+    """
+    Invoked on a vertex just before its outgoing edges will be
+    examined.
+    """
+    pass
+
+
+  def examine_edge(self, edge, graph):
+    """
+    Invoked on an edge as it is being examined.
+    """
+    pass
+
+
+  def tree_edge(self, edge, graph):
+    """
+    Invoked on an edge when it is determined that it is an edge in
+    the breadth-first search tree.
+    """
+    pass
+
+
+  def non_tree_edge(self, edge, graph):
+    """
+    Invoked on an edge when it is determined that it is not an
+    edge in the breadth-first search tree.
+    """
+    pass
+
+
+  def gray_target(self, edge, graph):
+    """
+    Invoked on a vertex that is the target of the edge being
+    examined. The vertex was marked"gray", meaning that it has been
+    seen before in the breadth-first traversal but has not yet
+    been examined.
+    """
+    pass
+
+
+  def black_target(self, edge, graph):
+    """
+    Invoked on a vertex that is the target of the edge being
+    examined. The edge was marked"black", meaning that it has
+    already been examined in the breadth-first traversal.
+    """
+    pass
+
+
+  def finish_vertex(self, vertex, graph):
+    """
+    Invoked on a vertex after all of its outgoing edges have been
+    examined.
+    """
+    pass
+
+
+class vertex_recording_visitor(visitor):
+
+  def __init__(self, start_vertex):
+
+    self.visited_vertices = [ start_vertex ]
+
+
+  def tree_edge(self, edge, graph):
+
+    self.visited_vertices.append( graph.target( edge ) )
+
+
+class distance_recording_visitor(visitor):
+
+  def __init__(self, start_vertex):
+
+    self.distance_for = {}
+    self.distance_for[ start_vertex ] = 0
+
+
+  def tree_edge(self, edge, graph):
+
+    source = graph.source( edge )
+    target = graph.target( edge )
+    self.distance_for[ target ] = self.distance_for[ source ] + 1
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/clustering_algorithm.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "boost_adaptbx_graph_clustering_algorithm_ext" )
+
+from boost_adaptbx_graph_clustering_algorithm_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/connected_component_algorithm.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "boost_adaptbx_graph_connected_component_algorithm_ext" )
+
+
+def connected_components(graph):
+
+  result = {}
+
+  for ( desc, component ) in ext.connected_components( graph = graph ):
+    result.setdefault( component, [] ).append( desc )
+
+  return list(result.values())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/graph_structure_comparison.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "boost_adaptbx_graph_graph_structure_comparison_ext" )
+from boost_adaptbx_graph_graph_structure_comparison_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/maximum_clique.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+from functools import reduce
+ext = bp.import_ext( "boost_adaptbx_graph_maximum_clique_ext" )
+import operator
+
+rascal = ext.rascal
+greedy = ext.greedy
+bron_kerbosch_all_cliques = ext.bron_kerbosch_all_cliques
+
+def compatibility_graph(
+  first,
+  second,
+  vertex_equality = operator.eq,
+  edge_equality = operator.eq,
+  output_graph_vertex = "vector",
+  output_graph_edge = "vector",
+  ):
+
+  from boost_adaptbx import graph
+  result = graph.adjacency_list(
+    graph_type = "undirected",
+    vertex_type = output_graph_vertex,
+    edge_type = output_graph_edge,
+    )
+  vertex_from = {}
+
+  import itertools
+
+  for ( left, right ) in itertools.product( first.vertices(), second.vertices() ):
+    if vertex_equality( first.vertex_label( left ), second.vertex_label( right ) ):
+      label = ( left, right )
+      vertex_from[ label ] = result.add_vertex( label = label )
+
+  edge_weight_first = dict(
+    ( frozenset( [ first.source( edge = e ), first.target( edge = e ) ] ), first.edge_weight( edge = e ) )
+    for e in first.edges()
+    )
+  edge_weight_second = dict(
+    ( frozenset( [ second.source( edge = e ), second.target( edge = e ) ] ), second.edge_weight( edge = e ) )
+    for e in second.edges()
+    )
+
+  for ( ( f_l, s_l ), ( f_r, s_r ) ) in itertools.combinations( vertex_from, 2 ):
+    if f_l == f_r or s_l == s_r:
+      continue
+
+    id_f = frozenset( [ f_l, f_r ] )
+    id_s = frozenset( [ s_l, s_r ] )
+    present_f = id_f in edge_weight_first
+    present_s = id_s in edge_weight_second
+
+    if (
+      present_f
+      and present_s
+      and edge_equality( edge_weight_first[ id_f ], edge_weight_second[ id_s ] )
+      ):
+      result.add_edge(
+        vertex1 = vertex_from[ ( f_l, s_l ) ],
+        vertex2 = vertex_from[ ( f_r, s_r ) ],
+        )
+
+    elif not present_f and not present_s:
+      result.add_edge(
+        vertex1 = vertex_from[ ( f_l, s_l ) ],
+        vertex2 = vertex_from[ ( f_r, s_r ) ],
+        )
+
+  return result
+
+
+def selected_subgraph(graph, vertices):
+
+  subgraph = graph.__class__()
+  ext.selected_subgraph( graph = graph, subgraph = subgraph, iterable = vertices )
+  return subgraph
+
+
+def bessonov_projection_bound(graph, partition):
+  """
+  Simple upper bound by projecting back to factor graphs
+
+  Vertices of the compatibility graph has to have properties 'first' and 'second'
+  the vertex descriptors of the original graphs
+  """
+
+  descriptors = reduce( operator.add, partition, [] )
+  properties = [ graph.vertex_label( vertex = v ) for v in descriptors ]
+
+  return min(
+    len( set( v[0]for v in properties ) ),
+    len( set( v[1] for v in properties ) ),
+    )
+
+
+class raymond_gradiner_willet_projection_bound(object):
+  """
+  Simple upper bound by projecting back to factor graphs, and matching vertices
+  according to their properties
+
+  Vertices of the compatibility graph has to have properties 'first' and 'second'
+  the vertex descriptors of the original graphs. The original graphs should
+  have a vertex_label property.
+
+  This technique is possibly very efficient for chemical line graphs
+  """
+
+  def __init__(self, first, second):
+
+    self.first = first
+    self.second = second
+
+
+  def vertex_classification(self, graph, vertices):
+
+    vertices_tagged = {}
+
+    for v in vertices:
+      label = graph.vertex_label( vertex = v )
+      vertices_tagged.setdefault( label, [] ).append( v )
+
+    return vertices_tagged
+
+
+  def __call__(self, graph, partition):
+
+    descriptors = reduce( operator.add, partition, [] )
+    properties = [ graph.vertex_label( vertex = v ) for v in descriptors ]
+
+    first_tagged = self.vertex_classification(
+      graph = self.first,
+      vertices = set( v[0] for v in properties ),
+      )
+    second_tagged = self.vertex_classification(
+      graph = self.second,
+      vertices = set( v[1] for v in properties ),
+      )
+
+    bound = 0
+
+    for v in set( first_tagged ).intersection( second_tagged ):
+      bound += min( len( first_tagged[ v ] ), len( second_tagged[ v ] ) )
+
+    return bound
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/metric.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "boost_adaptbx_graph_metric_ext" )
+
+from boost_adaptbx_graph_metric_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/min_cut_max_flow.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+from six.moves import zip
+ext = bp.import_ext( "boost_adaptbx_graph_min_cut_max_flow_ext" )
+
+def group_vertices(graph, parities):
+
+  assert len( parities ) == graph.num_vertices()
+  source = set()
+  target = set()
+
+  for ( v, p ) in zip( graph.vertices(), parities ):
+    if p:
+      source.add( v )
+
+    else:
+      target.add( v )
+
+  return ( source, target )
+
+
+class stoer_wagner_min_cut(object):
+  """
+  Object method version of stoer_wagner_min_cut
+  """
+
+  def __init__(self, graph):
+
+    ( self.weight, self.parities ) = ext.stoer_wagner_min_cut( graph = graph )
+    self.graph = graph
+
+
+  @property
+  def cutsets(self):
+
+    return group_vertices( graph = self.graph, parities = self.parities )
+
+
+class boykov_kolmogorov_max_flow(object):
+  """
+  Object method version of boykov_kolmogorov_max_flow
+  """
+
+  def __init__(self, graph, reverse_edge_map, source, sink):
+
+    ( self.weight, self.parities ) = ext.boykov_kolmogorov_max_flow(
+      graph = graph,
+      reverse_edge_map = reverse_edge_map,
+      source = source,
+      sink = sink,
+      )
+    self.graph = graph
+    self.source = source
+    self.sink = sink
+
+
+  @property
+  def cutsets(self):
+
+    ( source, sink ) = group_vertices( graph = self.graph, parities = self.parities )
+
+    assert self.source in source
+    assert self.sink in sink
+
+    return ( source, sink )
+
+
+class boykov_kolmogorov_min_st_cut(object):
+  """
+  Use Boykov-Kolmogorov algorithm to calculate min st-cut for undirected graphs
+  """
+
+  def __init__(self, graph, source, sink):
+
+    from boost_adaptbx import graph as graphmod
+    dirgraph = graphmod.adjacency_list(
+      graph_type = "directed",
+      vertex_type = "vector",
+      edge_type = "vector",
+      )
+
+    vertex_for = {}
+
+    for vertex in graph.vertices():
+      vertex_for[ vertex ] = dirgraph.add_vertex( label = vertex )
+
+    reverse_edge_map = {}
+
+    for edge in graph.edges():
+      s = vertex_for[ graph.source( edge = edge ) ]
+      t = vertex_for[ graph.target( edge = edge ) ]
+      w = graph.edge_weight( edge = edge )
+      ( ed, success ) = dirgraph.add_edge( vertex1 = s, vertex2 = t, weight = w )
+      assert success
+      ( red, success )  = dirgraph.add_edge( vertex1 = t, vertex2 = s, weight = w )
+      assert success
+      reverse_edge_map[ ed ] = red
+      reverse_edge_map[ red ] = ed
+
+    self.result = boykov_kolmogorov_max_flow(
+      graph = dirgraph,
+      reverse_edge_map = reverse_edge_map,
+      source = vertex_for[ source ],
+      sink = vertex_for[ sink ],
+      )
+
+
+  @property
+  def weight(self):
+
+    return self.result.weight
+
+
+  @property
+  def cutsets(self):
+
+    ( source, sink ) = self.result.cutsets
+
+    return (
+      set( self.result.graph.vertex_label( vertex = v ) for v in source ),
+      set( self.result.graph.vertex_label( vertex = v ) for v in sink ),
+      )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/minimum_cut_enumerate.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx.graph import min_cut_max_flow
+from boost_adaptbx.graph import utility
+
+import operator
+from functools import reduce
+
+
+def no_heap_element_limit(heap):
+
+  return False
+
+
+class heap_element_limit(object):
+
+  def __init__(self, maxcount):
+
+    self.maxcount = maxcount
+    self.iteration = 0
+
+
+  def __call__(self, heap):
+
+    if self.maxcount < len( heap ):
+      heap.sort()
+
+      while self.maxcount < len( heap ):
+        heap.pop()
+
+      import heapq
+      heapq.heapify( heap )
+
+    self.iteration += 1
+    return self.maxcount <= self.iteration
+
+
+def stirling_adaptive_tree_enumeration(
+  graph,
+  reference,
+  sw_path_vertex_selector,
+  bk_path_vertex_selector,
+  maxiter = None,
+  ):
+  """
+  Enumerates cuts in order of weight based on a tree built using the recursive
+  formula for Stirling numbers of the second kind
+  """
+
+  assert maxiter is None or 0 < maxiter
+
+  import heapq
+  heap = []
+
+  labelledgraph = construct_vertex_labelled_graph( graph = graph )
+  current = stirling_tree_sw_node(
+    graph = labelledgraph,
+    source_vertex_label = frozenset( ( reference, ) ),
+    sw_path_vertex_selector = sw_path_vertex_selector,
+    bk_path_vertex_selector = bk_path_vertex_selector,
+    )
+  heapq.heappush( heap, ( current.weight, current ) )
+
+  if maxiter is None:
+    handler = no_heap_element_limit
+
+  else:
+    handler = heap_element_limit( maxcount = maxiter )
+
+  while heap:
+    ( weight, current ) = heapq.heappop( heap )
+    node = current
+
+    while not node.is_terminal_leaf():
+      for child in node.immediate_offpath_children():
+        heapq.heappush( heap, ( child.weight, child ) )
+
+      node = node.immediate_onpath_child()
+
+    yield (
+      weight,
+      reduce( operator.or_, current.source_set_labels(), set() ),
+      reduce( operator.or_, current.sink_set_labels(), set() ),
+      )
+
+    if handler( heap = heap ):
+      break
+
+
+class stirling_tree_node(object):
+  """
+  An element in the Stirling tree
+  """
+
+  def is_terminal_leaf(self):
+
+    return self.graph.num_vertices() == 2
+
+
+  def available_source_set_vertices(self):
+
+    remaining = self.source_set.copy()
+    remaining.remove( self.source_vertex )
+    return remaining
+
+
+  def available_sink_set_vertices(self):
+
+    remaining = self.sink_set.copy()
+    remaining.remove( self.sink_vertex )
+    return remaining
+
+
+  def source_set_labels(self):
+
+    for vertex in self.source_set:
+      yield self.graph.vertex_label( vertex = vertex )
+
+
+  def sink_set_labels(self):
+
+    for vertex in self.sink_set:
+      yield self.graph.vertex_label( vertex = vertex )
+
+
+class stirling_tree_sw_node(stirling_tree_node):
+  """
+  A node in the Stirling-tree that uses Stoer-Wagner minimum cut
+
+  Branches 3-way
+  """
+
+  def __init__(
+    self,
+    graph,
+    source_vertex_label,
+    sw_path_vertex_selector,
+    bk_path_vertex_selector,
+    ):
+
+    assert 1 < graph.num_vertices()
+
+    self.graph = graph
+    self.source_vertex = find_vertex_by_label(
+      graph = self.graph,
+      label = source_vertex_label,
+      )
+
+    result = min_cut_max_flow.stoer_wagner_min_cut( graph = self.graph )
+    self.weight = result.weight
+
+    ( self.source_set, self.sink_set ) = result.cutsets
+
+    if self.source_vertex not in self.source_set:
+      assert self.source_vertex in self.sink_set
+      ( self.source_set, self.sink_set ) = ( self.sink_set, self.source_set )
+
+    assert self.source_vertex in self.source_set
+
+    self.sw_path_vertex_selector = sw_path_vertex_selector
+    self.bk_path_vertex_selector = bk_path_vertex_selector
+
+    self.sink_vertex = self.sw_path_vertex_selector( vertices = self.sink_set )
+
+    if self.is_terminal_leaf():
+      self.bk_route = TerminalRoute
+
+    else:
+      self.bk_route = self.bk_path_vertex_selector( node = self )
+
+
+  def immediate_onpath_child(self):
+
+    data = self.bk_route.onpath_child( node = self )
+
+    return stirling_tree_onpath_node(
+      graph = data.graph,
+      source_vertex_label = data.source_vertex_label,
+      source_set_labels = data.source_set_labels,
+      sink_vertex_label = data.sink_vertex_label,
+      sink_set_labels = data.sink_set_labels,
+      path_vertex_selector = self.bk_path_vertex_selector,
+      )
+
+
+  def immediate_offpath_children(self):
+
+    if self.is_terminal_leaf():
+      raise RuntimeError("No more children")
+
+    ( contracted, label ) = copy_graph_and_merge_vertices(
+      graph = self.graph,
+      merge1 = self.source_vertex,
+      merge2 = self.sink_vertex,
+      )
+    yield stirling_tree_sw_node(
+      graph = contracted,
+      source_vertex_label = label,
+      sw_path_vertex_selector = self.sw_path_vertex_selector,
+      bk_path_vertex_selector= self.bk_path_vertex_selector,
+      )
+
+    data = self.bk_route.offpath_child( node = self )
+
+    yield stirling_tree_bk_node(
+      graph = data.graph,
+      source_vertex_label = data.source_vertex_label,
+      sink_vertex_label = data.sink_vertex_label,
+      path_vertex_selector = self.bk_path_vertex_selector,
+      )
+
+
+class stirling_tree_bk_node(stirling_tree_node):
+  """
+  A node in the Stirling-tree that uses Boykov-Kolmogorov minimum cut
+
+  Branches 2-way
+  """
+
+  def __init__(
+    self,
+    graph,
+    source_vertex_label,
+    sink_vertex_label,
+    path_vertex_selector,
+    ):
+
+    assert 1 < graph.num_vertices()
+    self.graph = graph
+    ( self.source_vertex, self.sink_vertex ) = find_two_vertices_by_label(
+      graph = self.graph,
+      label1 = source_vertex_label,
+      label2 = sink_vertex_label,
+      )
+
+    result = min_cut_max_flow.boykov_kolmogorov_min_st_cut(
+      graph = self.graph,
+      source = self.source_vertex,
+      sink = self.sink_vertex,
+      )
+    self.weight = result.weight
+
+    ( self.source_set, self.sink_set ) = result.cutsets
+
+    assert self.source_vertex in self.source_set
+    assert self.sink_vertex in self.sink_set
+
+    self.path_vertex_selector = path_vertex_selector
+
+    if self.is_terminal_leaf():
+      self.route = TerminalRoute
+
+    else:
+      self.route = self.path_vertex_selector( node = self )
+
+
+  def immediate_onpath_child(self):
+
+    data = self.route.onpath_child( node = self )
+
+    return stirling_tree_onpath_node(
+      graph = data.graph,
+      source_vertex_label = data.source_vertex_label,
+      source_set_labels = data.source_set_labels,
+      sink_vertex_label = data.sink_vertex_label,
+      sink_set_labels = data.sink_set_labels,
+      path_vertex_selector = self.path_vertex_selector,
+      )
+
+
+  def immediate_offpath_children(self):
+
+    data = self.route.offpath_child( node = self )
+
+    yield stirling_tree_bk_node(
+      graph = data.graph,
+      source_vertex_label = data.source_vertex_label,
+      sink_vertex_label = data.sink_vertex_label,
+      path_vertex_selector = self.path_vertex_selector,
+      )
+
+
+class stirling_tree_onpath_node(stirling_tree_node):
+  """
+  A node in the Stirling tree en route to the minimum cut
+
+  Branches 2-way
+  """
+
+  def __init__(
+    self,
+    graph,
+    source_vertex_label,
+    source_set_labels,
+    sink_vertex_label,
+    sink_set_labels,
+    path_vertex_selector
+    ):
+
+    assert 1 < graph.num_vertices()
+    assert source_vertex_label in source_set_labels
+    assert sink_vertex_label in sink_set_labels
+
+    self.graph = graph
+
+    mapping = calculate_vertex_by_label_dict( graph = self.graph )
+
+    self.source_vertex = mapping[ source_vertex_label ]
+    self.sink_vertex = mapping[ sink_vertex_label ]
+    self.source_set = set( mapping[ l ] for l in source_set_labels )
+    self.sink_set = set( mapping[ l ] for l in sink_set_labels )
+
+    self.path_vertex_selector = path_vertex_selector
+
+    if self.is_terminal_leaf():
+      self.route = TerminalRoute
+
+    else:
+      self.route = self.path_vertex_selector( node = self )
+
+
+  def immediate_onpath_child(self):
+
+    data = self.route.onpath_child( node = self )
+
+    return stirling_tree_onpath_node(
+      graph = data.graph,
+      source_vertex_label = data.source_vertex_label,
+      source_set_labels = data.source_set_labels,
+      sink_vertex_label = data.sink_vertex_label,
+      sink_set_labels = data.sink_set_labels,
+      path_vertex_selector = self.path_vertex_selector,
+      )
+
+
+  def immediate_offpath_children(self):
+
+    data = self.route.offpath_child( node = self )
+
+    yield stirling_tree_bk_node(
+      graph = data.graph,
+      source_vertex_label = data.source_vertex_label,
+      sink_vertex_label = data.sink_vertex_label,
+      path_vertex_selector = self.path_vertex_selector,
+      )
+
+
+def arbitrary_selection_from_set(vertices):
+
+  return next( iter( vertices ) )
+
+
+class BKState(object):
+  """
+  A named tuple to hold all the data
+  """
+
+  def __init__(
+    self,
+    graph,
+    source_vertex_label,
+    source_set_labels,
+    sink_vertex_label,
+    sink_set_labels,
+    ):
+
+    self.graph = graph
+    self.source_vertex_label = source_vertex_label
+    self.source_set_labels = source_set_labels
+    self.sink_vertex_label = sink_vertex_label
+    self.sink_set_labels = sink_set_labels
+
+
+class TerminalRoute(object):
+  """
+  A singleton object that signifies no more steps in the tree
+  """
+
+  @staticmethod
+  def onpath_child(node):
+
+    raise RuntimeError("No more children")
+
+
+  @staticmethod
+  def offpath_child(node):
+
+    raise RuntimeError("No more children")
+
+
+class BKRoute(object):
+  """
+  Route using the Boykov-Kolmogorov algorithm
+  """
+
+  def __init__(self, vertex, onpath, offpath):
+
+    self.vertex = vertex
+    self.onpath = onpath
+    self.offpath = offpath
+
+
+  def onpath_child(self, node):
+
+    return self.get_child_state( node = node, method = self.onpath )
+
+
+  def offpath_child(self, node):
+
+    return self.get_child_state( node = node, method = self.offpath )
+
+
+  def get_child_state(self, node, method):
+
+    ( graph, source_vertex_label, sink_vertex_label ) = method(
+      node = node,
+      vertex = self.vertex,
+      )
+
+    source_set_labels = set(
+      node.graph.vertex_label( vertex = v ) for v in node.source_set
+      if v != node.source_vertex and v != self.vertex
+      )
+    source_set_labels.add( source_vertex_label )
+
+    sink_set_labels = set(
+      node.graph.vertex_label( vertex = v ) for v in node.sink_set
+      if v != node.sink_vertex and v != self.vertex
+      )
+    sink_set_labels.add( sink_vertex_label )
+
+    return BKState(
+      graph = graph,
+      source_vertex_label = source_vertex_label,
+      source_set_labels = source_set_labels,
+      sink_vertex_label = sink_vertex_label,
+      sink_set_labels = sink_set_labels,
+      )
+
+
+  @staticmethod
+  def merge_with_source(node, vertex):
+
+    ( contracted, label ) = copy_graph_and_merge_vertices(
+      graph = node.graph,
+      merge1 = node.source_vertex,
+      merge2 = vertex,
+      )
+
+    return ( contracted, label, node.graph.vertex_label( vertex = node.sink_vertex ) )
+
+
+  @staticmethod
+  def merge_with_sink(node, vertex):
+
+    ( contracted, label ) = copy_graph_and_merge_vertices(
+      graph = node.graph,
+      merge1 = node.sink_vertex,
+      merge2 = vertex,
+      )
+
+    return ( contracted, node.graph.vertex_label( vertex = node.source_vertex ), label )
+
+
+  @classmethod
+  def SourceSideChoice(cls, vertex):
+
+    return cls(
+      vertex = vertex,
+      onpath = cls.merge_with_source,
+      offpath = cls.merge_with_sink,
+      )
+
+
+  @classmethod
+  def SinkSideChoice(cls, vertex):
+
+    return cls(
+      vertex = vertex,
+      onpath = cls.merge_with_sink,
+      offpath = cls.merge_with_source,
+      )
+
+
+class BKEqualSizeSelector(object):
+  """
+  Selects vertices to make the source and sink sets equal in size
+  """
+
+  def __init__(self, selector = arbitrary_selection_from_set):
+
+    self.selector = selector
+
+
+  def __call__(self, node):
+
+    assert not node.is_terminal_leaf()
+
+    if len( node.sink_set ) <= len( node.source_set ):
+      selected = self.selector( vertices = node.available_source_set_vertices() )
+      return BKRoute.SourceSideChoice( vertex = selected )
+
+    else:
+      selected = self.selector( vertices = node.available_sink_set_vertices() )
+      return BKRoute.SinkSideChoice( vertex = selected )
+
+
+class BKPreferentialSourceSideSelector(object):
+  """
+  Selects preferentially from the source set until it is depleted
+  """
+
+  def __init__(self, selector = arbitrary_selection_from_set):
+
+    self.selector = selector
+
+
+  def __call__(self, node):
+
+    assert not node.is_terminal_leaf()
+
+    remaining_source = node.available_source_set_vertices()
+
+    if remaining_source:
+      selected = self.selector( vertices = remaining_source )
+      return BKRoute.SourceSideChoice( vertex = selected )
+
+    else:
+      remaining_sink = node.available_sink_set_vertices()
+      selected = self.selector( vertices = remaining_sink )
+      return BKRoute.SinkSideChoice( vertex = selected )
+
+
+def construct_vertex_labelled_graph(graph):
+
+  ( copy, mapping ) = utility.copy_graph_and_map_vertices( graph = graph )
+
+  for v in graph.vertices():
+    copy.set_vertex_label( vertex = mapping[ v ], label = frozenset( ( v, ) ) )
+
+  return copy
+
+
+def find_vertex_by_label(graph, label):
+
+  for vertex in graph.vertices():
+    if graph.vertex_label( vertex = vertex ) == label:
+      return vertex
+
+  raise KeyError("vertex not found")
+
+
+def find_two_vertices_by_label(graph, label1, label2):
+
+  vertex1 = None
+  vertex2 = None
+
+  for vertex in graph.vertices():
+    label = graph.vertex_label( vertex = vertex )
+
+    if vertex1 is None and label == label1:
+      vertex1 = vertex
+
+      if vertex2 is not None:
+        return ( vertex1, vertex2 )
+
+    elif vertex2 is None and label == label2:
+      vertex2 = vertex
+
+      if vertex1 is not None:
+        return ( vertex1, vertex2 )
+
+  raise KeyError("vertices not found")
+
+
+def calculate_vertex_by_label_dict(graph):
+
+  return dict(
+    ( graph.vertex_label( vertex  = v ), v ) for v in graph.vertices()
+    )
+
+
+contract_undirected_graph = utility.undirected_graph_vertex_contraction(
+  joint_vertex_label = operator.or_,
+  joint_edge_weight = operator.add,
+  )
+
+
+def copy_graph_and_merge_vertices(graph, merge1, merge2):
+
+  ( copy, mapping ) = utility.copy_graph_and_map_vertices( graph = graph )
+  contract_undirected_graph(
+    graph = copy,
+    v1 = mapping[ merge1 ],
+    v2 = mapping[ merge2 ],
+    )
+
+  return (
+    copy,
+    contract_undirected_graph.joint_vertex_label(
+      graph.vertex_label( vertex = merge1 ),
+      graph.vertex_label( vertex = merge2 ),
+      ),
+    )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+
+import unittest
+
+
+class TestGraph(unittest.TestCase):
+
+  def manipulation(self, g, unique_edge, directed):
+
+    vd1 = g.add_vertex( label = "CA" )
+    vd2 = g.add_vertex( label = "C" )
+    vd3 = g.add_vertex( label = "C" )
+
+    res = g.add_edge( vertex1 = vd1, vertex2 = vd2, weight = 1 )
+    self.assertEqual( len( res ), 2 )
+    self.assertTrue( res[1] )
+    ed1 = res[0]
+
+    res = g.add_edge( vertex1 = vd2, vertex2 = vd3, weight = 2 )
+    self.assertEqual( len( res ), 2 )
+    self.assertTrue( res[1] )
+    ed2 = res[0]
+
+    if unique_edge:
+      res = g.add_edge( vertex1 = vd1, vertex2 = vd2, weight = 1 )
+      self.assertEqual( len( res ), 2 )
+      self.assertFalse( res[1] )
+
+    self.assertEqual( set( g.vertices() ), set( [ vd1, vd2, vd3 ] ) )
+    self.assertEqual( set( g.edges() ), set( [ ed1, ed2 ] ) )
+
+    self.assertEqual( set( g.adjacent_vertices( vertex = vd1 ) ), set( [ vd2 ] ) )
+    self.assertEqual(
+      set( g.adjacent_vertices( vertex = vd2 ) ),
+      set( [ vd3 ] ) if directed else set( [ vd1, vd3 ] ),
+      )
+    self.assertEqual(
+      set( g.adjacent_vertices( vertex = vd3 ) ),
+      set() if directed else set( [ vd2 ] ),
+      )
+
+    self.assertEqual( set( g.out_edges( vertex = vd1 ) ), set( [ ed1 ] ) )
+    self.assertEqual(
+      set( g.out_edges( vertex = vd2 ) ),
+      set( [ ed2 ] ) if directed else set( [ ed1, ed2 ] ),
+      )
+    self.assertEqual(
+      set( g.out_edges( vertex = vd3 ) ),
+      set() if directed else set( [ ed2 ] ),
+      )
+
+    self.assertEqual( g.vertex_label( vertex = vd1 ), "CA" )
+    self.assertEqual( g.vertex_label( vertex = vd2 ), "C" )
+    self.assertEqual( g.vertex_label( vertex = vd3 ), "C" )
+    self.assertEqual( g.edge_weight( edge = ed1 ), 1 )
+    self.assertEqual( g.edge_weight( edge = ed2 ), 2 )
+
+    self.assertEqual( g.source( edge = ed1 ), vd1 )
+    self.assertEqual( g.source( edge = ed2 ), vd2 )
+    self.assertEqual( g.target( edge = ed1 ), vd2 )
+    self.assertEqual( g.target( edge = ed2 ), vd3 )
+
+    g.set_vertex_label( vertex = vd1, label = "CD" )
+    self.assertEqual( g.vertex_label( vertex = vd1 ), "CD" )
+    g.set_vertex_label( vertex = vd1, label = None )
+    self.assertEqual( g.vertex_label( vertex = vd1 ), None )
+
+    g.set_edge_weight( edge = ed1, weight = "FOO" )
+    self.assertEqual( g.edge_weight( edge = ed1 ), "FOO" )
+
+    g.remove_edge( edge = ed2 )
+    self.assertEqual( len( list( g.edges() ) ), 1 )
+    self.assertEqual( g.edge_weight( edge = ed1 ), "FOO" )
+
+    g.remove_vertex( vertex = vd3 )
+    self.assertEqual( set( g.vertices() ), set( [ vd1, vd2 ] ) )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g, unique_edge = True, directed = False )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g, unique_edge = True, directed = False )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g, unique_edge = False, directed = False )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g, unique_edge = False, directed = False )
+
+
+  def test_adjacency_list_directed_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "directed",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g, unique_edge = False, directed = True )
+
+
+suite_graph = unittest.TestLoader().loadTestsFromTestCase(
+  TestGraph
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_graph,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_breadth_first_search.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import breadth_first_search as bfs
+
+import unittest
+
+
+class TestVertexRecordingVisitor(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    vd1 = g.add_vertex()
+    vd2 = g.add_vertex()
+    vd3 = g.add_vertex()
+    vd4 = g.add_vertex()
+
+    g.add_edge( vertex1 = vd1, vertex2 = vd2 )
+    visitor = bfs.vertex_recording_visitor( start_vertex = vd1 )
+    bfs.breadth_first_search( graph = g, vertex = vd1, visitor = visitor )
+    self.assertEqual( visitor.visited_vertices, [ vd1, vd2 ] )
+
+    visitor = bfs.vertex_recording_visitor( start_vertex = vd2 )
+    bfs.breadth_first_search( graph = g, vertex = vd2, visitor = visitor )
+    self.assertEqual( visitor.visited_vertices, [ vd2, vd1 ] )
+
+    visitor = bfs.vertex_recording_visitor( start_vertex = vd3 )
+    bfs.breadth_first_search( graph = g, vertex = vd3, visitor = visitor )
+    self.assertEqual( visitor.visited_vertices, [ vd3 ] )
+
+    g.add_edge( vertex1 = vd2, vertex2 = vd3 )
+    g.add_edge( vertex1 = vd2, vertex2 = vd4 )
+    visitor = bfs.vertex_recording_visitor( start_vertex = vd1 )
+    bfs.breadth_first_search( graph = g, vertex = vd1, visitor = visitor )
+    self.assertEqual( visitor.visited_vertices[:2], [ vd1, vd2 ] )
+    self.assertEqual(
+      set( visitor.visited_vertices ),
+      set( [ vd1, vd2, vd3, vd4 ] ),
+      )
+
+    visitor = bfs.vertex_recording_visitor( start_vertex = vd2 )
+    bfs.breadth_first_search( graph = g, vertex = vd2, visitor = visitor )
+    self.assertEqual(
+      set( visitor.visited_vertices ),
+      set( [ vd1, vd2, vd3, vd4 ] ),
+      )
+    self.assertEqual( visitor.visited_vertices[0], vd2 )
+
+    g.add_edge( vertex1 = vd1, vertex2 = vd3 )
+    visitor = bfs.vertex_recording_visitor( start_vertex = vd1 )
+    bfs.breadth_first_search( graph = g, vertex = vd1, visitor = visitor )
+    self.assertEqual(
+      set( visitor.visited_vertices ),
+      set( [ vd1, vd2, vd3, vd4 ] ),
+      )
+    self.assertEqual( len( visitor.visited_vertices ), 4 )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+class TestDistanceRecordingVisitor(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    vd1 = g.add_vertex()
+    vd2 = g.add_vertex()
+    vd3 = g.add_vertex()
+    vd4 = g.add_vertex()
+
+    g.add_edge( vertex1 = vd1, vertex2 = vd2 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd3 )
+    g.add_edge( vertex1 = vd2, vertex2 = vd4 )
+    visitor = bfs.distance_recording_visitor( start_vertex = vd1 )
+    bfs.breadth_first_search( graph = g, vertex = vd1, visitor = visitor )
+
+    self.assertEqual(
+      visitor.distance_for,
+      { vd1: 0, vd2: 1, vd3: 1, vd4: 2 }
+      )
+    visitor2 = bfs.distance_recording_visitor( start_vertex = vd2 )
+    bfs.breadth_first_search( graph = g, vertex = vd2, visitor = visitor2 )
+
+    self.assertEqual(
+      visitor2.distance_for,
+      { vd1: 1, vd2: 0, vd3: 2, vd4: 1 }
+      )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+suite_vertex_recording_visitor = unittest.TestLoader().loadTestsFromTestCase(
+  TestVertexRecordingVisitor
+  )
+suite_distance_recording_visitor = unittest.TestLoader().loadTestsFromTestCase(
+  TestDistanceRecordingVisitor
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_vertex_recording_visitor,
+    suite_distance_recording_visitor,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_clustering_algorithm.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import clustering_algorithm
+
+import unittest
+from six.moves import range
+
+
+class TestBetweennessCentralityClustering(unittest.TestCase):
+
+  def graph_build(self, g):
+
+    vds = [ g.add_vertex() for i in range( 6 ) ]
+    return (
+      vds,
+      (
+        g.add_edge( vertex1 = vds[0], vertex2 = vds[1], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[0], vertex2 = vds[2], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[1], vertex2 = vds[2], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[2], vertex2 = vds[3], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[4], vertex2 = vds[5], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[4], vertex2 = vds[3], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[3], vertex2 = vds[5], weight = 1 )[0],
+        )
+      )
+
+
+  def undirected_params(self):
+
+    return ( 9, [ 1, 1, 1, 1, 1, 1 ], [ [ 0, 1, 2 ], [ 3, 4, 5 ] ] )
+
+
+  def directed_params(self):
+
+    return ( 6, [ 1, 1, 1, 1, 1, 1 ], None )
+
+
+  def build_and_test(self, g, params):
+
+    ( threshold, exp_ecs, exp_comps ) = params
+    ( vds, eds ) = self.graph_build( g )
+    ecmap = clustering_algorithm.betweenness_centrality_clustering(
+      graph = g,
+      threshold = threshold,
+      )
+
+    self.assertTrue( eds[3] not in ecmap )
+    self.assertEqual( len( ecmap ), len( exp_ecs ) )
+    self.assertEqual( exp_ecs, [ ecmap[ ed ] for ed in eds if ed != eds[3] ] )
+
+    if exp_comps is not None:
+      from boost_adaptbx.graph import connected_component_algorithm as cca
+      comps = cca.connected_components( graph = g )
+      self.assertEqual(
+        set( frozenset( c ) for c in comps ),
+        set( frozenset( vds[i] for i in c ) for c in exp_comps )
+        )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_params() )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_params() )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_params() )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_params() )
+
+
+  def test_adjacency_list_directed_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "directed",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.directed_params() )
+
+
+suite_betweenness_centrality_clustering = unittest.TestLoader().loadTestsFromTestCase(
+  TestBetweennessCentralityClustering
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_betweenness_centrality_clustering,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_connected_component_algorithm.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import connected_component_algorithm as cca
+
+import unittest
+
+
+class TestConnectedComponents(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    vd1 = g.add_vertex()
+    vd2 = g.add_vertex()
+    vd3 = g.add_vertex()
+
+    g.add_edge( vertex1 = vd1, vertex2 = vd2 )
+    components = cca.connected_components( graph = g )
+
+    self.assertEqual( len( components ), 2 )
+    self.assertEqual(
+      set( [ frozenset( c ) for c in components ] ),
+      set( [ frozenset( [ vd1, vd2 ] ), frozenset( [ vd3 ] ) ] ),
+      )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+suite_connected_components = unittest.TestLoader().loadTestsFromTestCase(
+  TestConnectedComponents
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_connected_components,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_graph_structure_comparison.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import graph_structure_comparison
+
+import unittest
+
+class collector(object):
+
+  def __init__(self):
+
+    self.collected = []
+
+
+  def __call__(self, data):
+
+    self.collected.append( data )
+    return True
+
+
+class TestMcGregorCommonSubgraphsUnique(unittest.TestCase):
+
+  def build_leu(self, leu):
+
+    v0 = leu.add_vertex( "CA" )
+    v1 = leu.add_vertex( "C" )  # CB
+    v2 = leu.add_vertex( "C" )  # CG
+    v3 = leu.add_vertex( "C" )  # CD2
+    v4 = leu.add_vertex( "C" )  # CD1
+
+    leu.add_edge(v0, v1, 1.53 )
+    leu.add_edge(v0, v2, 2.62 )
+    leu.add_edge(v0, v3, 3.23 )
+    leu.add_edge(v0, v4, 3.91 )
+
+    leu.add_edge(v1, v2, 1.53 )
+    leu.add_edge(v1, v3, 2.54 )
+    leu.add_edge(v1, v4, 2.51 )
+
+    leu.add_edge(v2, v3, 1.52 )
+    leu.add_edge(v2, v4, 1.52 )
+
+    leu.add_edge(v3, v4, 2.50 )
+
+    return ( v0, v1, v2 )
+
+
+  def build_asn(self, asn):
+
+    w0 = asn.add_vertex( "CA" )
+    w1 = asn.add_vertex( "C" )  # CB
+    w2 = asn.add_vertex( "C" )  # CG
+    w3 = asn.add_vertex( "C" )  # ND2
+    w4 = asn.add_vertex( "C" )  # OD1
+
+    asn.add_edge(w0, w1, 1.53 )
+    asn.add_edge(w0, w2, 2.54 )
+    asn.add_edge(w0, w3, 2.87 )
+    asn.add_edge(w0, w4, 3.59 )
+
+    asn.add_edge(w1, w2, 1.52 )
+    asn.add_edge(w1, w3, 2.43 )
+    asn.add_edge(w1, w4, 2.40 )
+
+    asn.add_edge(w2, w3, 1.33 )
+    asn.add_edge(w2, w4, 1.23 )
+
+    asn.add_edge(w3, w4, 2.25 )
+
+    return ( w0, w1, w2 )
+
+
+  def manipulate(self, leu, asn, matchings):
+
+    ( leu_ca, leu_cb, leu_cg ) = self.build_leu( leu = leu )
+    ( asn_ca, asn_cb, asn_cg ) = self.build_asn( asn = asn )
+
+    callback = collector()
+
+    import operator
+
+    graph_structure_comparison.mcgregor_common_subgraphs_unique(
+      graph1 = leu,
+      graph2 = asn,
+      vertex_equality = operator.eq,
+      edge_equality = lambda l, r: abs( l - r ) <= 0.1,
+      callback = callback,
+      )
+    self.assertEqual( len( callback.collected ), matchings )
+
+    largest = max( callback.collected, key = len )
+    self.assertEqual( len( largest ), 3 )
+    self.assertEqual(
+      sorted( [ ( leu.vertex_label( p[0] ), asn.vertex_label( p[1] ) ) for p in largest ] ),
+      [ ( "C", "C" ), ( "C", "C" ), ( "CA", "CA" ) ],
+      )
+    self.assertEqual(
+      set( largest ),
+      set( [ ( leu_ca, asn_ca ), ( leu_cb, asn_cb ), ( leu_cg, asn_cg ) ] ),
+      )
+
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      leu = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+      asn = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulate( leu = leu, asn = asn, matchings = 13 )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      leu = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+      asn = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulate( leu = leu, asn = asn, matchings = 13 )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      leu = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+      asn = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulate( leu = leu, asn = asn, matchings = 13 )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      leu = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+      asn = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulate( leu = leu, asn = asn, matchings = 13 )
+
+
+  def test_adjacency_list_directed_vector_vector(self):
+
+    try:
+      leu = graph.adjacency_list(
+        graph_type = "directed",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+      asn = graph.adjacency_list(
+        graph_type = "directed",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulate( leu = leu, asn = asn, matchings = 8 )
+
+
+suite_mcgregor_common_subgraphs_unique = unittest.TestLoader().loadTestsFromTestCase(
+  TestMcGregorCommonSubgraphsUnique
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_mcgregor_common_subgraphs_unique,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_maximum_clique.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import maximum_clique
+
+import unittest
+
+class accumulator(object):
+
+  def __init__(self):
+
+    self.largest = 0
+    self.sent = []
+
+  def __call__(self, result):
+
+    size = len( result )
+
+    if self.largest < size:
+      self.largest = size
+      self.sent = [ result ]
+
+    elif self.largest == size:
+      self.sent.append( result )
+
+
+class TestRascal(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    n = {}
+    n[ "1,1'" ] = g.add_vertex() # 0
+    n[ "1,5'" ] = g.add_vertex() # 1
+    n[ "2,2'" ] = g.add_vertex() # 2
+    n[ "2,3'" ] = g.add_vertex() # 3
+    n[ "3,2'" ] = g.add_vertex() # 4
+    n[ "3,3'" ] = g.add_vertex() # 5
+    n[ "4,4'" ] = g.add_vertex() # 6
+    n[ "5,1'" ] = g.add_vertex() # 7
+    n[ "5,5'" ] = g.add_vertex() # 8
+
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "3,3'" ] )
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "3,2'" ] )
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "3,3'" ] )
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "2,3'" ], vertex2 = n[ "3,2'" ] )
+    g.add_edge( vertex1 = n[ "2,3'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "3,2'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "3,3'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "3,3'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "4,4'" ], vertex2 = n[ "5,1'" ] )
+    g.add_edge( vertex1 = n[ "4,4'" ], vertex2 = n[ "5,5'" ] )
+
+    a = accumulator()
+    maximum_clique.rascal( graph = g, callable = a )
+    self.assertEqual(
+      set(
+        [
+          frozenset( [ n[ "1,1'" ], n[ "3,3'" ] , n[ "4,4'" ], n[ "5,5'" ] ] ),
+          frozenset( [ n[ "2,2'" ], n[ "3,3'" ] , n[ "4,4'" ], n[ "5,5'" ] ] ),
+          ]
+        ),
+      set( frozenset( m ) for m in a.sent ),
+      )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+class TestGreedy(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    n = {}
+    n[ "1,1'" ] = g.add_vertex() # 0
+    n[ "1,5'" ] = g.add_vertex() # 1
+    n[ "2,2'" ] = g.add_vertex() # 2
+    n[ "2,3'" ] = g.add_vertex() # 3
+    n[ "3,2'" ] = g.add_vertex() # 4
+    n[ "3,3'" ] = g.add_vertex() # 5
+    n[ "4,4'" ] = g.add_vertex() # 6
+    n[ "5,1'" ] = g.add_vertex() # 7
+    n[ "5,5'" ] = g.add_vertex() # 8
+
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "3,3'" ] )
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "3,2'" ] )
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "3,3'" ] )
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "2,3'" ], vertex2 = n[ "3,2'" ] )
+    g.add_edge( vertex1 = n[ "2,3'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "3,2'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "3,3'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "3,3'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "4,4'" ], vertex2 = n[ "5,1'" ] )
+    g.add_edge( vertex1 = n[ "4,4'" ], vertex2 = n[ "5,5'" ] )
+
+    result = maximum_clique.greedy( graph = g )
+    self.assertEqual(
+      set(
+        [
+          frozenset( [ n[ "1,1'" ], n[ "3,3'" ] , n[ "4,4'" ], n[ "5,5'" ] ] ),
+          frozenset( [ n[ "2,2'" ], n[ "3,3'" ] , n[ "4,4'" ], n[ "5,5'" ] ] ),
+          ]
+        ),
+      set( frozenset( m ) for m in result ),
+      )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+class TestCompatibilityGraph(unittest.TestCase):
+
+  def manipulation(self, left, right):
+
+    u1 = left.add_vertex( label = "O" )
+    u2 = left.add_vertex( label = "C" )
+    u3 = left.add_vertex( label = "C" )
+    u4 = left.add_vertex( label = "N" )
+    u5 = left.add_vertex( label = "O" )
+
+    left.add_edge( vertex1 = u1, vertex2 = u2, weight = 1 )
+    left.add_edge( vertex1 = u2, vertex2 = u3, weight = 1 )
+    left.add_edge( vertex1 = u3, vertex2 = u4, weight = 1 )
+    left.add_edge( vertex1 = u3, vertex2 = u5, weight = 2 )
+
+    v1 = right.add_vertex( label = "O" )
+    v2 = right.add_vertex( label = "C" )
+    v3 = right.add_vertex( label = "C" )
+    v4 = right.add_vertex( label = "N" )
+    v5 = right.add_vertex( label = "O" )
+
+    right.add_edge( vertex1 = v1, vertex2 = v2, weight = 2 )
+    right.add_edge( vertex1 = v2, vertex2 = v3, weight = 1 )
+    right.add_edge( vertex1 = v3, vertex2 = v4, weight = 1 )
+    right.add_edge( vertex1 = v3, vertex2 = v5, weight = 2 )
+
+    result = maximum_clique.compatibility_graph(
+      first = left,
+      second = right,
+      )
+
+    vertices = list( result.vertices() )
+    edges = list( result.edges() )
+
+    self.assertEqual( len( vertices ), 9 )
+    self.assertEqual( len( edges ), 16 )
+
+    self.assertEqual(
+      set( result.vertex_label( vertex = v ) for v in result.vertices() ),
+      set(
+        [
+          ( u1, v1 ), ( u1, v5 ), ( u5, v1 ), ( u5, v5 ),
+          ( u2, v2 ), ( u2, v3 ), ( u3, v2 ), ( u3, v3 ),
+          ( u4, v4 ),
+          ]
+        )
+      )
+    edges_between = set(
+      [
+        frozenset(
+          [
+            result.vertex_label( vertex = result.source( edge = e ) ),
+            result.vertex_label( vertex = result.target( edge = e ) ),
+            ]
+          )
+        for e in result.edges()
+        ]
+      )
+    self.assertEqual(
+      edges_between,
+      set(
+        [
+          frozenset( [ ( u1, v1 ), ( u3, v3 ) ] ),
+          frozenset( [ ( u1, v1 ), ( u4, v4 ) ] ),
+          frozenset( [ ( u1, v1 ), ( u5, v5 ) ] ),
+
+          frozenset( [ ( u1, v5 ), ( u3, v2 ) ] ),
+          frozenset( [ ( u1, v5 ), ( u4, v4 ) ] ),
+          frozenset( [ ( u1, v5 ), ( u5, v1 ) ] ),
+
+          frozenset( [ ( u2, v2 ), ( u3, v3 ) ] ),
+          frozenset( [ ( u2, v2 ), ( u4, v4 ) ] ),
+          frozenset( [ ( u2, v2 ), ( u5, v5 ) ] ),
+
+          frozenset( [ ( u2, v3 ), ( u3, v2 ) ] ),
+          frozenset( [ ( u2, v3 ), ( u5, v1 ) ] ),
+
+          frozenset( [ ( u3, v2 ), ( u5, v1 ) ] ),
+
+          frozenset( [ ( u3, v3 ), ( u4, v4 ) ] ),
+          frozenset( [ ( u3, v3 ), ( u5, v5 ) ] ),
+
+          frozenset( [ ( u4, v4 ), ( u5, v1 ) ] ),
+          frozenset( [ ( u4, v4 ), ( u5, v5 ) ] ),
+          ]
+        )
+      )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g1 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+      g2 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( left = g1, right = g2 )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g1 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+      g2 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( left = g1, right = g2 )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g1 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+      g2 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( left = g1, right = g2 )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g1 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+      g2 = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( left = g1, right = g2 )
+
+
+class TestSelectedSubgraph(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    n = {}
+    n[ "1,1'" ] = g.add_vertex( label = "1,1'" ) # 0
+    n[ "1,5'" ] = g.add_vertex( label = "1,5'" ) # 1
+    n[ "2,2'" ] = g.add_vertex( label = "2,2'" ) # 2
+    n[ "2,3'" ] = g.add_vertex( label = "2,3'" ) # 3
+    n[ "3,2'" ] = g.add_vertex( label = "3,2'" ) # 4
+    n[ "3,3'" ] = g.add_vertex( label = "3,3'" ) # 5
+    n[ "4,4'" ] = g.add_vertex( label = "4,4'" ) # 6
+    n[ "5,1'" ] = g.add_vertex( label = "5,1'" ) # 7
+    n[ "5,5'" ] = g.add_vertex( label = "5,5'" ) # 8
+
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "3,3'" ] )
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "1,1'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "3,2'" ] )
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "1,5'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "3,3'" ] )
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "2,2'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "2,3'" ], vertex2 = n[ "3,2'" ] )
+    g.add_edge( vertex1 = n[ "2,3'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "3,2'" ], vertex2 = n[ "5,1'" ] )
+
+    g.add_edge( vertex1 = n[ "3,3'" ], vertex2 = n[ "4,4'" ] )
+    g.add_edge( vertex1 = n[ "3,3'" ], vertex2 = n[ "5,5'" ] )
+
+    g.add_edge( vertex1 = n[ "4,4'" ], vertex2 = n[ "5,1'" ] )
+    g.add_edge( vertex1 = n[ "4,4'" ], vertex2 = n[ "5,5'" ] )
+
+    subgraph = maximum_clique.selected_subgraph(
+      graph = g,
+      vertices = g.adjacent_vertices( vertex = n[ "2,2'"] )
+      )
+    vertices = list( subgraph.vertices() )
+    self.assertEqual( len( vertices ), 3 )
+    self.assertEqual(
+      set( subgraph.vertex_label( vertex = v ) for v in vertices ),
+      set( [ "3,3'", "4,4'", "5,5'" ] )
+      )
+
+    edges = list( subgraph.edges() )
+    self.assertEqual( len( edges ), 3 )
+    self.assertEqual(
+      set(
+        frozenset(
+          [
+            subgraph.vertex_label( vertex = subgraph.source( edge = e ) ),
+            subgraph.vertex_label( vertex = subgraph.target( edge = e ) ),
+            ]
+          )
+        for e in edges
+        ),
+      set(
+        [
+          frozenset( [ "3,3'", "4,4'" ] ),
+          frozenset( [ "3,3'", "5,5'" ] ),
+          frozenset( [ "4,4'", "5,5'" ] ),
+          ]
+        )
+      )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+suite_rascal = unittest.TestLoader().loadTestsFromTestCase(
+  TestRascal
+  )
+suite_greedy = unittest.TestLoader().loadTestsFromTestCase(
+  TestGreedy
+  )
+suite_compatibility_graph = unittest.TestLoader().loadTestsFromTestCase(
+  TestCompatibilityGraph
+  )
+suite_selected_subgraph = unittest.TestLoader().loadTestsFromTestCase(
+  TestSelectedSubgraph
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_rascal,
+    suite_greedy,
+    suite_compatibility_graph,
+    suite_selected_subgraph,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_metric.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import metric
+
+import unittest
+from six.moves import range
+
+
+class TestBrandesBetweennessCentrality(unittest.TestCase):
+
+  def graph_build(self, g):
+
+    vds = [ g.add_vertex() for i in range( 6 ) ]
+    return (
+      vds,
+      (
+        g.add_edge( vertex1 = vds[0], vertex2 = vds[1], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[0], vertex2 = vds[2], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[1], vertex2 = vds[2], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[2], vertex2 = vds[3], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[4], vertex2 = vds[5], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[4], vertex2 = vds[3], weight = 1 )[0],
+        g.add_edge( vertex1 = vds[3], vertex2 = vds[5], weight = 1 )[0],
+        )
+      )
+
+
+  def undirected_results(self):
+
+    return ( [ 0, 0, 6, 6, 0, 0 ], [ 1, 4, 4, 9, 1, 4, 4 ] )
+
+
+  def directed_results(self):
+
+    return ( [ 0, 0, 4, 3, 0, 0 ], [ 1, 3, 3, 6, 1, 1, 4 ] )
+
+
+  def build_and_test(self, g, results):
+
+    ( vds, eds ) = self.graph_build( g )
+    ( exp_vcs, exp_ecs ) = results
+    ( vcmap, ecmap ) = metric.brandes_betweenness_centrality( graph = g )
+
+    self.assertEqual( len( vcmap ), len( exp_vcs ) )
+    self.assertTrue( all( vd in vcmap for vd in vds ) )
+    self.assertEqual( exp_vcs, [ int( vcmap[ vd ] ) for vd in vds ] )
+
+    self.assertEqual( len( ecmap ), len( exp_ecs ) )
+    self.assertTrue( all( ed in ecmap for ed in eds ) )
+    self.assertEqual( exp_ecs, [ int( ecmap[ ed ] ) for ed in eds ] )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_results() )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_results() )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_results() )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.undirected_results() )
+
+
+  def test_adjacency_list_directed_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "directed",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.build_and_test( g, self.directed_results() )
+
+
+suite_brandes_betweenness_centrality = unittest.TestLoader().loadTestsFromTestCase(
+  TestBrandesBetweennessCentrality
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_brandes_betweenness_centrality,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_min_cut_max_flow.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import min_cut_max_flow
+
+import unittest
+
+class TestStoerWagnerMinCut(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    vd0 = g.add_vertex()
+    vd1 = g.add_vertex()
+    vd2 = g.add_vertex()
+    vd3 = g.add_vertex()
+    vd4 = g.add_vertex()
+    vd5 = g.add_vertex()
+    vd6 = g.add_vertex()
+    vd7 = g.add_vertex()
+
+    g.add_edge( vertex1 = vd3, vertex2 = vd4, weight = 4 )
+    g.add_edge( vertex1 = vd3, vertex2 = vd6, weight = 3 )
+    g.add_edge( vertex1 = vd3, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd4, weight = 3 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd1, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd6, weight = 2 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd7, weight = 6 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd2, weight = 8 )
+    g.add_edge( vertex1 = vd4, vertex2 = vd1, weight = 1 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd6, weight = 1 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd5, weight = 80 )
+    g.add_edge( vertex1 = vd6, vertex2 = vd7, weight = 2 )
+    g.add_edge( vertex1 = vd7, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd5, vertex2 = vd2, weight = 1 )
+
+    result = min_cut_max_flow.stoer_wagner_min_cut( graph = g )
+    self.assertAlmostEqual( result.weight, 7, 7 )
+    self.assertEqual( g.num_vertices(), len( result.parities ) )
+    ( source, sink ) = result.cutsets
+
+    if len( sink ) < len( source ):
+      ( source, sink ) = ( sink, source )
+
+    self.assertEqual( len( source ), 2 )
+    self.assertEqual( len( sink ), 6 )
+    self.assertTrue( source, set( ( vd1, vd5 ) ) )
+    self.assertTrue( sink, set( ( vd0, vd2, vd3, vd4, vd6, vd7 ) ) )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+class TestBoykovKolmogorovMaxFlow(unittest.TestCase):
+
+  def create_edge(self, graph, left, right, weight, reverse_edge_map):
+
+    edf = graph.add_edge( vertex1 = left, vertex2 = right, weight = weight )[0]
+    edb = graph.add_edge( vertex1 = right, vertex2 = left, weight = weight )[0]
+    reverse_edge_map[ edf ] = edb
+    reverse_edge_map[ edb ] = edf
+
+
+  def manipulation(self, g):
+
+    vd0 = g.add_vertex()
+    vd1 = g.add_vertex()
+    vd2 = g.add_vertex()
+    vd3 = g.add_vertex()
+    vd4 = g.add_vertex()
+    vd5 = g.add_vertex()
+    vd6 = g.add_vertex()
+    vd7 = g.add_vertex()
+
+    revmap = {}
+
+    self.create_edge( graph = g, left = vd3, right = vd4, weight = 4, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd3, right = vd6, weight = 3, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd3, right = vd5, weight = 1, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd0, right = vd4, weight = 3, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd0, right = vd1, weight = 1, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd0, right = vd6, weight = 2, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd0, right = vd7, weight = 6, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd0, right = vd5, weight = 1, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd0, right = vd2, weight = 8, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd4, right = vd1, weight = 1, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd1, right = vd6, weight = 1, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd1, right = vd5, weight = 80, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd6, right = vd7, weight = 2, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd7, right = vd5, weight = 1, reverse_edge_map = revmap )
+    self.create_edge( graph = g, left = vd5, right = vd2, weight = 1, reverse_edge_map = revmap )
+
+    result = min_cut_max_flow.boykov_kolmogorov_max_flow(
+      graph = g,
+      reverse_edge_map = revmap,
+      source = vd0,
+      sink = vd1,
+      )
+    self.assertAlmostEqual( result.weight, 7, 7 )
+
+    ( source, sink ) = result.cutsets
+
+    self.assertTrue( vd0 in source )
+    self.assertTrue( vd1 in sink )
+    self.assertEqual( len( source ), 6 )
+    self.assertEqual( source, set( ( vd0, vd2, vd3, vd4, vd6, vd7 ) ) )
+    self.assertEqual( len( sink ), 2 )
+    self.assertEqual( sink, set( ( vd1, vd5 ) ) )
+
+
+  def test_adjacency_list_directed_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "directed",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+class TestBoykovKolmogorovMinSTCut(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    vd0 = g.add_vertex()
+    vd1 = g.add_vertex()
+    vd2 = g.add_vertex()
+    vd3 = g.add_vertex()
+    vd4 = g.add_vertex()
+    vd5 = g.add_vertex()
+    vd6 = g.add_vertex()
+    vd7 = g.add_vertex()
+
+    g.add_edge( vertex1 = vd3, vertex2 = vd4, weight = 4 )
+    g.add_edge( vertex1 = vd3, vertex2 = vd6, weight = 3 )
+    g.add_edge( vertex1 = vd3, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd4, weight = 3 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd1, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd6, weight = 2 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd7, weight = 6 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd2, weight = 8 )
+    g.add_edge( vertex1 = vd4, vertex2 = vd1, weight = 1 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd6, weight = 1 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd5, weight = 80 )
+    g.add_edge( vertex1 = vd6, vertex2 = vd7, weight = 2 )
+    g.add_edge( vertex1 = vd7, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd5, vertex2 = vd2, weight = 1 )
+
+    result = min_cut_max_flow.boykov_kolmogorov_min_st_cut( graph = g, source = vd0, sink = vd1 )
+
+    self.assertAlmostEqual( result.weight, 7, 7 )
+    ( source, sink ) = result.cutsets
+
+    self.assertTrue( vd0 in source )
+    self.assertTrue( vd1 in sink )
+    self.assertEqual( len( source ), 6 )
+    self.assertEqual( len( sink ), 2 )
+    self.assertTrue( source, set( ( vd0, vd2, vd3, vd4, vd6, vd7 ) ) )
+    self.assertTrue( sink, set( ( vd1, vd5 ) ) )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+suite_stoer_wagner_min_cut = unittest.TestLoader().loadTestsFromTestCase(
+  TestStoerWagnerMinCut
+  )
+suite_boykov_kolmogorov_max_flow = unittest.TestLoader().loadTestsFromTestCase(
+  TestBoykovKolmogorovMaxFlow
+  )
+suite_boykov_kolmogorov_min_st_cut = unittest.TestLoader().loadTestsFromTestCase(
+  TestBoykovKolmogorovMinSTCut
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_stoer_wagner_min_cut,
+    suite_boykov_kolmogorov_max_flow,
+    suite_boykov_kolmogorov_min_st_cut,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_minimum_cut_enumerate.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import minimum_cut_enumerate
+
+import unittest
+
+class TestStirlingAdaptiveEnumeration(unittest.TestCase):
+
+  full_count_with_weight = {
+      7: 1,
+      8: 4,
+      9: 2,
+      10: 2,
+      11: 2,
+      13: 5,
+      14: 3,
+      15: 2,
+      16: 3,
+      17: 7,
+      18: 4,
+      19: 3,
+      20: 6,
+      21: 3,
+      22: 2,
+      23: 2,
+      24: 2,
+      25: 2,
+      26: 4,
+      27: 2,
+      29: 1,
+      30: 1,
+      83: 1,
+      84: 1,
+      89: 4,
+      90: 2,
+      91: 4,
+      92: 6,
+      94: 2,
+      95: 4,
+      96: 1,
+      97: 4,
+      98: 7,
+      99: 5,
+      100: 5,
+      101: 1,
+      102: 3,
+      103: 3,
+      104: 3,
+      105: 1,
+      106: 1,
+      107: 3,
+      109: 2,
+      110: 1,
+      }
+
+  truncated_count_with_weight24 = {
+      7: 1,
+      8: 4,
+      9: 2,
+      10: 2,
+      11: 2,
+      13: 5,
+      14: 3,
+      15: 2,
+      16: 3,
+      }
+
+  truncated_count_with_weight27 = {
+      7: 1,
+      8: 4,
+      9: 2,
+      10: 2,
+      11: 2,
+      13: 5,
+      14: 3,
+      15: 2,
+      16: 3,
+      17: 3,
+      }
+
+
+  def build_graph(self, g):
+
+    vd0 = g.add_vertex( label = 0 )
+    vd1 = g.add_vertex( label = 1 )
+    vd2 = g.add_vertex( label = 2 )
+    vd3 = g.add_vertex( label = 3 )
+    vd4 = g.add_vertex( label = 4 )
+    vd5 = g.add_vertex( label = 5 )
+    vd6 = g.add_vertex( label = 6 )
+    vd7 = g.add_vertex( label = 7 )
+
+    g.add_edge( vertex1 = vd3, vertex2 = vd4, weight = 4 )
+    g.add_edge( vertex1 = vd3, vertex2 = vd6, weight = 3 )
+    g.add_edge( vertex1 = vd3, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd4, weight = 3 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd1, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd6, weight = 2 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd7, weight = 6 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd2, weight = 8 )
+    g.add_edge( vertex1 = vd4, vertex2 = vd1, weight = 1 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd6, weight = 1 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd5, weight = 80 )
+    g.add_edge( vertex1 = vd6, vertex2 = vd7, weight = 2 )
+    g.add_edge( vertex1 = vd7, vertex2 = vd5, weight = 1 )
+    g.add_edge( vertex1 = vd5, vertex2 = vd2, weight = 1 )
+    return vd0
+
+
+  def run_all_tests(self, g, reference):
+
+    self.manipulation(
+      g,
+      reference = reference,
+      maxiter = None,
+      expected = self.full_count_with_weight,
+      )
+    self.manipulation(
+      g,
+      reference = reference,
+      maxiter = 150,
+      expected = self.full_count_with_weight,
+      )
+    self.manipulation(
+      g,
+      reference = reference,
+      maxiter = 24,
+      expected = self.truncated_count_with_weight24,
+      )
+    self.manipulation(
+      g,
+      reference = reference,
+      maxiter = 27,
+      expected = self.truncated_count_with_weight27,
+      )
+
+
+  def manipulation(self, g, reference, maxiter, expected):
+
+    stiter = minimum_cut_enumerate.stirling_adaptive_tree_enumeration(
+      graph = g,
+      reference = reference,
+      sw_path_vertex_selector = minimum_cut_enumerate.arbitrary_selection_from_set,
+      bk_path_vertex_selector = minimum_cut_enumerate.BKEqualSizeSelector(),
+      maxiter = maxiter,
+      )
+    cuts_with_weight = {}
+
+    for ( weight, source, sink ) in stiter:
+      solu = (
+        frozenset( g.vertex_label( vertex = v ) for v in source ),
+        frozenset( g.vertex_label( vertex = v ) for v in sink ),
+        )
+      cuts_with_weight.setdefault( int( weight ), set() ).add( solu )
+
+    self.assertEqual( len( expected ), len( cuts_with_weight ) )
+
+    for ( weight, cuts ) in cuts_with_weight.items():
+      self.assertEqual( len( cuts ), expected[ weight ] )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      reference = self.build_graph( g )
+      self.run_all_tests(g, reference = reference )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      reference = self.build_graph( g )
+      self.run_all_tests(g, reference = reference )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      reference = self.build_graph( g )
+      self.run_all_tests(g, reference = reference )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      reference = self.build_graph( g )
+      self.run_all_tests(g, reference = reference )
+
+
+suite_stirling_adaptive_enumeration = unittest.TestLoader().loadTestsFromTestCase(
+  TestStirlingAdaptiveEnumeration
+  )
+
+alltests = unittest.TestSuite(
+  [
+    suite_stirling_adaptive_enumeration,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/tests/tst_graph_utility.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx import graph
+from boost_adaptbx.graph import utility
+
+import unittest
+
+class TestCopyGraph(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    vd0 = g.add_vertex( label = object() )
+    vd1 = g.add_vertex( label = object() )
+    vd2 = g.add_vertex( label = object() )
+
+    g.add_edge( vertex1 = vd0, vertex2 = vd1, weight = object() )
+    g.add_edge( vertex1 = vd0, vertex2 = vd2, weight = object() )
+    g.add_edge( vertex1 = vd1, vertex2 = vd2, weight = object() )
+
+    copy = utility.copy_graph( graph = g )
+    self.assertEqual( copy.num_vertices(), 3 )
+    self.assertEqual( copy.num_edges(), 3 )
+    self.assertEqual(
+      set( g.vertex_label( vertex = v ) for v in g.vertices() ),
+      set( copy.vertex_label( vertex = v ) for v in copy.vertices() ),
+      )
+    self.assertEqual(
+      set( g.edge_weight( edge = e ) for e in g.edges() ),
+      set( copy.edge_weight( edge = e ) for e in copy.edges() ),
+      )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+class TestCopyGraphAndMapVertices(unittest.TestCase):
+
+  def manipulation(self, g):
+
+    vd0 = g.add_vertex( label = object() )
+    vd1 = g.add_vertex( label = object() )
+    vd2 = g.add_vertex( label = object() )
+
+    g.add_edge( vertex1 = vd0, vertex2 = vd1, weight = object() )
+    g.add_edge( vertex1 = vd0, vertex2 = vd2, weight = object() )
+    g.add_edge( vertex1 = vd1, vertex2 = vd2, weight = object() )
+
+    ( copy, mapping ) = utility.copy_graph_and_map_vertices( graph = g )
+    self.assertEqual( copy.num_vertices(), 3 )
+    self.assertEqual( copy.num_edges(), 3 )
+
+    self.assertEqual( len( mapping ), 3 )
+
+    for vertex in g.vertices():
+      self.assertTrue( vertex in mapping )
+      self.assertEqual(
+        g.vertex_label( vertex = vertex ),
+        copy.vertex_label( vertex = mapping[ vertex ] ),
+        )
+
+    weight_of_edge_between = {}
+
+    for edge in copy.edges():
+      sv = copy.source( edge = edge )
+      dv = copy.target( edge = edge )
+      weight_of_edge_between[ frozenset( ( sv, dv ) ) ] = copy.edge_weight( edge = edge )
+
+    for edge in g.edges():
+      sv = copy.source( edge = edge )
+      dv = copy.target( edge = edge )
+      key = frozenset( ( mapping[ sv ], mapping[ dv ] ) )
+      self.assertTrue( key in weight_of_edge_between )
+      self.assertEqual( weight_of_edge_between[ key ], g.edge_weight( edge = edge ) )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+class TestContractUndirectedGraph(unittest.TestCase):
+
+  def setUp(self):
+
+    import operator
+    self.contract_undirected_graph = utility.undirected_graph_vertex_contraction(
+      joint_vertex_label = operator.or_,
+      joint_edge_weight = operator.add
+      )
+
+
+  def manipulation(self, g):
+
+    vd0 = g.add_vertex( label = frozenset( [ 0 ] ) )
+    vd1 = g.add_vertex( label = frozenset( [ 1 ] ) )
+    vd2 = g.add_vertex( label = frozenset( [ 2 ] ) )
+    vd3 = g.add_vertex( label = frozenset( [ 3 ] ) )
+    vd4 = g.add_vertex( label = frozenset( [ 4 ] ) )
+
+    g.add_edge( vertex1 = vd0, vertex2 = vd1, weight = 1 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd2, weight = 3 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd2, weight = 4 )
+    g.add_edge( vertex1 = vd0, vertex2 = vd3, weight = 9 )
+    g.add_edge( vertex1 = vd1, vertex2 = vd4, weight = 8 )
+    g.add_edge( vertex1 = vd2, vertex2 = vd4, weight = 6 )
+
+    self.assertEqual(
+      self.contract_undirected_graph.joint_vertex_label(
+        frozenset( [ 0 ] ),
+        frozenset( [ 1 ] ),
+        ),
+      frozenset( [ 0, 1 ] ),
+      )
+    self.assertEqual( self.contract_undirected_graph.joint_edge_weight( 3, 4 ), 7 )
+
+    self.contract_undirected_graph( graph = g, v1 = vd0, v2 = vd1 )
+    vl01 = frozenset( [ 0, 1 ] )
+    vl2 = frozenset( [ 2 ] )
+    vl3 = frozenset( [ 3 ] )
+    vl4 = frozenset( [ 4 ] )
+
+    self.assertEqual( g.num_vertices(), 4 )
+    vertices = list( g.vertices() )
+    self.assertEqual( len( vertices ), 4 )
+    vertex_labels = set( g.vertex_label( vertex = v ) for v in vertices )
+    self.assertEqual( len( vertex_labels ), 4 )
+    self.assertEqual( vertex_labels, set( [ vl01, vl2, vl3, vl4 ] ) )
+
+    self.assertEqual( g.num_edges(), 4 )
+    edges = list( g.edges() )
+    self.assertEqual( len( edges ), 4 )
+
+    weight_between = {
+      frozenset( [ vl01, vl2 ] ): 7,
+      frozenset( [ vl01, vl3 ] ): 9,
+      frozenset( [ vl01, vl4 ] ): 8,
+      frozenset( [ vl2, vl4 ] ): 6,
+      }
+
+    for ed in edges:
+      key = frozenset(
+        [
+          g.vertex_label( vertex = g.source( edge = ed ) ),
+          g.vertex_label( vertex = g.target( edge = ed ) ),
+          ]
+        )
+      self.assertTrue( key in weight_between )
+      self.assertEqual( g.edge_weight( edge = ed ), weight_between[ key ] )
+
+
+  def test_adjacency_list_undirected_vector_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_set(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "set",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_vector_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "vector",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+  def test_adjacency_list_undirected_list_vector(self):
+
+    try:
+      g = graph.adjacency_list(
+        graph_type = "undirected",
+        vertex_type = "list",
+        edge_type = "vector",
+        )
+
+    except NotImplementedError:
+      pass
+
+    else:
+      self.manipulation( g )
+
+
+suite_copy_graph = unittest.TestLoader().loadTestsFromTestCase(
+  TestCopyGraph
+  )
+suite_copy_graph_and_map_vertices = unittest.TestLoader().loadTestsFromTestCase(
+  TestCopyGraphAndMapVertices
+  )
+suite_contract_undirected_graph = unittest.TestLoader().loadTestsFromTestCase(
+  TestContractUndirectedGraph
+  )
+
+
+alltests = unittest.TestSuite(
+  [
+    suite_copy_graph,
+    suite_copy_graph_and_map_vertices,
+    suite_contract_undirected_graph,
+    ]
+  )
+
+
+def load_tests(loader, tests, pattern):
+
+  return alltests
+
+
+if __name__ == "__main__":
+  unittest.TextTestRunner( verbosity = 2 ).run( alltests )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/graph/utility.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext( "boost_adaptbx_graph_utility_ext" )
+
+def copy_graph(graph):
+
+  copy = graph.__class__()
+  ext.copy_graph( source = graph, target = copy )
+  return copy
+
+
+def copy_graph_and_map_vertices(graph):
+
+  copy = graph.__class__()
+  mapping = ext.copy_graph_and_map_vertices( source = graph, target = copy )
+  return ( copy, mapping )
+
+
+class undirected_graph_vertex_contraction(object):
+
+  def __init__(self, joint_vertex_label, joint_edge_weight):
+
+    self.joint_vertex_label = joint_vertex_label
+    self.joint_edge_weight = joint_edge_weight
+
+
+  def __call__(self, graph, v1, v2):
+
+    v1_edge_to = {}
+
+    for ed in graph.out_edges( vertex = v1 ):
+      target = graph.target( edge = ed )
+      assert target not in v1_edge_to
+      v1_edge_to[ target ] = ed
+
+    create_edge_between = []
+
+    for ed in graph.out_edges( vertex = v2 ):
+      target = graph.target( edge = ed )
+
+      if target == v1 or target == v2:
+        continue
+
+      this_edge_weight = graph.edge_weight( edge = ed )
+
+      if target in v1_edge_to:
+        parallel_edge = v1_edge_to[ target ]
+        graph.set_edge_weight(
+          edge = parallel_edge,
+          weight = self.joint_edge_weight(
+            graph.edge_weight( edge = parallel_edge ),
+            this_edge_weight,
+            )
+          )
+
+      else:
+        create_edge_between.append( ( target, this_edge_weight ) )
+
+    graph.set_vertex_label(
+      vertex = v1,
+      label = self.joint_vertex_label(
+        graph.vertex_label( vertex = v1 ),
+        graph.vertex_label( vertex = v2 ),
+        )
+      )
+
+    for ( other, weight ) in create_edge_between:
+      ( ed, success ) = graph.add_edge( vertex1 = v1, vertex2 = other, weight = weight )
+      assert success
+
+    graph.remove_vertex( vertex = v2 )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/hybrid_times.py
+from __future__ import absolute_import, division, print_function
+
+from boost_python_hybrid_times_ext import run_c_plus_plus
+import sys, os
+from six.moves import range
+
+if (not hasattr(sys, "gettickeraccumulation")):
+  print("***************************************************")
+  print("WARNING: sys.gettickeraccumulation() not available.")
+  print("***************************************************")
+  print()
+  def gettickeraccumulation():
+    return 1000000
+  sys.gettickeraccumulation = gettickeraccumulation
+
+def factorial(n):
+  fact = 1
+  for i in range(2,n+1):
+    fact *= i
+  return fact
+
+def power(x, n):
+  pow = x
+  for i in range(1,n):
+    pow *= x
+  return pow
+
+def sin(x, n_terms):
+  result = x
+  sign = -1
+  pow = 3
+  for i in range(1,n_terms):
+    result += power(x,pow)/(sign*factorial(pow))
+    sign *= -1
+    pow += 2
+  return result
+
+def run_python(n, n_terms):
+  result = 0
+  for j in range(n):
+    for i in range(180):
+      result += sin(i * 3.14159265359/180, n_terms)
+  return result
+
+class hybrid(object):
+
+  def __init__(self, n_python):
+    self.n_python = n_python
+
+  def __call__(self, n, n_terms):
+    result = run_python(self.n_python, n_terms)
+    result += run_c_plus_plus(n-self.n_python, n_terms)
+    return result
+
+def usr_and_sys():
+  t = os.times()
+  return t[0]+t[1]
+
+class time_per_python_tick(object):
+
+  def __init__(self, worker, n, n_terms):
+    time_0 = usr_and_sys()
+    ticks_0 = sys.gettickeraccumulation()
+    self.result = worker(n, n_terms)
+    self.ticks_diff = sys.gettickeraccumulation() - ticks_0
+    self.time_diff = usr_and_sys() - time_0
+
+  def report(self, label):
+    print("%-6s %6.3f %10d %10.3f" % (
+      label, self.time_diff, self.ticks_diff,
+      self.time_diff/max(1,self.ticks_diff)*1.e6))
+    return self
+
+def forever(n_terms, n=200):
+  sys.tracebacklimit = 0
+  n_ratios = 0
+  sum_py = 0
+  sum_cpp = 0
+  while True:
+    time_0 = usr_and_sys()
+    run_python(n, n_terms)
+    sum_py += usr_and_sys() - time_0
+    time_0 = usr_and_sys()
+    run_c_plus_plus(n, n_terms)
+    sum_cpp += usr_and_sys() - time_0
+    n_ratios += 1
+    print("mean Python: %6.3f" % (sum_py/n_ratios))
+    print("mean C++:    %6.3f" % (sum_cpp/n_ratios))
+    if (sum_cpp != 0):
+      print("iteration %d: ratio %6.3f" % (n_ratios, sum_py/sum_cpp))
+    else:
+      print("iteration %d: ratio infinity" % n_ratios)
+    print()
+
+def end_points(n_terms):
+  print("         time      ticks  time/tick")
+  n = 1
+  while (n <= 128):
+    print("n:", n)
+    py = time_per_python_tick(run_python, n, n_terms).report("Python")
+    cpp = time_per_python_tick(run_c_plus_plus, n, n_terms).report("C++")
+    if (cpp.time_diff != 0):
+      print("ratio %6.3f" % (py.time_diff / cpp.time_diff))
+    else:
+      print("ratio infinity")
+    assert abs(py.result - cpp.result) < 1.e-8
+    print()
+    n *= 2
+
+def plot(n_terms):
+  for n,m in [(100,100), (1000, 100), (10000, 100), (100000, 100)]:
+    print("                 time      ticks  time/tick")
+    reference_result = None
+    for n_python in range(0, m+1, m/10):
+      hy = time_per_python_tick(hybrid(n_python), n, n_terms).report(
+        "%6.2f%% Python" % (100.*n_python/n))
+      if (reference_result is None):
+        reference_result = hy.result
+      else:
+        assert abs(hy.result - reference_result) < 1.e-10*n
+    print()
+
+def run():
+  n_terms = 6 # larger values lead to integer overflows in factorial()
+  if ("--forever" in sys.argv[1:]):
+    forever(n_terms)
+  else:
+    end_points(n_terms)
+    plot(n_terms)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/libtbx_refresh.py
+from __future__ import absolute_import, division, print_function
+import os
+import re
+import sys
+
+# Find Boost version at configuration time by parsing boost/version.hpp
+try:
+  self.env.boost_version = -1
+  boost_root = self.env.find_in_repositories('boost')
+  # boost directory in cctbx_project is picked up by find_in_repositories
+  if not os.path.isdir(boost_root) or 'cctbx_project' in boost_root:
+    boost_root = os.path.join(sys.prefix, 'include')
+    if sys.platform == 'darwin' and 'python.app' in boost_root:
+      boost_root = os.path.join(boost_root.split('python.app')[0], 'include')
+    elif sys.platform == 'win32':
+      boost_root = os.path.join(sys.prefix, 'Library', 'include')
+  version_pat = re.compile(r'^ \s* \#define \s+ BOOST_VERSION \s+ (\d+) \s* $',
+                            re.X)
+  with open(os.path.join(boost_root, 'boost', 'version.hpp')) as lines:
+    for li in lines:
+      m = version_pat.search(li)
+      if m:
+        self.env.boost_version = int(m.group(1))
+except IOError:
+  pass
+except TypeError:
+  if boost_root is None: pass
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+from libtbx import test_utils
+import libtbx.load_env
+
+tst_list_base = [
+  "$B/tests/tst_optional_copy",
+  "$D/tests/tst_libc_backtrace.py",
+  "$D/tests/tst_rational.py",
+  "$D/tests/tst_optional.py",
+  "$D/tests/tst_std_pair.py",
+  "$D/tests/tst_tuple.py",
+  "$D/tests/tst_stdout.py",
+  "$D/tests/tst_stderr_stdout.py",
+  "$D/tests/tst_deprecation_tools.py",
+  ]
+
+# failing test
+tst_list_fail = [
+  "$D/tests/tst_python_streambuf.py",
+  ]
+
+# final lists
+tst_list = tst_list_base
+tst_list_expected_failures = tst_list_fail
+
+def run():
+  build_dir = libtbx.env.under_build("boost_adaptbx")
+  dist_dir = libtbx.env.dist_path("boost_adaptbx")
+
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_boost_thread.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("boost_adaptbx_boost_thread_test_ext")
+
+from libtbx.test_utils import approx_equal
+import math
+
+def sanity_test():
+  (pi, e) = ext.test_boost_thread()
+  assert approx_equal(pi, math.pi, eps=5), pi
+  assert approx_equal(e, math.exp(1), eps=5), e
+
+def run():
+  sanity_test()
+  print('OK')
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_char_array.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx_char_array_ext as ext
+import sys
+
+def exercise_char_n():
+  assert ext.char_3_holder().value == "bar"
+  assert ext.char_5_holder().value == "barte"
+  assert ext.use_char_n("rab") == "bar"
+  assert ext.use_char_n("etrab") == "barte"
+
+def run(args):
+  iterations = 100
+  if (len(args) > 0):
+    iterations = int(args[0])
+  i = 0
+  while (iterations == 0 or i < iterations):
+    exercise_char_n()
+    i += 1
+  print("OK")
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_deprecation_tools.py
+from __future__ import absolute_import, division, print_function
+from boost_adaptbx.boost.python import deprecate_method
+import warnings
+
+
+def exercise():
+  # Choose a Boost Python class for which to deprecate a method. Here we
+  # use rational.int.
+  from boost_adaptbx.boost import rational
+
+  original_value = rational.int().numerator()
+  deprecate_method(rational.int, "numerator")
+
+  with warnings.catch_warnings(record=True) as w:
+    warnings.simplefilter("always")
+    new_value = rational.int().numerator()
+
+  assert original_value == new_value
+  assert len(w) == 1
+  assert issubclass(w[-1].category, DeprecationWarning)
+  assert "deprecated" in str(w[-1].message)
+
+
+def run():
+  exercise()
+  print("OK")
+
+
+if __name__ == "__main__":
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_libc_backtrace.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+import sys
+
+def run(args):
+  forever = "--forever" in args
+  while True:
+    bp.ext.libtbx_introspection_show_stack()
+    bp.ext.boost_adaptbx_libc_backtrace(0)
+    if (not forever): break
+  print("OK")
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_optional.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx.test_utils import Exception_expected
+import boost_adaptbx.boost.optional
+import sys
+
+def exercise(args):
+  forever = "--forever" in args
+  while True:
+    assert boost_adaptbx.boost.optional.exercise(None) == 42
+    assert boost_adaptbx.boost.optional.exercise(13) is None
+    assert boost_adaptbx.boost.optional.exercise(0) == 0
+    assert boost_adaptbx.boost.optional.exercise(1) == 3
+    assert boost_adaptbx.boost.optional.exercise(1.5) == 4
+    try:
+      boost_adaptbx.boost.optional.exercise("")
+    except Exception as e:
+      assert str(e).splitlines()[2] == "did not match C++ signature:"
+    else:
+      raise Exception_expected
+    exercise_wstring = getattr(boost_adaptbx.boost.optional, "exercise_wstring", None)
+    if (not forever): print("exercise_wstring:", exercise_wstring)
+    if (exercise_wstring is not None):
+      assert boost_adaptbx.boost.optional.exercise_wstring(u"abc") == u"abcabc"
+    if (not forever): break
+  print("OK")
+
+if (__name__ == "__main__"):
+  exercise(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_python_streambuf.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+from boost_adaptbx.boost.python import streambuf, ostream
+from six.moves import range
+ext = bp.import_ext("boost_adaptbx_python_streambuf_test_ext")
+import StringIO
+import cStringIO
+from libtbx.test_utils import Exception_expected
+from libtbx.option_parser import option_parser
+import libtbx.object_oriented_patterns as oop
+import os
+
+
+class file_object_debug_proxy(oop.proxy):
+
+  def __init__(self, *args, **kwds):
+    super(file_object_debug_proxy, self).__init__(*args, **kwds)
+    self.seek_call_log = []
+    self.write_call_log = []
+
+  def seek(self, off, mode):
+    self.seek_call_log.append((off, mode))
+    self.subject.seek(off, mode)
+
+  def write(self, s):
+    self.write_call_log.append(s)
+    self.subject.write(s)
+
+
+class io_test_case(object):
+  phrase = "Coding should be fun"
+  #         01234567890123456789
+
+  def run(self):
+    m = streambuf.default_buffer_size
+    for n in range(50, 0, -1):
+      streambuf.default_buffer_size = n
+      self.exercise_read_failure()
+      self.exercise_write_failure()
+      self.exercise_read()
+      self.exercise_write()
+      self.exercise_seek_and_read()
+      self.exercise_partial_read()
+      self.exercise_write_and_seek()
+    streambuf.default_buffer_size = m
+
+  def exercise_read(self):
+    self.create_file_object(mode='r')
+    words = ext.test_read(streambuf(self.file_object), "read")
+    assert words == "Coding, should, be, fun, [ fail, eof ]"
+    self.file_object.close()
+
+  def exercise_partial_read(self):
+    self.create_file_object(mode='r')
+    words = ext.test_read(streambuf(self.file_object), "partial read")
+    assert words == "Coding, should, "
+    trailing = self.file_object.read()
+    assert  trailing == " be fun"
+    self.file_object.close()
+
+  def exercise_read_failure(self):
+    self.create_file_object(mode='r')
+    self.file_object.close()
+    try:
+      ext.test_read(streambuf(self.file_object), "read")
+    except ValueError:
+      pass
+    else:
+      raise Exception_expected
+    self.file_object.close()
+
+  def exercise_write(self):
+    self.create_file_object(mode='w')
+    report = ext.test_write(ostream(self.file_object), "write")
+    assert report == ''
+    assert self.file_content() == "2 times 1.6 equals 3.2"
+    self.file_object.close()
+
+  def exercise_seek_and_read(self):
+    self.create_instrumented_file_object(mode='r')
+    words = ext.test_read(streambuf(self.file_object), "read and seek")
+    assert words == "should, should, uld, ding, fun, [ eof ]"
+    n = streambuf.default_buffer_size
+    soughts = self.file_object.seek_call_log
+    # stringent tests carefully crafted to make sure the seek-in-buffer
+    # optimisation works as expected
+    # C.f. the comment in the C++ function actual_write_test
+    assert soughts[-1] == (-4,2)
+    soughts = soughts[:-1]
+    if n >= 14:
+      assert soughts == []
+    else:
+      assert soughts[0] == (6,0)
+      soughts = soughts[1:]
+      if 8 <= n <= 13:
+        assert len(soughts) == 1 and self.only_seek_cur(soughts)
+      elif n == 7:
+        assert len(soughts) == 2 and self.only_seek_cur(soughts)
+      else:
+        assert soughts[0] == (6,0)
+        soughts = soughts[1:]
+        assert self.only_seek_cur(soughts)
+        if n == 4: assert len(soughts) == 1
+        else: assert len(soughts) == 2
+    self.file_object.close()
+
+  def exercise_write_and_seek(self):
+    self.create_instrumented_file_object(mode='w')
+    report = ext.test_write(ostream(self.file_object), "write and seek (cur)")
+    assert report == ''
+    expected = '1000 times 1000 equals 1000000'
+    assert self.file_content() == expected
+    assert self.file_object.tell() == 9
+    if streambuf.default_buffer_size >= 30:
+      assert self.file_object.write_call_log == [ expected ]
+    self.file_object.close()
+
+  def only_seek_cur(cls, seek_calls):
+    return [ whence for off, whence in seek_calls if whence != 1 ] == []
+
+  def create_instrumented_file_object(self, mode):
+    self.create_file_object(mode)
+    self.file_object = file_object_debug_proxy(self.file_object)
+
+
+class stringio_test_case(io_test_case):
+
+  stringio_type = StringIO.StringIO
+
+  def exercise_write_failure(self):
+    pass
+
+  def create_file_object(self, mode):
+    if mode == 'r':
+      self.file_object = self.stringio_type(self.phrase)
+    elif mode == 'w':
+      self.file_object = self.stringio_type()
+    else:
+      raise NotImplementedError("Internal error in the test code")
+
+  def file_content(self):
+    return self.file_object.getvalue()
+
+
+class cstringio_test_case(stringio_test_case):
+
+  stringio_type = cStringIO.StringIO
+
+  def exercise_write_failure(self):
+    self.create_file_object(mode='r')
+    try:
+      ext.test_write(ostream(self.file_object), "write")
+    except ValueError as err:
+      # That Python file object has no 'write' attribute
+      assert str(err).find("write") > -1
+    except RuntimeError as err:
+      # Redhat 8.0: basic_ios::clear(iostate) caused exception
+      assert str(err).find("clear") > -1
+    else:
+      raise Exception_expected
+
+
+class mere_file_test_case(io_test_case):
+
+  def exercise_write_failure(self):
+    import platform
+    if (platform.platform().find("redhat-8.0") >= 0):
+      return # avoid Abort
+    self.create_file_object(mode='r')
+    try:
+      ext.test_write(streambuf(self.file_object), "write")
+    except IOError as err:
+      pass
+    else:
+      raise Exception_expected
+    self.file_object.close()
+
+  def create_file_object(self, mode):
+    f = open("tmp_tst_python_streambuf", "w")
+    if mode.find('r') > -1:
+      f.write(self.phrase)
+    f.close()
+    self.file_object = open(f.name, mode)
+
+  def file_content(self):
+    i = self.file_object.tell()
+    self.file_object.flush()
+    result = open(self.file_object.name).read()
+    self.file_object.seek(i, 0)
+    return result
+
+
+def time_it(path, buffer_size):
+  if (buffer_size is None):
+    buffer_size = streambuf.default_buffer_size
+  print("Buffer is %i bytes" % buffer_size)
+  path = os.path.expanduser(path)
+  input = open(path, 'r')
+  inp_buf = streambuf(python_file_obj=input, buffer_size=buffer_size)
+  ext.time_read(input.name, inp_buf)
+  output = open("tmp_tst_python_streambuf", "w")
+  out_buf = streambuf(python_file_obj=output, buffer_size=buffer_size)
+  ext.time_write(output.name, out_buf)
+
+def run(args):
+  options = (option_parser()
+              .option(None, '--time_on_file',
+                      metavar="PATH",
+                      help="time reading and writing."
+                           "The file to read shall be a hkl file, i.e "
+                           "each line has a format like "
+                           "'int int int double double'. "
+                           "The end shall be marked by 0 0 0")
+              .option(None, '--buffer_size', type='int',
+                      metavar="INT")
+              ).process(args).options
+  for i_trial in range(3):
+    stringio_test_case().run()
+  for i_trial in range(3):
+    cstringio_test_case().run()
+  for i_trial in range(3):
+    mere_file_test_case().run()
+  if options.time_on_file:
+    time_it(options.time_on_file, options.buffer_size)
+
+  print('OK')
+
+if __name__ == '__main__':
+  import sys
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_rational.py
+from __future__ import absolute_import, division, print_function
+
+from boost_adaptbx.boost import rational
+from libtbx.test_utils import Exception_expected, approx_equal, show_diff
+from six.moves import range
+from six.moves import zip
+try:
+  from six.moves import cPickle as pickle
+except ImportError:
+  import pickle
+
+def exercise_int():
+  ri = rational.int
+  r = ri()
+  assert r.numerator() == 0
+  assert r.denominator() == 1
+  assert r.as_tuple() == (0,1)
+  assert int(r) == 0
+  assert float(r) == 0
+  assert rational.int(rational.int(3)).as_tuple() == (3,1)
+  assert rational.int(2).as_tuple() == (2,1)
+  assert rational.int(2,3).as_tuple() == (2,3)
+  assert str(rational.int()) == "0"
+  assert str(rational.int(2)) == "2"
+  assert str(rational.int(-2,3)) == "-2/3"
+  assert (-rational.int(2,3)).as_tuple() == (-2,3)
+  assert (rational.int(2,3) + rational.int(3,4)).as_tuple() == (17,12)
+  assert (rational.int(2,3) - rational.int(3,4)).as_tuple() == (-1,12)
+  assert (rational.int(2,3) * rational.int(3,4)).as_tuple() == (1,2)
+  assert (rational.int(2,3) / rational.int(3,4)).as_tuple() == (8,9)
+  assert (rational.int(2,3) // rational.int(3,4)) == 0
+  assert (rational.int(2,3) % rational.int(1,2)).as_tuple() == (1,6)
+  assert (rational.int(2,3) + 4).as_tuple() == (14,3)
+  assert (rational.int(2,3) - 4).as_tuple() == (-10,3)
+  assert (rational.int(2,3) * 4).as_tuple() == (8,3)
+  assert (rational.int(2,3) / 4).as_tuple() == (1,6)
+  assert (rational.int(2,3) // 4) == 0
+  assert (rational.int(7,3) % 2).as_tuple() == (1,3)
+  assert (5 + rational.int(2,3)).as_tuple() == (17,3)
+  assert (5 - rational.int(2,3)).as_tuple() == (13,3)
+  assert (5 * rational.int(2,3)).as_tuple() == (10,3)
+  assert (5 / rational.int(2,3)).as_tuple() == (15,2)
+  assert (5 // rational.int(2,3)) == 7
+  assert (5 % rational.int(2,3)).as_tuple() == (1,3)
+  assert rational.int(2,3) == rational.int(2,3)
+  assert not rational.int(2,3) == rational.int(2,5)
+  assert rational.int(2,3) != rational.int(2,5)
+  assert not rational.int(2,3) != rational.int(2,3)
+  assert rational.int(2,3) < rational.int(3,4)
+  assert not rational.int(2,3) < rational.int(2,3)
+  assert rational.int(2,3) > rational.int(1,2)
+  assert not rational.int(2,3) > rational.int(2,3)
+  assert rational.int(2,3) <= rational.int(3,4)
+  assert not rational.int(2,3) <= rational.int(1,2)
+  assert rational.int(2,3) >= rational.int(1,2)
+  assert not rational.int(2,3) >= rational.int(3,4)
+  assert rational.int(4,2) == 2
+  assert not rational.int(4,2) == 3
+  assert rational.int(4,2) != 3
+  assert not rational.int(4,2) != 2
+  assert rational.int(4,2) < 3
+  assert not rational.int(4,2) < 2
+  assert rational.int(4,2) > 1
+  assert not rational.int(4,2) > 2
+  assert rational.int(4,2) <= 3
+  assert not rational.int(4,2) <= 1
+  assert rational.int(4,2) >= 1
+  assert not rational.int(4,2) >= 3
+  assert 2 == rational.int(4,2)
+  assert not 3 == rational.int(4,2)
+  assert 3 != rational.int(4,2)
+  assert not 2 != rational.int(4,2)
+  assert 3 > rational.int(4,2)
+  assert not 2 > rational.int(4,2)
+  assert 1 < rational.int(4,2)
+  assert not 2 < rational.int(4,2)
+  assert 3 >= rational.int(4,2)
+  assert not 1 >= rational.int(4,2)
+  assert 1 <= rational.int(4,2)
+  assert not 3 <= rational.int(4,2)
+  r = rational.int(4,3)
+  r += 1
+  assert r.as_tuple() == (7,3)
+  assert approx_equal(float(r), 7./3)
+  s = rational.int(4,3)
+  assert hash(s) == hash(rational.int(4,3))
+  assert hash(s) != hash(r)
+  for n in range(-100,100):
+    assert hash(n) == hash(rational.int(n))
+    for d in range(1,8):
+      assert hash(rational.int(n,d)) == hash(rational.int(n,d))
+      assert hash(rational.int(n,d)) == hash(rational.int(3*n,3*d))
+      assert hash(rational.int(n,d)) == hash(rational.int(-3*n,-3*d))
+  try: int(r)
+  except RuntimeError as e:
+    assert str(e) == "boost.rational: as_int() conversion error:" \
+      " denominator is different from one."
+  else: raise Exception_expected
+  for n in range(-5,6):
+    for d in range(1,10):
+      r = rational.int(n, d)
+      p = pickle.dumps(r)
+      l = pickle.loads(p)
+      assert l == r
+      assert str(l) == str(r)
+  #
+  ee = "bad rational: zero denominator"
+  lhs = ri(1)
+  for rhs in [ri(0), 0]:
+    try: lhs / rhs
+    except RuntimeError as e: assert not show_diff(str(e), ee)
+    else: raise Exception_expected
+    try: lhs % rhs
+    except RuntimeError as e: assert not show_diff(str(e), ee)
+    else: raise Exception_expected
+  #
+  try:
+    import fractions
+  except ImportError:
+    fractions = None
+  def check(nd1, nd2, expected=None):
+    r1, r2 = ri(*nd1), ri(*nd2)
+    rm = r1 % r2
+    assert (r1 // r2) * r2 + rm == r1
+    if (fractions is not None):
+      ff = fractions.Fraction
+      f1, f2 = ff(*nd1), ff(*nd2)
+      fm = f1 % f2
+      assert (fm.numerator, fm.denominator) == rm.as_tuple()
+    if (expected is not None):
+      assert rm.as_tuple() == expected
+  check((2,3), (1,2), (1,6))
+  check((2,3), (-1,2), (-1,3))
+  check((-2,3), (1,2), (1,3))
+  check((-2,3), (-1,2), (-1,6))
+  for ln in range(-7,7+1):
+    for rn in range(-9,9+1):
+      if (rn == 0): continue
+      check((ln,3), (rn,4))
+  #
+  ri = rational.int
+  def check(r, e):
+    assert isinstance(r, ri)
+    assert r == e
+  check(ri(3,2) + ri(4,5), ri(23,10))
+  check(ri(3,2) + 4, ri(11,2))
+  check(2 + ri(4,5), ri(14,5))
+  check(ri(3,2) - ri(4,5), ri(7,10))
+  check(ri(3,2) - 4, ri(-5,2))
+  check(2 - ri(4,5), ri(6,5))
+  check(ri(3,2) * ri(4,5), ri(6,5))
+  check(ri(3,2) * 4, ri(6,1))
+  check(2 * ri(4,5), ri(8,5))
+  check(ri(3,2) / ri(4,5), ri(15,8))
+  check(ri(3,2) / 4, ri(3,8))
+  check(2 / ri(4,5), ri(5,2))
+  #
+  def check(r, e):
+    assert isinstance(r, int)
+    assert r == e
+  check(ri(3,2) // ri(4,5), 1)
+  check(ri(3,2) // 4, 0)
+  check(2 // ri(4,5), 2)
+  #
+  def check(r, e):
+    assert isinstance(r, float)
+    assert approx_equal(r, e)
+  check(ri(3,2) + 4., 5.5)
+  check(2. + ri(4,5), 2.8)
+  check(ri(3,2) - 4., -2.5)
+  check(2. - ri(4,5), 1.2)
+  check(ri(3,2) * 4., 6.0)
+  check(2. * ri(4,5), 1.6)
+  check(ri(3,2) / 4., 0.375)
+  check(2. / ri(4,5), 2.5)
+  #
+  try: ri(3,2) // 4.
+  except TypeError as e:
+    assert str(e).startswith("unsupported operand type(s)")
+  else: raise Exception_expected
+  try: 2. // ri(4,5)
+  except TypeError as e:
+    assert str(e).startswith("unsupported operand type(s)")
+  else: raise Exception_expected
+  #
+  try: ri(3,2) % 4.
+  except TypeError as e:
+    assert str(e).startswith("unsupported operand type(s)")
+  else: raise Exception_expected
+  try: 2. % ri(4,5)
+  except TypeError as e:
+    assert str(e).startswith("unsupported operand type(s)")
+  else: raise Exception_expected
+  #
+  try: ri(1) / 0.
+  except ZeroDivisionError as e:
+    assert not show_diff(str(e), "float division by zero")
+  else: raise Exception_expected
+  try: 1. / ri(0)
+  except ZeroDivisionError as e:
+    assert not show_diff(str(e), "float division by zero")
+  else: raise Exception_expected
+
+def exercise_functions():
+  assert rational.gcd(8,6) == 2
+  assert rational.lcm(8,6) == 24
+
+def exercise_python_code():
+  r = rational.int
+  assert rational.from_string("1") == 1
+  assert rational.from_string("2/4").as_tuple() == (1,2)
+  assert rational.vector((2,3,4), 3) == [r(d,3) for d in (2,3,4)]
+  assert rational.vector((2,3,4), (3,4,5)) == [
+    r(d,n) for d,n in zip((2,3,4), (3,4,5))]
+  assert rational.lcm_denominators(array=[]) == 1
+  assert rational.lcm_denominators(array=[r(3,4)]) == 4
+  assert rational.lcm_denominators(array=[r(3,4), r(5,6)]) == 12
+
+def run():
+  exercise_int()
+  exercise_functions()
+  exercise_python_code()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_std_pair.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.std_pair
+from libtbx.test_utils import Exception_expected
+
+def run():
+  boost_adaptbx.boost.std_pair.exercise(( 1, 2)) == ( 2, 1.)
+  boost_adaptbx.boost.std_pair.exercise((-2, 4)) == (-4, 2.)
+
+  try:
+    boost_adaptbx.boost.std_pair.exercise(1)
+  except Exception as err:
+    assert err.__class__.__name__ == 'ArgumentError'
+  else:
+    raise Exception_expected
+
+  try:
+    boost_adaptbx.boost.std_pair.exercise((1,))
+  except Exception as err:
+    assert err.__class__.__name__ == 'ArgumentError'
+  else:
+    raise Exception_expected
+
+  try:
+    boost_adaptbx.boost.std_pair.exercise((1,2,3,))
+  except Exception as err:
+    assert err.__class__.__name__ == 'ArgumentError'
+  else:
+    raise Exception_expected
+
+  print("OK")
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_stderr_stdout.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+from boost_adaptbx.boost.python import ostream
+import libtbx.object_oriented_patterns as oop
+import sys
+import gc
+
+class without_tell(oop.proxy):
+  """ sys.stdout and sys.stderr don't have a functional method 'tell',
+  except on MacOS X. This proxy brings the latter back into the ranks """
+
+  def tell(self):
+    raise NotImplementedError("Test of stdout/stderr / C++ stream bridge")
+
+def run():
+  ext = bp.import_ext("boost_adaptbx_python_streambuf_test_ext")
+  ext.call_with_stderr_stdout_do_nothing(
+    ostream(sys.stderr),
+    ostream(sys.stdout))
+  gc.collect()
+  ext.call_with_stderr_stdout_do_nothing(
+    ostream(without_tell(sys.stderr)), # bug trigger on MacOS X
+    ostream(sys.stdout))
+  gc.collect()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_stdin.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+from boost_adaptbx.boost.python import streambuf
+ext = bp.import_ext("boost_adaptbx_python_streambuf_test_ext")
+import subprocess
+import sys
+
+def exercise():
+  proc = subprocess.Popen(args='libtbx.python %s --core' % __file__,
+                          shell=True,
+                          stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+  output, error = proc.communicate("Veni Vidi Vici")
+  assert not error, error
+  assert not output, output
+
+def read_from_stdin():
+  written = ext.test_read(streambuf(sys.stdin), "read")
+  assert written == "Veni, Vidi, Vici, [ fail, eof ]", written
+
+def run(core):
+  if not core:
+    exercise()
+    print('OK')
+  else:
+    read_from_stdin()
+
+if __name__ == '__main__':
+  run(core='--core' in sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_stdout.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+from boost_adaptbx.boost.python import ostream
+ext = bp.import_ext("boost_adaptbx_python_streambuf_test_ext")
+import subprocess
+import sys
+
+def exercise():
+  assert __file__.find('"') < 0
+  proc = subprocess.Popen(args='libtbx.python "%s" --core' % __file__,
+                          shell=True,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+  output, error = proc.communicate()
+  assert not error, error
+  assert output == b"2 times 1.6 equals 3.2", output
+
+def write_to_stdout():
+  ext.test_write(ostream(sys.stdout), "write")
+
+def run(core):
+  if not core:
+    exercise()
+    print('OK')
+  else:
+    write_to_stdout()
+
+if __name__ == '__main__':
+  run(core='--core' in sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_string_representation.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+def exercise():
+  import boost_adaptbx.boost.python as bp
+  csr = bp.ext.string_representation
+  from libtbx.str_utils import py_string_representation as psr
+  for sr in [csr, psr]:
+    assert sr("a", '"', "'") == '"a"'
+    assert sr("b", "'", '"') == "'b'"
+  def check(s):
+    c = csr(s, '"', "'")
+    p = psr(s, '"', "'")
+    assert c == p
+    r = eval(c)
+    assert r == s
+  iset = list(range(130)) + list(range(250,256))
+  for i in iset:
+    s = chr(i)
+    check(s)
+    for j in iset:
+      t = s + chr(j)
+      check(t)
+
+def run(args):
+  assert args in [[], ["--forever"]]
+  while True:
+    exercise()
+    if (len(args) == 0):
+      break
+  print("OK")
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_swig_args.py
+from __future__ import absolute_import, division, print_function
+import example
+import boost_python_swig_args_ext
+import sys
+
+def exercise():
+  c = example.Circle(10)
+  c.x = 20
+  c.y = 30
+
+  s = example.Square(10)
+  s.x = -10
+  s.y = 5
+
+  forever = "--forever" in sys.argv[1:]
+  while True:
+    boost_python_swig_args_ext.show(c.this)
+    boost_python_swig_args_ext.show(s.this)
+    if (not forever): break
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+boost_adaptbx/tests/tst_tuple.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.tuple
+
+def exercise():
+  doc = boost_adaptbx.boost.tuple.exercise.__doc__
+  assert doc.replace("\n","").startswith("exercise(")
+  assert boost_adaptbx.boost.tuple.exercise(1) == (2, 0.5)
+  assert boost_adaptbx.boost.tuple.exercise(2) == (4, 1)
+
+def run():
+  exercise()
+  print('OK')
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************

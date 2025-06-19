@@ -1,0 +1,1868 @@
+
+
+ *******************************************************************************
+xfel/cxi/gfx/wx_detectors.py
+from __future__ import absolute_import, division, print_function
+
+#-----------------------------------------------------------------------
+# more-or-less real-time plotting of Bragg peak count and XES detector
+# skewness.
+#-----------------------------------------------------------------------
+
+from xfel.cxi.gfx import status_plot
+import wxtbx.plots
+from scitbx.array_family import flex
+import libtbx.phil
+from libtbx.utils import Usage, Sorry
+import wx
+import matplotlib.ticker as ticker
+import time
+import os
+
+master_phil = libtbx.phil.parse("""
+  status_dir = None
+    .type = path
+  run_id = None
+    .type = int
+  t_wait = 8000
+    .type = int
+  hit_cutoff = 12
+    .type = int
+  average_window = 1000
+    .type = int
+""")
+
+class DetectorPlotFrame (wxtbx.plots.plot_frame) :
+  show_controls_default = False
+  def __init__ (self, *args, **kwds) :
+    self.params = None
+    self._watch_dir = None
+    self._watch_files = []
+    self._line_offsets = {}
+    self._t1 = flex.double()
+    self._t2 = flex.double()
+    self._t3 = flex.double()
+    self._t4 = flex.double()
+    self._hit_sample_last = 0
+    self._bragg = flex.int()
+    self._skewness = flex.double()
+    self._photon_counts = flex.double()
+    self._hit_ratio = flex.double()
+    wxtbx.plots.plot_frame.__init__(self, *args, **kwds)
+
+  def create_plot_panel (self) :
+    return DetectorPlot(
+      parent=self,
+      figure_size=(16,10))
+
+  def set_run_id (self, run_id) :
+    self.plot_panel.set_run_id(run_id)
+
+  def set_watch_dir (self, dir_name, params) :
+    assert os.path.isdir(dir_name)
+    self.params = params
+    self._watch_dir = dir_name
+    self.update_from_logs()
+    self._timer = wx.Timer(owner=self)
+    self.Bind(wx.EVT_TIMER, self.OnTimer)
+    self._timer.Start(self.params.t_wait)
+
+  def find_logs (self) :
+    assert (self._watch_dir is not None)
+    current_dir = os.path.join(self._watch_dir, "stdout")
+    print("Current directory: %s" % current_dir)
+    for file_name in os.listdir(current_dir) :
+      if (file_name.endswith(".out")) :
+        full_path = os.path.join(current_dir, file_name)
+        print("Adding %s to list of files to monitor" % full_path)
+        f = open(full_path)
+        self._watch_files.append(f)
+
+  def update_from_logs (self, force_update_hits=False) :
+    if (len(self._watch_files) == 0) :
+      self.find_logs()
+    if (len(self._watch_files) > 0) :
+      #print "Collecting new data @ %s" % time.strftime("%H:%M:%S",
+      #  time.localtime())
+      for fh in self._watch_files :
+        for line in fh.readlines() :
+          if ("BRAGG" in line) :
+            fields1 = line.split(":")
+            fields2 = fields1[-1].strip().split()
+            self._t1.append(float(fields2[1]))
+            self._bragg.append(int(fields2[2]))
+            hit_point_min = self._hit_sample_last+self.params.average_window
+            if (not force_update_hits) and (len(self._t1) > hit_point_min) :
+              self.update_hit_rate()
+              self._hit_sample_last = len(self._t1)
+          elif ("SKEW" in line) :
+            fields1 = line.split(":")
+            fields2 = fields1[-1].strip().split()
+            self._t2.append(float(fields2[1]))
+            self._skewness.append(float(fields2[2]))
+          elif ("N_PHOTONS" in line) :
+            fields1 = line.split(":")
+            fields2 = fields1[-1].strip().split()
+            self._t4.append(float(fields2[1]))
+            self._photon_counts.append(float(fields2[2]))
+      if (force_update_hits) :
+        self.update_hit_rate()
+      self.plot_panel.show_plot(
+        t1=self._t1,
+        bragg=self._bragg,
+        t2=self._t2,
+        skewness=self._skewness,
+        t3=self._t3,
+        hit_rate=self._hit_ratio,
+        t4=self._t4,
+        photon_counts=self._photon_counts,
+      )
+
+  def update_hit_rate (self) :
+    if (len(self._t1) >= self.params.average_window) :
+      start = len(self._t1) - self.params.average_window
+      window = self._bragg[start:]
+      isel = (window > self.params.hit_cutoff).iselection()
+      ratio = float(len(isel)) / float(self.params.average_window)
+      self._t3.append(self._t1[-1])
+      self._hit_ratio.append(ratio*100)
+
+  def OnTimer (self, event) :
+    t1 = time.time()
+    self.update_from_logs(True)
+    t2 = time.time()
+    #print "Updated in %.2fs" % (t2 - t1)
+
+  def OnSave (self, event) :
+    self.plot_panel.save_png()
+
+class DetectorPlot (wxtbx.plots.plot_container) :
+  def set_run_id (self, run_id) :
+    self.run_id = run_id
+
+  def show_plot (self, t1, bragg, t2, skewness, t3, hit_rate,
+                 t4, photon_counts) :
+    assert (self.run_id is not None)
+    self.figure.clear()
+    xmin = xmax = None
+    if (len(t1) > 0) :
+      xmin, xmax = min(t1), max(t1)
+    if (len(t2) > 0) :
+      if (xmin is not None) :
+        xmin, xmax = min(min(t2), xmin), max(max(t2), xmax)
+      else :
+        xmin, xmax = min(t2), max(t2)
+    perm = flex.sort_permutation(t3)
+    t3 = t3.select(perm)
+    hit_rate = hit_rate.select(perm)
+    ax1 = self.figure.add_axes([0.1, 0.05, 0.8, 0.4])
+    ax2 = self.figure.add_axes([0.1, 0.45, 0.8, 0.15], sharex=ax1)
+    ax3 = self.figure.add_axes([0.1, 0.6, 0.8, 0.25], sharex=ax1)
+    ax1.grid(True, color="0.75")
+    ax2.grid(True, color="0.75")
+    ax3.grid(True, color="0.75")
+    ax1.plot(t1, bragg, 'd', color=[0.0,0.5,1.0])
+    ax2.plot(t3, hit_rate, 'o-', color=[0.0,1.0,0.0])
+    ax3.plot(t4, photon_counts, '^', color=[0.8,0.0,0.2])
+    ax1.set_ylabel("# of Bragg spots")
+    ax2.set_ylabel("Hit rate (%)")
+    ax3.set_ylabel("XES photon count")
+    if (len(photon_counts) > 0) :
+      ax3.set_ylim(-1, max(photon_counts))
+    ax1.set_xlim(xmin, xmax)
+    ax1.set_xlabel("Time")
+    for ax in ax1, ax2, ax3:
+      if (ax is not ax1) :
+        for label in ax.get_xticklabels():
+          label.set_visible(False)
+      ax.get_yticklabels()[0].set_visible(False)
+    ax1.xaxis.set_major_formatter(ticker.FuncFormatter(status_plot.format_time))
+    ax3.set_title("Detector analysis for run %d" % self.run_id)
+    self.figure.autofmt_xdate()
+    self.canvas.draw()
+    self.parent.Refresh()
+
+  def save_png (self) :
+    if (getattr(self, "run_id", None) is not None) :
+      file_name = "run%d_detector_status.png" % self.run_id
+      self.figure.savefig(file_name, format="png")
+      print("Saved image to %s" % os.path.abspath(file_name))
+    else :
+      print("Can't save an image until run ID is set")
+
+def run (args) :
+  user_phil = []
+  # TODO: replace this stuff with iotbx.phil.process_command_line_with_files
+  # as soon as I can safely modify it
+  for arg in args :
+    if (os.path.isdir(arg)) :
+      user_phil.append(libtbx.phil.parse("""status_dir=\"%s\"""" % arg))
+    elif (not "=" in arg) :
+      try :
+        user_phil.append(libtbx.phil.parse("""run_id=%d""" % int(arg)))
+      except ValueError as e :
+        raise Sorry("Unrecognized argument '%s'" % arg)
+    else :
+      try :
+        user_phil.append(libtbx.phil.parse(arg))
+      except RuntimeError as e :
+        raise Sorry("Unrecognized argument '%s' (error: %s)" % (arg, str(e)))
+  params = master_phil.fetch(sources=user_phil).extract()
+  if (params.run_id is None) :
+    master_phil.show()
+    raise Usage("run_id must be defined (either run_id=XXX, or the integer "+
+      "ID alone).")
+  if (params.status_dir is None) :
+    master_phil.show()
+    raise Usage("status_dir must be defined!")
+  elif (not os.path.isdir(params.status_dir)) :
+    raise Sorry("%s does not exist or is not a directory!" % params.status_dir)
+  assert (params.t_wait is not None) and (params.t_wait > 0)
+  assert (params.hit_cutoff is not None) and (params.hit_cutoff > 0)
+  assert (params.average_window is not None) and (params.average_window > 0)
+  app = wx.App(0)
+  frame = DetectorPlotFrame(None, -1, "Detector status for run %d" %
+    params.run_id)
+  frame.set_run_id(params.run_id)
+  frame.set_watch_dir(params.status_dir, params)
+  frame.Show()
+  app.MainLoop()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/integrate_image_api.py
+from __future__ import absolute_import, division, print_function
+import os
+
+def integrate_one_image(data, **kwargs):
+  from xfel.cxi.display_spots import run_one_index_core
+  from labelit.dptbx.error import NoAutoIndex
+  from libtbx.utils import Sorry
+  from spotfinder.exception import SpotfinderError
+  from labelit.exception import AutoIndexError
+  from iotbx.detectors.cspad_detector_formats import detector_format_version as detector_format_function
+  from iotbx.detectors.cspad_detector_formats import reverse_timestamp
+
+  basename = kwargs.get("integration_basename")
+  if (basename is None):
+    basename = ""
+
+  dirname  = kwargs.get("integration_dirname")
+  if (dirname is None):
+    dirname = "integration"
+  if (not os.path.isdir(dirname)):
+    import errno
+    try:
+      os.makedirs(dirname)
+    except OSError as exc:
+      if exc.errno==errno.EEXIST: pass
+  path = os.path.join(dirname, basename          \
+                        +      data['TIMESTAMP'] \
+                        +      ("_%05d.pickle" % data['SEQUENCE_NUMBER']))
+
+  args = ["indexing.data=dummy",
+          "beam_search_scope=0.5",
+          "lepage_max_delta = 3.0",
+          "spots_pickle = None",
+          "subgroups_pickle = None",
+          "refinements_pickle = None",
+          "rmsd_tolerance = 5.0",
+          "mosflm_rmsd_tolerance = 5.0",
+          "indexing.completeness_pickle=%s"%path,
+          "difflimit_sigma_cutoff=2.0",
+          #"indexing.open_wx_viewer=True"
+          ]
+
+  detector_format_version = detector_format_function(
+    data['DETECTOR_ADDRESS'], reverse_timestamp(data['TIMESTAMP'])[0])
+  args += ["distl.detector_format_version=%s" % detector_format_version]
+
+  from xfel.phil_preferences import load_cxi_phil
+  horizons_phil = load_cxi_phil(data["xtal_target"], args)
+  horizons_phil.indexing.data = data
+  print("XFEL processing: %s"%path)
+  try:
+    return run_one_index_core(horizons_phil)
+  except NoAutoIndex as e:
+    print("NoAutoIndex", data['TIMESTAMP'], e)
+    info = e.info
+  except AutoIndexError as e:
+    print("FailedAutoIndex", data['TIMESTAMP'], e)
+    info = e.info
+  except Sorry as e:
+    print("Sorry", data['TIMESTAMP'], e)
+    info = e.info
+  except ZeroDivisionError as e:
+    print("ZeroDivisionError", data['TIMESTAMP'], e)
+    info = e.info
+  except SpotfinderError as e:
+    print("Too few spots from Spotfinder", data['TIMESTAMP'], e)
+    info = e.info
+  except Exception as e:
+    print("ANOTHER exception", data['TIMESTAMP'], e)
+    import traceback
+    traceback.print_exc()
+    info = e.info
+
+  # return number of spotfinder spots
+  try:
+    return len(info.organizer.S.images[info.organizer.frames[0]]['spots_total'])
+  except Exception as e:
+    print("Couldn't find spotfinding results", data['TIMESTAMP'])
+
+if __name__=="__main__":
+  pass
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/merging_utils.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from libtbx import adopt_init_args
+
+class intensity_data (object) :
+  """
+  Container for scaled intensity data.
+  """
+  def __init__ (self, n_refl) :
+    self.n_refl = n_refl
+    self.initialize()
+
+  def initialize (self) :
+    self.ISIGI        = {}
+    self.completeness = flex.int(self.n_refl, 0)
+    self.completeness_predictions = flex.int(self.n_refl, 0)
+    self.summed_N     = flex.int(self.n_refl, 0)
+    self.summed_weight= flex.double(self.n_refl, 0.)
+    self.summed_wt_I  = flex.double(self.n_refl, 0.)
+
+class frame_data (intensity_data) :
+  """
+  Intensity data for a single frame.
+  """
+  def __init__ (self, n_refl, file_name) :
+    intensity_data.__init__(self, n_refl)
+    self.file_name = file_name
+    self.n_obs = 0
+    self.n_rejected = 0
+    self.corr = 0
+    self.d_min = -1
+    self.accept = False
+    self.indexed_cell = None
+    self.log_out = file_name
+    self.wavelength = None
+
+  def set_indexed_cell (self, unit_cell) :
+    self.indexed_cell = unit_cell
+
+  def set_log_out (self, out_str) :
+    self.log_out = out_str
+
+  def show_log_out (self, out) :
+    print(self.log_out, file=out)
+
+class null_data (object) :
+  """
+  Stand-in for a frame rejected due to conflicting symmetry.  (No flex arrays
+  included, to save pickling time during multiprocessing.)
+  """
+  def __init__ (self, file_name, log_out,
+                file_error=False,
+                low_signal=False,
+                wrong_bravais=False,
+                wrong_cell=False,
+                low_resolution=False,
+                low_correlation=False,
+                reason=None) :
+    adopt_init_args(self, locals())
+
+  def show_log_out (self, out) :
+    print(self.log_out, file=out)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/postrefinement_factory.py
+from __future__ import absolute_import, division, print_function
+
+class factory(object):
+  def __init__(self, params):
+    self.params = params
+
+  def postrefinement_algorithm(self,):
+    if self.params.postrefinement.enable:
+      if self.params.postrefinement.algorithm in ['rs','eta_deff']:
+        from xfel.cxi.postrefinement_legacy_rs import legacy_rs as postrefinement_algorithm
+      elif self.params.postrefinement.algorithm in ['rs2']:
+        from xfel.cxi.postrefinement_updated_rs import updated_rs as postrefinement_algorithm
+      elif self.params.postrefinement.algorithm in ['rs_hybrid']:
+        from xfel.cxi.postrefinement_hybrid_rs import rs_hybrid as postrefinement_algorithm
+      return postrefinement_algorithm
+    return None
+
+  @staticmethod
+  def insert_frame_call(kwargs):
+    # legacy behavior
+    if kwargs["self"].params.postrefinement.enable==False or \
+       kwargs["self"].params.postrefinement.algorithm in ["rs","eta_deff"]:
+
+       return kwargs["db_mgr"].insert_frame_legacy(
+         **dict(
+           [ (k,kwargs[k]) for k in ["result","wavelength","corr","slope","offset","data"] ]
+             )
+         )
+    # new behavior for rs2 and rs_hybrid
+    elif kwargs["self"].params.postrefinement.algorithm in ["rs2", "rs_hybrid"]:
+       return kwargs["db_mgr"].insert_frame_updated(
+         **dict(
+           [ (k,kwargs[k]) for k in ["result","wavelength","data","postx"] ]
+             )
+         )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/postrefinement_hybrid_rs.py
+from __future__ import absolute_import, division, print_function
+import math
+from scitbx import matrix
+from cctbx import miller
+from dials.array_family import flex
+from scitbx.math.tests.tst_weighted_correlation import simple_weighted_correlation
+from xfel.cxi.postrefinement_legacy_rs import rs_parameterization
+from xfel.cxi.postrefinement_updated_rs import rs2_refinery,lbfgs_minimizer_derivatives,chosen_weights,updated_rs
+from scitbx.lstbx import normal_eqns
+from scitbx.lstbx import normal_eqns_solving
+
+class rs_hybrid(updated_rs):
+  def __init__(self,measurements_orig, params, i_model, miller_set, result, out):
+    measurements = measurements_orig.deep_copy()
+    # Now manipulate the data to conform to unit cell, asu, and space group
+    # of reference.  The resolution will be cut later.
+    # Only works if there is NOT an indexing ambiguity!
+    observations = measurements.customized_copy(
+      anomalous_flag=not params.merge_anomalous,
+      crystal_symmetry=miller_set.crystal_symmetry()
+      ).map_to_asu()
+
+    observations_original_index = measurements.customized_copy(
+      anomalous_flag=not params.merge_anomalous,
+      crystal_symmetry=miller_set.crystal_symmetry()
+      )
+
+    # Ensure that match_multi_indices() will return identical results
+    # when a frame's observations are matched against the
+    # pre-generated Miller set, self.miller_set, and the reference
+    # data set, self.i_model.  The implication is that the same match
+    # can be used to map Miller indices to array indices for intensity
+    # accumulation, and for determination of the correlation
+    # coefficient in the presence of a scaling reference.
+
+    assert len(i_model.indices()) == len(miller_set.indices()) \
+        and  (i_model.indices() ==
+              miller_set.indices()).count(False) == 0
+    matches = miller.match_multi_indices(
+      miller_indices_unique=miller_set.indices(),
+      miller_indices=observations.indices())
+
+    pair1 = flex.int([pair[1] for pair in matches.pairs()])
+    pair0 = flex.int([pair[0] for pair in matches.pairs()])
+    # narrow things down to the set that matches, only
+    observations_pair1_selected = observations.customized_copy(
+      indices = flex.miller_index([observations.indices()[p] for p in pair1]),
+      data = flex.double([observations.data()[p] for p in pair1]),
+      sigmas = flex.double([observations.sigmas()[p] for p in pair1]),
+    )
+    observations_original_index_pair1_selected = observations_original_index.customized_copy(
+      indices = flex.miller_index([observations_original_index.indices()[p] for p in pair1]),
+      data = flex.double([observations_original_index.data()[p] for p in pair1]),
+      sigmas = flex.double([observations_original_index.sigmas()[p] for p in pair1]),
+    )
+###################
+    I_observed = observations_pair1_selected.data()
+    chosen = chosen_weights(observations_pair1_selected, params)
+
+    MILLER = observations_original_index_pair1_selected.indices()
+    ORI = result["current_orientation"][0]
+    Astar = matrix.sqr(ORI.reciprocal_matrix())
+    WAVE = result["wavelength"]
+    BEAM = matrix.col((0.0,0.0,-1./WAVE))
+    BFACTOR = 0.
+
+    #calculation of correlation here
+    I_reference = flex.double([i_model.data()[pair[0]] for pair in matches.pairs()])
+    I_invalid = flex.bool([i_model.sigmas()[pair[0]] < 0. for pair in matches.pairs()])
+    use_weights = False # New facility for getting variance-weighted correlation
+
+    if use_weights:
+       #variance weighting
+      I_weight = flex.double(
+        [1./(observations_pair1_selected.sigmas()[pair[1]])**2 for pair in matches.pairs()])
+    else:
+      I_weight = flex.double(len(observations_pair1_selected.sigmas()), 1.)
+    I_weight.set_selected(I_invalid,0.)
+    chosen.set_selected(I_invalid,0.)
+
+    """Explanation of 'include_negatives' semantics as originally implemented in cxi.merge postrefinement:
+       include_negatives = True
+       + and - reflections both used for Rh distribution for initial estimate of RS parameter
+       + and - reflections both used for calc/obs correlation slope for initial estimate of G parameter
+       + and - reflections both passed to the refinery and used in the target function (makes sense if
+                           you look at it from a certain point of view)
+
+       include_negatives = False
+       + and - reflections both used for Rh distribution for initial estimate of RS parameter
+       +       reflections only used for calc/obs correlation slope for initial estimate of G parameter
+       + and - reflections both passed to the refinery and used in the target function (makes sense if
+                           you look at it from a certain point of view)
+    """
+    if params.include_negatives:
+      SWC = simple_weighted_correlation(I_weight, I_reference, I_observed)
+    else:
+      non_positive = ( observations_pair1_selected.data() <= 0 )
+      SWC = simple_weighted_correlation(I_weight.select(~non_positive),
+            I_reference.select(~non_positive), I_observed.select(~non_positive))
+
+    print("Old correlation is", SWC.corr, file=out)
+    assert params.postrefinement.algorithm=="rs_hybrid"
+    Rhall = flex.double()
+    for mill in MILLER:
+        H = matrix.col(mill)
+        Xhkl = Astar*H
+        Rh = ( Xhkl + BEAM ).length() - (1./WAVE)
+        Rhall.append(Rh)
+    Rs = math.sqrt(flex.mean(Rhall*Rhall))
+
+    RS = 1./10000. # reciprocal effective domain size of 1 micron
+    RS = Rs        # try this empirically determined approximate, monochrome, a-mosaic value
+
+    self.rs2_current = flex.double([SWC.slope, BFACTOR, RS, 0., 0.])
+    self.rs2_parameterization_class = rs_parameterization
+
+    self.rs2_refinery = rs2_refinery(ORI=ORI, MILLER=MILLER, BEAM=BEAM, WAVE=WAVE,
+        ICALCVEC = I_reference, IOBSVEC = I_observed, WEIGHTS = chosen)
+    self.rs2_refinery.set_profile_shape(params.postrefinement.lineshape)
+    self.nave1_refinery = nave1_refinery(ORI=ORI, MILLER=MILLER, BEAM=BEAM, WAVE=WAVE,
+        ICALCVEC = I_reference, IOBSVEC = I_observed, WEIGHTS = chosen)
+    self.nave1_refinery.set_profile_shape(params.postrefinement.lineshape)
+
+    self.out=out; self.params = params;
+    self.miller_set = miller_set
+    self.observations_pair1_selected = observations_pair1_selected;
+    self.observations_original_index_pair1_selected = observations_original_index_pair1_selected
+    self.i_model = i_model
+
+  def run_plain(self):
+    self.MINI = lbfgs_minimizer_derivatives( current_x = self.rs2_current,
+        parameterization = self.rs2_parameterization_class, refinery = self.rs2_refinery,
+        out = self.out )
+
+    self.refined_mini = self.MINI
+    values = self.rs2_parameterization_class(self.MINI.x)
+    self.nave1_current = flex.double(
+      [values.G, values.BFACTOR, values.RS, values.thetax*1000., values.thetay*1000.])
+    self.nave1_parameterization_class = nave1_parameterization
+    self.MINI2 = per_frame_helper( current_x = self.nave1_current,
+        parameterization = self.nave1_parameterization_class, refinery = self.nave1_refinery,
+        out = self.out )
+    print("Trying Lev-Mar2", file=self.out)
+    iterations = normal_eqns_solving.naive_iterations(non_linear_ls = self.MINI2,
+        step_threshold = 0.0001,
+        gradient_threshold = 1.E-10)
+    self.refined_mini = self.MINI2
+    self.refinery = self.nave1_refinery # used elsewhere, not private interface
+    self.parameterization_class = nave1_parameterization
+
+  def result_for_cxi_merge(self, file_name):
+    values = self.get_parameter_values()
+    self.rs2_parameter_range_assertions(values)
+    scaler = self.nave1_refinery.scaler_callable(self.get_parameter_values())
+
+    partiality_array = self.refinery.get_partiality_array(values)
+    p_scaler = flex.pow(partiality_array,
+                        0.5*self.params.postrefinement.merge_partiality_exponent)
+
+    fat_selection = (self.nave1_refinery.lorentz_callable(self.get_parameter_values()) >
+                     self.params.postrefinement.rs_hybrid.partiality_threshold) # was 0.2 for rs2
+    fat_count = fat_selection.count(True)
+    scaler_s = scaler.select(fat_selection)
+    p_scaler_s = p_scaler.select(fat_selection)
+
+    #avoid empty database INSERT, if insufficient centrally-located Bragg spots:
+    # in samosa, handle this at a higher level, but handle it somehow.
+    if fat_count < 3:
+      raise ValueError("< 3 near-fulls after refinement")
+    print("On total %5d the fat selection is %5d"%(
+      len(self.observations_pair1_selected.indices()), fat_count), file=self.out)
+    observations_original_index = \
+      self.observations_original_index_pair1_selected.select(fat_selection)
+
+    observations = self.observations_pair1_selected.customized_copy(
+      indices = self.observations_pair1_selected.indices().select(fat_selection),
+      data = (self.observations_pair1_selected.data().select(fat_selection)/scaler_s),
+      sigmas = (self.observations_pair1_selected.sigmas().select(fat_selection)/(scaler_s * p_scaler_s))
+    )
+    matches = miller.match_multi_indices(
+      miller_indices_unique=self.miller_set.indices(),
+      miller_indices=observations.indices())
+
+    I_weight = flex.double(len(observations.sigmas()), 1.)
+    I_reference = flex.double([self.i_model.data()[pair[0]] for pair in matches.pairs()])
+    I_invalid = flex.bool([self.i_model.sigmas()[pair[0]] < 0. for pair in matches.pairs()])
+    I_weight.set_selected(I_invalid,0.)
+    SWC = simple_weighted_correlation(I_weight, I_reference, observations.data())
+    print("CORR: NEW correlation is", SWC.corr, file=self.out)
+    print("ASTAR_FILE",file_name,tuple(self.nave1_refinery.get_eff_Astar(values)), file=self.out)
+    self.final_corr = SWC.corr
+    #another range assertion
+    assert self.final_corr > 0.1,"correlation coefficient out of range (<= 0.1) after LevMar refinement"
+    # XXX Specific to the hybrid_rs method, and likely these limits are problem-specific (especially G-max) so look for another approach
+    #     or expose the limits as phil parameters.
+    assert values.G < 0.5 , "G-scale value out of range ( > 0.5 XXX may be too strict ) after LevMar refinement"
+
+    return observations_original_index,observations,matches
+
+  def result_for_samosa(self):
+    values = self.get_parameter_values()
+    return self.refinery.get_eff_Astar(values), values.RS, self.refinery.get_partiality_array(values)
+
+  def get_parameter_values(self):
+    return self.refined_mini.parameterization(self.refined_mini.x)
+
+class nave1_refinery(rs2_refinery):
+
+    def jacobian_callable(self,values):
+      PB = self.get_partiality_array(values)
+      EXP = flex.exp(-2.*values.BFACTOR*self.DSSQ)
+      G_terms = (EXP * PB * self.ICALCVEC)
+      B_terms = (values.G * EXP * PB * self.ICALCVEC)*(-2.*self.DSSQ)
+      P_terms = (values.G * EXP * self.ICALCVEC)
+
+      thetax = values.thetax; thetay = values.thetay;
+      Rx = matrix.col((1,0,0)).axis_and_angle_as_r3_rotation_matrix(thetax)
+      dRx_dthetax = matrix.col((1,0,0)).axis_and_angle_as_r3_derivative_wrt_angle(thetax)
+      Ry = matrix.col((0,1,0)).axis_and_angle_as_r3_rotation_matrix(thetay)
+      dRy_dthetay = matrix.col((0,1,0)).axis_and_angle_as_r3_derivative_wrt_angle(thetay)
+      ref_ori = matrix.sqr(self.ORI.reciprocal_matrix())
+      miller_vec = self.MILLER.as_vec3_double()
+      ds1_dthetax = flex.mat3_double(len(self.MILLER),Ry * dRx_dthetax * ref_ori) * miller_vec
+      ds1_dthetay = flex.mat3_double(len(self.MILLER),dRy_dthetay * Rx * ref_ori) * miller_vec
+
+      s1vec = self.get_s1_array(values)
+      s1lenvec = flex.sqrt(s1vec.dot(s1vec))
+      dRh_dthetax = s1vec.dot(ds1_dthetax)/s1lenvec
+      dRh_dthetay = s1vec.dot(ds1_dthetay)/s1lenvec
+      rs = values.RS
+      Rh = self.get_Rh_array(values)
+      rs_sq = rs*rs
+      denomin = (2. * Rh * Rh + rs_sq)
+      dPB_dRh = { "lorentzian": -PB * 4. * Rh / denomin,
+                  "gaussian": -PB * 4. * math.log(2) * Rh / rs_sq }[self.profile_shape]
+      dPB_dthetax = dPB_dRh * dRh_dthetax
+      dPB_dthetay = dPB_dRh * dRh_dthetay
+      Px_terms = P_terms * dPB_dthetax /1000.; Py_terms = P_terms * dPB_dthetay /1000.
+
+      dPB_drs = { "lorentzian": 4 * rs * Rh * Rh / (denomin * denomin),
+                  "gaussian": 4 * math.log(2) * PB * Rh * Rh / (rs * rs_sq) }[self.profile_shape]
+      Prs_terms = P_terms * dPB_drs
+
+      return [G_terms,B_terms,Prs_terms,Px_terms,Py_terms]
+
+class nave1_parameterization(rs_parameterization):
+  def __getattr__(YY,item):
+    if item=="thetax" : return YY.reference[3]/1000. #internally kept in milliradians
+    if item=="thetay" : return YY.reference[4]/1000.
+    if item=="G" :      return YY.reference[0]
+    if item=="BFACTOR": return YY.reference[1]
+    if item=="RS":      return YY.reference[2]
+    raise AttributeError(item)
+
+
+class per_frame_helper(normal_eqns.non_linear_ls, normal_eqns.non_linear_ls_mixin):
+  def __init__(pfh,current_x=None, parameterization=None, refinery=None, out=None,):
+    pfh.parameterization = parameterization
+    pfh.refinery = refinery
+    pfh.out = out
+    super(per_frame_helper, pfh).__init__(n_parameters=current_x.size())
+    pfh.n = current_x.size()
+    pfh.x_0 = current_x
+    pfh.restart()
+
+  def restart(pfh):
+    pfh.x = pfh.x_0.deep_copy()
+    pfh.old_x = None
+
+  def step_forward(pfh):
+    pfh.old_x = pfh.x.deep_copy()
+    pfh.x += pfh.step()
+
+  def step_backward(pfh):
+    assert pfh.old_x is not None
+    pfh.x, pfh.old_x = pfh.old_x, None
+
+  def parameter_vector_norm(pfh):
+    return pfh.x.norm()
+
+  def build_up(pfh, objective_only=False):
+    values = pfh.parameterization(pfh.x)
+    assert 0. < values.G , "G-scale value out of range ( < 0 ) within LevMar build_up"
+    # XXX revisit these limits.  Seems like an ad hoc approach to have to set these limits
+    # However, the assertions are necessary to avoid floating point exceptions at the C++ level
+    # Regardless, these tests throw out ~30% of LM14 data, thus search for another approach
+    assert -150. < values.BFACTOR < 150. ,"B-factor out of range (+/-150) within LevMar build_up"
+    assert -0.5 < 180.*values.thetax/math.pi < 0.5 , "thetax out of range ( |rotx|>.5 degrees ) within LevMar build_up"
+    assert -0.5 < 180.*values.thetay/math.pi < 0.5 , "thetay out of range ( |roty|>.5 degrees ) within LevMar build_up"
+    assert 0.000001 < values.RS , "RLP size out of range (<0.000001) within LevMar build_up"
+    assert values.RS < 0.001 , "RLP size out of range (>0.001) within LevMar build_up"
+    residuals = pfh.refinery.fvec_callable(values)
+    pfh.reset()
+    if objective_only:
+      pfh.add_residuals(residuals, weights=pfh.refinery.WEIGHTS)
+    else:
+      grad_r = pfh.refinery.jacobian_callable(values)
+      jacobian = flex.double(
+        flex.grid(len(pfh.refinery.MILLER), pfh.n_parameters))
+      for j, der_r in enumerate(grad_r):
+        jacobian.matrix_paste_column_in_place(der_r,j)
+        #print >> pfh.out, "COL",j, list(der_r)
+      pfh.add_equations(residuals, jacobian, weights=pfh.refinery.WEIGHTS)
+    print("rms %10.3f"%math.sqrt(flex.mean(pfh.refinery.WEIGHTS*residuals*residuals)), end=' ', file=pfh.out)
+    values.show(pfh.out)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/postrefinement_legacy_rs.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+import math
+from scitbx import matrix
+from cctbx import miller
+from dials.array_family import flex
+from scitbx.math.tests.tst_weighted_correlation import simple_weighted_correlation
+from libtbx import adopt_init_args, group_args
+
+class legacy_rs(object):
+  def __init__(self,measurements_orig, params, i_model, miller_set, result, out):
+    measurements = measurements_orig.deep_copy()
+
+    # Now manipulate the data to conform to unit cell, asu, and space group
+    # of reference.  The resolution will be cut later.
+    # Only works if there is NOT an indexing ambiguity!
+    observations = measurements.customized_copy(
+      anomalous_flag=not params.merge_anomalous,
+      crystal_symmetry=miller_set.crystal_symmetry()
+      ).map_to_asu()
+
+    observations_original_index = measurements.customized_copy(
+      anomalous_flag=not params.merge_anomalous,
+      crystal_symmetry=miller_set.crystal_symmetry()
+      )
+
+    # Ensure that match_multi_indices() will return identical results
+    # when a frame's observations are matched against the
+    # pre-generated Miller set, self.miller_set, and the reference
+    # data set, self.i_model.  The implication is that the same match
+    # can be used to map Miller indices to array indices for intensity
+    # accumulation, and for determination of the correlation
+    # coefficient in the presence of a scaling reference.
+
+    assert len(i_model.indices()) == len(miller_set.indices()) \
+        and  (i_model.indices() ==
+              miller_set.indices()).count(False) == 0
+
+    matches = miller.match_multi_indices(
+      miller_indices_unique=miller_set.indices(),
+      miller_indices=observations.indices())
+
+    pair1 = flex.int([pair[1] for pair in matches.pairs()])
+    pair0 = flex.int([pair[0] for pair in matches.pairs()])
+    # narrow things down to the set that matches, only
+    observations_pair1_selected = observations.customized_copy(
+      indices = flex.miller_index([observations.indices()[p] for p in pair1]),
+      data = flex.double([observations.data()[p] for p in pair1]),
+      sigmas = flex.double([observations.sigmas()[p] for p in pair1]),
+    )
+    observations_original_index_pair1_selected = observations_original_index.customized_copy(
+      indices = flex.miller_index([observations_original_index.indices()[p] for p in pair1]),
+      data = flex.double([observations_original_index.data()[p] for p in pair1]),
+      sigmas = flex.double([observations_original_index.sigmas()[p] for p in pair1]),
+    )
+###################
+    I_observed = observations_pair1_selected.data()
+    MILLER = observations_original_index_pair1_selected.indices()
+    ORI = result["current_orientation"][0]
+    Astar = matrix.sqr(ORI.reciprocal_matrix())
+    WAVE = result["wavelength"]
+    BEAM = matrix.col((0.0,0.0,-1./WAVE))
+    BFACTOR = 0.
+
+    #calculation of correlation here
+    I_reference = flex.double([i_model.data()[pair[0]] for pair in matches.pairs()])
+    I_invalid = flex.bool([i_model.sigmas()[pair[0]] < 0. for pair in matches.pairs()])
+    use_weights = False # New facility for getting variance-weighted correlation
+
+    if use_weights:
+       #variance weighting
+      I_weight = flex.double(
+        [1./(observations_pair1_selected.sigmas()[pair[1]])**2 for pair in matches.pairs()])
+    else:
+      I_weight = flex.double(len(observations_pair1_selected.sigmas()), 1.)
+    I_weight.set_selected(I_invalid,0.)
+
+    """Explanation of 'include_negatives' semantics as originally implemented in cxi.merge postrefinement:
+       include_negatives = True
+       + and - reflections both used for Rh distribution for initial estimate of RS parameter
+       + and - reflections both used for calc/obs correlation slope for initial estimate of G parameter
+       + and - reflections both passed to the refinery and used in the target function (makes sense if
+                           you look at it from a certain point of view)
+
+       include_negatives = False
+       + and - reflections both used for Rh distribution for initial estimate of RS parameter
+       +       reflections only used for calc/obs correlation slope for initial estimate of G parameter
+       + and - reflections both passed to the refinery and used in the target function (makes sense if
+                           you look at it from a certain point of view)
+    """
+    if params.include_negatives:
+      SWC = simple_weighted_correlation(I_weight, I_reference, I_observed)
+    else:
+      non_positive = ( observations_pair1_selected.data() <= 0 )
+      SWC = simple_weighted_correlation(I_weight.select(~non_positive),
+            I_reference.select(~non_positive), I_observed.select(~non_positive))
+
+    print("Old correlation is", SWC.corr, file=out)
+    if params.postrefinement.algorithm=="rs":
+      Rhall = flex.double()
+      for mill in MILLER:
+        H = matrix.col(mill)
+        Xhkl = Astar*H
+        Rh = ( Xhkl + BEAM ).length() - (1./WAVE)
+        Rhall.append(Rh)
+      Rs = math.sqrt(flex.mean(Rhall*Rhall))
+
+      RS = 1./10000. # reciprocal effective domain size of 1 micron
+      RS = Rs        # try this empirically determined approximate, monochrome, a-mosaic value
+      current = flex.double([SWC.slope, BFACTOR, RS, 0., 0.])
+
+      parameterization_class = rs_parameterization
+      refinery = rs_refinery(ORI=ORI, MILLER=MILLER, BEAM=BEAM, WAVE=WAVE,
+        ICALCVEC = I_reference, IOBSVEC = I_observed)
+
+    elif params.postrefinement.algorithm=="eta_deff":
+      eta_init = 2. * result["ML_half_mosaicity_deg"][0] * math.pi/180.
+      D_eff_init = 2.*result["ML_domain_size_ang"][0]
+      current = flex.double([SWC.slope, BFACTOR, eta_init, 0., 0.,D_eff_init,])
+
+      parameterization_class = eta_deff_parameterization
+      refinery = eta_deff_refinery(ORI=ORI, MILLER=MILLER, BEAM=BEAM, WAVE=WAVE,
+        ICALCVEC = I_reference, IOBSVEC = I_observed)
+
+    func = refinery.fvec_callable(parameterization_class(current))
+    functional = flex.sum(func*func)
+    print("functional",functional, file=out)
+    self.current = current; self.parameterization_class = parameterization_class
+    self.refinery = refinery; self.out=out; self.params = params;
+    self.miller_set = miller_set
+    self.observations_pair1_selected = observations_pair1_selected;
+    self.observations_original_index_pair1_selected = observations_original_index_pair1_selected
+
+  def run_plain(self):
+    self.MINI = lbfgs_minimizer_base( current_x = self.current,
+        parameterization = self.parameterization_class, refinery = self.refinery,
+        out = self.out )
+
+  def result_for_cxi_merge(self, file_name):
+    scaler = self.refinery.scaler_callable(self.parameterization_class(self.MINI.x))
+    if self.params.postrefinement.algorithm=="rs":
+      fat_selection = (self.refinery.lorentz_callable(self.parameterization_class(self.MINI.x)) > 0.2)
+    else:
+      fat_selection = (self.refinery.lorentz_callable(self.parameterization_class(self.MINI.x)) < 0.9)
+    fat_count = fat_selection.count(True)
+
+    #avoid empty database INSERT, if insufficient centrally-located Bragg spots:
+    # in samosa, handle this at a higher level, but handle it somehow.
+    if fat_count < 3:
+      raise ValueError("< 3 near-fulls after refinement")
+    print("On total %5d the fat selection is %5d"%(
+      len(self.observations_pair1_selected.indices()), fat_count), file=self.out)
+    observations_original_index = \
+      self.observations_original_index_pair1_selected.select(fat_selection)
+
+    observations = self.observations_pair1_selected.customized_copy(
+      indices = self.observations_pair1_selected.indices().select(fat_selection),
+      data = (self.observations_pair1_selected.data()/scaler).select(fat_selection),
+      sigmas = (self.observations_pair1_selected.sigmas()/scaler).select(fat_selection)
+    )
+    matches = miller.match_multi_indices(
+      miller_indices_unique=self.miller_set.indices(),
+      miller_indices=observations.indices())
+    return observations_original_index,observations,matches
+
+  def get_parameter_values(self):
+    values = self.parameterization_class(self.MINI.x)
+    return values
+
+  def result_for_samosa(self):
+    values = self.parameterization_class(self.MINI.x)
+    return self.refinery.get_eff_Astar(values), values.RS
+
+class refinery_base(group_args):
+    def __init__(self, **kwargs):
+      group_args.__init__(self,**kwargs)
+      mandatory = ["ORI","MILLER","BEAM","WAVE","ICALCVEC","IOBSVEC"]
+      for key in mandatory: getattr(self,key)
+      self.DSSQ = self.ORI.unit_cell().d_star_sq(self.MILLER)
+
+    """Refinery class takes reference and observations, and implements target
+    functions and derivatives for a particular model paradigm."""
+    def get_Rh_array(self, values):
+      Rh = flex.double()
+      eff_Astar = self.get_eff_Astar(values)
+      for mill in self.MILLER:
+        x = eff_Astar * matrix.col(mill)
+        Svec = x + self.BEAM
+        Rh.append(Svec.length() - (1./self.WAVE))
+      return Rh
+
+    def get_s1_array(self, values):
+      miller_vec = self.MILLER.as_vec3_double()
+      ref_ori = matrix.sqr(self.ORI.reciprocal_matrix())
+      Rx = matrix.col((1,0,0)).axis_and_angle_as_r3_rotation_matrix(values.thetax)
+      Ry = matrix.col((0,1,0)).axis_and_angle_as_r3_rotation_matrix(values.thetay)
+      s_array = flex.mat3_double(len(self.MILLER),Ry * Rx * ref_ori) * miller_vec
+      s1_array = s_array + flex.vec3_double(len(self.MILLER), self.BEAM)
+      return s1_array
+
+    def get_eff_Astar(self, values):
+      thetax = values.thetax; thetay = values.thetay;
+      effective_orientation = self.ORI.rotate_thru((1,0,0),thetax
+         ).rotate_thru((0,1,0),thetay
+         )
+      return matrix.sqr(effective_orientation.reciprocal_matrix())
+
+    def scaler_callable(self, values):
+      PB = self.get_partiality_array(values)
+      EXP = flex.exp(-2.*values.BFACTOR*self.DSSQ)
+      terms = values.G * EXP * PB
+      return terms
+
+    def fvec_callable(self, values):
+      PB = self.get_partiality_array(values)
+      EXP = flex.exp(-2.*values.BFACTOR*self.DSSQ)
+      terms = (values.G * EXP * PB * self.ICALCVEC - self.IOBSVEC)
+      # Ideas for improvement
+      #   straightforward to also include sigma weighting
+      #   add extra terms representing rotational excursion: terms.concatenate(1.e7*Rh)
+      return terms
+
+class rs_refinery(refinery_base):
+    def lorentz_callable(self,values):
+      return self.get_partiality_array(values)
+
+    def get_partiality_array(self,values):
+      rs = values.RS
+      Rh = self.get_Rh_array(values)
+      rs_sq = rs*rs
+      PB = rs_sq / ((2. * (Rh * Rh)) + rs_sq)
+      return PB
+
+class eta_deff_refinery(refinery_base):
+    def __init__(self, **kwargs):
+      refinery_base.__init__(self,**kwargs)
+      self.DVEC = self.ORI.unit_cell().d(self.MILLER)
+
+    def lorentz_callable(self,values):
+      Rh = self.get_Rh_array(values)
+      Rs = flex.double(len(self.MILLER),1./values.DEFF)+flex.double(len(self.MILLER),values.ETA/2.)/self.DVEC
+      ratio = Rh / Rs
+      ratio_abs = flex.abs(ratio)
+      return ratio_abs
+
+    def get_partiality_array(self,values):
+      Rh = self.get_Rh_array(values)
+      Rs = flex.double(len(self.MILLER),1./values.DEFF)+flex.double(len(self.MILLER),values.ETA/2.)/self.DVEC
+      Rs_sq = Rs * Rs
+      Rh_sq = Rh * Rh
+      numerator = Rs_sq - Rh_sq
+      denominator = values.DEFF * Rs * Rs_sq
+      partiality = numerator / denominator
+      return partiality
+
+class unpack_base(object):
+  "abstract interface"
+  def __init__(YY,values):
+    YY.reference = values # simply the flex double list of parameters
+  def __getattr__(YY,item):
+    raise NotImplementedError
+  def show(values,out):
+    raise NotImplementedError
+
+class rs_parameterization(unpack_base):
+  def __getattr__(YY,item):
+    if item=="thetax" : return YY.reference[3]
+    if item=="thetay" : return YY.reference[4]
+    if item=="G" :      return YY.reference[0]
+    if item=="BFACTOR": return YY.reference[1]
+    if item=="RS":      return YY.reference[2]
+    raise AttributeError(item)
+
+  def show(YY, out):
+    print("G: %10.7f"%YY.G, end=' ', file=out)
+    print("B: %10.7f"%YY.BFACTOR, \
+        "RS: %10.7f"%YY.RS, \
+        "%7.3f deg %7.3f deg"%(
+        180.*YY.thetax/math.pi,180.*YY.thetay/math.pi), file=out)
+
+class eta_deff_parameterization(unpack_base):
+  def __getattr__(YY,item):
+    if item=="thetax" : return YY.reference[3]
+    if item=="thetay" : return YY.reference[4]
+    if item=="G" :      return YY.reference[0]
+    if item=="BFACTOR": return YY.reference[1]
+    if item=="ETA":      return YY.reference[2]
+    if item=="DEFF":      return YY.reference[5]
+    raise AttributeError(item)
+
+
+  def show(YY, out):
+    print("%10.7f"%YY.G, end=' ', file=out)
+    print("%10.7f"%YY.BFACTOR, \
+          "eta %10.7f"%YY.ETA, \
+          "Deff %10.2f"%YY.DEFF, \
+          "%7.3f deg %7.3f deg"%(
+      180.*YY.thetax/math.pi,180.*YY.thetay/math.pi), file=out)
+
+class lbfgs_minimizer_base:
+
+  def __init__(self, current_x=None, parameterization=None, refinery=None, out=None,
+               min_iterations=0, max_calls=1000, max_drop_eps=1.e-5):
+    adopt_init_args(self, locals())
+    self.n = current_x.size()
+    self.x = current_x
+    from scitbx import lbfgs
+    self.minimizer = lbfgs.run(
+      target_evaluator=self,
+      termination_params=lbfgs.termination_parameters(
+        traditional_convergence_test=False,
+        drop_convergence_test_max_drop_eps=max_drop_eps,
+        min_iterations=min_iterations,
+        max_iterations = None,
+        max_calls=max_calls),
+      exception_handling_params=lbfgs.exception_handling_parameters(
+         ignore_line_search_failed_rounding_errors=True,
+         ignore_line_search_failed_step_at_lower_bound=True,#the only change from default
+         ignore_line_search_failed_step_at_upper_bound=False,
+         ignore_line_search_failed_maxfev=False,
+         ignore_line_search_failed_xtol=False,
+         ignore_search_direction_not_descent=False)
+      )
+
+  def compute_functional_and_gradients(self):
+    values = self.parameterization(self.x)
+    assert -150. < values.BFACTOR < 150. # limits on the exponent, please
+    self.func = self.refinery.fvec_callable(values)
+    functional = flex.sum(self.func*self.func)
+    self.f = functional
+    DELTA = 1.E-7
+    self.g = flex.double()
+    for x in range(self.n):
+      templist = list(self.x)
+      templist[x]+=DELTA
+      dvalues = flex.double(templist)
+
+      dfunc = self.refinery.fvec_callable(self.parameterization(dvalues))
+      dfunctional = flex.sum(dfunc*dfunc)
+      #calculate by finite_difference
+      self.g.append( ( dfunctional-functional )/DELTA )
+    self.g[2]=0.
+    print("rms %10.3f"%math.sqrt(flex.mean(self.func*self.func)), end=' ', file=self.out)
+    values.show(self.out)
+    return self.f, self.g
+
+  def __del__(self):
+    values = self.parameterization(self.x)
+    print("FINALMODEL", end=' ', file=self.out)
+    print("rms %10.3f"%math.sqrt(flex.mean(self.func*self.func)), end=' ', file=self.out)
+    values.show(self.out)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/postrefinement_updated_rs.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+import math
+from scitbx import matrix
+from cctbx import miller
+from dials.array_family import flex
+from scitbx.math.tests.tst_weighted_correlation import simple_weighted_correlation
+from libtbx import adopt_init_args
+from xfel.cxi.postrefinement_legacy_rs import legacy_rs, rs_refinery, rs_parameterization, lbfgs_minimizer_base
+
+def chosen_weights(observation_set, params):
+    data = observation_set.data()
+    sigmas = observation_set.sigmas()
+    return {
+      "unit": flex.double(len(data),1.),
+      "variance": 1./(sigmas*sigmas),
+      "gentle": flex.pow(flex.sqrt(flex.abs(data))/sigmas,2),
+      "extreme": flex.pow(data/sigmas,2)
+    } [ params.postrefinement.target_weighting ]
+
+class updated_rs(legacy_rs):
+  def __init__(self,measurements_orig, params, i_model, miller_set, result, out):
+    measurements = measurements_orig.deep_copy()
+
+    # Now manipulate the data to conform to unit cell, asu, and space group
+    # of reference.  The resolution will be cut later.
+    # Only works if there is NOT an indexing ambiguity!
+    observations = measurements.customized_copy(
+      anomalous_flag=not params.merge_anomalous,
+      crystal_symmetry=miller_set.crystal_symmetry()
+      ).map_to_asu()
+
+    observations_original_index = measurements.customized_copy(
+      anomalous_flag=not params.merge_anomalous,
+      crystal_symmetry=miller_set.crystal_symmetry()
+      )
+
+    # Ensure that match_multi_indices() will return identical results
+    # when a frame's observations are matched against the
+    # pre-generated Miller set, self.miller_set, and the reference
+    # data set, self.i_model.  The implication is that the same match
+    # can be used to map Miller indices to array indices for intensity
+    # accumulation, and for determination of the correlation
+    # coefficient in the presence of a scaling reference.
+
+    assert len(i_model.indices()) == len(miller_set.indices()) \
+        and  (i_model.indices() ==
+              miller_set.indices()).count(False) == 0
+
+    matches = miller.match_multi_indices(
+      miller_indices_unique=miller_set.indices(),
+      miller_indices=observations.indices())
+
+    pair1 = flex.int([pair[1] for pair in matches.pairs()])
+    pair0 = flex.int([pair[0] for pair in matches.pairs()])
+    # narrow things down to the set that matches, only
+    observations_pair1_selected = observations.customized_copy(
+      indices = flex.miller_index([observations.indices()[p] for p in pair1]),
+      data = flex.double([observations.data()[p] for p in pair1]),
+      sigmas = flex.double([observations.sigmas()[p] for p in pair1]),
+    )
+    observations_original_index_pair1_selected = observations_original_index.customized_copy(
+      indices = flex.miller_index([observations_original_index.indices()[p] for p in pair1]),
+      data = flex.double([observations_original_index.data()[p] for p in pair1]),
+      sigmas = flex.double([observations_original_index.sigmas()[p] for p in pair1]),
+    )
+###################
+    I_observed = observations_pair1_selected.data()
+    chosen = chosen_weights(observations_pair1_selected, params)
+
+    MILLER = observations_original_index_pair1_selected.indices()
+    ORI = result["current_orientation"][0]
+    Astar = matrix.sqr(ORI.reciprocal_matrix())
+    WAVE = result["wavelength"]
+    BEAM = matrix.col((0.0,0.0,-1./WAVE))
+    BFACTOR = 0.
+
+    #calculation of correlation here
+    I_reference = flex.double([i_model.data()[pair[0]] for pair in matches.pairs()])
+    I_invalid = flex.bool([i_model.sigmas()[pair[0]] < 0. for pair in matches.pairs()])
+    use_weights = False # New facility for getting variance-weighted correlation
+
+    if use_weights:
+       #variance weighting
+      I_weight = flex.double(
+        [1./(observations_pair1_selected.sigmas()[pair[1]])**2 for pair in matches.pairs()])
+    else:
+      I_weight = flex.double(len(observations_pair1_selected.sigmas()), 1.)
+    I_weight.set_selected(I_invalid,0.)
+    chosen.set_selected(I_invalid,0.)
+
+    """Explanation of 'include_negatives' semantics as originally implemented in cxi.merge postrefinement:
+       include_negatives = True
+       + and - reflections both used for Rh distribution for initial estimate of RS parameter
+       + and - reflections both used for calc/obs correlation slope for initial estimate of G parameter
+       + and - reflections both passed to the refinery and used in the target function (makes sense if
+                           you look at it from a certain point of view)
+
+       include_negatives = False
+       + and - reflections both used for Rh distribution for initial estimate of RS parameter
+       +       reflections only used for calc/obs correlation slope for initial estimate of G parameter
+       + and - reflections both passed to the refinery and used in the target function (makes sense if
+                           you look at it from a certain point of view)
+    """
+    if params.include_negatives:
+      SWC = simple_weighted_correlation(I_weight, I_reference, I_observed)
+    else:
+      non_positive = ( observations_pair1_selected.data() <= 0 )
+      SWC = simple_weighted_correlation(I_weight.select(~non_positive),
+            I_reference.select(~non_positive), I_observed.select(~non_positive))
+
+    print("CORR: Old correlation is", SWC.corr, file=out)
+    if params.postrefinement.algorithm=="rs2":
+      Rhall = flex.double()
+      for mill in MILLER:
+        H = matrix.col(mill)
+        Xhkl = Astar*H
+        Rh = ( Xhkl + BEAM ).length() - (1./WAVE)
+        Rhall.append(Rh)
+      Rs = math.sqrt(flex.mean(Rhall*Rhall))
+
+      RS = 1./10000. # reciprocal effective domain size of 1 micron
+      RS = Rs        # try this empirically determined approximate, monochrome, a-mosaic value
+      current = flex.double([SWC.slope, BFACTOR, RS, 0., 0.])
+
+      parameterization_class = rs_parameterization
+      refinery = rs2_refinery(ORI=ORI, MILLER=MILLER, BEAM=BEAM, WAVE=WAVE,
+        ICALCVEC = I_reference, IOBSVEC = I_observed, WEIGHTS = chosen)
+      refinery.set_profile_shape(params.postrefinement.lineshape)
+
+    func = refinery.fvec_callable(parameterization_class(current))
+    functional = flex.sum(func*func)
+    print("functional",functional, file=out)
+    self.current = current; self.parameterization_class = parameterization_class
+    self.refinery = refinery; self.out=out; self.params = params;
+    self.miller_set = miller_set
+    self.observations_pair1_selected = observations_pair1_selected;
+    self.observations_original_index_pair1_selected = observations_original_index_pair1_selected
+    self.i_model = i_model
+
+  def run_plain(self):
+    self.MINI = lbfgs_minimizer_derivatives( current_x = self.current,
+        parameterization = self.parameterization_class, refinery = self.refinery,
+        out = self.out )
+    self.refined_mini = self.MINI
+
+  def rs2_parameter_range_assertions(self,values):
+    # New range assertions for refined variables
+    assert 0 < values.G, "G-scale value out of range ( < 0 ) after rs2 refinement"
+    assert -25 < values.BFACTOR and values.BFACTOR < 25, "B-factor value out of range ( |B|>25 ) after rs2 refinement"
+    assert -0.5<180.*values.thetax/math.pi<0.5,"thetax value out of range ( |rotx|>.5 degrees ) after rs2 refinement"
+    assert -0.5<180.*values.thetay/math.pi<0.5,"thetay value out of range ( |roty|>.5 degrees ) after rs2 refinement"
+
+  def result_for_cxi_merge(self, file_name):
+    values = self.get_parameter_values()
+    self.rs2_parameter_range_assertions(values)
+    scaler = self.refinery.scaler_callable(self.parameterization_class(self.MINI.x))
+
+    partiality_array = self.refinery.get_partiality_array(values)
+    p_scaler = flex.pow(partiality_array,
+                        0.5*self.params.postrefinement.merge_partiality_exponent)
+
+    fat_selection = (partiality_array > 0.2)
+    fat_count = fat_selection.count(True)
+    scaler_s = scaler.select(fat_selection)
+    p_scaler_s = p_scaler.select(fat_selection)
+
+    #avoid empty database INSERT, if insufficient centrally-located Bragg spots:
+    # in samosa, handle this at a higher level, but handle it somehow.
+    if fat_count < 3:
+      raise ValueError("< 3 near-fulls after refinement")
+    print("On total %5d the fat selection is %5d"%(
+      len(self.observations_pair1_selected.indices()), fat_count), file=self.out)
+    observations_original_index = \
+      self.observations_original_index_pair1_selected.select(fat_selection)
+
+    observations = self.observations_pair1_selected.customized_copy(
+      indices = self.observations_pair1_selected.indices().select(fat_selection),
+      data = (self.observations_pair1_selected.data().select(fat_selection)/scaler_s),
+      sigmas = (self.observations_pair1_selected.sigmas().select(fat_selection)/(scaler_s * p_scaler_s))
+    )
+    matches = miller.match_multi_indices(
+      miller_indices_unique=self.miller_set.indices(),
+      miller_indices=observations.indices())
+
+    I_weight = flex.double(len(observations.sigmas()), 1.)
+    I_reference = flex.double([self.i_model.data()[pair[0]] for pair in matches.pairs()])
+    I_invalid = flex.bool([self.i_model.sigmas()[pair[0]] < 0. for pair in matches.pairs()])
+    I_weight.set_selected(I_invalid,0.)
+    SWC = simple_weighted_correlation(I_weight, I_reference, observations.data())
+    print("CORR: NEW correlation is", SWC.corr, file=self.out)
+    print("ASTAR_FILE",file_name,tuple(self.refinery.get_eff_Astar(values)), file=self.out)
+    self.final_corr = SWC.corr
+    self.refined_mini = self.MINI
+    #another range assertion
+    assert self.final_corr > 0.1,"correlation coefficient out of range (<= 0.1) after rs2 refinement"
+
+    return observations_original_index,observations,matches
+
+  def get_parameter_values(self):
+    return self.refined_mini.parameterization(self.refined_mini.x)
+
+class rs2_refinery(rs_refinery):
+
+    def set_profile_shape(self, shape):
+      self.profile_shape = shape
+      self.get_partiality_array = {
+        "lorentzian":super(rs2_refinery, self).get_partiality_array,
+        "gaussian": self.get_gaussian_partiality_array
+      }[shape]
+
+    def get_gaussian_partiality_array(self,values):
+      rs = values.RS
+      Rh = self.get_Rh_array(values)
+      immersion = Rh/rs
+      gaussian = flex.exp(-2. * math.log(2) * (immersion*immersion))
+      return gaussian
+
+    def jacobian_callable(self,values):
+      PB = self.get_partiality_array(values)
+      EXP = flex.exp(-2.*values.BFACTOR*self.DSSQ)
+      G_terms = (EXP * PB * self.ICALCVEC)
+      B_terms = (values.G * EXP * PB * self.ICALCVEC)*(-2.*self.DSSQ)
+      P_terms = (values.G * EXP * self.ICALCVEC)
+
+      thetax = values.thetax; thetay = values.thetay;
+      Rx = matrix.col((1,0,0)).axis_and_angle_as_r3_rotation_matrix(thetax)
+      dRx_dthetax = matrix.col((1,0,0)).axis_and_angle_as_r3_derivative_wrt_angle(thetax)
+      Ry = matrix.col((0,1,0)).axis_and_angle_as_r3_rotation_matrix(thetay)
+      dRy_dthetay = matrix.col((0,1,0)).axis_and_angle_as_r3_derivative_wrt_angle(thetay)
+      ref_ori = matrix.sqr(self.ORI.reciprocal_matrix())
+      miller_vec = self.MILLER.as_vec3_double()
+      ds1_dthetax = flex.mat3_double(len(self.MILLER),Ry * dRx_dthetax * ref_ori) * miller_vec
+      ds1_dthetay = flex.mat3_double(len(self.MILLER),dRy_dthetay * Rx * ref_ori) * miller_vec
+
+      s1vec = self.get_s1_array(values)
+      s1lenvec = flex.sqrt(s1vec.dot(s1vec))
+      dRh_dthetax = s1vec.dot(ds1_dthetax)/s1lenvec
+      dRh_dthetay = s1vec.dot(ds1_dthetay)/s1lenvec
+      rs = values.RS
+      Rh = self.get_Rh_array(values)
+      rs_sq = rs*rs
+      denomin = (2. * Rh * Rh + rs_sq)
+      dPB_dRh = { "lorentzian": -PB * 4. * Rh / denomin,
+                  "gaussian": -PB * 4. * math.log(2) * Rh / rs_sq }[self.profile_shape]
+      dPB_dthetax = dPB_dRh * dRh_dthetax
+      dPB_dthetay = dPB_dRh * dRh_dthetay
+      Px_terms = P_terms * dPB_dthetax; Py_terms = P_terms * dPB_dthetay
+
+      return [G_terms,B_terms,0,Px_terms,Py_terms]
+
+class lbfgs_minimizer_derivatives(lbfgs_minimizer_base):
+
+  def __init__(self, current_x=None, parameterization=None, refinery=None, out=None,
+               min_iterations=0, max_calls=1000, max_drop_eps=1.e-5):
+    adopt_init_args(self, locals())
+    self.n = current_x.size()
+    self.x = current_x
+    from scitbx import lbfgs
+    self.minimizer = lbfgs.run(
+      target_evaluator=self,
+      termination_params=lbfgs.termination_parameters(
+        traditional_convergence_test=True,
+        drop_convergence_test_max_drop_eps=max_drop_eps,
+        min_iterations=min_iterations,
+        max_iterations = None,
+        max_calls=max_calls),
+      exception_handling_params=lbfgs.exception_handling_parameters(
+         ignore_line_search_failed_rounding_errors=True,
+         ignore_line_search_failed_step_at_lower_bound=True,#the only change from default
+         ignore_line_search_failed_step_at_upper_bound=False,
+         ignore_line_search_failed_maxfev=False,
+         ignore_line_search_failed_xtol=False,
+         ignore_search_direction_not_descent=False)
+      )
+
+  def compute_functional_and_gradients(self):
+    values = self.parameterization(self.x)
+    assert -150. < values.BFACTOR < 150,"B-factor out of range (+/-150) within rs2 functional and gradients"
+    self.func = self.refinery.fvec_callable(values)
+    functional = flex.sum(self.refinery.WEIGHTS*self.func*self.func)
+    self.f = functional
+    jacobian = self.refinery.jacobian_callable(values)
+    self.g = flex.double(self.n)
+    for ix in range(self.n):
+      self.g[ix] = flex.sum(2. * self.refinery.WEIGHTS * self.func * jacobian[ix])
+    print("rms %10.3f"%math.sqrt(flex.sum(self.refinery.WEIGHTS*self.func*self.func)/
+                                              flex.sum(self.refinery.WEIGHTS)), end=' ', file=self.out)
+    values.show(self.out)
+    return self.f, self.g
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/spectra_filter.py
+from __future__ import absolute_import, division, print_function
+import psana
+import numpy as np
+from libtbx import easy_pickle
+from xfel.cxi.cspad_ana import cspad_tbx
+from libtbx.phil import parse
+from libtbx.utils import Sorry
+
+phil_scope = parse("""
+  spectra_filter {
+    name = None
+      .type = str
+      .help = Name of this set of filters
+    detector_address = None
+      .type = str
+      .help = Address for fee spectrometer, eg FeeHxSpectrometer.0:Opal1000.1
+    roi = None
+      .type = ints(size=4)
+      .help = Spectra region of interest in pixels (xmin, xmax, ymin, ymax)
+    background_roi = None
+      .type = ints(size=4)
+      .help = Background region of interest in pixels (xmin, xmax, ymin, ymax)
+    peak_range = None
+      .type = ints(size=2)
+      .help = Range of pixels for the peak region (xmin, xmax). ymin and ymax \
+              come from the roi.
+    background_path = None
+      .type = str
+      .help = Path to background pickle file
+    filter
+      .multiple = True
+      .help = Set of available filters
+    {
+      name = None
+        .type = str
+        .help = Name of this filter
+      flux_min = None
+        .type = float
+        .help = Minimum flux to accept an event, where flux is defined as \
+                sum(roi pixels-background pickle pixels) - mean(background roi pixels - background pickle pixels) \
+                None: do not filter with this parameter
+      flux_max = None
+        .type = float
+        .help = Maximum flux to accept an event. None: do not filter with this parameter
+      peak_ratio_min = None
+        .type = float
+        .help = Minimum peak ratio to accept an event, where the peak ratio is the peak_sum/flux, and peak_sum is \
+                sum(peak pixels-background pickle pixels) - mean(background roi pixels - background pickle pixels) \
+                None: do not filter with this parameter
+      peak_ratio_max = None
+        .type = float
+        .help = Maximum peak ratio to accept an event. None: do not filter with this parameter
+    }
+  }
+""")
+
+class spectra_filter(object):
+  def __init__(self, params):
+    self.src = psana.Source(params.spectra_filter.detector_address)
+    self.roi = params.spectra_filter.roi
+    self.bg_roi = params.spectra_filter.background_roi
+    if params.spectra_filter.background_path is None:
+      self.dark_pickle = None
+    else:
+      self.dark_pickle = easy_pickle.load(params.spectra_filter.background_path)['DATA'].as_numpy_array()
+    self.peak_range = params.spectra_filter.peak_range
+    self.params = params
+
+  def filter_event(self, evt, filter_name):
+    filter_phils = [f for f in self.params.spectra_filter.filter if f.name == filter_name]
+    if len(filter_phils) == 0:
+      raise Sorry("Filter %s not found in phil file"%filter_name)
+    elif len(filter_phils) > 1:
+      raise Sorry("Ambiguous filter name: %s"%filter_name)
+
+    filter_phil = filter_phils[0]
+    return self._filter_event(evt, filter_phil.flux_min, filter_phil.flux_max, filter_phil.peak_ratio_min, filter_phil.peak_ratio_max)
+
+  def _filter_event(self, evt, flux_min, flux_max, peak_ratio_min, peak_ratio_max):
+    all_data = evt.get(psana.Camera.FrameV1, self.src)
+    if all_data is None:
+      print("No data")
+      return False, None, None, None, None, None
+    print(cspad_tbx.evt_timestamp(cspad_tbx.evt_time(evt)), end=' ')
+    data = np.array(all_data.data16().astype(np.int32))
+    if self.dark_pickle is None:
+      self.dark_pickle = np.zeros(data.shape)
+    if self.bg_roi is None:
+      dc_offset = None
+      dc_offset_mean = 0.0
+    else:
+      xmin, xmax, ymin, ymax = self.bg_roi
+      dc_offset = data[ymin:ymax,xmin:xmax] - self.dark_pickle[ymin:ymax,xmin:xmax] #dc: direct current
+      dc_offset_mean = np.mean(dc_offset)
+    if self.roi is None:
+      xmin = 0; ymin = 0
+      ymax, xmax = data.shape
+    else:
+      xmin, xmax, ymin, ymax = self.roi
+    data_signal = data[ymin:ymax,xmin:xmax] - self.dark_pickle[ymin:ymax,xmin:xmax]
+    data = data_signal - dc_offset_mean
+
+    # make a 1D trace
+    spectrum = np.sum(data, 0)
+    flux = np.sum(spectrum)
+    if self.peak_range is None:
+      print("Run", evt.run(), "flux:", flux)
+    else:
+      peak = spectrum[self.peak_range[0]-xmin:self.peak_range[1]-xmin]
+      peak_max = np.sum(peak)
+      print("Run", evt.run(), "peak max:", peak_max, "at", np.argmax(peak)+xmin, "px", "flux:", flux, "m/f:", peak_max/flux)
+
+      if flux_min is not None and flux < flux_min: return False, None, None, None, None, None
+      if flux_max is not None and flux >= flux_max: return False, None, None, None, None, None
+      if peak_ratio_min is not None and peak_max/flux < peak_ratio_min: return False, None, None, None, None, None
+      if peak_ratio_max is not None and peak_max/flux >= peak_ratio_max: return False, None, None, None, None, None
+
+    all_data = all_data.data16().astype(np.int32)
+    return True, data, spectrum, dc_offset, all_data - self.dark_pickle, all_data
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/strong_zulu.py
+from __future__ import absolute_import, division, print_function
+import os
+
+def integrate_one_image(data):
+  from .display_spots import run_one_index_core
+  from labelit.dptbx.error import NoAutoIndex
+  from libtbx.utils import Sorry
+
+  path = "strong/" + data['TIMESTAMP'] + "_" + "%05d" % data['SEQUENCE_NUMBER'] + ".pickle"
+  args = ["indexing.data=dummy",
+          "distl.detector_format_version=CXI 3.2",
+          "force_method2_resolution_limit=2.2",
+          "distl_highres_limit=2.2",
+          "distl.res.outer=2.0",
+          "beam_search_scope=0.5",
+          "target_cell=38,78,78,90,90,90",
+          "lepage_max_delta = 3.0",
+          "spots_pickle = None",
+          "subgroups_pickle = None",
+          "refinements_pickle = None",
+          "rmsd_tolerance = 5.0",
+          "mosflm_rmsd_tolerance = 5.0",
+          "known_setting = 9",
+          "mosaicity_limit=1.0",
+          "indexing.completeness_pickle=%s"%path,
+          "difflimit_sigma_cutoff=2.0",
+          "indexing.verbose_cv=True",
+          #"indexing.open_wx_viewer=True"
+          ]
+
+  from spotfinder.applications.xfel import cxi_phil
+  horizons_phil = cxi_phil.cxi_versioned_extract(args)
+  horizons_phil.indexing.data = data
+
+  try:
+    run_one_index_core(horizons_phil)
+  except NoAutoIndex as e:
+    print("NoAutoIndex")
+    print(e)
+  except Sorry as e:
+    print(e)
+  except ZeroDivisionError as e:
+    print("ZeroDivisionError")
+    print(e)
+  except Exception as e:
+    print("ANOTHER exception")
+    print(e)
+
+if __name__=="__main__":
+
+  dirname = "/net/cci/dials/from_sunbird/sauter/rawdata/L291/lyso/sept02/new_test/"
+  files = """2011-02-20T19:15Z39:482_00734.pickle
+2011-02-20T19:18Z25:271_00708.pickle
+2011-02-20T19:20Z12:239_00917.pickle
+2011-02-20T19:14Z42:365_00021.pickle
+2011-02-20T19:17Z33:519_00155.pickle
+2011-02-20T19:17Z40:287_00358.pickle
+2011-02-20T19:18Z34:937_00998.pickle
+2011-02-20T19:13Z34:768_00993.pickle
+2011-02-20T19:14Z02:108_00813.pickle
+2011-02-20T19:20Z30:520_00465.pickle
+2011-02-20T19:20Z47:900_00987.pickle
+2011-02-20T19:15Z21:798_00204.pickle
+2011-02-20T19:15Z16:423_00042.pickle
+2011-02-20T19:16Z35:167_00405.pickle
+2011-02-20T19:18Z33:220_00946.pickle
+2011-02-20T19:20Z31:811_00504.pickle
+2011-02-20T19:18Z53:079_00542.pickle
+2011-02-20T19:17Z52:237_00717.pickle
+2011-02-20T19:14Z58:115_00493.pickle
+2011-02-20T19:20Z42:534_00826.pickle
+2011-02-20T19:20Z42:534_00826.pickle
+2011-02-20T19:14Z24:074_00472.pickle
+2011-02-20T19:15Z46:566_00947.pickle
+2011-02-20T19:19Z50:902_00277.pickle
+2011-02-20T19:14Z37:340_00870.pickle
+2011-02-20T19:20Z17:638_00079.pickle
+2011-02-20T19:20Z19:013_00120.pickle
+2011-02-20T19:13Z15:453_00413.pickle
+2011-02-20T19:11Z17:086_00862.pickle
+2011-02-20T19:19Z39:021_00920.pickle
+2011-02-20T19:18Z13:570_00357.pickle
+2011-02-20T19:15Z46:974_00959.pickle
+2011-02-20T19:19Z26:906_00557.pickle
+2011-02-20T19:15Z22:856_00235.pickle
+2011-02-20T19:14Z51:049_00281.pickle
+2011-02-20T19:19Z17:505_00275.pickle
+2011-02-20T19:18Z06:395_00141.pickle
+2011-02-20T19:19Z01:329_00789.pickle
+2011-02-20T19:18Z27:104_00763.pickle
+2011-02-20T19:18Z01:195_00985.pickle
+2011-02-20T19:18Z56:721_00651.pickle
+2011-02-20T19:19Z28:822_00614.pickle
+2011-02-20T19:14Z40:707_00971.pickle""".split("\n")
+
+
+
+  def get_paths_single():
+      for file in files:
+          path = os.path.join(dirname,"out_shot%s"%file)
+          yield path
+
+
+  get_paths = get_paths_single
+
+  for path in get_paths():
+    print(path)
+    from libtbx import easy_pickle
+    L = easy_pickle.load(path)
+    integrate_one_image(L)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/trumpet_plot.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from matplotlib import pyplot as plt
+from matplotlib import gridspec
+import math
+import os
+from dials.array_family import flex
+
+class trumpet_plot(object):
+
+  def __init__(self, nrows=2, ncols=2):
+    self.AD1TF7B_MAX2T = 45.
+    self.AD1TF7B_MAXDP = 0.5
+    self.AD1TF7B_MAXDP = 0.1
+    self.color_encoding = "I/sigma"
+    plt.figure(figsize=(12,10))  #use 9 for laptop
+    self.gs = gridspec.GridSpec(nrows=nrows,ncols=ncols,width_ratios=[3,1])
+    self.ncols = ncols
+
+  def set_reduction(self,reduction): #see data_utils for definition of this container
+    self.reduction = reduction
+  def set_refined(self,info): # a repository for the refined parameters
+    self.refined = info
+
+  def plot_one_model(self,nrow,out):
+    fig = plt.subplot(self.gs[nrow*self.ncols])
+    two_thetas = self.reduction.get_two_theta_deg()
+    degrees = self.reduction.get_delta_psi_deg()
+
+    if self.color_encoding=="conventional":
+          positive = (self.reduction.i_sigi>=0.)
+          fig.plot(two_thetas.select(positive), degrees.select(positive), "bo")
+          fig.plot(two_thetas.select(~positive), degrees.select(~positive), "r+")
+    elif self.color_encoding=="I/sigma":
+          positive = (self.reduction.i_sigi>=0.)
+          tt_selected = two_thetas.select(positive)
+          dp_selected = degrees.select(positive)
+          i_sigi_select = self.reduction.i_sigi.select(positive)
+          order = flex.sort_permutation(i_sigi_select)
+          tt_selected = tt_selected.select(order)
+          dp_selected = dp_selected.select(order)
+          i_sigi_selected = i_sigi_select.select(order)
+          from matplotlib.colors import Normalize
+          dnorm = Normalize()
+          dcolors = i_sigi_selected.as_numpy_array()
+          dnorm.autoscale(dcolors)
+          N = len(dcolors)
+          CMAP = plt.get_cmap("rainbow")
+          if self.refined.get("partiality_array",None) is None:
+            for n in range(N):
+              fig.plot([tt_selected[n]],[dp_selected[n]],
+              color=CMAP(dnorm(dcolors[n])),marker=".", markersize=10)
+          else:
+            partials = self.refined.get("partiality_array")
+            partials_select = partials.select(positive)
+            partials_selected = partials_select.select(order)
+            assert len(partials)==len(positive)
+            for n in range(N):
+              fig.plot([tt_selected[n]],[dp_selected[n]],
+              color=CMAP(dnorm(dcolors[n])),marker=".", markersize=20*partials_selected[n])
+              # change the markersize to indicate partiality.
+          negative = (self.reduction.i_sigi<0.)
+          fig.plot(two_thetas.select(negative), degrees.select(negative), "r+", linewidth=1)
+    else:
+          strong = (self.reduction.i_sigi>=10.)
+          positive = ((~strong) & (self.reduction.i_sigi>=0.))
+          negative = (self.reduction.i_sigi<0.)
+          assert (strong.count(True)+positive.count(True)+negative.count(True) ==
+                  len(self.reduction.i_sigi))
+          fig.plot(two_thetas.select(positive), degrees.select(positive), "bo")
+          fig.plot(two_thetas.select(strong), degrees.select(strong), marker='.',linestyle='None',
+           markerfacecolor='#00ee00', markersize=10)
+          fig.plot(two_thetas.select(negative), degrees.select(negative), "r+")
+
+    # indicate the imposed resolution filter
+    wavelength = self.reduction.experiment.beam.get_wavelength()
+    imposed_res_filter = self.reduction.get_imposed_res_filter(out)
+    resolution_markers = [
+      a for a in [imposed_res_filter,self.reduction.measurements.d_min()] if a is not None]
+    for RM in resolution_markers:
+          two_th = (180./math.pi)*2.*math.asin(wavelength/(2.*RM))
+          plt.plot([two_th, two_th],[self.AD1TF7B_MAXDP*-0.8,self.AD1TF7B_MAXDP*0.8],'k-')
+          plt.text(two_th,self.AD1TF7B_MAXDP*-0.9,"%4.2f"%RM)
+
+    #indicate the linefit
+    mean = flex.mean(degrees)
+    minplot = flex.min(two_thetas)
+    plt.plot([0,minplot],[mean,mean],"k-")
+    LR = flex.linear_regression(two_thetas, degrees)
+    model_y = LR.slope()*two_thetas + LR.y_intercept()
+    plt.plot(two_thetas, model_y, "k-")
+
+    #Now let's take care of the red and green lines.
+    half_mosaic_rotation_deg = self.refined["half_mosaic_rotation_deg"]
+    mosaic_domain_size_ang = self.refined["mosaic_domain_size_ang"]
+    red_curve_domain_size_ang = self.refined.get("red_curve_domain_size_ang",mosaic_domain_size_ang)
+    a_step = self.AD1TF7B_MAX2T / 50.
+    a_range = flex.double([a_step*x for x in range(1,50)]) # domain two-theta array
+    #Bragg law [d=L/2sinTH]
+    d_spacing = (wavelength/(2.*flex.sin(math.pi*a_range/360.)))
+    # convert two_theta to a delta-psi.  Formula for Deffective [Dpsi=d/2Deff]
+    inner_phi_deg = flex.asin((d_spacing / (2.*red_curve_domain_size_ang)) )*(180./math.pi)
+    outer_phi_deg = flex.asin((d_spacing / (2.*mosaic_domain_size_ang)) + \
+      half_mosaic_rotation_deg*math.pi/180. )*(180./math.pi)
+    plt.title("ML: mosaicity FW=%4.2f deg, Dsize=%5.0fA on %d spots\n%s"%(
+          2.*half_mosaic_rotation_deg, mosaic_domain_size_ang, len(two_thetas),
+          os.path.basename(self.reduction.filename)))
+    plt.plot(a_range, inner_phi_deg, "r-")
+    plt.plot(a_range,-inner_phi_deg, "r-")
+    plt.plot(a_range, outer_phi_deg, "g-")
+    plt.plot(a_range, -outer_phi_deg, "g-")
+    plt.xlim([0,self.AD1TF7B_MAX2T])
+    plt.ylim([-self.AD1TF7B_MAXDP,self.AD1TF7B_MAXDP])
+
+    #second plot shows histogram
+    fig = plt.subplot(self.gs[1+nrow*self.ncols])
+    plt.xlim([-self.AD1TF7B_MAXDP,self.AD1TF7B_MAXDP])
+    nbins = 50
+    n,bins,patches = plt.hist(dp_selected, nbins,
+           range=(-self.AD1TF7B_MAXDP,self.AD1TF7B_MAXDP),
+           weights=self.reduction.i_sigi.select(positive),
+           normed=0, facecolor="orange", alpha=0.75)
+    #ersatz determine the median i_sigi point:
+    isi_positive = self.reduction.i_sigi.select(positive)
+    isi_order = flex.sort_permutation(isi_positive)
+    reordered = isi_positive.select(isi_order)
+    isi_median = reordered[int(len(isi_positive)*0.9)]
+    isi_top_half_selection = (isi_positive>isi_median)
+    n,bins,patches = plt.hist(dp_selected.select(isi_top_half_selection), nbins,
+           range=(-self.AD1TF7B_MAXDP,self.AD1TF7B_MAXDP),
+           weights=isi_positive.select(isi_top_half_selection),
+           normed=0, facecolor="#ff0000", alpha=0.75)
+    plt.xlabel("(degrees)")
+    plt.title("Weighted histogram of Delta-psi")
+
+  def set_color_coding(self,choice):
+    self.color_encoding = choice
+
+  def show(self):
+    plt.show()
+        #plt.tight_layout()
+        #plt.savefig('grid_figure.pdf')
+
+def trumpet_wrapper(result, postx, file_name, params, out):
+      from scitbx import matrix
+      from dxtbx.model import BeamFactory
+      beam = BeamFactory.make_beam(s0=(0,0,-1./result["wavelength"]))
+      from dxtbx.model import Experiment
+      from dxtbx.model import crystal
+
+      obs_to_plot = postx.observations_original_index_pair1_selected # XXX uses a private interface
+
+      HKL=obs_to_plot.indices()
+      i_sigi=obs_to_plot.data()/obs_to_plot.sigmas()
+      direct_matrix = result["current_orientation"][0].direct_matrix()
+      real_a = direct_matrix[0:3]
+      real_b = direct_matrix[3:6]
+      real_c = direct_matrix[6:9]
+      SG = obs_to_plot.space_group()
+      crystal = crystal.crystal_model(real_a, real_b, real_c, space_group=SG)
+      q = Experiment(beam=beam, crystal=crystal)
+
+      TPL = trumpet_plot()
+      from xfel.cxi.data_utils import reduction
+      RED = reduction(filename = file_name, experiment = q, HKL = HKL, i_sigi = i_sigi,
+                    measurements = obs_to_plot, params = params)
+      TPL.set_reduction(RED)
+
+      # first plot: before postrefinement
+      TPL.reduction.experiment.crystal.set_A(matrix.sqr(result["current_orientation"][0].reciprocal_matrix()))
+      TPL.set_refined(dict(half_mosaic_rotation_deg=result["ML_half_mosaicity_deg"][0],
+                             mosaic_domain_size_ang=result["ML_domain_size_ang"][0]))
+      TPL.plot_one_model(nrow=0,out=out)
+
+      # second plot after postrefinement
+      values = postx.get_parameter_values()
+      TPL.reduction.experiment.crystal.set_A(postx.refined_mini.refinery.get_eff_Astar(values))
+      TPL.refined["red_curve_domain_size_ang"]=1/values.RS
+      TPL.refined["partiality_array"]=postx.refined_mini.refinery.get_partiality_array(values)
+      TPL.plot_one_model(nrow=1,out=out)
+
+      TPL.show()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/cxi/util.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+import os
+
+#for integration pickles:
+allowable_basename_endings = ["_00000.pickle",
+                              ".pickle",
+                              ".refl",
+                              "_refined_experiments.json",
+                              "_refined.expt",
+                              "_experiments.json"
+                             ]
+def is_odd_numbered(file_name, use_hash = False):
+  if use_hash:
+    import hashlib
+    hash_object = hashlib.md5(file_name)
+    return int(hash_object.hexdigest(), 16) % 2 == 0
+  for allowable in allowable_basename_endings:
+    if (file_name.endswith(allowable)):
+      try:
+        return int(os.path.basename(file_name).split(allowable)[-2][-1])%2==1
+      except ValueError:
+        file_name = os.path.basename(file_name).split(allowable)[0]
+        break
+  #can not find standard filename extension, instead find the last digit:
+  for idx in range(1,len(file_name)+1):
+    if file_name[-idx].isdigit():
+      return int(file_name[-idx])%2==1
+  raise ValueError
+if __name__=="__main__":
+  print(is_odd_numbered("int_fake_19989.img"))
+
+
+ *******************************************************************************

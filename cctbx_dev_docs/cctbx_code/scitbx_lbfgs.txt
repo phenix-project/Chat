@@ -1,0 +1,1782 @@
+
+
+ *******************************************************************************
+scitbx/lbfgs/__init__.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_lbfgs_ext")
+from scitbx_lbfgs_ext import *
+
+from libtbx import adopt_init_args
+
+raw = raw_lbfgs()
+
+class core_parameters(object):
+
+  def __init__(self, m=5,
+                     maxfev=20,
+                     gtol=0.9,
+                     xtol=1.e-16,
+                     stpmin=1.e-20,
+                     stpmax=1.e20):
+    adopt_init_args(self, locals())
+
+class termination_parameters(object):
+
+  def __init__(self, traditional_convergence_test=True,
+                     traditional_convergence_test_eps=1.e-5,
+                     drop_convergence_test_n_test_points=5,
+                     drop_convergence_test_max_drop_eps=1.e-5,
+                     drop_convergence_test_iteration_coefficient=2,
+                     min_iterations=0,
+                     max_iterations=None,
+                     max_calls=None):
+    drop_convergence_test_n_test_points = max(
+      drop_convergence_test_n_test_points,
+      min_iterations)
+    adopt_init_args(self, locals())
+
+class exception_handling_parameters(object):
+
+  def __init__(self, ignore_line_search_failed_rounding_errors=True,
+                     ignore_line_search_failed_step_at_lower_bound=False,
+                     ignore_line_search_failed_step_at_upper_bound=False,
+                     ignore_line_search_failed_maxfev=False,
+                     ignore_line_search_failed_xtol=False,
+                     ignore_search_direction_not_descent=False):
+    adopt_init_args(self, locals())
+
+  def filter(self, msg, n, x, g):
+    if (not msg.startswith("lbfgs error")):
+      return 1
+    if (msg.find("Rounding errors prevent further progress.") >= 0):
+      if (self.ignore_line_search_failed_rounding_errors):
+        return 0
+    elif (msg.find("The step is at the lower bound stpmin().") >= 0):
+      if (x is not None and g is not None
+          and ext.traditional_convergence_test(n)(x, g)):
+        return 0
+      if (self.ignore_line_search_failed_step_at_lower_bound):
+        return -1
+    elif (msg.find("The step is at the upper bound stpmax().") >= 0):
+      if (self.ignore_line_search_failed_step_at_upper_bound):
+        return -1
+    elif (msg.find("Number of function evaluations has reached"
+                 + " maxfev().") >= 0):
+      if (self.ignore_line_search_failed_maxfev):
+        return -1
+    elif (msg.find("Relative width of the interval of uncertainty"
+                 + " is at most xtol().") >= 0):
+      if (self.ignore_line_search_failed_xtol):
+        return -1
+    elif (msg.find("The search direction is not a descent direction.") >= 0):
+      if (x is not None and g is not None
+          and ext.traditional_convergence_test(n)(x, g)):
+        return 0
+      if (self.ignore_search_direction_not_descent):
+        return -1
+    return 1
+
+def run_c_plus_plus(target_evaluator,
+                    termination_params=None,
+                    core_params=None,
+                    exception_handling_params=None,
+                    log=None,
+                    #---> Insertion starts
+                    gradient_only=False,
+                    line_search=True):
+                    #<--- Insertion ends
+  if (termination_params is None):
+    termination_params = termination_parameters()
+  if (core_params is None):
+    core_params = core_parameters()
+  if (exception_handling_params is None):
+    exception_handling_params = exception_handling_parameters()
+  x = target_evaluator.x
+  if (log is not None):
+    print("lbfgs minimizer():", file=log)
+    print("  x.size():", x.size(), file=log)
+    print("  m:", core_params.m, file=log)
+    print("  maxfev:", core_params.maxfev, file=log)
+    print("  gtol:", core_params.gtol, file=log)
+    print("  xtol:", core_params.xtol, file=log)
+    print("  stpmin:", core_params.stpmin, file=log)
+    print("  stpmax:", core_params.stpmax, file=log)
+    print("lbfgs traditional_convergence_test:", \
+      termination_params.traditional_convergence_test, file=log)
+  minimizer = ext.minimizer(
+    x.size(),
+    core_params.m,
+    core_params.maxfev,
+    core_params.gtol,
+    core_params.xtol,
+    core_params.stpmin,
+    core_params.stpmax)
+  if (termination_params.traditional_convergence_test):
+    is_converged = ext.traditional_convergence_test(
+      x.size(),
+      termination_params.traditional_convergence_test_eps)
+  else:
+    is_converged = ext.drop_convergence_test(
+      n_test_points=termination_params.drop_convergence_test_n_test_points,
+      max_drop_eps=termination_params.drop_convergence_test_max_drop_eps,
+      iteration_coefficient
+        =termination_params.drop_convergence_test_iteration_coefficient)
+  callback_after_step = getattr(target_evaluator, "callback_after_step", None)
+  diag_mode = getattr(target_evaluator, "diag_mode", None)
+  if (diag_mode is not None): assert diag_mode in ["once", "always"]
+  f_min, x_min = None, None
+  f, g = None, None
+  try:
+    while 1:
+      if (diag_mode is None):
+        f, g = target_evaluator.compute_functional_and_gradients()
+        d = None
+      else:
+        f, g, d = target_evaluator.compute_functional_gradients_diag()
+        if (diag_mode == "once"):
+          diag_mode = None
+      if (f_min is None):
+        if (not termination_params.traditional_convergence_test):
+          is_converged(f)
+        f_min, x_min = f, x.deep_copy()
+      elif (f_min > f):
+        f_min, x_min = f, x.deep_copy()
+      if (log is not None):
+        print("lbfgs minimizer.run():" \
+          " f=%.6g, |g|=%.6g, x_min=%.6g, x_mean=%.6g, x_max=%.6g" % (
+          f, g.norm(), flex.min(x), flex.mean(x), flex.max(x)), file=log)
+      if (d is None):
+        #---> Insertion starts
+        if (minimizer.run(x, f, g, gradient_only,line_search)): continue
+        #<--- Insertion ends
+      else:
+        #---> Insertion starts
+        if (minimizer.run(x, f, g, d, gradient_only,line_search)): continue
+        #<--- Insertion ends
+      if (log is not None):
+        print("lbfgs minimizer step", file=log)
+      if (callback_after_step is not None):
+        if (callback_after_step(minimizer) is True):
+          if (log is not None):
+            print("lbfgs minimizer stop: callback_after_step is True", file=log)
+          break
+      if (termination_params.traditional_convergence_test):
+        if (    minimizer.iter() >= termination_params.min_iterations
+            and is_converged(x, g)):
+          if (log is not None):
+            print("lbfgs minimizer stop: traditional_convergence_test", file=log)
+          break
+      else:
+        if (is_converged(f)):
+          if (log is not None):
+            print("lbfgs minimizer stop: drop_convergence_test", file=log)
+          break
+      if (    termination_params.max_iterations is not None
+          and minimizer.iter() >= termination_params.max_iterations):
+        if (log is not None):
+          print("lbfgs minimizer stop: max_iterations", file=log)
+        break
+      if (    termination_params.max_calls is not None
+          and minimizer.nfun() > termination_params.max_calls):
+        if (log is not None):
+          print("lbfgs minimizer stop: max_calls", file=log)
+        break
+      if (d is None):
+        #---> Insertion starts
+        if (not minimizer.run(x, f, g, gradient_only,line_search)): break
+        #<--- Insertion ends
+      else:
+        #---> Insertion starts
+        if (not minimizer.run(x, f, g, d, gradient_only,line_search)): break
+        #<--- Insertion ends
+  except RuntimeError as e:
+    minimizer.error = str(e)
+    if (log is not None):
+      print("lbfgs minimizer exception:", str(e), file=log)
+    if (x_min is not None):
+      x.clear()
+      x.extend(x_min)
+    error_classification = exception_handling_params.filter(
+      minimizer.error, x.size(), x, g)
+    if (error_classification > 0):
+      raise
+    elif (error_classification < 0):
+      minimizer.is_unusual_error = True
+    else:
+      minimizer.is_unusual_error = False
+  else:
+    minimizer.error = None
+    minimizer.is_unusual_error = None
+  if (log is not None):
+    print("lbfgs minimizer done.", file=log)
+  return minimizer
+
+def run_fortran(target_evaluator,
+                termination_params=None,
+                core_params=None):
+  "For debugging only!"
+  from scitbx.python_utils.misc import store
+  from fortran_lbfgs import lbfgs as fortran_lbfgs
+  import Numeric
+  if (termination_params is None):
+    termination_params = termination_parameters()
+  if (core_params is None):
+    core_params = core_parameters()
+  assert termination_params.traditional_convergence_test
+  assert core_params.maxfev == 20
+  x = target_evaluator.x
+  n = x.size()
+  m = core_params.m
+  gtol = core_params.gtol
+  xtol = core_params.xtol
+  stpmin = core_params.stpmin
+  stpmax = core_params.stpmax
+  eps = termination_params.traditional_convergence_test_eps
+  x_numeric = Numeric.array(Numeric.arange(n), Numeric.Float64)
+  g_numeric = Numeric.array(Numeric.arange(n), Numeric.Float64)
+  size_w = n*(2*m+1)+2*m
+  w = Numeric.array(Numeric.arange(size_w), Numeric.Float64)
+  diag = Numeric.array(Numeric.arange(n), Numeric.Float64)
+  iprint = [1, 0]
+  diagco = 0
+  iflag = Numeric.array([0], Numeric.Int32)
+  minimizer = store(error=None)
+  while 1:
+    f, g = target_evaluator.compute_functional_and_gradients()
+    for i,xi in enumerate(x): x_numeric[i] = xi
+    for i,gi in enumerate(g): g_numeric[i] = gi
+    fortran_lbfgs(n, m, x_numeric, f, g_numeric, diagco, diag,
+      iprint, eps, xtol, w, iflag)
+    for i,xi in enumerate(x_numeric): x[i] = xi
+    if (iflag[0] == 0):
+      break
+    if (iflag[0] < 0):
+      minimizer.error = "fortran lbfgs error"
+      break
+  return minimizer
+
+def run(target_evaluator,
+        termination_params=None,
+        core_params=None,
+        exception_handling_params=None,
+        use_fortran=False,
+        log=None,
+        #---> Insertion starts
+        gradient_only=False,
+        line_search=True):
+        #<--- Insertion ends
+  if (use_fortran):
+    return run_fortran(target_evaluator, termination_params, core_params)
+  else:
+    return run_c_plus_plus(
+      target_evaluator,
+      termination_params,
+      core_params,
+      exception_handling_params,
+      log,
+      #---> Insertion starts
+      gradient_only,
+      line_search)
+      #<--- Insertion ends
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/dev/__init__.py
+"""
+lbfgs/dev/__init__
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/dev/run.py
+from __future__ import absolute_import, division, print_function
+from scitbx import lbfgs as scitbx_lbfgs
+from scitbx.array_family import flex
+from libtbx import adopt_init_args
+
+# Rosenbrock's function, gradients and curvatures
+
+def target(x,y):
+  return (1-x)**2+100*(y-x**2)**2
+
+def grad_x(x,y):
+  return -2*(1-x) + 400*(-x*y+x**3)
+
+def grad_y(x,y):
+  return 2*100*(y-x**2)
+
+def curv_xx(x,y):
+  return 2 + 400*(-y+3*x**2)
+
+def curv_yy(x,y):
+  return 200
+
+#
+
+def lbfgs_run(target_evaluator,
+              min_iterations=0,
+              max_iterations=None,
+              traditional_convergence_test=1,
+              use_curvatures=False):
+  ext = scitbx_lbfgs.ext
+  minimizer = ext.minimizer(target_evaluator.n)
+  minimizer.error = None
+  if (traditional_convergence_test):
+    is_converged = ext.traditional_convergence_test(target_evaluator.n)
+  else:
+    raise RuntimeError
+    is_converged = ext.drop_convergence_test(min_iterations)
+  try:
+    icall = 0
+    requests_f_and_g = True
+    requests_diag = use_curvatures
+    while 1:
+      if (requests_f_and_g):
+        icall += 1
+      x, f, g, d = target_evaluator(
+        requests_f_and_g=requests_f_and_g,
+        requests_diag=requests_diag)
+      if (requests_diag):
+        print("x,f,d:", tuple(x), f, tuple(d))
+      else:
+        print("x,f:", tuple(x), f)
+      if (use_curvatures):
+        if (d is None): d = flex.double(x.size())
+        have_request = minimizer.run(x, f, g, d)
+      else:
+        have_request = minimizer.run(x, f, g)
+      if (have_request):
+        requests_f_and_g = minimizer.requests_f_and_g()
+        requests_diag = minimizer.requests_diag()
+        continue
+      assert not minimizer.requests_f_and_g()
+      assert not minimizer.requests_diag()
+      if (traditional_convergence_test):
+        if (minimizer.iter() >= min_iterations and is_converged(x, g)): break
+      else:
+        if (is_converged(f)): break
+      if (max_iterations is not None and minimizer.iter() >= max_iterations):
+        break
+      if (use_curvatures):
+        have_request = minimizer.run(x, f, g, d)
+      else:
+        have_request = minimizer.run(x, f, g)
+      if (not have_request): break
+      requests_f_and_g = minimizer.requests_f_and_g()
+      requests_diag = minimizer.requests_diag()
+  except RuntimeError as e:
+    minimizer.error = str(e)
+  minimizer.n_calls = icall
+  return minimizer
+
+class minimizer:
+
+  def __init__(self, xx=-3, yy=-4, min_iterations=0, max_iterations=10000):
+    adopt_init_args(self, locals())
+    self.x = flex.double([xx, yy])
+    self.n = self.x.size()
+
+  def run(self, use_curvatures=0):
+    self.minimizer = lbfgs_run(
+      target_evaluator=self,
+      min_iterations=self.min_iterations,
+      max_iterations=self.max_iterations,
+      use_curvatures=use_curvatures)
+    self(requests_f_and_g=True, requests_diag=False)
+    return self
+
+  def __call__(self, requests_f_and_g, requests_diag):
+    self.xx, self.yy = self.x
+    if (not requests_f_and_g and not requests_diag):
+      requests_f_and_g = True
+      requests_diag = True
+    if (requests_f_and_g):
+      self.f = target(self.xx,self.yy)
+      self.g = flex.double(
+        (grad_x(self.xx, self.yy),
+         grad_y(self.xx, self.yy)))
+      self.d = None
+    if (requests_diag):
+      self.d = flex.double(
+        (curv_xx(self.xx, self.yy),
+         curv_yy(self.xx, self.yy)))
+      assert self.d.all_ne(0)
+      self.d = 1 / self.d
+    return self.x, self.f, self.g, self.d
+
+def run():
+  for use_curvatures in (False, True):
+    print("use_curvatures:", use_curvatures)
+    m = minimizer().run(use_curvatures=use_curvatures)
+    print(tuple(m.x), "final")
+    if (abs(m.x[0]) > 1.e-4 or abs(m.x[1]) > 1.e-4):
+      print(tuple(m.x), "failure, use_curvatures="+str(use_curvatures))
+    print("iter,exception:", m.minimizer.iter(), m.minimizer.error)
+    print("n_calls:", m.minimizer.n_calls)
+    assert m.minimizer.n_calls == m.minimizer.nfun()
+    print()
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/dev/twisted_gaussian.py
+from __future__ import absolute_import, division, print_function
+from scitbx import lbfgs as scitbx_lbfgs
+from scitbx.array_family import flex
+from libtbx import adopt_init_args
+import random
+import math
+import sys
+from six.moves import range
+
+def gauss2d0(xy, s11, s12, s22):
+  (x,y) = xy
+  return -math.log(1/math.sqrt(4*math.pi**2*(s11*s22-s12**2))
+           *math.exp(-(s22*x**2-2*s12*x*y+s11*y**2)/(2*(s11*s22-s12**2))))
+
+def twisted_gauss2d0(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  arg = twist*math.sqrt(x**2+y**2)
+  c = math.cos(arg)
+  s = math.sin(arg)
+  xt = x*c - y*s
+  yt = y*c + x*s
+  return gauss2d0((xt,yt), s11, s12, s22)
+
+Cos = math.cos
+Sin = math.sin
+Sqrt = math.sqrt
+Pi = math.pi
+
+def analytic_grad_x(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return 0.
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def analytic_grad_y(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return 0.
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_xx(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 +
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 +
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(Cos(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+               (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2
+             + 2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**3*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (3*twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**3*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (3*twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           4*s12*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                Sqrt(x**2 + y**2) + Sin(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2)
+          /(2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_yy(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (-2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*y**3*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*y**3*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (3*twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                  Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+               (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2\
+            - 4*s12*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*(Cos(twist*Sqrt(x**2 + y**2)) +
+               (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+               (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))**2
+           )/(2.*(-s12**2 + s11*s22)))
+
+def analytic_curv_xy(xy, s11, s12, s22, twist):
+  (x,y) = xy
+  if (x == 0 and y == 0): return None
+  return (
+         (2*s11*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            (-((twist*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/
+                 (x**2 + y**2)**1.5) -
+              (twist**2*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) +
+              (twist*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(y*Cos(twist*Sqrt(x**2 + y**2)) +
+              x*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(x*Cos(twist*Sqrt(x**2 + y**2)) -
+              y*Sin(twist*Sqrt(x**2 + y**2)))*
+            ((twist*x*y**2*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2)**1.5 -
+              (twist**2*x**2*y*Cos(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*x*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              (twist*x**2*y*Sin(twist*Sqrt(x**2 + y**2)))/
+               (x**2 + y**2)**1.5 +
+              (twist**2*x*y**2*Sin(twist*Sqrt(x**2 + y**2)))/(x**2 + y**2) -
+              (twist*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s22*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(-((twist*y**2*Cos(twist*Sqrt(x**2 + y**2)))/
+                 Sqrt(x**2 + y**2)) - Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            ((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) +
+              Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) -
+           2*s12*(Cos(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*x**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)) +
+           2*s11*((twist*x**2*Cos(twist*Sqrt(x**2 + y**2)))/
+               Sqrt(x**2 + y**2) + Sin(twist*Sqrt(x**2 + y**2)) -
+              (twist*x*y*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2))*
+            (Cos(twist*Sqrt(x**2 + y**2)) +
+              (twist*x*y*Cos(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2) -
+              (twist*y**2*Sin(twist*Sqrt(x**2 + y**2)))/Sqrt(x**2 + y**2)))/
+         (2.*(-s12**2 + s11*s22)))
+
+def finite_grad_x(xy, s11, s12, s22, twist, eps=1.e-6):
+  (x,y) = xy
+  tm = twisted_gauss2d0((x-eps,y), s11, s12, s22, twist)
+  tp = twisted_gauss2d0((x+eps,y), s11, s12, s22, twist)
+  return (tp-tm)/(2*eps)
+
+def finite_grad_y(xy, s11, s12, s22, twist, eps=1.e-6):
+  (x,y) = xy
+  tm = twisted_gauss2d0((x,y-eps), s11, s12, s22, twist)
+  tp = twisted_gauss2d0((x,y+eps), s11, s12, s22, twist)
+  return (tp-tm)/(2*eps)
+
+def finite_curv_xx(xy, s11, s12, s22, twist, eps=1.e-6):
+  (x,y) = xy
+  tm = finite_grad_x((x-eps,y), s11, s12, s22, twist, eps)
+  tp = finite_grad_x((x+eps,y), s11, s12, s22, twist, eps)
+  return (tp-tm)/(2*eps)
+
+def finite_curv_yy(xy, s11, s12, s22, twist, eps=1.e-6):
+  (x,y) = xy
+  tm = finite_grad_y((x,y-eps), s11, s12, s22, twist, eps)
+  tp = finite_grad_y((x,y+eps), s11, s12, s22, twist, eps)
+  return (tp-tm)/(2*eps)
+
+def finite_curv_xy(xy, s11, s12, s22, twist, eps=1.e-6):
+  (x,y) = xy
+  tm = finite_grad_x((x,y-eps), s11, s12, s22, twist, eps)
+  tp = finite_grad_x((x,y+eps), s11, s12, s22, twist, eps)
+  return (tp-tm)/(2*eps)
+
+def finite_curv_yx(xy, s11, s12, s22, twist, eps=1.e-6):
+  (x,y) = xy
+  tm = finite_grad_y((x-eps,y), s11, s12, s22, twist, eps)
+  tp = finite_grad_y((x+eps,y), s11, s12, s22, twist, eps)
+  return (tp-tm)/(2*eps)
+
+def verify_derivatives(n=5, s11=1, s12=1.2, s22=2, twist=0.5, verbose=0):
+  for ix in range(-n,n+1):
+    for iy in range(-n,n+1):
+      xy = [i/float(n) for i in (ix,iy)]
+      if (0 or verbose):
+        print("value: %5.3f" % twisted_gauss2d0(xy, s11, s12, s22, twist))
+        print()
+      for f,a in ((finite_grad_x,analytic_grad_x),
+                  (finite_grad_y,analytic_grad_y)):
+        fg = f(xy, s11, s12, s22, twist)
+        ag = a(xy, s11, s12, s22, twist)
+        if (0 or verbose):
+          print("fg:", fg)
+          print("ag:", ag)
+          print()
+        assert abs(fg-ag) < 1.e-5
+      for f,a in ((finite_curv_xx,analytic_curv_xx),
+                  (finite_curv_yy,analytic_curv_yy),
+                  (finite_curv_xy,analytic_curv_xy),
+                  (finite_curv_yx,analytic_curv_xy)):
+        fc = f(xy, s11, s12, s22, twist)
+        ac = a(xy, s11, s12, s22, twist)
+        if (0 or verbose):
+          print("fc:", fc)
+          print("ac:", ac)
+          print()
+        if (xy != [0,0]):
+          assert abs(fc-ac)/max(1,min(abs(fc),abs(ac))) < 1.e-3
+
+class fortran_minimizer:
+
+  def __init__(self, scitbx_minimizer):
+    import numpy
+    self.n = scitbx_minimizer.n()
+    self.m = scitbx_minimizer.m()
+    self.x = numpy.array(numpy.arange(self.n), numpy.float64)
+    self.g = numpy.array(numpy.arange(self.n), numpy.float64)
+    self.diag = numpy.array(numpy.arange(self.n), numpy.float64)
+    self.iprint = [1, 0]
+    self.eps = 1.e-5 # convergence test
+    self.xtol = scitbx_minimizer.xtol()
+    size_w = self.n*(2*self.m+1)+2*self.m
+    self.w = numpy.array(numpy.arange(size_w), numpy.float64)
+    self.iflag = numpy.array([0], numpy.int32)
+
+  def __call__(self, x, f, g, diag=None, diagco=False):
+    for i,v in enumerate(x): self.x[i] = v
+    for i,v in enumerate(g): self.g[i] = v
+    if (diag is not None):
+      for i,v in enumerate(diag): self.diag[i] = v
+    from fortran_lbfgs import lbfgs as fortran_lbfgs
+    fortran_lbfgs(
+      self.n, self.m,
+      self.x, f, self.g, diagco, self.diag,
+      self.iprint, self.eps, self.xtol, self.w, self.iflag)
+    for i,v in enumerate(self.x): x[i] = v
+    for i,v in enumerate(self.g): g[i] = v
+    if (diag is not None):
+      for i,v in enumerate(self.diag): diag[i] = v
+
+def fortran_lbfgs_run(target_evaluator,
+                      max_calls=100000,
+                      use_curvatures=False):
+  ext = scitbx_lbfgs.ext
+  scitbx_minimizer = ext.minimizer(target_evaluator.n)
+  minimizer = fortran_minimizer(scitbx_minimizer)
+  icall = 0
+  requests_f_and_g = True
+  requests_diag = use_curvatures
+  while 1:
+    if (not use_curvatures):
+      assert not requests_diag
+    x, f, g, d = target_evaluator(
+      requests_f_and_g=requests_f_and_g,
+      requests_diag=requests_diag)
+    if (requests_diag):
+      print("x,f,d:", tuple(x), f, tuple(d))
+    else:
+      print("x,f:", tuple(x), f)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    minimizer(x, f, g, diag=d, diagco=use_curvatures)
+    print("iflag:", minimizer.iflag[0])
+    if (minimizer.iflag[0] <= 0): break
+    requests_f_and_g = minimizer.iflag[0] == 1
+    requests_diag = minimizer.iflag[0] == 2
+    if (requests_f_and_g):
+      icall += 1
+      if (icall > max_calls): break
+  minimizer.n_calls = icall
+  return minimizer
+
+def lbfgs_run(target_evaluator,
+              min_iterations=0,
+              max_iterations=None,
+              traditional_convergence_test=1,
+              use_curvatures=False):
+  ext = scitbx_lbfgs.ext
+  minimizer = ext.minimizer(target_evaluator.n)
+  minimizer.error = None
+  if (traditional_convergence_test):
+    is_converged = ext.traditional_convergence_test(target_evaluator.n)
+  else:
+    raise RuntimeError
+    is_converged = ext.drop_convergence_test(min_iterations)
+  try:
+    icall = 0
+    requests_f_and_g = True
+    requests_diag = use_curvatures
+    while 1:
+      if (requests_f_and_g):
+        icall += 1
+      x, f, g, d = target_evaluator(
+        requests_f_and_g=requests_f_and_g,
+        requests_diag=requests_diag)
+      if (requests_diag):
+        print("x,f,d:", tuple(x), f, tuple(d))
+      else:
+        print("x,f:", tuple(x), f)
+      if (use_curvatures):
+        if (d is None): d = flex.double(x.size())
+        have_request = minimizer.run(x, f, g, d)
+      else:
+        have_request = minimizer.run(x, f, g)
+      if (have_request):
+        requests_f_and_g = minimizer.requests_f_and_g()
+        requests_diag = minimizer.requests_diag()
+        continue
+      assert not minimizer.requests_f_and_g()
+      assert not minimizer.requests_diag()
+      if (traditional_convergence_test):
+        if (minimizer.iter() >= min_iterations and is_converged(x, g)): break
+      else:
+        if (is_converged(f)): break
+      if (max_iterations is not None and minimizer.iter() >= max_iterations):
+        break
+      if (use_curvatures):
+        have_request = minimizer.run(x, f, g, d)
+      else:
+        have_request = minimizer.run(x, f, g)
+      if (not have_request): break
+      requests_f_and_g = minimizer.requests_f_and_g()
+      requests_diag = minimizer.requests_diag()
+  except RuntimeError as e:
+    minimizer.error = str(e)
+  minimizer.n_calls = icall
+  return minimizer
+
+class twisted_gaussian_minimizer:
+
+  def __init__(self, x, s11=1, s12=1.2, s22=2, twist=0.5,
+               min_iterations=0, max_iterations=10000):
+    adopt_init_args(self, locals())
+    self.x = flex.double(x)
+    self.n = self.x.size()
+
+  def run(self, use_fortran=0, use_curvatures=0):
+    if (not use_fortran):
+      self.minimizer = lbfgs_run(
+        target_evaluator=self,
+        min_iterations=self.min_iterations,
+        max_iterations=self.max_iterations,
+        use_curvatures=use_curvatures)
+    else:
+      self.minimizer = fortran_lbfgs_run(
+        target_evaluator=self,
+        use_curvatures=use_curvatures)
+    self(requests_f_and_g=True, requests_diag=False)
+    return self
+
+  def __call__(self, requests_f_and_g, requests_diag):
+    if (not requests_f_and_g and not requests_diag):
+      requests_f_and_g = True
+      requests_diag = True
+    if (requests_f_and_g):
+      self.f = twisted_gauss2d0(self.x, self.s11,self.s12,self.s22, self.twist)
+      self.g = flex.double(
+        (finite_grad_x(self.x, self.s11, self.s12, self.s22, self.twist),
+         finite_grad_y(self.x, self.s11, self.s12, self.s22, self.twist)))
+      self.d = None
+    if (requests_diag):
+      self.d = flex.double(
+        (analytic_curv_xx(self.x, self.s11, self.s12, self.s22, self.twist),
+         analytic_curv_yy(self.x, self.s11, self.s12, self.s22, self.twist)))
+      self.df = flex.double(
+        (finite_curv_xx(self.x, self.s11, self.s12, self.s22, self.twist),
+         finite_curv_yy(self.x, self.s11, self.s12, self.s22, self.twist)))
+      assert self.d.all_ne(0)
+      print(tuple(self.df), "finite")
+      print(tuple(self.d), "analytic")
+      self.d = 1 / self.d
+    return self.x, self.f, self.g, self.d
+
+def run(scale=2, twist=0.5):
+  random.seed(0)
+  if ("--verify" in sys.argv[1:]):
+    verify_derivatives()
+  use_fortran = "--fortran" in sys.argv[1:]
+  for iteration in range(100):
+    x = [random.random()*scale for i in (0,1)]
+    print(x, "start")
+    for use_curvatures in (False, True):
+      m = twisted_gaussian_minimizer(x=x, twist=twist).run(
+        use_fortran=False,
+        use_curvatures=use_curvatures)
+      print(x)
+      print(tuple(m.x), "final")
+      if (use_fortran):
+        mf = twisted_gaussian_minimizer(x=x, twist=twist).run(
+          use_fortran=True,
+          use_curvatures=use_curvatures)
+        assert mf.x.all_eq(m.x)
+        print(mf.minimizer.n_calls, m.minimizer.n_calls)
+        assert mf.minimizer.n_calls+1 == m.minimizer.n_calls
+      if (abs(m.x[0]) > 1.e-4 or abs(m.x[1]) > 1.e-4):
+        print(tuple(m.x), "failure, use_curvatures="+str(use_curvatures))
+      print("iter,exception:", m.minimizer.iter(), m.minimizer.error)
+      print("n_calls:", m.minimizer.n_calls)
+      assert m.minimizer.n_calls == m.minimizer.nfun()
+      print()
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/tst_curvatures.py
+"""Test case dramatically improves LBFGS multiparameter refinement by
+using curvatures to provide relative weightings for the contributions of
+each parameter to the target functional.
+This implementation is based on code from Ralf Grosse-Kunstleve
+in the module scitbx/lbfgs/dev/twisted_gaussian.py.
+Here, the re-usable part of the code is abstracted to a mix-in class
+that can be used by any other application wishing to use curvatures."""
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+def lbfgs_run(target_evaluator,
+              min_iterations=0,
+              max_iterations=None,
+              traditional_convergence_test=1,
+              traditional_convergence_test_eps=None,
+              use_curvatures=False,verbose=False):
+  from scitbx import lbfgs as scitbx_lbfgs
+  ext = scitbx_lbfgs.ext
+  minimizer = ext.minimizer(target_evaluator.n)
+  minimizer.error = None
+  if (traditional_convergence_test and traditional_convergence_test_eps is not None):
+    is_converged = ext.traditional_convergence_test(n = target_evaluator.n,
+      eps = traditional_convergence_test_eps)
+  elif (traditional_convergence_test):
+    is_converged = ext.traditional_convergence_test(target_evaluator.n)
+  else:
+    raise RuntimeError
+    is_converged = ext.drop_convergence_test(min_iterations)
+  callback_after_step = getattr(target_evaluator, "callback_after_step", None)
+  try:
+    icall = 0
+    requests_f_and_g = True
+    requests_diag = use_curvatures
+    while 1:
+      if (requests_f_and_g):
+        icall += 1
+      x, f, g, d = target_evaluator(
+        requests_f_and_g=requests_f_and_g,
+        requests_diag=requests_diag)
+      if verbose:
+        if (requests_diag):
+          print("x,f,d:", tuple(x), f, tuple(d))
+        else:
+          print("x,f:", tuple(x), f)
+      if (use_curvatures):
+        from scitbx.array_family import flex
+        if (d is None): d = flex.double(x.size())
+        have_request = minimizer.run(x, f, g, d)
+      else:
+        have_request = minimizer.run(x, f, g)
+      if (callback_after_step is not None):
+        callback_after_step(minimizer)
+      if (have_request):
+        requests_f_and_g = minimizer.requests_f_and_g()
+        requests_diag = minimizer.requests_diag()
+        continue
+      assert not minimizer.requests_f_and_g()
+      assert not minimizer.requests_diag()
+      if (traditional_convergence_test):
+        if (minimizer.iter() >= min_iterations and is_converged(x, g)): break
+      else:
+        if (is_converged(f)): break
+      if (max_iterations is not None and minimizer.iter() >= max_iterations):
+        break
+      if (use_curvatures):
+        have_request = minimizer.run(x, f, g, d)
+      else:
+        have_request = minimizer.run(x, f, g)
+      if (not have_request): break
+      requests_f_and_g = minimizer.requests_f_and_g()
+      requests_diag = minimizer.requests_diag()
+  except RuntimeError as e:
+    minimizer.error = str(e)
+  minimizer.n_calls = icall
+  return minimizer
+
+class lbfgs_with_curvatures_mix_in(object):
+  """Mix in this class with your application-specific minimizer class.
+     The app-specific class is required to implement:
+       1. In the constructor
+            a) define the free parameters as self.x = flex.double()
+            b) last line: call the lbfgs_with_curvatures_mix_in constructor
+       2. compute_functional_and_gradients() returns (double functional, flex.double gradients)
+       3. curvatures() returns flex.double curvatures == diagonal elements of Hessian matrix
+
+     Exposed variable traditional_convergence_test_eps gives some flexibility
+     to the application program to specify the epsilon value for hitting
+     convergence.  Choosing the right value avoids unnecessary minimization
+     iterations that optimize the target functional to the last decimal place.
+  """
+
+  def __init__(self, min_iterations=0, max_iterations=1000,
+        traditional_convergence_test_eps=None,
+        use_curvatures=True):
+    self.n = len(self.x)
+    self.minimizer = lbfgs_run(
+        target_evaluator=self,
+        min_iterations=min_iterations,
+        max_iterations=max_iterations,
+        traditional_convergence_test_eps=traditional_convergence_test_eps,
+        use_curvatures=use_curvatures)
+
+  def __call__(self, requests_f_and_g, requests_diag):
+    if (not requests_f_and_g and not requests_diag):
+      requests_f_and_g = True
+      requests_diag = True
+    if (requests_f_and_g):
+      self.f, self.g = self.compute_functional_and_gradients()
+      self.d = None
+    if (requests_diag):
+      self.d = self.curvatures()
+      #assert self.d.all_gt(0) # conceptually curvatures must be positive to be within convergence well
+      sel = (self.g != 0)
+      self.d.set_selected(~sel,1000) # however, if we've decided to not refine a certain parameter, we
+                                     # can indicate this to LBFGS by setting the gradient to zero.
+                                     # Then we can set the curvature to an arbitrary positive value that
+                                     # will be tested for positivity but otherwise ignored.
+      assert self.d.select(sel).all_gt(0)
+      self.d = 1 / self.d
+    return self.x, self.f, self.g, self.d
+
+
+class fit_xy_translation(lbfgs_with_curvatures_mix_in):
+  """Elementary test case.  Six groups of xy observations generated by
+     random Gaussian with mean = 0 and sigma = 1.  Fit the population means with
+     six xy model means.  However, since the sample sizes are
+     extremely different, convergence is slow if using a global least-squares
+     target function.  Convergence speeds up considerably if curvatures
+     are added.
+  """
+
+  def __init__(self,use_curvatures,verbose):
+    self.verbose=verbose
+    self.create_test_data()
+    from scitbx.array_family import flex
+
+    self.count_iterations = 0
+    self.x = flex.double([0.]*12) # x & y displacements for each of 6 data groups
+    lbfgs_with_curvatures_mix_in.__init__(self,
+      min_iterations=0,
+      max_iterations=1000,
+      use_curvatures=use_curvatures)
+    if self.verbose:
+      print(["%8.5f"%a for a in self.x[0::2]])
+      print(["%8.5f"%a for a in self.x[1::2]])
+
+  def curvatures(self):
+    from scitbx.array_family import flex
+    curvs = flex.double([0.]*12)
+    for x in range(6):
+      selection = (self.master_groups==x)
+      curvs[2*x] = 2. * selection.count(True)
+      curvs[2*x+1]=2. * selection.count(True)
+    return curvs
+
+  def compute_functional_and_gradients(self):
+    from scitbx.array_family import flex
+    import math
+
+    self.model_mean_x = flex.double(len(self.observed_x))
+    self.model_mean_y = flex.double(len(self.observed_x))
+
+    for x in range(6):
+      selection = (self.master_groups==x)
+      self.model_mean_x.set_selected(selection, self.x[2*x])
+      self.model_mean_y.set_selected(selection, self.x[2*x+1])
+
+    delx = self.observed_x - self.model_mean_x
+    dely = self.observed_y - self.model_mean_y
+    delrsq = delx*delx + dely*dely
+
+    f = flex.sum(delrsq)
+
+    gradients = flex.double([0.]*12)
+    for x in range(6):
+      selection = (self.master_groups==x)
+      gradients[2*x] = -2. * flex.sum( delx.select(selection) )
+      gradients[2*x+1]=-2. * flex.sum( dely.select(selection) )
+    if self.verbose:
+      print("Functional ",math.sqrt(flex.mean(delrsq)))
+    self.count_iterations += 1
+    return f,gradients
+
+  def create_test_data(self):
+    from scitbx.array_family import flex
+    self.observed_x = flex.double()
+    self.observed_y = flex.double()
+    self.master_groups = flex.int()
+    igroup = 0
+    import random
+    random.seed(0.0)
+
+    for group_N in [30000, 25000, 20000, 10000, 2000, 5]:  # six data groups of different sizes
+      for x in range(group_N):
+        self.observed_x.append( random.gauss(0.,1.) )
+        self.observed_y.append( random.gauss(0.,1.) )
+        self.master_groups.append(igroup)
+      igroup+=1
+
+    self.known_mean_x = flex.double()
+    self.known_mean_y = flex.double()
+    for x in range(6):
+      selection = (self.master_groups==x)
+      self.known_mean_x.append( flex.mean( self.observed_x.select(selection) ) )
+      self.known_mean_y.append( flex.mean( self.observed_y.select(selection) ) )
+    if self.verbose:
+      print(["%8.5f"%a for a in self.known_mean_x])
+      print(["%8.5f"%a for a in self.known_mean_y])
+
+def run(verbose=False):
+
+  C = fit_xy_translation(use_curvatures=True,verbose=verbose)
+  assert C.count_iterations < 10 # should be 7 on Linux
+  C = fit_xy_translation(use_curvatures=False,verbose=verbose)
+  assert C.count_iterations > 40 # should be 50 on Linux
+
+  return None
+
+if (__name__ == "__main__"):
+
+  result = run(verbose=False)
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/tst_ext.py
+from __future__ import absolute_import, division, print_function
+import math
+from scitbx.array_family import flex
+from scitbx import lbfgs
+from six.moves import range
+
+def exercise_drop_convergence_test():
+  c = lbfgs.drop_convergence_test()
+  assert c.n_test_points() > 0
+  assert c.max_drop_eps() > 0
+  assert c.iteration_coefficient() > 0
+  assert c.objective_function_values().size() == 0
+  assert c.max_drop() == 0
+  c = lbfgs.drop_convergence_test(n_test_points=6)
+  c = lbfgs.drop_convergence_test(n_test_points=6, max_drop_eps=1.e-3)
+  c = lbfgs.drop_convergence_test(
+    n_test_points=6, max_drop_eps=1.e-3, iteration_coefficient=3)
+  assert c.n_test_points() == 6
+  assert c.max_drop_eps() == 1.e-3
+  assert c.iteration_coefficient() == 3
+  assert c.objective_function_values().size() == 0
+  assert c.max_drop() == 0
+  for n_test_points in (2, 7):
+    c = lbfgs.drop_convergence_test(n_test_points, 1.e-3)
+    assert c.n_test_points() == n_test_points
+    converged = []
+    for x in range(10):
+      converged.append(c(math.exp(-x)))
+    c.objective_function_values().size() == 10
+    if (n_test_points == 2):
+      assert converged == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+    else:
+      assert converged == [0, 0, 0, 0, 0, 0, 0, 0, 1, 1]
+
+def exercise_minimization(verbose):
+  n = 100
+  x = flex.double(n)
+  g = flex.double(n)
+  for j in range(0, n, 2):
+    x[j] = -1.2
+    x[j+1] = 1.
+  minimizer = lbfgs.minimizer(n)
+  is_converged = lbfgs.traditional_convergence_test(n)
+  if (verbose):
+    print("n: ", minimizer.n())
+    print("m: ", minimizer.m())
+    print("xtol: ", minimizer.xtol())
+  while 1:
+    f = 0.
+    for j in range(0, n, 2):
+      t1 = 1.e0 - x[j]
+      t2 = 1.e1 * (x[j+1] - x[j] * x[j])
+      g[j+1] = 2.e1 * t2
+      g[j] = -2.e0 * (x[j] * g[j+1] + t1)
+      f = f + t1 * t1 + t2 * t2
+    if (minimizer.run(x, f, g)): continue
+    if (verbose):
+      print("f:", f, "gnorm:", minimizer.euclidean_norm(g))
+      print(minimizer.iter(), minimizer.nfun(), minimizer.stp())
+    if (is_converged(x, g)): break
+    if (minimizer.nfun() > 2000): break
+    assert minimizer.run(x, f, g)
+  assert f < 1.e-12
+  assert minimizer.euclidean_norm(g) < 1.e-4
+  assert minimizer.iter() < 40
+  assert minimizer.nfun() < 50
+  assert abs(minimizer.stp() - 1) < 1.e-6
+
+def run():
+  import os, sys
+  Endless = "--Endless" in sys.argv
+  verbose = "--Verbose" in sys.argv and not Endless
+  exercise_drop_convergence_test()
+  while 1:
+    exercise_minimization(verbose)
+    if (not Endless): break
+  t = os.times()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/tst_func_free_line_search.py
+"""
+lbfgs.tst_func_free_line_search
+
+"""
+
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+import scitbx.lbfgs
+from libtbx import adopt_init_args
+from libtbx.test_utils import approx_equal
+
+def func(x1,x2,x3):
+  return (x1-2)**2 + (x2+5)**2 + (x3-500)**4
+
+def grad(x1,x2,x3):
+  return flex.double([(x1-2)*2, (x2+5)*2, 4*(x3-500)*3])
+
+x0 = [-100,203,999]
+
+class lbfgs(object):
+
+  def __init__(self, gradient_only):
+    print("scitbx.lbfgs: use gradient_only line search: ", gradient_only)
+    adopt_init_args(self, locals())
+    self.lbfgs_core_params = scitbx.lbfgs.core_parameters(
+                               stpmin=1.e-10,
+                               stpmax=500)
+    self.lbfgs_termination_params = scitbx.lbfgs.termination_parameters(
+      max_iterations = 6000)
+    self.f=None
+    self.g=None
+    self.x = flex.double(x0)
+    self.minimizer = scitbx.lbfgs.run(
+      gradient_only             = gradient_only,
+      target_evaluator          = self,
+      core_params               = self.lbfgs_core_params,
+      termination_params        = self.lbfgs_termination_params,
+      exception_handling_params = scitbx.lbfgs.exception_handling_parameters(
+        ignore_line_search_failed_step_at_lower_bound = True))
+
+  def compute_functional_and_gradients(self):
+    self.f = func(x1=self.x[0], x2 = self.x[1], x3 = self.x[2])
+    self.g = grad(x1=self.x[0], x2 = self.x[1], x3 = self.x[2])
+    return self.f, self.g
+
+if(__name__ == "__main__"):
+  print("The answer is: [2, -5, 500] ")
+  print("The start value is:", x0)
+  t=lbfgs(True)
+  assert approx_equal(t.x, [2, -5, 500])
+  t=lbfgs(False)
+  assert approx_equal(t.x, [2, -5, 500])
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/tst_lbfgs_fem.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.lbfgs import have_lbfgs_fem, fortran, raw_reference, raw
+from libtbx.utils import show_times
+from libtbx.test_utils import show_diff
+from libtbx import easy_run
+import libtbx.load_env
+import random
+import re
+import sys, os
+from six.moves import range
+from six.moves import zip
+
+def exercise(lbfgs_impl, n=100, m=5, iprint=[1, 0]):
+  assert n % 2 == 0
+  x = flex.double(n)
+  g = flex.double(n)
+  diag = flex.double(n)
+  diagco = 0
+  eps = 1.0e-5
+  xtol = 1.0e-16
+  for j in range(0, n, 2):
+    x[j] = -1.2
+    x[j+1] = 1.
+  size_w = n*(2*m+1)+2*m
+  w = flex.double(size_w)
+  iflag = 0
+  for icall in range(2000):
+    f = 0.
+    for j in range(0, n, 2):
+      t1 = 1.e0 - x[j]
+      t2 = 1.e1 * (x[j+1] - x[j] * x[j])
+      g[j+1] = 2.e1 * t2
+      g[j] = -2.e0 * (x[j] * g[j+1] + t1)
+      f = f + t1 * t1 + t2 * t2
+    iflag = lbfgs_impl(
+      n=n, m=m, x=x, f=f, g=g, diagco=diagco, diag=diag,
+      iprint=iprint, eps=eps, xtol=xtol, w=w, iflag=iflag)
+    if (iflag <= 0): break
+
+def run_cmd(cmd):
+  print(cmd)
+  sys.stdout.flush()
+  out = easy_run.fully_buffered(command=cmd)
+  err = "\n".join(out.stderr_lines)
+  if err:
+    print(err)
+    if err.find("== ERROR SUMMARY: 0 errors from 0 contexts") < 0:
+      raise AssertionError(
+        "stderr output does not appear to be valgrind output")
+  return "\n".join(out.stdout_lines)
+
+def run_and_compare_sdrive_fem(this_script):
+  sdrive_fem = libtbx.env.under_build(path="scitbx/lbfgs/sdrive_fem")
+  if not os.path.isfile(sdrive_fem):
+    return
+  outputs = []
+  for cmd in [sdrive_fem, 'scitbx.python "%s" fortran 100 5 1 0' % this_script]:
+    outputs.append(run_cmd(cmd=cmd))
+  assert not show_diff(outputs[0], outputs[1])
+
+def truncate_floats(out):
+  match_objects = re.finditer(
+    "[ -][0-9]\\.[0-9][0-9][0-9]E[-+][0-9][0-9]", out)
+  fragments = []
+  k = 0
+  for match_obj in match_objects:
+    i = match_obj.start()
+    j = match_obj.end()
+    v = float(out[i:j])
+    if abs(v) < 1e-14:
+      v = 0
+    else:
+      v = float(out[i:j-4])
+    fmt = "%%%d.1f" % (j-4-i)
+    fragments.append(out[k:i] + fmt % v)
+    k = j-4
+  fragments.append(out[k:])
+  return "".join(fragments)
+
+def replace_e0dd_with_edd(out):
+  match_objects = re.finditer("E[-+]0[0-9][0-9]", out)
+  fragments = []
+  k = 0
+  for match_obj in match_objects:
+    j = match_obj.start() + 2
+    i = out.rfind(" ", k, j)
+    assert i >= 0
+    if (j - i < 9):
+      fragments.append(out[k:i] + " " + out[i:j])
+    else:
+      fragments.append(out[k:j])
+    k = j + 1
+  fragments.append(out[k:])
+  return "".join(fragments)
+
+def run_and_compare_implementations(this_script, n, m, iprint):
+  outputs = []
+  for impl in ["fortran", "raw_reference", "raw"]:
+    if impl == "fortran" and not have_lbfgs_fem:
+      continue
+    cmd = 'scitbx.python "%s" %s %d %d %d %d' % (
+      this_script, impl, n, m, iprint[0], iprint[1])
+    out = run_cmd(cmd=cmd)
+    if impl == "fortran":
+      out = out.replace("D-", "E-").replace("D+", "E+")
+    out = replace_e0dd_with_edd(out=out)
+    out = out.replace("E-00", "E+00")
+    out = truncate_floats(out=out)
+    outputs.append(out)
+  assert len(outputs) >= 2
+  a = outputs[0]
+  for b in outputs[1:]:
+    if sys.platform != 'darwin':
+      assert a == b, show_diff(b, a)
+    elif a != b:
+      show_diff(b, a)
+      # We need this to cover up test failure with Xcode >=7.3
+      for lia, lib in zip(a.splitlines(), b.splitlines()):
+        if lia != lib:
+          gnorma = lia.split()[3]
+          gnormb = lib.split()[3]
+          assert abs(float(gnorma) - float(gnormb)) <= 1e-6
+
+def compare_implementations():
+  this_script = libtbx.env.under_dist(
+    module_name="scitbx", path="lbfgs/tst_lbfgs_fem.py")
+  assert '"' not in this_script
+  run_and_compare_sdrive_fem(this_script=this_script)
+  rnd = random.Random(x=0)
+  for iprint1 in [-1, 0, 1, 2, 3]:
+    for iprint2 in [0, 1, 2, 3]:
+      n = rnd.choice([100, 14, 4, 2])
+      m = rnd.choice([2, 3, 4, 5, 6, 7])
+      run_and_compare_implementations(
+        this_script=this_script, n=n, m=m, iprint=[iprint1, iprint2])
+
+def run(args):
+  timer = show_times(time_start="now")
+  if len(args) == 5:
+    exercise(
+      lbfgs_impl=eval(args[0]),
+      n=int(args[1]),
+      m=int(args[2]),
+      iprint=[int(args[3]), int(args[4])])
+    return
+  assert args in [[], ["--once"], ["--endless"]]
+  if not have_lbfgs_fem:
+    print("Skipping some tests: lbfgs_fem.cpp not linked into scitbx_lbfgs_ext.")
+  once = "--once" in args
+  endless = "--endless" in args
+  while once or endless:
+    if have_lbfgs_fem:
+      exercise(lbfgs_impl=fortran)
+    exercise(lbfgs_impl=raw_reference)
+    exercise(lbfgs_impl=raw)
+    once = False
+  else:
+    compare_implementations()
+  timer()
+  print("OK")
+
+if __name__ == "__main__":
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgs/tst_mpi_split_evaluator.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from scitbx.lbfgs import core_parameters, termination_parameters
+from scitbx.lbfgs import exception_handling_parameters, ext
+from scitbx.array_family import flex
+import scitbx
+
+"""mpi_split_evaluator_run(), supports an LBFGS parameter optimization scenario where
+the target (functional and gradients) are significantly rate limiting, and moreover where
+the requisite terms of f and g can be load balanced by distributing the data over parallel
+evaluator instances, each of which can be handled by an MPI worker rank.  Rank 0 then
+performs a simple MPI.reduce sum to obtain the full f and g.  There has been
+no low-level redesign to support MPI.  In particular, the ext.minimizer is
+run (wastefully) by every worker rank, using the same x parameters, f, and g. A simple
+working example is given."""
+
+# based on scitbx/lbfgs/__init__.py, run_c_plus_plus
+def mpi_split_evaluator_run(target_evaluator,
+                    termination_params=None,
+                    core_params=None,
+                    exception_handling_params=None,
+                    log=None,
+                    #---> Insertion starts
+                    gradient_only=False,
+                    line_search=True):
+                    #<--- Insertion ends
+  """The supported scenario is that each MPI worker rank has a target evaluator
+  that has part of the data.  Each rank calculates a bit of the functional and
+  gradients, but then mpi reduce is used to sum them all up.  There has been
+  no low-level redesign to support MPI.  In particular, the ext.minimizer is
+  run (wastefully) by every worker rank, using the same data.  It is assumed that
+  the calculation of compute_functional_and_gradients() is overwhelmingly the rate
+  limiting step, and that is what MPI parallelism is intended to distribute here."""
+  from libtbx.mpi4py import MPI
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+
+  if (termination_params is None):
+    termination_params = termination_parameters()
+  if (core_params is None):
+    core_params = core_parameters()
+  if (exception_handling_params is None):
+    exception_handling_params = exception_handling_parameters()
+  x = target_evaluator.x
+  if (log is not None):
+    print("lbfgs minimizer():", file=log)
+    print("  x.size():", x.size(), file=log)
+    print("  m:", core_params.m, file=log)
+    print("  maxfev:", core_params.maxfev, file=log)
+    print("  gtol:", core_params.gtol, file=log)
+    print("  xtol:", core_params.xtol, file=log)
+    print("  stpmin:", core_params.stpmin, file=log)
+    print("  stpmax:", core_params.stpmax, file=log)
+    print("lbfgs traditional_convergence_test:", \
+      termination_params.traditional_convergence_test, file=log)
+  minimizer = ext.minimizer(
+    x.size(),
+    core_params.m,
+    core_params.maxfev,
+    core_params.gtol,
+    core_params.xtol,
+    core_params.stpmin,
+    core_params.stpmax)
+  if (termination_params.traditional_convergence_test):
+    is_converged = ext.traditional_convergence_test(
+      x.size(),
+      termination_params.traditional_convergence_test_eps)
+  else:
+    is_converged = ext.drop_convergence_test(
+      n_test_points=termination_params.drop_convergence_test_n_test_points,
+      max_drop_eps=termination_params.drop_convergence_test_max_drop_eps,
+      iteration_coefficient
+        =termination_params.drop_convergence_test_iteration_coefficient)
+  callback_after_step = getattr(target_evaluator, "callback_after_step", None)
+  diag_mode = getattr(target_evaluator, "diag_mode", None)
+  if (diag_mode is not None): assert diag_mode in ["once", "always"]
+  f_min, x_min = None, None
+  f, g = None, None
+  try:
+    while 1:
+      if (diag_mode is None):
+        #XXX Only the diag_mode==None case is currently implemented, just as example
+        f_term, g_term = target_evaluator.compute_functional_and_gradients()
+        f_total = comm.reduce(f_term, MPI.SUM, 0)
+        g_total = comm.reduce(g_term, MPI.SUM, 0)
+        if rank==0: transmit = (f_total,g_total)
+        else: transmit = None
+        f, g = comm.bcast(transmit, root=0)
+        if False and rank==0: # for debug
+          print ("%s %10.4f"%("MPI stp",f),"["," ".join(["%10.4f"%a for a in x]),"]")
+        d = None
+      else:
+        f, g, d = target_evaluator.compute_functional_gradients_diag()
+        if (diag_mode == "once"):
+          diag_mode = None
+      if (f_min is None):
+        if (not termination_params.traditional_convergence_test):
+          is_converged(f)
+        f_min, x_min = f, x.deep_copy()
+      elif (f_min > f):
+        f_min, x_min = f, x.deep_copy()
+      if (log is not None):
+        print("lbfgs minimizer.run():" \
+          " f=%.6g, |g|=%.6g, x_min=%.6g, x_mean=%.6g, x_max=%.6g" % (
+          f, g.norm(), flex.min(x), flex.mean(x), flex.max(x)), file=log)
+      if (d is None):
+        #---> Insertion starts
+        if (minimizer.run(x, f, g, gradient_only,line_search)): continue
+        #<--- Insertion ends
+      else:
+        #---> Insertion starts
+        if (minimizer.run(x, f, g, d, gradient_only,line_search)): continue
+        #<--- Insertion ends
+      if (log is not None):
+        print("lbfgs minimizer step", file=log)
+      if (callback_after_step is not None):
+        if (callback_after_step(minimizer) is True):
+          if (log is not None):
+            print("lbfgs minimizer stop: callback_after_step is True", file=log)
+          break
+      if (termination_params.traditional_convergence_test):
+        if (    minimizer.iter() >= termination_params.min_iterations
+            and is_converged(x, g)):
+          if (log is not None):
+            print("lbfgs minimizer stop: traditional_convergence_test", file=log)
+          break
+      else:
+        if (is_converged(f)):
+          if (log is not None):
+            print("lbfgs minimizer stop: drop_convergence_test", file=log)
+          break
+      if (    termination_params.max_iterations is not None
+          and minimizer.iter() >= termination_params.max_iterations):
+        if (log is not None):
+          print("lbfgs minimizer stop: max_iterations", file=log)
+        break
+      if (    termination_params.max_calls is not None
+          and minimizer.nfun() > termination_params.max_calls):
+        if (log is not None):
+          print("lbfgs minimizer stop: max_calls", file=log)
+        break
+      if (d is None):
+        #---> Insertion starts
+        if (not minimizer.run(x, f, g, gradient_only,line_search)): break
+        #<--- Insertion ends
+      else:
+        #---> Insertion starts
+        if (not minimizer.run(x, f, g, d, gradient_only,line_search)): break
+        #<--- Insertion ends
+  except RuntimeError as e:
+    minimizer.error = str(e)
+    if (log is not None):
+      print("lbfgs minimizer exception:", str(e), file=log)
+    if (x_min is not None):
+      x.clear()
+      x.extend(x_min)
+    error_classification = exception_handling_params.filter(
+      minimizer.error, x.size(), x, g)
+    if (error_classification > 0):
+      raise
+    elif (error_classification < 0):
+      minimizer.is_unusual_error = True
+    else:
+      minimizer.is_unusual_error = False
+  else:
+    minimizer.error = None
+    minimizer.is_unusual_error = None
+  if (log is not None):
+    print("lbfgs minimizer done.", file=log)
+  return minimizer
+
+class simple_quadratic(object):
+  def __init__(self):
+    self.datax = flex.double(range(-15,17))
+    self.datay = flex.double([20,15,18,12,10, 10,5,5,1,2, -3,-1,-4,-5,-4,
+                          -6,-4,-6,-4,-4,  -4,-5,-1,0,-1,  1,5,4,9,10, 13,15])
+    abc = 0.1,-0.3,-5.0 # The expected parameters, y = a*x*x + b*x +  c
+    self.n = 3
+    self.x = flex.double([1,1,1])#lay out the parameter estimates.
+
+  def run(self):
+    self.minimizer = scitbx.lbfgs.run(target_evaluator=self,
+        termination_params=scitbx.lbfgs.termination_parameters(
+        traditional_convergence_test=True,
+        traditional_convergence_test_eps=1.e-3,
+        max_calls=1000)
+    )
+    self.a = self.x
+
+  def print_step(self,message,target):
+    print ("%s %10.4f"%(message,target),"["," ".join(["%10.4f"%a for a in self.x]),"]")
+
+  def compute_functional_and_gradients(self):
+    self.a = self.x
+    residuals = self.datay - self.a[0]*self.datax*self.datax - self.a[1]*self.datax - self.a[2]
+    f = flex.sum( 0.5 * residuals * residuals )
+    g = flex.double(self.n)
+    dR_da = -self.datax*self.datax
+    dR_db = -self.datax
+    dR_dc = flex.double(len(self.datax),-1)
+    g[0] = flex.sum( residuals * dR_da )
+    g[1] = flex.sum( residuals * dR_db )
+    g[2] = flex.sum( residuals * dR_dc )
+    # self.print_step("LBFGS stp",f)
+    return f,g
+
+class mpi_quadratic(simple_quadratic):
+
+  def reinitialize(self,idx,logical_size):
+    if idx >= logical_size:
+      self.skip_flag = True
+    else:
+      self.skip_flag = False
+      self.datax = self.datax[idx]
+      self.datay = self.datay[idx]
+
+  def compute_functional_and_gradients(self):
+    if self.skip_flag: return 0,flex.double(self.n)
+    a = self.x
+    residual = (self.datay - a[0]*self.datax*self.datax - a[1]*self.datax - a[2])
+    f = 0.5 * residual * residual
+    g = flex.double(self.n)
+    dR_da = -self.datax*self.datax
+    dR_db = -self.datax
+    dR_dc = -1.
+    g[0] = residual * dR_da
+    g[1] = residual * dR_db
+    g[2] = residual * dR_dc
+    return f,g
+
+def run_mpi():
+  from libtbx.mpi4py import MPI
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+  #print ("hello from rank %d of %d"%(rank,size))
+
+  W = simple_quadratic()
+  if rank==0:
+    W.run()
+    print(list(W.a), "Single process final answer")
+  else:
+    pass
+  comm.barrier()
+
+
+  M = mpi_quadratic()
+  M.reinitialize(idx=rank, logical_size=len(W.datax))
+  minimizer = mpi_split_evaluator_run(target_evaluator=M,
+        termination_params=scitbx.lbfgs.termination_parameters(
+        traditional_convergence_test=True,
+        traditional_convergence_test_eps=1.e-3,
+        max_calls=1000)
+      )
+  if rank==0:
+    print(list(M.x), "MPI final answer")
+    try:
+      from libtbx.test_utils import approx_equal
+      assert approx_equal(M.x,W.a)
+      assert approx_equal(M.x,[0.09601410216133123, -0.28424727078557327, -4.848332140888606])
+      print ("OK")
+    except Exception:
+      print ("FAIL")
+
+if __name__=="__main__":
+  Usage = """
+srun -n 32 -c 2 libtbx.python scitbx/lbfgs/tst_mpi_split_evaluator.py #small test case, 1 node
+...only works when MPI is present, e.g., salloc -C haswell -N1 -q interactive -t 00:15:00
+"""
+  run_mpi()
+
+
+ *******************************************************************************

@@ -1,0 +1,329 @@
+
+
+ *******************************************************************************
+iotbx/kriber/__init__.py
+"""Routines to use strudat to read structured coordinate files"""
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/kriber/strudat.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import uctbx
+import sys
+
+class atom(object):
+
+  def __init__(self, label, site, connectivity):
+    self.label = label
+    self.site = tuple(site)
+    self.connectivity = connectivity
+
+  def as_xray_scatterer(self):
+    return xray.scatterer(label=self.label, site=self.site)
+
+class read_entry(object):
+
+  def __init__(self, f):
+    line = f.readline()
+    if (len(line) == 0):
+      self.tag = False
+      return
+    if (line[0] != "*"):
+      self.tag = None
+      return
+    self.tag = line[1:].strip()
+    assert len(self.tag) != 0
+    self.title = f.readline().strip()
+    self.reference = f.readline().strip()
+    self.space_group_symbol = f.readline().strip()
+    assert len(self.space_group_symbol) != 0
+    self.unit_cell_parameters = [float(p) for p in f.readline().split()]
+    assert len(self.unit_cell_parameters) != 0
+    self.atoms = []
+    while 1:
+      line = f.readline()
+      if (len(line) == 0): break
+      if (line.startswith("--")): break
+      atom_line_fields = line.split("#", 1)[0].split()
+      if (len(atom_line_fields) == 0): continue
+      assert len(atom_line_fields) in (4,5), line.rstrip()
+      site = [float(x) for x in atom_line_fields[1:4]]
+      if (len(atom_line_fields) > 4):
+        connectivity = int(atom_line_fields[4])
+      else:
+        connectivity = None
+      self.atoms.append(atom(atom_line_fields[0], site, connectivity))
+    self._space_group_info = None
+    self._unit_cell = None
+
+  def space_group_info(self):
+    if (self._space_group_info is None):
+      self._space_group_info = sgtbx.space_group_info(
+        self.space_group_symbol, table_id="A1983")
+    return self._space_group_info
+
+  def space_group(self):
+    return self.space_group_info().group()
+
+  def _derived_laue_group_symbol(self):
+    return str(sgtbx.space_group_info(
+      group=self.space_group().build_derived_laue_group())).replace(" ", "")
+
+  def unit_cell(self):
+    self._unit_cell = uctbx.infer_unit_cell_from_symmetry(
+      self.unit_cell_parameters, self.space_group())
+    if (self._unit_cell is None):
+      raise RuntimeError("Cannot interpret unit cell parameters.")
+    return self._unit_cell
+
+  def crystal_symmetry(self):
+    return crystal.symmetry(
+      unit_cell=self.unit_cell(),
+      space_group_info=self.space_group_info())
+
+  def show(self, f=None):
+    if (f is None): f = sys.stdout
+    print("Tag:", self.tag, file=f)
+    print("Title:", self.title, file=f)
+    print("Reference:", self.reference, file=f)
+    self.crystal_symmetry().show_summary(f=f)
+    for atm in self.atoms:
+      print("%-8s" % atm.label, end=' ', file=f)
+      print("%8.5f %8.5f %8.5f" % atm.site, end=' ')
+      if (atm.connectivity != None):
+        print("%2d" % atm.connectivity, end=' ')
+      print()
+
+  def connectivities(self, all_or_nothing=False):
+    result = [atom.connectivity for atom in self.atoms]
+    if (all_or_nothing):
+      n_none = result.count(None)
+      if (n_none == len(result)):
+        result = None
+      elif (n_none != 0):
+        raise AssertionError("Tag %s: %d atom%s missing the bond count."
+          % (self.tag, n_none, [" is","s are"][int(n_none!=1)]))
+    return result
+
+  def as_xray_structure(self, min_distance_sym_equiv=0.5):
+    result = xray.structure(
+      special_position_settings=crystal.special_position_settings(
+        crystal_symmetry=self.crystal_symmetry(),
+        min_distance_sym_equiv=min_distance_sym_equiv))
+    for atm in self.atoms:
+      result.add_scatterer(atm.as_xray_scatterer())
+    return result
+
+class read_all_entries(object):
+
+  def __init__(self, f):
+    self.entries = []
+    while 1:
+      entry = read_entry(f)
+      if (entry.tag is None):
+        continue
+      if (entry.tag == False):
+        break
+      self.entries.append(entry)
+
+  def show(self, f=None):
+    if (f is None): f = sys.stdout
+    for entry in self.entries:
+      entry.show(f=f)
+      print(file=f)
+
+  def __call__(self):
+    return self.entries
+
+  def get(self, tag):
+    for entry in self.entries:
+      if (entry.tag == tag):
+        return entry
+    return None
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/kriber/tst_strudat.py
+from __future__ import absolute_import, division, print_function
+from iotbx.kriber import strudat
+from cctbx.regression import tst_direct_space_asu
+from cctbx import crystal
+from cctbx import uctbx
+from cctbx.array_family import flex
+from libtbx.test_utils import Exception_expected
+from libtbx.utils import format_cpu_times
+import libtbx.load_env
+from six.moves import cStringIO as StringIO
+import sys, os
+from six.moves import zip
+
+def exercise_basic():
+  test_file = StringIO("""
+*tric
+Title
+Reference
+P 1
+ 11 12 13 100 110 120
+Si 0.1 0.2 0.3
+---------------------------------
+*mono_b
+Title
+Reference
+P 1 2 1
+ 11 12 13 100
+Si 0.1 0.2 0.3
+---------------------------------
+*mono_c
+Title
+Reference
+P 1 1 2
+ 11 12 13 100
+Si 0.1 0.2 0.3
+---------------------------------
+*mono_a
+Title
+Reference
+P 2 1 1
+ 11 12 13 100
+Si 0.1 0.2 0.3
+---------------------------------
+*orth
+Title
+Reference
+P 2 2 2
+ 11 12 13
+Si 0.1 0.2 0.3 # remark
+---------------------------------
+*tetr
+Title
+Reference
+P 4
+ 11 13
+Si 0.1 0.2 0.3 4
+---------------------------------
+*trig
+Title
+Reference
+R 3
+ 11 13
+Si 0.1 0.2 0.3
+---------------------------------
+*rhom
+Title
+Reference
+R 3 R
+ 11 100
+Si 0.1 0.2 0.3
+---------------------------------
+*hexa
+Title
+Reference
+P 6
+ 11 13
+Si 0.1 0.2 0.3
+---------------------------------
+*cubi
+Title
+Reference
+P 2 3
+ 11
+Si 0.1 0.2 0.3
+O  0.0 0.0 0.0
+---------------------------------
+*mixcon1
+Title
+Reference
+P 2 3
+ 11
+Si 0.1 0.2 0.3 4
+O  0.0 0.0 0.0
+---------------------------------
+*mixcon2
+Title
+Reference
+P 2 3
+ 11
+Si 0.1 0.2 0.3 4
+O  0.0 0.0 0.0
+O  0.0 0.0 0.0
+---------------------------------
+""")
+  all_entries = strudat.read_all_entries(test_file)
+  for tag,cell in (("tric", (11,12,13,100,110,120)),
+                   ("mono_b", (11,12,13,90,100,90)),
+                   ("mono_c", (11,12,13,90,90,100)),
+                   ("mono_a", (11,12,13,100,90,90)),
+                   ("orth", (11,12,13,90,90,90)),
+                   ("tetr", (11,11,13,90,90,90)),
+                   ("trig", (11,11,13,90,90,120)),
+                   ("rhom", (11,11,11,100,100,100)),
+                   ("hexa", (11,11,13,90,90,120)),
+                   ("cubi", (11,11,11,90,90,90))):
+    assert all_entries.get(tag).unit_cell().is_similar_to(
+      uctbx.unit_cell(cell))
+  assert all_entries.get("orth").atoms[0].connectivity is None
+  assert all_entries.get("tetr").atoms[0].connectivity == 4
+  assert all_entries.get("mixcon1").connectivities() == [4, None]
+  assert all_entries.get("mixcon2").connectivities() == [4, None, None]
+  try:
+    all_entries.get("mixcon1").connectivities(all_or_nothing=True)
+  except AssertionError as e:
+    assert str(e) == "Tag mixcon1: 1 atom is missing the bond count."
+  else:
+    raise Exception_expected
+  try:
+    all_entries.get("mixcon2").connectivities(all_or_nothing=True)
+  except AssertionError as e:
+    assert str(e) == "Tag mixcon2: 2 atoms are missing the bond count."
+  else:
+    raise Exception_expected
+  assert all_entries.get("cubi").as_xray_structure().scatterers().size() == 2
+
+def exercise_zeolite_atlas(distance_cutoff=3.5):
+  atlas_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/misc/strudat_zeolite_atlas",
+    test=os.path.isfile)
+  if (atlas_file is None):
+    print("Skipping exercise_zeolite_atlas(): input file not available")
+    return
+  with open(atlas_file) as f:
+    all_entries = strudat.read_all_entries(f)
+  for i,entry in enumerate(all_entries.entries):
+    structure = entry.as_xray_structure()
+    if ("--full" in sys.argv[1:] or i % 20 == 0):
+      tst_direct_space_asu.exercise_neighbors_pair_generators(
+        structure=structure,
+        verbose="--Verbose" in sys.argv[1:])
+    asu_mappings = structure.asu_mappings(buffer_thickness=distance_cutoff)
+    pair_generator = crystal.neighbors_fast_pair_generator(
+      asu_mappings=asu_mappings,
+      distance_cutoff=distance_cutoff)
+    bond_counts = flex.size_t(structure.scatterers().size(), 0)
+    for pair in pair_generator:
+      bond_counts[pair.i_seq] += 1
+      if (pair.j_sym == 0):
+        bond_counts[pair.j_seq] += 1
+    for atom,bond_count in zip(entry.atoms, bond_counts):
+      assert atom.connectivity is not None
+      assert atom.connectivity == bond_count
+
+def run():
+  exercise_basic()
+  exercise_zeolite_atlas()
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************

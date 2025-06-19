@@ -1,0 +1,117 @@
+
+
+ *******************************************************************************
+scitbx/graphics_utils/__init__.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_graphics_utils_ext")
+from scitbx_graphics_utils_ext import *
+from cctbx.array_family import flex
+
+def color_by_property(
+    properties,
+    selection,
+    color_all=False,
+    gradient_type="rainbow",
+    min_value=0.2):
+  gradients = ["rainbow", "redblue", "heatmap"]
+  assert (gradient_type in gradients)
+  return color_by_property_(
+    properties=properties.as_double(),
+    selection=selection,
+    color_all=color_all,
+    gradient_type=gradients.index(gradient_type),
+    min_value=min_value)
+
+
+def map_to_rgb_colourmap(
+    data_for_colors,
+    colormap,
+    selection,
+    attenuation=None,
+    powscale=1.0,
+    map_directly=False,
+    color_all=False):
+  if attenuation is None:
+    attenuation = flex.double(data_for_colors.size(), 1.0)
+  return map_to_rgb_colourmap_(
+    data_for_colors=data_for_colors.as_double(),
+    colourmap=colormap,
+    selection=selection,
+    attenuation=attenuation,
+    powscale=powscale,
+    map_directly = map_directly,
+    color_all=color_all)
+
+
+def colour_by_phi_FOM(phi, fom = None):
+  if not fom:
+    fom = flex.double(phi.size(), 1.0)
+  return color_by_phi_fom_(phi, fom)
+
+
+
+def NoNansArray(arr, d=0.0):
+  return NoNans(arr, d)
+
+def IsNansArray(arr):
+  return IsNans(arr)
+
+def NoNansVecArray(vecs, defx=0.0, defy=0.0, defz=0.0):
+  return NoNansvec3(vecs, defx, defy, defz)
+
+def IsNansVecArray(vecs):
+  return IsNansvec3(vecs)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/graphics_utils/tst.py
+from __future__ import absolute_import, division, print_function
+
+from scitbx import graphics_utils
+from scitbx.array_family import flex
+from libtbx.test_utils import approx_equal
+
+def exercise():
+  g = graphics_utils.make_rainbow_gradient(nbins=21)
+  assert approx_equal(g[0], (0.0, 0.0, 1.0))
+  assert approx_equal(g[10], (0.0, 1.0, 0.0))
+  assert approx_equal(g[-1], (1.0, 0.0, 0.0))
+  sel = flex.bool([True] * 10)
+  sel[5] = False
+  r = graphics_utils.color_rainbow(
+    selection=sel,
+    color_all=False)
+  assert approx_equal(r[0], (0.0,0.0,1.0))
+  assert approx_equal(r[-1], (1.0,0.0,0.0))
+  assert approx_equal(r[4], (0.0,1.0,0.0))
+  r2 = graphics_utils.color_rainbow(
+    selection=sel,
+    color_all=True)
+  assert approx_equal(r2[0], (0.0,0.0,1.0))
+  assert approx_equal(r2[-1], (1.0,0.0,0.0))
+  assert approx_equal(r2[6], (2/3.,1.0,0.0))
+  b = flex.double([4.0,5.2,1.7,6.9,9.5,24.3])
+  c = graphics_utils.color_by_property(
+    properties=b,
+    selection=flex.bool(b.size(), True))
+  assert approx_equal(c[2], (0.0,0.0,1.0))
+  c2 = graphics_utils.scale_selected_colors(
+    input_colors=c,
+    selection=flex.bool(c.size(), True),
+    scale=0.9)
+  assert approx_equal(c2[2], (0.0,0.0,0.9))
+  c3 = graphics_utils.grayscale_by_property(
+    properties=b,
+    selection=flex.bool(b.size(), True))
+  assert approx_equal(c3[2], (0.95,0.95,0.95))
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************

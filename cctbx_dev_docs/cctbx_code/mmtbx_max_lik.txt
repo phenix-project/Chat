@@ -1,0 +1,1316 @@
+
+
+ *******************************************************************************
+mmtbx/max_lik/__init__.py
+from __future__ import absolute_import, division, print_function
+import cctbx.array_family.flex # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("mmtbx_max_lik_ext")
+from mmtbx_max_lik_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/max_lik/max_like_non_uniform.py
+from __future__ import absolute_import, division, print_function
+import math
+from cctbx.array_family import flex
+from cctbx.eltbx import van_der_waals_radii
+from cctbx import maptbx
+from cctbx import crystal
+from libtbx.test_utils import approx_equal
+from cctbx import miller
+from scitbx import fftpack
+from scitbx import matrix
+from cctbx.eltbx.xray_scattering import wk1995
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+ext = bp.import_ext("mmtbx_max_lik_ext")
+from mmtbx_max_lik_ext import *
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("mmtbx_masks_ext")
+from mmtbx_masks_ext import *
+
+
+
+class ordered_solvent_distribution(object):
+
+  def __init__(self,
+               structure = None,
+               fo = None,
+               grid_step = None,
+               rad=None,
+               n_real = None,
+               nshells = -1):
+    assert [grid_step,n_real].count(None) == 1
+    assert structure is not None
+    assert fo is not None
+    self.n_real = n_real
+    self.nshells = nshells
+    self._structure = structure
+    self._grid_step = grid_step
+    self._fo = fo
+    self._f = None
+    self._fc= None
+    self._distribution = None
+    if(rad is None):
+       self.rad = 1.0
+    else:
+       self.rad = rad
+    self._f_ordered_solvent()
+
+
+  def _f_ordered_solvent(self):
+    fo = self._fo
+    fc = fo.structure_factors_from_scatterers(xray_structure = self._structure
+                                             ).f_calc()
+    self._fc = fc
+    if(self.n_real is None):
+       crystal_gridding = maptbx.crystal_gridding(unit_cell = self._structure.unit_cell(),
+                                               step = self._grid_step)
+       n_real = crystal_gridding.n_real()
+    else:
+       n_real = self.n_real
+
+    xyzf = flex.vec3_double()
+    atmrad = flex.double()
+    elements = []
+    for scatterer in self._structure.scatterers():
+      xyzf.append(list(scatterer.site))
+      atmrad.append(van_der_waals_radii.vdw.table[scatterer.element_symbol()])
+      elements.append( scatterer.element_symbol() )
+    assert xyzf.size() == atmrad.size()
+
+    sel_flag = flex.int(xyzf.size(),1)
+    # XXX removed 2011-02-14: set sel_flag to zero if resname is HOH
+    assert sel_flag.size() == atmrad.size()
+    self._distribution = wat_dist()
+
+    self._distribution.do_wat_dist(
+          shell    = 0.0,
+          xyzf     = xyzf,
+          atmrad   = atmrad,
+          element_symbol = elements,
+          uc       = self._structure.unit_cell(),
+          sg       = self._structure.space_group(),
+          nxnynz   = n_real,
+          sel_flag = sel_flag,
+          rad      = self.rad,
+          nshells  = self.nshells)
+    data = self._distribution.data()
+
+    ###############################
+    #mask_data = mask(0.0,
+    #                 1.0,
+    #                 1.0,
+    #                 xyzf,
+    #                 atmrad,
+    #                 self._structure.unit_cell(),
+    #                 self._structure.space_group(),
+    #                 crystal_gridding.n_real()).data()
+    #
+    #data.set_selected(mask_data == 0.0, 0.0)
+    ###############################
+
+    map_of_coeff = map_of_coeff_scaled(data,
+                                       self._structure,
+                                       n_real)
+
+    from_map = maptbx.structure_factors.from_map(
+       space_group=self._structure.space_group_info().group(),
+       anomalous_flag=False,
+       miller_indices=fo.indices(),
+       complex_map=map_of_coeff,
+       conjugate_flag=True)
+    self._f = miller.array(
+                miller_set = miller.set(
+                   crystal_symmetry = crystal.symmetry(
+                      unit_cell = self._structure.unit_cell(),
+                      space_group_info = self._structure.space_group_info()),
+                   indices = fo.indices(),
+                   anomalous_flag = False),
+                data = from_map.data())
+
+    assert fc.indices().all_eq(self._f.indices()) == 1
+    assert fc.indices().all_eq(fo.indices()) == 1
+    assert flex.max(abs(self._f).data()) < 1.0
+    return self
+
+  def max_number_of_shells(self):
+    return self._distribution.max_number_of_shells()
+
+  def fcalc_from_distribution(self):
+    return self._f
+
+  #def f_ordered_solvent(self, n_water_atoms_absent = None,
+  #                            bf_atoms_absent = None,
+  #                            absent_atom_type = None):
+  #  assert n_water_atoms_absent is not None
+  #  nsym = self._f.space_group().order_z()
+  #  n_lost_w = nsym * n_water_atoms_absent
+  #  data = self._f.data() * n_lost_w
+  #  d_star_sq_data = self._f.d_star_sq().data()
+  #  table = wk1995(absent_atom_type).fetch()
+  #  ff = table.at_d_star_sq(d_star_sq_data)
+  #  factor = ff * flex.exp(-bf_atoms_absent/4.0*d_star_sq_data)
+  #  f_by_m = miller.array(miller_set = self._f, data = data*factor)
+  #  return f_by_m
+
+  def distribution_as_array(self):
+    return self._distribution.data()
+
+  def distribution_as_xplor_file(self, file_name = None):
+    if file_name is not None:
+      self._distribution.as_xplor_map(self._structure.unit_cell(), file_name)
+
+  def print_all_reflections_in_file(self, file_name = None):
+    if(file_name is not None):
+      file = open(file_name,"w")
+      ic = self._fc.indices()
+      i  = self._f .indices()
+      io = self._fo.indices()
+      fcd = abs(self._fc).data()
+      fcp = self._fc.phases().data()
+      fd  = abs(self._f).data()
+      fp  = self._f.phases().data()
+      fod = abs(self._fo).data()
+      st = "%4d%4d%4d %10.6f %10.6f %4d%4d%4d %10.6f %10.6f %4d%4d%4d %10.3f \n"
+      for j in range(fd.size()):
+        file.write(st % (ic[j][0],ic[j][1],ic[j][2],fcd[j],fcp[j],\
+                         i[j][0] ,i[j][1] ,i[j][2] ,fd[j] ,fp[j],\
+                         io[j][0],io[j][1],io[j][2],fod[j]))
+
+  #def fcalc_plus_f(self, n_water_atoms_absent = None):
+  #  nsym = self._f.space_group().order_z()
+  #  n_lost_w = nsym * n_water_atoms_absent
+  #  #ss = 1./flex.pow2(self._f.d_spacings().data())
+  #  data = self._fc.data() + self._f.data() * n_lost_w
+  #  #data = self._fc.data().deep_copy()
+  #  #for i in range(len(ss)):
+  #  #  data[i] = self._fc.data()[i] + self._f.data()[i] * n_lost_w * form_factor("O", ss[i]) * \
+  #  #          math.exp(-25.0/4.0*ss[i])
+  #  fc_plus_f = miller.array(miller_set = self._fc,
+  #                           data = data)
+  #  return fc_plus_f
+
+def form_factor(absent_atom_type,ss):
+    #
+    # W & K form-factor for an atom, B=0.0
+    #
+    table=wk1995(absent_atom_type).fetch()
+    a_wk=table.array_of_a()
+    b_wk=table.array_of_b()
+    c_wk=table.c()
+    result_wk=c_wk
+    for i in range(5):
+       result_wk += a_wk[i]*math.exp(-b_wk[i]*ss/4.0)
+    return result_wk
+
+def map_of_coeff_scaled(mask_map,structure,nxyz):
+     assert mask_map.is_0_based()
+     assert not mask_map.is_padded()
+     fft_manager = fftpack.real_to_complex_3d(mask_map.focus())
+     padded_data = maptbx.copy(mask_map,
+                               flex.grid(fft_manager.m_real()
+                              ).set_focus(fft_manager.n_real()))
+     map_of_coeff = fft_manager.forward(padded_data)
+     scale = matrix.col(nxyz).product()/structure.unit_cell().volume()
+     sc = matrix.col(mask_map.focus()).product()/structure.unit_cell().volume()
+     assert sc == scale
+     map_of_coeff /= scale
+     return map_of_coeff
+
+def f_ordered_solvent(f,
+                      n_water_atoms_absent,
+                      bf_atoms_absent,
+                      absent_atom_type):
+  nsym = f.space_group().order_z()
+  n_lost_w = nsym * n_water_atoms_absent
+  data = f.data() * n_lost_w
+  d_star_sq_data = f.d_star_sq().data()
+  table = wk1995(absent_atom_type).fetch()
+  ff = table.at_d_star_sq(d_star_sq_data)
+  factor = ff * flex.exp(-bf_atoms_absent/4.0*d_star_sq_data)
+  f_by_m = miller.array(miller_set = f, data = data*factor)
+  return f_by_m
+
+def alpha_beta(f_dist,
+               n_atoms_included,
+               n_nonwater_atoms_absent,
+               n_water_atoms_absent,
+               bf_atoms_absent,
+               final_error,
+               absent_atom_type):
+  nsym = f_dist.space_group().order_z()
+  ss = 1./flex.pow2(f_dist.d_spacings().data())
+  n_part   = nsym * n_atoms_included
+  n_lost_p = nsym * n_nonwater_atoms_absent
+  n_lost_w = nsym * n_water_atoms_absent
+  f_dist_data = flex.abs(f_dist.data())
+  a_d = flex.exp( -0.25 * ss * final_error**2 * math.pi**3 )
+  d_star_sq_data = f_dist.d_star_sq().data()
+  assert approx_equal(ss,d_star_sq_data)
+  table = wk1995(absent_atom_type).fetch()
+  ff = table.at_d_star_sq(d_star_sq_data)
+  factor = ff * flex.exp(-bf_atoms_absent/4.0*d_star_sq_data)
+  b_d = ((1.-a_d*a_d)*n_part+n_lost_p+n_lost_w*(1.-f_dist_data*f_dist_data))*\
+                                                                  factor*factor
+  alpha = f_dist.array(data = a_d)
+  beta  = f_dist.array(data = b_d)
+  return alpha, beta
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/max_lik/maxlik.py
+from __future__ import absolute_import, division, print_function
+import math
+from cctbx.array_family import flex
+from cctbx.eltbx.xray_scattering import wk1995
+from scitbx.math import bessel_i1_over_i0
+from mmtbx import max_lik
+import math
+from cctbx.array_family import flex
+from cctbx import miller
+from libtbx import adopt_init_args
+import iotbx.phil
+from six.moves import zip
+from six.moves import range
+
+alpha_beta_params = iotbx.phil.parse("""\
+  free_reflections_per_bin = 140
+    .type = int
+  number_of_macromolecule_atoms_absent = 225
+    .type = int
+  n_atoms_included = 0
+    .type = int
+  bf_atoms_absent = 15.0
+    .type = float
+  final_error = 0.0
+    .type = float
+  absent_atom_type = "O"
+    .type = str
+  method = *est calc
+    .type = choice
+  estimation_algorithm = *analytical iterative
+    .type = choice
+  verbose = -1
+    .type = int
+  interpolation = True
+    .type = bool
+  number_of_waters_absent = 613
+    .type = float
+""")
+
+def fo_fc_alpha_over_eps_beta(f_obs, f_model, alpha, beta):
+  # Parameter "t". The coefficient 2 is already included, so for example
+  # fom = th(t) or I1(t)/I0(t) depending on cf.
+  return max_lik.fo_fc_alpha_over_eps_beta(
+    f_obs          = f_obs.data(),
+    f_model        = flex.abs(f_model.data()),
+    alpha          = alpha.data(),
+    beta           = beta.data(),
+    space_group    = f_obs.space_group(),
+    miller_indices = f_obs.indices())
+
+def figures_of_merit_(f_obs,
+                      f_calc,
+                      alpha,
+                      beta):
+  return max_lik.fom_and_phase_error(f_obs          = f_obs.data(),
+                                     f_model        = f_calc.data(),
+                                     alpha          = alpha,
+                                     beta           = beta,
+                                     space_group    = f_obs.space_group(),
+                                     miller_indices = f_obs.indices()).fom()
+
+def phase_error(f_obs,
+                f_calc,
+                alpha,
+                beta):
+  return max_lik.fom_and_phase_error(
+                                f_obs          = f_obs.data(),
+                                f_model        = f_calc.data(),
+                                alpha          = alpha,
+                                beta           = beta,
+                                space_group    = f_obs.space_group(),
+                                miller_indices = f_obs.indices()).phase_error()
+
+def fom(t,lcent):
+    #
+    # calculates the ratio I1(2t)/I0(2t) if lcent=0 and th(t) in other cases
+    # I1() - Modified Bessel Function of 1 order
+    # I0() - Modified Bessel Function of 0 order
+    #
+    if lcent == 0:
+       result = bessel_i1_over_i0(2.*t)
+    else:
+       result = math.tanh(t)
+    return result
+###############################################################################
+class alpha_beta_calc(object):
+
+  def __init__(self,f,
+                    n_atoms_absent,
+                    n_atoms_included,
+                    bf_atoms_absent,
+                    final_error,
+                    absent_atom_type):
+    #
+    #   ss=s**2 = (2*sin(teta)/lambda)**2 for the given reflection;
+    #   final_error - desired mean error in atomic positions (in A);
+    #                 it must be specified as 0., if the user has
+    #                 no idea about its other value;
+    #   n_atoms_included - an approximate number of non-hydrogen atoms in
+    #                      the ASYMMETRIC PART OF THE UNIT CELL, which
+    #                      are INCLUDED into the current model for refinement;
+    #   n_atoms_absent - an approximate number of non-hydrogen atoms in
+    #                    the ASYMMETRIC PART OF THE UNIT CELL, which are
+    #                    NOT INCLUDED into the current model for refinement;
+    #.....................................................................
+    # P.Afonine, V.Lunin & A.Urzhumtsev.(2003).J.Appl.Cryst.36,158-159
+    #
+    self.f = f
+    assert n_atoms_absent >= 0
+    assert n_atoms_included >= 0
+    assert f.size() > 0
+    self.ss = 1./flex.pow2(f.d_spacings().data())
+    assert self.ss.size() == f.data().size()
+    self.nsym = f.space_group().order_z()
+    assert self.nsym >= 1
+    self.n_atoms_absent   = n_atoms_absent
+    self.n_atoms_included = n_atoms_included
+    self.bf_atoms_absent = bf_atoms_absent
+    if final_error is None : final_error = 0.0
+    self.final_error = final_error
+    assert final_error >= 0.0
+    if absent_atom_type is None : absent_atom_type="C"
+    self.absent_atom_type = absent_atom_type
+
+  def alpha_beta(self):
+    #
+    # alpha, beta by formulas
+    #.........................................................................
+    # V.Lunin & T.Skovoroda. Acta Cryst. (1995). A51, 880-887
+    # A.Urzhumtsev, T.Skovoroda & V.Lunin. J. Appl. Cryst. (1996). 29, 741-744
+    # V.Lunin, P.Afonine & A.Urzhumtsev. Acta Cryst. (2002). A58, 270-282
+    #
+    alpha=[] ; beta=[]
+    n_part = self.nsym * self.n_atoms_included
+    n_lost = self.nsym * self.n_atoms_absent
+    for ssi in self.ss:
+       ak = math.exp(-0.25*ssi*(self.final_error**2)*(math.pi**3))
+       alpha.append( ak )
+       fact = self.form_factor(ssi)*math.exp(-self.bf_atoms_absent/4.0*ssi)
+       beta.append(((1.0-ak**2)*n_part+n_lost)*fact**2)
+    alpha_data = flex.double(alpha)
+    beta_data = flex.double(beta)
+    alpha = miller.array(miller_set = self.f, data = alpha_data)
+    beta  = miller.array(miller_set = self.f, data = beta_data)
+    return alpha, beta
+
+  def form_factor(self,ss):
+    #
+    # W & K form-factor of atom C
+    #
+    table=wk1995(self.absent_atom_type).fetch()
+    a_wk=table.array_of_a()
+    b_wk=table.array_of_b()
+    c_wk=table.c()
+    result_wk=c_wk
+    for i in range(5):
+       result_wk += a_wk[i]*math.exp(-b_wk[i]*ss/4.0)
+    return result_wk
+
+###############################################################################
+class alpha_beta_est_manager(object):
+
+  def __init__(self,f_obs,
+                    f_calc,
+                    free_reflections_per_bin,
+                    flags,
+                    interpolation,
+                    epsilons):
+    adopt_init_args(self, locals())
+    #
+    # icent - array contains 0 for acentric reflections and >0 integer
+    #         for centric reflections
+    # epsilon  - array contains the correction factors for intensity
+    #         they are equal to how many times the transposed symmetry
+    #         matrixes leaves the reciprocal space point at the same place
+    # icont - array contains the control set; the value 1 means that
+    #         this reflection will be used in the calculation of
+    #         likelihood function;
+    # f_calc - array of calculated magnitude values
+    # f_obs  - array of experimental magnitude values
+    # free_reflections_per_bin - minimal number of reflections in given
+    #                    resolution zone used for alpha,beta calculation
+    # V.Lunin & T.Skovoroda. Acta Cryst. (1995). A51, 880-887
+    # P.Afonine, V.Lunin & A.Urzhumtsev.(2003).J.Appl.Cryst.36,158-159
+    #
+    assert len(self.flags) == self.f_obs.data().size()
+    assert self.f_obs.data().size() == self.f_calc.data().size()
+    assert self.f_obs.data().size() == self.epsilons.size()
+    assert self.f_calc.indices().all_eq(self.f_obs.indices()) == 1
+    self.f_calc = abs(self.f_calc)
+    if(self.flags.count(True) > 0):
+      if free_reflections_per_bin > flags.count(True):
+         self.free_reflections_per_bin = flags.count(True)
+      self.f_obs_test  = self.f_obs.select(self.flags)
+      self.f_calc_test = self.f_calc.select(self.flags)
+      self.epsilons_test = self.epsilons.select(self.flags)
+    if(self.flags.count(True) == 0):
+      self.f_obs_test  = self.f_obs.select(~self.flags)
+      self.f_calc_test = self.f_calc.select(~self.flags)
+      self.epsilons_test = self.epsilons.select(~self.flags)
+    self.f_obs_test.setup_binner_counting_sorted(
+      reflections_per_bin= self.free_reflections_per_bin)
+    self.fo_test_sets = []
+    self.fm_test_sets = []
+    self.indices_sets = []
+    self.epsilons_sets = []
+    for i_bin in self.f_obs_test.binner().range_used():
+       sel = self.f_obs_test.binner().selection(i_bin)
+       sel_f_obs_test = self.f_obs_test.select(sel)
+       sel_f_calc_test = self.f_calc_test.select(sel)
+       sel_epsilons_test = self.epsilons_test.select(sel)
+       if(sel.count(True) > 0): # XXX I do not understand why it can be 0 (in rare cases)
+         self.fo_test_sets.append(sel_f_obs_test.data())
+         self.fm_test_sets.append(sel_f_calc_test.data())
+         self.indices_sets.append(sel_f_obs_test.indices())
+         self.epsilons_sets.append(sel_epsilons_test)
+    for a,b,c in zip(self.fo_test_sets, self.fm_test_sets, self.indices_sets):
+      assert a.size() == b.size() == c.size() != 0
+    obj = max_lik.alpha_beta_est(fo_test     = self.fo_test_sets,
+                                 fm_test     = self.fm_test_sets,
+                                 indices     = self.indices_sets,
+                                 epsilons    = self.epsilons_sets,
+                                 space_group = self.f_obs_test.space_group())
+    self.alpha_in_zones, self.beta_in_zones = obj.alpha(), obj.beta()
+    self.alpha, self.beta = self.alpha_beta_for_each_reflection()
+
+  def alpha_beta(self):
+    return self.alpha, self.beta
+
+  def smooth(self,x):
+    if len(x) > 1:
+      x1=x[0]
+      x2=x[1]
+      for i in range(1,len(x)-1,1):
+         x3=x[i+1]
+         tmp = (x1+x2+x3)/3.0
+         x[i]=tmp
+         x1=x2
+         x2=x3
+      for i in range(0,len(x),1):
+        if(x[i] < 0.01):
+          try: x[i] = x[i-1]
+          except Exception: x[i] = x[i+1]
+
+    return x
+
+  def alpha_beta_for_each_reflection(self, f_obs=None):
+    if f_obs is None: f_obs = self.f_obs
+    alpha = flex.double(f_obs.size())
+    beta = flex.double(f_obs.size())
+    f_obs.setup_binner(n_bins= len(self.alpha_in_zones))
+    binner = f_obs.binner()
+    if(self.interpolation == True):
+      az = flex.double(self.smooth(self.alpha_in_zones))
+      bz = flex.double(self.smooth(self.beta_in_zones) )
+      alpha = binner.interpolate(az, 0)
+      beta  = binner.interpolate(bz, 0)
+    elif(self.interpolation == False):
+      for i_bin, az, bz in zip(binner.range_used(),self.alpha_in_zones,
+                               self.beta_in_zones):
+        sel = binner.selection(i_bin)
+        alpha.set_selected(sel, az)
+        beta.set_selected(sel, bz)
+    alpha = miller.array(miller_set=f_obs, data=alpha)
+    beta = miller.array(miller_set=f_obs, data=beta)
+    return alpha, beta
+
+
+class alpha_beta(object):
+  def __init__(self, f_obs            = None,
+                     f_calc           = None,
+                     free_reflections_per_bin = None,
+                     flags            = None,
+                     verbose          = None,
+                     n_atoms_absent   = None,
+                     n_atoms_included = None,
+                     bf_atoms_absent  = None,
+                     final_error      = None,
+                     absent_atom_type = None,
+                     method           = None,
+                     interpolation    = None):
+    adopt_init_args(self, locals())
+    assert self.method == "calc" or self.method == "est" or \
+           self.method == "calc_and_est"
+    assert self.verbose is not None
+    if (self.method == "est"):
+      assert self.interpolation is not None
+      assert self.f_obs.data().size() == self.f_calc.data().size()
+      assert self.flags.size() == self.f_obs.data().size()
+      assert self.f_calc.indices().all_eq(self.f_obs.indices()) == 1
+      self.alpha, self.beta = alpha_beta_est_manager(
+        f_obs           = self.f_obs,
+        f_calc          = abs(self.f_calc),
+        free_reflections_per_bin = self.free_reflections_per_bin,
+        flags           = self.flags,
+        interpolation   = self.interpolation).alpha_beta()
+    if (self.method == "calc"):
+      assert self.f_obs is not None or self.f_calc is not None
+      if (self.f_obs is not None): f = self.f_obs
+      else: f = self.f_calc
+      assert self.n_atoms_absent is not None
+      assert self.n_atoms_included is not None
+      assert self.bf_atoms_absent is not None
+      assert self.absent_atom_type is not None
+      self.alpha, self.beta = alpha_beta_calc(
+                                    f                = f,
+                                    n_atoms_absent   = self.n_atoms_absent,
+                                    n_atoms_included = self.n_atoms_included,
+                                    bf_atoms_absent  = self.bf_atoms_absent,
+                                    final_error      = self.final_error,
+                                    absent_atom_type = self.absent_atom_type).alpha_beta()
+    if (self.method == "calc_and_est"):
+      assert self.interpolation    is not None
+      assert self.f_obs            is not None
+      assert self.f_calc           is not None
+      assert self.free_reflections_per_bin is not None
+      assert self.flags            is not None
+      assert self.n_atoms_absent   is not None
+      assert self.n_atoms_included is not None
+      assert self.bf_atoms_absent  is not None
+      assert self.final_error      is not None
+      assert self.absent_atom_type is not None
+      assert self.f_obs.data().size() == self.f_calc.data().size() == \
+             self.flags.size()
+      assert self.f_calc.indices().all_eq(self.f_obs.indices()) == 1
+      self.alpha_calc, self.beta_calc = alpha_beta_calc(
+                                    f                = self.f_obs,
+                                    n_atoms_absent   = self.n_atoms_absent,
+                                    n_atoms_included = self.n_atoms_included,
+                                    bf_atoms_absent  = self.bf_atoms_absent,
+                                    final_error      = self.final_error,
+                                    absent_atom_type = self.absent_atom_type).alpha_beta()
+      self.alpha_est, self.beta_est = alpha_beta_est(
+        f_obs           = self.f_obs,
+        f_calc          = abs(self.f_calc),
+        free_reflections_per_bin = self.free_reflections_per_bin,
+        flags           = self.flags,
+        interpolation   = self.interpolation).alpha_beta()
+      alpha_calc_ma = miller.array(miller_set= self.f_obs,data= self.alpha_calc)
+      beta_calc_ma  = miller.array(miller_set= self.f_obs,data= self.beta_calc)
+      alpha_est_ma  = miller.array(miller_set= self.f_obs,data= self.alpha_est)
+      beta_est_ma   = miller.array(miller_set= self.f_obs,data= self.beta_est)
+
+      ss = 1./flex.pow2(alpha_calc_ma.d_spacings().data())
+      omega_calc = []
+      omega_est  = []
+      for ac,ae,ssi in zip(self.alpha_calc, self.alpha_est,ss):
+        if(ac > 1.0): ac = 1.0
+        if(ae > 1.0): ae = 1.0
+        if(ac <= 0.0): ac = 1.e-6
+        if(ae <= 0.0): ae = 1.e-6
+        coeff = -4./(math.pi**3*ssi)
+        omega_calc.append( math.sqrt( math.log(ac) * coeff ) )
+        omega_est.append( math.sqrt( math.log(ae) * coeff ) )
+      omega_calc_ma = miller.array(miller_set= self.f_obs,data= flex.double(omega_calc))
+      omega_est_ma  = miller.array(miller_set= self.f_obs,data= flex.double(omega_est))
+
+      if(self.flags.count(True) > 0):
+        omega_calc_ma_test = omega_calc_ma.select(self.flags)
+        omega_est_ma_test  = omega_est_ma.select(self.flags)
+        alpha_calc_ma_test= alpha_calc_ma.select(self.flags)
+        beta_calc_ma_test= beta_calc_ma.select(self.flags)
+        alpha_est_ma_test= alpha_est_ma.select(self.flags)
+        beta_est_ma_test= beta_est_ma.select(self.flags)
+      if(self.flags.count(True) == 0):
+        omega_calc_ma_test = omega_calc_ma.select(~self.flags)
+        omega_est_ma_test  = omega_est_ma.select(~self.flags)
+        alpha_calc_ma_test= alpha_calc_ma.select(~self.flags)
+        beta_calc_ma_test= beta_calc_ma.select(~self.flags)
+        alpha_est_ma_test= alpha_est_ma.select(~self.flags)
+        beta_est_ma_test= beta_est_ma.select(~self.flags)
+
+      alpha_calc_ma_test.setup_binner(
+        reflections_per_bin = self.free_reflections_per_bin)
+      beta_calc_ma_test.use_binning_of(alpha_calc_ma_test)
+      alpha_est_ma_test.use_binning_of(alpha_calc_ma_test)
+      beta_est_ma_test.use_binning_of(alpha_calc_ma_test)
+      omega_calc_ma_test.use_binning_of(alpha_calc_ma_test)
+      omega_est_ma_test.use_binning_of(alpha_calc_ma_test)
+
+      print("    Resolution           Estimated and calculated alpha, beta and model error")
+      print("   d1        d2    nref alpha_e    beta_e    err_e alpha_c   beta_c     err_c")
+      for i_bin in alpha_calc_ma_test.binner().range_used():
+        sel = alpha_calc_ma_test.binner().selection(i_bin)
+        sel_alpha_calc_ma_test = alpha_calc_ma_test.select(sel)
+        sel_beta_calc_ma_test  = beta_calc_ma_test.select(sel)
+        sel_alpha_est_ma_test  = alpha_est_ma_test.select(sel)
+        sel_beta_est_ma_test   = beta_est_ma_test.select(sel)
+        sel_omega_calc_ma_test = omega_calc_ma_test.select(sel)
+        sel_omega_est_ma_test  = omega_est_ma_test.select(sel)
+        size = sel_alpha_calc_ma_test.data().size()
+        if(self.interpolation == False):
+          i=0
+          while i < size:
+            v_alpha_est = sel_alpha_est_ma_test.data()[i]
+            if(sel_alpha_est_ma_test.data().count(v_alpha_est) > size/2):
+              v_beta_est = sel_beta_est_ma_test.data()[i]
+              if(sel_beta_est_ma_test.data().count(v_beta_est) > size/2): break
+            i+=1
+        elif(self.interpolation == True):
+          v_alpha_est = flex.mean(sel_alpha_est_ma_test.data())
+          v_beta_est  = flex.mean(sel_beta_est_ma_test.data())
+        alpha_calc = flex.mean(sel_alpha_calc_ma_test.data())
+        beta_calc  = flex.mean(sel_beta_calc_ma_test.data())
+        omega_c = flex.mean(sel_omega_calc_ma_test.data())
+        omega_e = flex.mean(sel_omega_est_ma_test.data())
+        d1 = alpha_calc_ma_test.binner().bin_d_range(i_bin)[0]
+        d2 = alpha_calc_ma_test.binner().bin_d_range(i_bin)[1]
+        print("%8.4f %8.4f %5d %6.5f %12.3f %5.3f %6.5f %12.3f %5.3f" % \
+          (d1,d2,size,v_alpha_est,\
+           v_beta_est,omega_e,alpha_calc,beta_calc,omega_c))
+
+  def alpha_beta(self):
+    return self.alpha, self.beta
+
+def sigma_miss(miller_array, n_atoms_absent, bf_atoms_absent, absent_atom_type):
+  result = flex.double()
+  if(n_atoms_absent == 0): return flex.double(miller_array.indices().size(), 0)
+  def form_factor(ssi, absent_atom_type):
+    table=wk1995(absent_atom_type).fetch()
+    a_wk=table.array_of_a()
+    b_wk=table.array_of_b()
+    c_wk=table.c()
+    result_wk=c_wk
+    for i in range(5):
+      result_wk += a_wk[i]*math.exp(-b_wk[i]*ssi/4.0)
+    return result_wk
+  ss = 1./flex.pow2(miller_array.d_spacings().data())
+  nsym = miller_array.space_group().order_z()
+  #
+  for ssi in ss:
+     fact = form_factor(ssi, absent_atom_type)*math.exp(-bf_atoms_absent/4.0*ssi)
+     result.append(fact * nsym * n_atoms_absent)
+  return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/max_lik/tst_max_lik.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+import sys
+from cctbx import xray
+from cctbx import crystal
+from mmtbx.max_lik import max_like_non_uniform
+from cctbx.development import random_structure
+from cctbx.development import debug_utils
+
+
+#------------------------------------------------------------------------TEST-0
+def test_less_one(space_group_info,
+                  volume_per_atom = 100,
+                  d_min = 1.8):
+
+  #symmetry = crystal.symmetry(space_group_symbol="p212121")
+  #space_group_info = symmetry.space_group_info()
+  #n_sym = space_group_info.type().group().n_smx()
+  for n_atoms in (1,10):
+    if(n_atoms == 1):
+       denom = 16.0
+    else:
+       denom = 4.0
+
+    for element in ("C","O","N"):
+        structure = random_structure.xray_structure(
+               space_group_info=space_group_info,
+               elements=[element]*n_atoms,
+               volume_per_atom=volume_per_atom,
+               random_u_iso=False)
+
+        fc = structure.structure_factors(d_min          = d_min,
+                                         anomalous_flag = False,
+                                         algorithm      = "fft").f_calc()
+        manager = max_like_non_uniform.ordered_solvent_distribution(
+                                            structure = structure,
+                                            fo        = fc,
+                                            grid_step = fc.d_min()/denom)
+        f_water_dist = manager.fcalc_from_distribution()
+        ### check phase compatibility with the symmetry:
+        centrics = f_water_dist.select_centric()
+        if(centrics.indices().size() > 0):
+           ideal = centrics.phase_transfer(centrics)
+           assert flex.max(flex.abs(ideal.data() - centrics.data())) < 1.e-6
+        ###
+        #print "max = ", flex.max( flex.abs( f_water_dist.data() ) )
+        #print "min = ", flex.min( flex.abs( f_water_dist.data() ) )
+        #print "ave = ", flex.mean( flex.abs( f_water_dist.data() ) )
+        assert flex.max( flex.abs( f_water_dist.data() ) ) < 1.0
+#------------------------------------------------------------------------TEST-1
+def test_grid_step(n_sites = 50,
+                   volume_per_atom = 50,
+                   d_min = 2.0):
+  grid_step = (0.2,0.4,0.6,0.7,0.9,1.0)
+  for step in grid_step:
+    symmetry = crystal.symmetry(space_group_symbol="P1")
+    structure = random_structure.xray_structure(space_group_info = symmetry.space_group_info(),
+                                                elements=["C"]*n_sites,
+                                                volume_per_atom=volume_per_atom,
+                                                random_u_iso=False)
+    fc = structure.structure_factors(d_min = d_min,
+                                     anomalous_flag=False,
+                                     algorithm="fft").f_calc()
+    manager = max_like_non_uniform.ordered_solvent_distribution(
+                                      structure = structure,
+                                      fo = fc,
+                                      grid_step = step)
+    f_water_dist = manager.fcalc_from_distribution()
+    ### check phase compatibility with the symmetry:
+    centrics = f_water_dist.select_centric()
+    if(centrics.indices().size() > 0):
+       ideal = centrics.phase_transfer(centrics)
+       assert flex.max(flex.abs(ideal.data() - centrics.data())) < 1.e-6
+    ###
+    #print "max = ", flex.max( flex.abs( f_water_dist.data() ) )
+    #print "min = ", flex.min( flex.abs( f_water_dist.data() ) )
+    #print "ave = ", flex.mean( flex.abs( f_water_dist.data() ) )
+    assert flex.max( flex.abs( f_water_dist.data() ) ) < 1.0
+
+#------------------------------------------------------------------------TEST-2
+def test_r(space_group_info,
+           step = 0.6,
+           d_min = 4.0):
+  r = (-1.05,-0.1,0.0,1.05,0.1)
+  n_sym = space_group_info.type().group().n_smx()
+  if(n_sym != 8):
+     for x in r:
+      for y in r:
+       for z in r:
+         symmetry = crystal.symmetry(unit_cell = space_group_info.any_compatible_unit_cell(volume= 2000),
+                                     space_group_info = space_group_info)
+         #symmetry = crystal.symmetry(unit_cell=(11., 12., 13., 75., 85., 95.),
+         #                            space_group_symbol="P1")
+         #symmetry = crystal.symmetry(unit_cell=(11., 12., 13., 90., 90., 90.),
+         #                            space_group_symbol="p212121")
+         structure = xray.structure(crystal_symmetry=symmetry)
+         scatterer = xray.scatterer(
+                          site = (x,y,z),
+                          u = 0.1,
+                          occupancy = 1.0,
+                          scattering_type = "O")
+         structure.add_scatterer(scatterer)
+         fc = structure.structure_factors(d_min = d_min,
+                                          anomalous_flag=False,
+                                          algorithm="fft").f_calc()
+         manager = max_like_non_uniform.ordered_solvent_distribution(
+                                         structure = structure,
+                                         fo = fc,
+                                         grid_step = step)
+         f_water_dist = manager.fcalc_from_distribution()
+         ### check phase compatibility with the symmetry:
+         centrics = f_water_dist.select_centric()
+         if(centrics.indices().size() > 0):
+            ideal = centrics.phase_transfer(centrics)
+            assert flex.max(flex.abs(ideal.data() - centrics.data())) < 1.e-6
+         ###
+         #print "max = ", flex.max( flex.abs( f_water_dist.data() ) )
+         #print "min = ", flex.min( flex.abs( f_water_dist.data() ) )
+         #print "ave = ", flex.mean( flex.abs( f_water_dist.data() ) )
+         assert flex.max( flex.abs( f_water_dist.data() ) ) < 1.0
+#------------------------------------------------------------------------
+
+def run_call_back(flags, space_group_info):
+  test_less_one(space_group_info = space_group_info)
+
+def run_call_back_1(flags, space_group_info):
+  test_r(space_group_info = space_group_info)
+
+def run():
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], run_call_back_1,
+    symbols_to_stdout=True, symbols_to_stderr=False)
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], run_call_back,
+    symbols_to_stdout=True, symbols_to_stderr=False)
+  test_grid_step()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/max_lik/tst_maxlik.py
+from __future__ import absolute_import, division, print_function
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import xray
+from cctbx.array_family import flex
+from cctbx import miller
+from mmtbx import max_lik
+from mmtbx.max_lik import maxlik
+from libtbx.test_utils import approx_equal
+from libtbx.utils import format_cpu_times
+import time
+from cctbx.development import random_structure
+from cctbx.eltbx.xray_scattering import wk1995
+import random
+import math
+from six.moves import range
+
+if (1): # fixed random seed to avoid rare failures
+  random.seed(0)
+  flex.set_random_seed(0)
+
+def test_1():
+  tstart = time.time()
+  fraction_missing = 0.1
+  d_min = 1.5
+# create dummy model
+  symmetry = crystal.symmetry(unit_cell=(15.67, 25.37, 35.68, 90, 90, 90),
+                              space_group_symbol="P 21 21 21")
+  structure = xray.structure(crystal_symmetry=symmetry)
+  for k in range(1000):
+    scatterer = xray.scatterer(
+                 site = ((1.+k*abs(math.sin(k)))/1000.0,
+                         (1.+k*abs(math.cos(k)))/1000.0,
+                         (1.+ k)/1000.0),
+                 u = abs(math.cos(k))*100./(8.*math.pi**2),
+                 occupancy = 1.0,
+                 scattering_type = "C")
+    structure.add_scatterer(scatterer)
+
+# partial model
+  n_keep = int(round(structure.scatterers().size() * (1-fraction_missing)))
+  partial_structure = xray.structure(special_position_settings=structure)
+  partial_structure.add_scatterers(structure.scatterers()[:n_keep])
+
+# fcalc (partial model), fobs (fcalc full model)
+  f_calc = structure.structure_factors(d_min=d_min,
+                               anomalous_flag=False).f_calc()
+  f_calc_partial = partial_structure.structure_factors(d_min=d_min,
+                                               anomalous_flag=False).f_calc()
+  f_obs = abs(f_calc)
+  f_calc= abs(f_calc_partial)
+  d_star_sq = 1./flex.pow2(f_obs.d_spacings().data())
+
+  assert approx_equal(flex.max(f_calc.data()),6810.19834824)
+  assert approx_equal(flex.min(f_calc.data()),0.019589341727)
+  assert approx_equal(flex.mean(f_calc.data()),76.651506629)
+  assert approx_equal(flex.max(f_obs.data()),6962.58343229)
+  assert approx_equal(flex.min(f_obs.data()),0.00111552904935)
+  assert approx_equal(flex.mean(f_obs.data()),74.5148786464)
+  assert f_obs.size() == f_calc.size()
+
+# define test set reflections
+  flags=flex.bool(f_calc_partial.indices().size(), False)
+  k=0
+  for i in range(f_calc_partial.indices().size()):
+    k=k+1
+    if (k !=10):
+      flags[i]=False
+    else:
+      k=0
+      flags[i]=True
+  assert flags.count(True) == 250
+  assert flags.count(False) == 2258
+  assert flags.size() == 2508
+
+# *********************************************************TEST = 1
+  alpha, beta = maxlik.alpha_beta_est_manager(
+                    f_obs  = f_obs,
+                    f_calc = f_calc,
+                    free_reflections_per_bin = 1000,
+                    flags = flags,
+                    interpolation = False,
+                    epsilons = f_obs.epsilons().data().as_double()).alpha_beta()
+
+  assert alpha.data().size() == beta.data().size()
+  assert alpha.data().size() == f_obs.size()
+  assert approx_equal(flex.min(alpha.data()),0.914152454693)
+  assert approx_equal(flex.max(alpha.data()),0.914152454693)
+  assert approx_equal(flex.min(beta.data()),818.503411782)
+  assert approx_equal(flex.max(beta.data()),818.503411782)
+# *********************************************************TEST = 2
+  alpha, beta = maxlik.alpha_beta_est_manager(
+    f_obs  = f_obs,
+    f_calc = f_calc,
+    free_reflections_per_bin = 50,
+    flags = flags,
+    interpolation = False,
+    epsilons = f_obs.epsilons().data().as_double()).alpha_beta()
+
+  assert alpha.data().size() == beta.data().size()
+  assert alpha.data().size() == f_obs.size()
+  assert approx_equal(flex.min(alpha.data()), 0.910350007113)
+  assert approx_equal(flex.max(alpha.data()), 1.07104387776)
+  assert approx_equal(flex.min(beta.data()), 21.7374310013)
+  assert approx_equal(flex.max(beta.data()), 4222.81104745)
+# *********************************************************TEST = 3
+  alpha, beta = maxlik.alpha_beta_calc(
+                    f   = f_obs,
+                    n_atoms_absent  = 100,
+                    n_atoms_included= 900,
+                    bf_atoms_absent = 25.0,
+                    final_error     = 0.0,
+                    absent_atom_type = "C").alpha_beta()
+
+  fom = max_lik.fom_and_phase_error(
+    f_obs          = f_obs.data(),
+    f_model        = flex.abs(f_calc.data()),
+    alpha          = alpha.data(),
+    beta           = beta.data(),
+    epsilons       = f_obs.epsilons().data().as_double(),
+    centric_flags  = f_obs.centric_flags().data()).fom()
+
+  assert flex.max(fom) <= 1.0
+  assert flex.min(fom) >= 0.0
+  assert flex.min(alpha.data()) == flex.max(alpha.data()) == 1.0
+  assert approx_equal(flex.min(beta.data()),7.964134920)
+  assert approx_equal(flex.max(beta.data()),13695.1589364)
+# *********************************************************TEST = 4
+
+  xs = crystal.symmetry((3,4,5), "P 2 2 2")
+  mi = flex.miller_index(((1,-2,3), (0,0,-4)))
+  ms = miller.set(xs, mi)
+  fc  = flex.double((1.,2.))
+  fo  = flex.double((1.,2.))
+  mso = miller.set(xs, mi)
+  mac = miller.array(ms, fc)
+  mao = miller.array(ms, fo)
+
+  alp = flex.double(2,0.0)
+  bet = flex.double(2,1e+9)
+  fom = max_lik.fom_and_phase_error(
+    f_obs          = mao.data(),
+    f_model        = mac.data(),
+    alpha          = alp,
+    beta           = bet,
+    epsilons       = mao.epsilons().data().as_double(),
+    centric_flags  = mao.centric_flags().data()).fom()
+  assert approx_equal(fom,[0.0, 0.0])
+  alp = flex.double(2,1.0)
+  bet = flex.double(2,1e+9)
+  fom = max_lik.fom_and_phase_error(
+    f_obs          = mao.data(),
+    f_model        = mac.data(),
+    alpha          = alp,
+    beta           = bet,
+    epsilons       = mao.epsilons().data().as_double(),
+    centric_flags  = mao.centric_flags().data()).fom()
+
+  assert approx_equal(fom,[0.0, 0.0])
+  alp = flex.double(2,0.0)
+  bet = flex.double(2,1e-9)
+  fom = max_lik.fom_and_phase_error(
+    f_obs          = mao.data(),
+    f_model        = mac.data(),
+    alpha          = alp,
+    beta           = bet,
+    epsilons       = mao.epsilons().data().as_double(),
+    centric_flags  = mao.centric_flags().data()).fom()
+  assert approx_equal(fom,[0.0, 0.0])
+  alp = flex.double(2,1.0)
+  bet = flex.double(2,1e-9)
+  fom = max_lik.fom_and_phase_error(
+    f_obs          = mao.data(),
+    f_model        = mac.data(),
+    alpha          = alp,
+    beta           = bet,
+    epsilons       = mao.epsilons().data().as_double(),
+    centric_flags  = mao.centric_flags().data()).fom()
+  assert approx_equal(fom,[1.0, 1.0])
+
+def test_2():
+  n_sites = 1000
+  d_min   = 2.0
+  volume_per_atom = 50
+  fraction_missing = (0.0,)
+  scale = 5.0
+
+# create dummy model
+  space_group_info = sgtbx.space_group_info("P212121")
+  structure = random_structure.xray_structure(
+                                 space_group_info  = space_group_info,
+                                 elements          = ["N"]*(n_sites),
+                                 volume_per_atom   = volume_per_atom,
+                                 random_u_iso      = False)
+  structure.scattering_type_registry(table="wk1995")
+  f_calc = structure.structure_factors(d_min          = d_min,
+                                       anomalous_flag = False,
+                                       algorithm      = "direct").f_calc()
+  f_obs = abs(f_calc)
+
+  for fm in fraction_missing:
+    # partial model
+      n_keep = int(round(structure.scatterers().size() * (1-fm)))
+      partial_structure = xray.structure(special_position_settings=structure)
+      partial_structure.add_scatterers(structure.scatterers()[:n_keep])
+
+    # fcalc (partial model), fobs (fcalc full model)
+      f_calc_partial = partial_structure.structure_factors(d_min=d_min,
+                                                   anomalous_flag=False,
+                                                   algorithm = "direct").f_calc()
+      f_calc= abs(f_calc_partial)
+
+    # define test set reflections
+      flags=flex.bool(f_calc_partial.indices().size(), False)
+      k=0
+      for i in range(f_calc_partial.indices().size()):
+        k=k+1
+        if (k !=10):
+          flags[i]=False
+        else:
+          k=0
+          flags[i]=True
+
+    # *********************************************************TEST = 1
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = f_obs,
+        f_calc          = f_calc,
+        free_reflections_per_bin = f_obs.data().size(),
+        flags           = flags,
+        interpolation   = False,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = f_obs,
+        f_calc          = f_calc,
+        free_reflections_per_bin = f_obs.data().size(),
+        flags           = flags,
+        interpolation   = True,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+    # *********************************************************TEST = 2
+
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = miller.array(miller_set = f_obs,
+                                       data       = f_obs.data() * scale),
+        f_calc          = f_calc,
+        free_reflections_per_bin = 200,
+        flags           = flags,
+        interpolation   = False,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = miller.array(miller_set = f_obs,
+                                       data       = f_obs.data() * scale),
+        f_calc          = f_calc,
+        free_reflections_per_bin = 200,
+        flags           = flags,
+        interpolation   = True,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+    # *********************************************************TEST = 3
+
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = miller.array(miller_set = f_obs,
+                                       data       = f_obs.data() * scale),
+        f_calc          = f_calc,
+        free_reflections_per_bin = 200,
+        flags           = flex.bool(f_obs.data().size(), True),
+        interpolation   = False,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = miller.array(miller_set = f_obs,
+                                       data       = f_obs.data() * scale),
+        f_calc          = f_calc,
+        free_reflections_per_bin = 200,
+        flags           = flex.bool(f_obs.data().size(), True),
+        interpolation   = True,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+    # *********************************************************TEST = 4
+
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = miller.array(miller_set = f_obs,
+                                       data       = f_obs.data() * scale),
+        f_calc          = f_calc,
+        free_reflections_per_bin = 200,
+        flags           = flex.bool(f_obs.data().size(), False),
+        interpolation   = False,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+
+      alpha, beta = maxlik.alpha_beta_est_manager(
+        f_obs           = miller.array(miller_set = f_obs,
+                                       data       = f_obs.data() * scale),
+        f_calc          = f_calc,
+        free_reflections_per_bin = 200,
+        flags           = flex.bool(f_obs.data().size(), False),
+        interpolation   = True,
+        epsilons        = f_obs.epsilons().data().as_double()).alpha_beta()
+
+      assert alpha.size() == beta.size()
+      assert alpha.size() == f_obs.size()
+      assert approx_equal(flex.min(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.max(alpha.data()),1.0/scale, 1.e-2)
+      assert approx_equal(flex.min(beta.data()) ,0.0, 1.e-2)
+      assert approx_equal(flex.max(beta.data()) ,0.0, 1.e-2)
+    # *********************************************************TEST = 5
+
+def test_3():
+
+   symmetry = crystal.symmetry(unit_cell          = (15.67, 25.37, 35.68, 90, 90, 90),
+                               space_group_symbol = "P 21 21 21")
+   structure = xray.structure(crystal_symmetry = symmetry)
+   mi = structure.structure_factors(d_min          = 1.5,
+                                    anomalous_flag = False).f_calc().indices()
+   # ================================================================= TEST-1
+   alpha  = flex.double(mi.size())
+   beta   = flex.double(mi.size())
+   d_obs  = flex.double(mi.size())
+   d_calc = flex.double(mi.size())
+
+   for i in range(1,mi.size()+1):
+     d_obs [i-1] = i*1.0
+     d_calc[i-1] = i*1.0
+     beta  [i-1] = i*500.0
+     alpha [i-1] = float(i) / float(i + 1)
+
+   obj = max_lik.f_star_w_star_mu_nu(f_obs          = d_obs,
+                                     f_model        = d_calc,
+                                     alpha          = alpha,
+                                     beta           = beta,
+                                     space_group    = symmetry.space_group(),
+                                     miller_indices = mi)
+   f_star = obj.f_star()
+   w_star = obj.w_star()
+   mu     = obj.mu()
+   nu     = obj.nu()
+   nzero  = obj.number_of_f_star_zero()
+
+   assert approx_equal(flex.max(f_star) ,          2505.77677201 , 1.e-4)
+   assert approx_equal(flex.min(f_star) ,          0.0           , 1.e-4)
+   assert approx_equal(flex.mean(f_star),          1085.99060715 , 1.e-4)
+   assert approx_equal(flex.max(w_star) ,          1.0           , 1.e-4)
+   assert approx_equal(flex.min(w_star) ,          0.0           , 1.e-4)
+   assert approx_equal(flex.mean(w_star),          0.01782658613 , 1.e-4)
+   assert approx_equal(flex.max(mu)     ,          2.23810354633 , 1.e-4)
+   assert approx_equal(flex.min(mu)     ,          0.0           , 1.e-4)
+   assert approx_equal(flex.mean(mu)    ,          1.20159615933 , 1.e-4)
+   assert approx_equal(flex.max(nu)     ,          0.999107484116, 1.e-4)
+   assert approx_equal(flex.min(nu)     ,          0.0           , 1.e-4)
+   assert approx_equal(flex.mean(nu)    ,          0.745699513719, 1.e-4)
+   assert approx_equal(nzero            ,          501           )
+
+def test_4():
+
+   symmetry = crystal.symmetry(unit_cell          = (15.67, 25.37, 35.68, 90, 90, 90),
+                               space_group_symbol = "P 21 21 21")
+   structure = xray.structure(crystal_symmetry = symmetry)
+   ma = structure.structure_factors(d_min          = 1.5,
+                                    anomalous_flag = False).f_calc()
+   mi = ma.indices()
+   # ================================================================= TEST-1
+   alpha  = flex.double(mi.size())
+   beta   = flex.double(mi.size())
+   d_obs  = flex.double(mi.size())
+   d_calc = flex.double(mi.size())
+
+   # define test set reflections
+   flags=flex.int(beta.size(), 0)
+   k=0
+   for i in range(flags.size()):
+     k=k+1
+     if (k !=10):
+       flags[i]=0
+     else:
+       k=0
+       flags[i]=1
+
+   for i in range(1,mi.size()+1):
+     d_obs [i-1] = i*1.5
+     d_calc[i-1] = i*1.0
+     beta  [i-1] = i*500.0
+     alpha [i-1] = float(i) / float(i + 1)
+
+   obj = max_lik.fom_and_phase_error(
+     f_obs          = d_obs,
+     f_model        = d_calc,
+     alpha          = alpha,
+     beta           = beta,
+     epsilons       = ma.epsilons().data().as_double(),
+     centric_flags  = ma.centric_flags().data())
+   per = obj.phase_error()
+   fom = obj.fom()
+   assert approx_equal(flex.max(per) ,  89.9325000127     , 1.e-4)
+   assert approx_equal(flex.min(per) ,  5.37565067746e-05 , 1.e-4)
+   assert approx_equal(flex.mean(per),  20.7942460698     , 1.e-4)
+   assert approx_equal(flex.max(fom) ,  0.999999402705    , 1.e-4)
+   assert approx_equal(flex.min(fom) ,  0.000749999859375 , 1.e-4)
+   assert approx_equal(flex.mean(fom),  0.858269037582    , 1.e-4)
+
+def run():
+  test_1()
+  test_2()
+  test_3()
+  test_4()
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************

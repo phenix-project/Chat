@@ -1,0 +1,1301 @@
+
+
+ *******************************************************************************
+mmtbx/disorder/__init__.py
+
+"""
+Tools for analyzing disorder (or heterogeneity in general) in ensembles and
+and other multi-conformer models or collections of conformations.  For building
+and refinement of such models, see mmtbx.building.alternate_conformations or
+mmtbx.refinement.ensemble_refinement.
+"""
+
+from __future__ import absolute_import, division, print_function
+import math
+import six
+
+def set_ensemble_b_factors_to_xyz_displacement(pdb_hierarchy,
+    include_hydrogens=False,
+    include_waters=False,
+    use_c_alpha_values=False,
+    method="rmsf",
+    selection=None,
+    substitute_b_value=-1.0,
+    logarithmic=False,
+    log=None):
+  """
+  Given an ensemble (multi-MODEL PDB hierarchy), calculate the deviation
+  between copies of each atom (defined here as either the root-mean-square
+  fluctuation, or the radius of the minimum covering sphere) and set the
+  isotropic B-factors to this value.
+  """
+  if (log is None) : log = null_out()
+  assert (method in ["rmsf", "mcs"])
+  from scitbx.math import minimum_covering_sphere
+  from scitbx.array_family import flex
+  pdb_atoms = pdb_hierarchy.atoms()
+  pdb_atoms.reset_i_seq()
+  xyz_by_atom = {}
+  def get_key(atom):
+    labels = atom.fetch_labels()
+    return (labels.chain_id, labels.resid(), labels.altloc, atom.name)
+  def get_c_alpha(atom):
+    if (atom.name.strip() == "CA") and (atom.element.strip() == "C"):
+      return atom
+    for other in atom.parent().atoms():
+      if (other.name.strip() == "CA") and (other.element.strip() == "C"):
+        return other
+    return None
+  for model in pdb_hierarchy.models():
+    for atom in model.atoms():
+      if (selection is not None):
+        if (not selection[atom.i_seq]) : continue
+      elif (not include_hydrogens) and (atom.element.strip() in ["H","D"]):
+        continue
+      elif (not include_waters) and (atom.parent().resname in ["HOH"]):
+        continue
+      if (use_c_alpha_values) and (atom.name.strip() != "CA"):
+        continue
+      atom_key = get_key(atom)
+      if (atom_key in xyz_by_atom):
+        xyz_by_atom[atom_key].append(atom.xyz)
+      else :
+        xyz_by_atom[atom_key] = flex.vec3_double([atom.xyz])
+  dev_by_atom = {}
+  for atom_key, xyz in six.iteritems(xyz_by_atom):
+    if (method == "mcs"):
+      mcs = minimum_covering_sphere(points=xyz, epsilon=0.1)
+      radius = mcs.radius()
+      if (logarithmic):
+        radius = math.log(radius + 1.0)
+      dev_by_atom[atom_key] = radius
+    else :
+      mean_array = flex.vec3_double(xyz.size(), xyz.mean())
+      rmsf = xyz.rms_difference(mean_array)
+      dev_by_atom[atom_key] = rmsf
+  # NOTE it seems flex.double handles list generators, not sure about funky python3 dict.values() though
+  all_dev = flex.double(list(dev_by_atom.values()))
+  if (method == "mcs"):
+    print("Distribution of sphere radii:", file=log)
+  else :
+    print("Distribution of root-mean-square fluctuation values:", file=log)
+  flex.histogram(all_dev, n_slots=20).show(f=log, prefix="  ",
+    format_cutoffs="%.2f")
+  for model in pdb_hierarchy.models():
+    for atom in model.atoms():
+      if (use_c_alpha_values):
+        c_alpha = get_c_alpha(atom)
+        if (c_alpha is None):
+          atom.b = substitute_b_value
+        else :
+          atom_key = get_key(c_alpha)
+          atom.b = dev_by_atom.get(atom_key, substitute_b_value)
+      else :
+        atom_key = get_key(atom)
+        atom.b = dev_by_atom.get(atom_key, substitute_b_value)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/disorder/analyze_model.py
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.disorder import backbone
+from scitbx.array_family import flex
+from scitbx.matrix import col
+from libtbx.str_utils import format_value as fv
+from libtbx import Auto, slots_getstate_setstate
+import math
+import sys
+from six.moves import range
+
+# XXX in order to make this run in parallel over many PDB IDs, I need to cheat
+# slightly and substitute pickle-able objects for the original classes in
+# iotbx.pdb.hierarchy.  Note that parent relationships will be lost in the
+# process.
+class residue_group_proxy(slots_getstate_setstate):
+  """Pickle-able stand-in for iotbx.pdb.hierarchy.residue_group."""
+  __slots__ = ["resseq", "icode", "_atom_groups", "_id_str", ]
+  def __init__(self, residue_group):
+    self.resseq = residue_group.resseq
+    self.icode = residue_group.icode
+    self._id_str = residue_group.id_str()
+    self._atom_groups = [ ]
+    for ag in residue_group.atom_groups():
+      self._atom_groups.append(atom_group_proxy(ag))
+
+  def id_str(self):
+    return self._id_str
+
+  def atom_groups(self):
+    return self._atom_groups
+
+class atom_group_proxy(slots_getstate_setstate):
+  """Pickle-able stand-in for iotbx.pdb.hierarchy.atom_group."""
+  __slots__ = [ "resname", "altloc", "_atoms", ]
+  def __init__(self, atom_group):
+    self.resname = atom_group.resname
+    self.altloc = atom_group.altloc
+    self._atoms = atoms_proxy(atom_group.atoms())
+
+  def atoms(self):
+    return self._atoms
+
+class atoms_proxy(slots_getstate_setstate):
+  """
+  Pickle-able stand-in for af::shared<atom> array, using the atom_with_labels
+  objects as elements.
+  """
+  __slots__ = [ "_atoms" ]
+  def __init__(self, atoms):
+    self._atoms = [ a.fetch_labels() for a in atoms ]
+
+  def __getitem__(self, idx):
+    return self._atoms[idx]
+
+  def extract_occ(self):
+    return flex.double([ a.occ for a in self._atoms ])
+
+  def extract_b(self):
+    return flex.double([ a.b for a in self._atoms ])
+
+class disordered_segment(object):
+  """
+  A group of one or more adjacent residues presumed to form continuous
+  alternate conformations.
+  """
+  def __init__(self, residue_group):
+    self.residue_groups = [ ]
+    self.outliers = {}
+    self.rotamers = {}
+    self.ramachandran = {}
+    self.backrubs = []
+    self.append_residue_group(residue_group)
+
+  def __str__(self):
+    if (self.n_residues() == 1):
+      return self.residue_groups[0].id_str()
+    else :
+      return "%s --> %s" % (self.residue_groups[0].id_str(),
+         self.residue_groups[-1].id_str())
+
+  def show(self, prefix="", out=sys.stdout):
+    if (self.n_residues() == 1):
+      print(prefix + "Segment: 1 residue (%s), %d conformers" % \
+        (self.residue_groups[0].id_str(), self.n_confs()), file=out)
+    else :
+      print(prefix+"Segment: %d residues (%s --> %s), %d conformers" %\
+        (self.n_residues(), self.residue_groups[0].id_str(),
+         self.residue_groups[-1].id_str(), self.n_confs()), file=out)
+    for i_res, rg in enumerate(self.residue_groups):
+      print(prefix+"  residue_group=%s" % rg.id_str(), file=out)
+      for ag in rg.atom_groups():
+        rama = rota = None
+        for o in self.ramachandran.get(rg.id_str(), []):
+          if (o.altloc == ag.altloc):
+            rama = o
+            break
+        for o in self.rotamers.get(rg.id_str(), []):
+          if (o.altloc == ag.altloc):
+            rota = o
+            break
+        print(prefix + "    " + \
+          "atom_group=%1s %3s  occ=%.2f phi=%-6s psi=%-6s rot=%-7s" %\
+          (ag.altloc,
+           ag.resname,
+           flex.mean(ag.atoms().extract_occ()),
+           fv("%.1f", getattr(rama, "phi", None)),
+           fv("%.1f", getattr(rama, "psi", None)),
+           getattr(rota, "rotamer_name", None)), file=out)
+      if (len(self.backrubs[i_res]) > 0):
+        for backrub in self.backrubs[i_res] :
+          backrub.show(out=out, prefix=prefix+"    ")
+      outliers = self.outliers[rg.id_str()]
+      if (len(outliers) > 0):
+        print(prefix+"     MolProbity outliers:", file=out)
+      for outlier in outliers :
+        print(prefix+"       %s: %s" % (type(outlier).__name__,
+          str(outlier)), file=out)
+
+  def get_previous_conformer(self, index=0):
+    rg = self.residue_groups[-1]
+    i_group = 0
+    for atom_group in rg.atom_groups():
+      if (atom_group.altloc.strip() != ''):
+        if (i_group == index):
+          return atom_group
+        else :
+          i_group += 1
+    return None
+
+  def is_part_of_segment(self, other,
+      ignore_inconsistent_occupancy=False,
+      ignore_inconsistent_n_conformers=False,
+      max_peptide_bond_distance_within_conformer=2.0):
+    """
+    Determine whether a residue_group object is part of the same continuous
+    disordered segment.  The precise meaning of this can be adjusted depending
+    on user preferences; by default a continuous segment must have the same
+    number of conformers for each residue, and occupancies must be constrained
+    for each conformation.  The latter assumption will probably be violated
+    most often.
+    """
+    other_groups = other.atom_groups()
+    assert len(other_groups) >= 2
+    if (len(other_groups) != len(self.residue_groups[-1].atom_groups())):
+      if (not ignore_inconsistent_n_conformers):
+        return False
+    i_group = 0
+    for atom_group in other_groups :
+      if (atom_group.altloc != ''):
+        other_atoms = atom_group.atoms()
+        prev_group = self.get_previous_conformer(index=i_group)
+        if (prev_group is None):
+          assert ignore_inconsistent_n_conformers
+          break
+        i_group += 1
+        if (prev_group.altloc != atom_group.altloc):
+          return False
+        prev_atoms = prev_group.atoms()
+        if (prev_atoms[0].occ != other_atoms[0].occ):
+          if (not ignore_inconsistent_occupancy):
+            return False
+        curr_n, prev_c = None, None
+        for atom in prev_atoms :
+          if (atom.name == " C  "):
+            prev_c = atom.xyz
+            break
+        for atom in other_atoms :
+          if (atom.name == " N  "):
+            curr_n = atom.xyz
+            break
+        if (curr_n is None) or (prev_c is None):
+          return False
+        dist = abs(col(curr_n) - col(prev_c))
+        if (dist > max_peptide_bond_distance_within_conformer):
+          return False
+    return True
+
+  def append_residue_group(self, rg):
+    self.residue_groups.append(residue_group_proxy(rg))
+    rg_backrubs = backbone.find_backrubs(residue_group=rg)
+    self.backrubs.append(rg_backrubs)
+
+  def detect_sequence_disorder(self):
+    """
+    Find any residue groups with heterogeneous chemical identity.
+    """
+    disordered = []
+    for rg in self.residue_groups :
+      resnames = set([ ag.resname.upper() for ag in rg.atom_groups() ])
+      if (len(resnames) > 1):
+        disordered.append((rg.id_str(), sorted(list(resnames))))
+    return disordered
+
+  def n_residues(self):
+    return len(self.residue_groups)
+
+  def n_partial_splits(self, join_at_calpha=False):
+    """
+    Count the number of residues where not all atoms have alternates.
+    """
+    n_partial = 0
+    for residue_group in self.residue_groups :
+      for atom_group in residue_group.atom_groups():
+        if (atom_group.altloc.strip() == ''):
+          if (join_at_calpha):
+            for atom in atom_group.atoms():
+              if (atom.name == " CA "):
+                n_partial += 1
+                break
+          else :
+            n_partial += 1
+          break
+    return n_partial
+
+  def n_confs(self):
+    """
+    Count the number of alternate conformations.  Sometimes this may not be
+    the same for all residue groups, in which case a list is returned.
+    """
+    all_n_confs = []
+    for residue_group in self.residue_groups :
+      all_n_confs.append(0)
+      for atom_group in residue_group.atom_groups():
+        if (atom_group.altloc.strip() != ''):
+          all_n_confs[-1] += 1
+    all_n_confs_uniq = set(all_n_confs)
+    if (len(all_n_confs_uniq) != 1):
+      return sorted(list(all_n_confs_uniq))
+    return all_n_confs_uniq.pop()
+
+  def n_confs_max(self):
+    n_confs = self.n_confs()
+    if isinstance(n_confs, int):
+      return n_confs
+    return max(n_confs)
+
+  def minimum_atom_group_occupancy(self):
+    occ_min = 1.
+    for rg in self.residue_groups :
+      for ag in rg.atom_groups():
+        ag_atoms = ag.atoms()
+        total = 0
+        n_non_hd = 0
+        for atom in ag.atoms():
+          if (atom.element.strip() not in ["H", "D"]) and (atom.occ != 0):
+            total += atom.occ
+            n_non_hd += 1
+        if (total != 0):
+          occ_mean_ag = total / n_non_hd
+          occ_min = min(occ_min, occ_mean_ag)
+    return occ_min
+
+  def get_all_conformer_distances(self, backbone=None):
+    n_confs = self.n_confs()
+    assert isinstance(n_confs, int)
+    pairwise_distances = []
+    for i_conf in range(n_confs - 1):
+      indices = [i_conf, i_conf + 1]
+      pairwise_distances.append(self.get_conformer_distances(
+        conformer_indices=indices,
+        backbone=backbone))
+    return pairwise_distances
+
+  def get_conformer_distances(self,
+      conformer_indices=Auto,
+      backbone=None):
+    """
+    Calculate the distances between atoms in the specified pair of conformers
+    (must be present for all residue groups).
+    """
+    # XXX the way this is handled is somewhat clumsy, but necessary because
+    # there is no requirement that atom groups have the same number of atoms or
+    # even the same chemical identity (although they are assumed to be amino
+    # acids)
+    distances = []
+    for rg in self.residue_groups :
+      i_ag = 0
+      atom_groups = rg.atom_groups()
+      if (conformer_indices is Auto):
+        if (atom_groups[0].altloc.strip() == ''):
+          if (len(atom_groups) <= 2):
+            continue
+          else :
+            conformer_indices = (1,2)
+        else :
+          conformer_indices = (0,1)
+      else :
+        assert (len(conformer_indices) == 2)
+      ag1 = rg.atom_groups()[conformer_indices[0]]
+      ag2 = rg.atom_groups()[conformer_indices[1]]
+      if ((ag1.altloc.strip() == '') and
+          (conformer_indices[0] == 0) and
+          (len(atom_groups) >= 3)):
+        ag1 = rg.atom_groups()[conformer_indices[0]+1]
+        ag2 = rg.atom_groups()[conformer_indices[1]+1]
+      for atom1 in ag1.atoms():
+        name = atom1.name.strip()
+        element = atom1.element.upper().strip()
+        if (element in ["H","D"]):
+          continue
+        if (backbone is not None):
+          if (((backbone) and (not name in ["C","CA","N","O"])) or
+              ((not backbone) and (name in ["C","CA","N","O"]))):
+            continue
+        for atom2 in ag2.atoms():
+          if (atom1.name == atom2.name):
+            distances.append(abs(col(atom1.xyz) - col(atom2.xyz)))
+    return distances
+
+  def max_distance_between_conformers(self, backbone=None):
+    paired_distances = self.get_all_conformer_distances(backbone=backbone)
+    paired_max = []
+    for distances in paired_distances :
+      if (len(distances) > 0):
+        paired_max.append(max(distances))
+    if (len(paired_max) > 0):
+      return max(paired_max)
+    return None
+
+  def max_rmsd_between_conformers(self, backbone=None):
+    paired_distances = self.get_all_conformer_distances(backbone=backbone)
+    rmsd_max = None
+    for distances in paired_distances :
+      if (len(distances) == 0):
+        continue
+      rmsd = math.sqrt(sum([ dxyz**2 for dxyz in distances]) / len(distances))
+      if (rmsd_max is None) or (rmsd > rmsd_max):
+        rmsd_max = rmsd
+    return rmsd_max
+
+  def extract_validation_results(self, multi_criterion):
+    """
+    Find the matching validation result objects from the multi-criterion
+    object (see mmtbx/validation/molprobity/__init__.py).
+    """
+    for rg in self.residue_groups :
+      self.outliers[rg.id_str()] = []
+      self.rotamers[rg.id_str()] = []
+      self.ramachandran[rg.id_str()] = []
+      results = multi_criterion.get_residue_group_data(rg)
+      for result in results.outliers :
+        if result.is_outlier():
+          self.outliers[rg.id_str()].append(result)
+        if type(result).__name__ == "rotamer" :
+          self.rotamers[rg.id_str()].append(result)
+        elif type(result).__name__ == "ramachandran" :
+          self.ramachandran[rg.id_str()].append(result)
+
+  def n_rotamer_changes(self, resname=None):
+    n_changes = 0
+    for rg in self.residue_groups :
+      resnames = set([ ag.resname.upper() for ag in rg.atom_groups() ])
+      if (len(resnames) > 1):
+        continue
+      elif (resname is not None) and (resnames.pop() != resname.upper()):
+        continue
+      rotamers = set(self.rotamers.get(rg.id_str(), []))
+      if (len(rotamers) > 1):
+        n_changes += 1
+    return n_changes
+
+  def find_peptide_flips(self, angle_cutoff=150):
+    residues_and_angles = []
+    for rg in self.residue_groups :
+      peptide_angle = carbonyl_oxygen_angle(rg)
+      if peptide_angle is not None and peptide_angle >= angle_cutoff:
+        residues_and_angles.append((rg.id_str(), peptide_angle))
+    return residues_and_angles
+
+  def n_cbeta_outliers(self):
+    return self.n_outliers_of_type(analysis_type='cbeta')
+
+  def n_outliers_of_type(self, analysis_type):
+    n_outliers = 0
+    for rg in self.residue_groups :
+      results = self.outliers.get(rg.id_str(), [])
+      for result in results :
+        if (type(result).__name__ == analysis_type) and result.is_outlier():
+          n_outliers += 1
+    return n_outliers
+
+#-----------------------------------------------------------------------
+# utility methods
+def is_joined_at_calpha(residue_group):
+  for atom_group in residue_group.atom_groups():
+    if (atom_group.altloc.strip() == ''):
+      for atom in atom_group.atoms():
+        if (atom.name == " CA "):
+          return True
+  return False
+
+def carbonyl_oxygen_angle(residue_group):
+  """
+  Calculate angles between carbonyl oxygen (C=O) bonds in each pair of atom
+  groups, and return the maximum value (or None if fewer than two such bonds
+  are found).
+  """
+  c_o_vectors = []
+  for atom_group in residue_group.atom_groups():
+    c_xyz = o_xyz = None
+    for atom in atom_group.atoms():
+      if (atom.name.strip() == "O"):
+        o_xyz = col(atom.xyz)
+      elif (atom.name.strip() == "C"):
+        c_xyz = col(atom.xyz)
+    if (not None in [c_xyz, o_xyz]):
+      c_o_vectors.append(c_xyz - o_xyz)
+  if (len(c_o_vectors) >= 2):
+    angles = []
+    i_ag = 0
+    while (i_ag < len(c_o_vectors) - 1):
+      angles.append(c_o_vectors[i_ag].angle(c_o_vectors[i_ag+1], deg=True))
+      i_ag += 1
+    return max(angles)
+  return None
+
+def only_amide_hydrogen_split(residue_group):
+  """
+  Detect cases where the only alternate conformation is for the amide hydrogen,
+  presumably because the previous residue was split and Reduce was used to
+  add hydrogens.  These residues are ignored in our analyses.
+  """
+  for atom in residue_group.atoms():
+    labels = atom.fetch_labels()
+    if (labels.altloc.strip() != '') and (atom.name != " H  "):
+      return False
+  return True
+
+# XXX unused?
+def get_nconfs(pdb_hierarchy):
+  """
+  Count the number of conformers in a structure.
+  """
+  if (len(pdb_hierarchy.models()) > 1):
+    n_confs = -1 # multiple MODELs aren't handled
+  else :
+    for chain in pdb_hierarchy.only_model().chains():
+      if (chain.is_protein()):
+        confs = chain.conformers()
+        if (len(confs) > n_confs):
+          n_confs = len(confs)
+  return n_confs
+
+#-----------------------------------------------------------------------
+class process_residue_groups(object):
+  def __init__(self, chain,
+      multi_criterion_validation=None,
+      ignore_inconsistent_occupancy=False,
+      log=sys.stdout):
+    self.segments = []
+    self.chain_id = chain.id
+    self.n_residue_groups = 0
+    self.n_disordered = 0
+    self.residue_counts = {}
+    self.disordered_residue_counts = {}
+    assert chain.is_protein()
+    segment = None
+    for residue_group in chain.residue_groups():
+      self.n_residue_groups += 1
+      atom_groups = residue_group.atom_groups()
+      resname_1 = atom_groups[0].resname
+      if (not resname_1 in self.residue_counts):
+        self.residue_counts[resname_1] = 0
+      self.residue_counts[resname_1] += 1
+      if (len(atom_groups) > 1):
+        self.n_disordered += 1
+        if only_amide_hydrogen_split(residue_group):
+          print("    residue %s only has alt. confs. for H" % \
+            residue_group.id_str(), file=log)
+          segment = None
+          continue
+        else :
+          if (not resname_1 in self.disordered_residue_counts):
+            self.disordered_residue_counts[resname_1] = 0
+          self.disordered_residue_counts[resname_1] += 1
+          if (segment is None):
+            segment = disordered_segment(residue_group)
+            self.segments.append(segment)
+          else :
+            if segment.is_part_of_segment(other=residue_group,
+                ignore_inconsistent_occupancy=ignore_inconsistent_occupancy):
+              segment.append_residue_group(residue_group)
+            else :
+              segment = disordered_segment(residue_group)
+              self.segments.append(segment)
+      else :
+        segment = None
+    if (multi_criterion_validation is not None):
+      for segment in self.segments :
+        segment.extract_validation_results(multi_criterion_validation)
+
+  def show(self, prefix="", out=sys.stdout):
+    print(prefix+"Chain '%s': %d residues, %d disordered" % (
+      self.chain_id, self.n_residue_groups, self.n_disordered), file=out)
+    for segment in self.segments :
+      segment.show(out=out, prefix=prefix+"  ")
+
+class process_pdb_hierarchy(object):
+  def __init__(self, pdb_hierarchy,
+      validation,
+      ignore_inconsistent_occupancy=False,
+      log=sys.stdout):
+    self.chains = []
+    self.n_residue_groups = 0
+    self.n_disordered = 0
+    self.sequence_disorder = []
+    self.n_rama_outliers = validation.ramalyze.n_outliers
+    self.n_rota_outliers = validation.rotalyze.n_outliers
+    self.n_cbeta_outliers = validation.cbetadev.n_outliers
+    multi_criterion_validation = None
+    if (validation is not None):
+      multi_criterion_validation = validation.as_multi_criterion_view()
+    for chain in pdb_hierarchy.only_model().chains():
+      if (chain.is_protein()):
+        print("  processing chain '%s'" % chain.id, file=log)
+        chain_info = process_residue_groups(chain=chain,
+          multi_criterion_validation=multi_criterion_validation,
+          ignore_inconsistent_occupancy=ignore_inconsistent_occupancy,
+          log=log)
+        self.chains.append(chain_info)
+        self.n_residue_groups += chain_info.n_residue_groups
+        self.n_disordered += chain_info.n_disordered
+        for segment in chain_info.segments :
+          self.sequence_disorder.extend(segment.detect_sequence_disorder())
+      else :
+        print("  skipping non-protein chain '%s'" % chain.id, file=log)
+    # TODO post-analysis
+
+  @property
+  def segments(self):
+    for chain in self.chains :
+      for segment in chain.segments :
+        yield segment
+
+  def max_rmsd_between_conformers(self, backbone=None):
+    rmsd_max = segment_max = None
+    for segment in self.segments :
+      rmsd = segment.max_rmsd_between_conformers(backbone=backbone)
+      if (rmsd_max is None) or (rmsd > rmsd_max):
+        rmsd_max = rmsd
+        segment_max = segment
+    return rmsd_max, segment_max
+
+  def max_distance_between_conformers(self, backbone=None):
+    dist_max = segment_max = None
+    for segment in self.segments :
+      dist = segment.max_distance_between_conformers(backbone=backbone)
+      if (dist_max is None) or (dist > dist_max):
+        dist_max = dist
+        segment_max = segment
+    return dist_max, segment_max
+
+  def show(self, out=sys.stdout, verbose=True):
+    print("", file=out)
+    print("Overall: %d protein chain(s)" % len(self.chains), file=out)
+    print("         %d residues" % self.n_residue_groups, file=out)
+    print("         %d disorered in %d segments" % (self.n_disordered,
+      sum([ len(c.segments) for c in self.chains ])), file=out)
+    if (len(self.sequence_disorder) > 0):
+      print("%d heterogeneous residues:" % len(self.sequence_disorder), file=out)
+      for rg_id, resnames in self.sequence_disorder :
+        print("  %s (%s)" % (rg_id, ",".join(resnames)))
+    n_rotamer_changes = n_cbeta_dev = n_partial_splits = 0
+    peptide_flips = []
+    for segment in self.segments :
+      n_rotamer_changes += segment.n_rotamer_changes()
+      n_cbeta_dev += segment.n_cbeta_outliers()
+      n_partial_splits += segment.n_partial_splits(join_at_calpha=True)
+      peptide_flips.extend(segment.find_peptide_flips())
+    print("%d disordered residues have multiple rotamers" % \
+      n_rotamer_changes, file=out)
+    if (n_partial_splits > 0):
+      print("%d disordered residues have a single C-alpha atom" % \
+        n_partial_splits, file=out)
+    if (n_cbeta_dev > 0):
+      print("%d disordered residues have C-beta deviations" % \
+        n_cbeta_dev, file=out)
+    if (len(peptide_flips) > 0):
+      print("%d apparent peptide flips:", file=out)
+      for residue_id_str, angle in peptide_flips :
+        print("  %s (angle=%.1f)" % (residue_id_str, angle), file=out)
+    # distances and RMSDs
+    rmsd_max, segment_max = self.max_rmsd_between_conformers()
+    rmsd_mc_max, segment_mc_max = self.max_rmsd_between_conformers(
+      backbone=True)
+    assert (rmsd_max is not None)
+    print("Max. RMSD between conformers:", file=out)
+    print("  %6.3f (%s) [all non-H atoms]" % (rmsd_max, segment_max), file=out)
+    if (rmsd_mc_max is not None):
+      print("  %6.3f (%s) [backbone only]" %(rmsd_mc_max,
+        segment_mc_max), file=out)
+    dist_max, segment_max = self.max_distance_between_conformers()
+    dist_mc_max, segment_mc_max = self.max_distance_between_conformers(
+      backbone=True)
+    assert (dist_max is not None)
+    print("Max. distance between conformers:", file=out)
+    print("  %6.3f (%s) [all non-H atoms]" % (dist_max, segment_max), file=out)
+    if (dist_mc_max is not None):
+      print("  %6.3f (%s) [backbone only]" %(dist_mc_max,
+        segment_mc_max), file=out)
+    # verbose output
+    if (verbose):
+      for chain in self.chains :
+        chain.show(out=out)
+    else :
+      print("Run with --verbose to show per-residue results.", file=out)
+    print("", file=out)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/disorder/backbone.py
+
+"""
+Tools for analyzing backbone motion in ensembles and statically disordered
+structures.
+"""
+
+# derived from BackrubFinder2.java by Ian Davis
+
+from __future__ import absolute_import, division, print_function
+from libtbx import slots_getstate_setstate
+import math
+import sys
+from six.moves import range
+
+def get_calphas(pdb_hierarchy):
+  n_models = pdb_hierarchy.models_size()
+  calphas = []
+  for n in range(n_models) : calphas.append([])
+  for i_mod, model in enumerate(pdb_hierarchy.models()):
+    for chain in model.chains():
+      if (not chain.is_protein()) : continue
+      for residue_group in chain.residue_groups():
+        atom_group = residue_group.only_atom_group()
+        c_alpha = atom_group.get_atom("CA")
+        if (c_alpha is not None):
+          #print "%d: %s" % (i_mod, c_alpha.id_str())
+          calphas[i_mod].append(c_alpha)
+        else :
+          calphas[i_mod].append(None)
+  for calphas_model in calphas :
+    assert len(calphas_model) == len(calphas[0])
+  return calphas
+
+def get_cbetas(pdb_hierarchy):
+  n_models = pdb_hierarchy.models_size()
+  cbetas = [ [] ] * n_models
+  for i_mod, model in enumerate(pdb_hierarchy.models()):
+    for chain in model.chains():
+      if (not chain.is_protein()) : continue
+      for residue_group in chain.residue_groups():
+        atom_group = residue_group.only_atom_group()
+        c_beta = atom_group.get_atom("CB")
+        if (c_beta is None):
+          c_beta = atom_group.get_atom("2HA")
+        if (c_beta is not None):
+          cbetas[i_mod].append(c_beta)
+        else :
+          cbetas[i_mod].append(None)
+  for cbetas_model in cbetas :
+    assert len(cbetas_model) == len(cbetas[0])
+  return cbetas
+
+def circ_stddev(t, deg=True):
+  assert (len(t) > 0)
+  from scitbx.array_family import flex
+  if (not deg):
+    t = t * 180 / math.pi
+  mean = flex.mean(t)
+  a = sa = 0
+  # FIXME use C++ array operations
+  for i in range(len(t)):
+    a = abs(mean - t[i]) % 360
+    if (a > 180.0):
+      a = 360.0 - a
+    sa += a*a
+  return math.sqrt(sa / len(t))
+
+def circ_len(t, deg=True):
+  assert (len(t) > 0)
+  from scitbx.array_family import flex
+  if (deg):
+    t = math.pi * (t/180)
+  sx = flex.sum(flex.cos(t)) / len(t)
+  sy = flex.sum(flex.sin(t)) / len(t)
+  return math.sqrt(sx**2 + sy**2)
+
+def circ_mean(t, deg=True):
+  assert (len(t) > 0)
+  from scitbx.array_family import flex
+  if (deg):
+    t = math.pi * (t/180)
+  sx = flex.sum(flex.cos(t)) / len(t)
+  sy = flex.sum(flex.sin(t)) / len(t)
+  return math.degrees(math.atan2(sy, sx))
+
+class backrub_residue(slots_getstate_setstate):
+  __slots__ = ["id_str", "i_mod", "j_mod", "rmsd", "backrub_angle", "xyz"]
+  def __init__(self, calpha, i_mod, j_mod, rmsd, backrub_angle):
+    residue_group = calpha.parent().parent()
+    self.id_str = residue_group.id_str()
+    self.i_mod = i_mod
+    self.j_mod = j_mod
+    self.rmsd = rmsd
+    self.backrub_angle = backrub_angle
+    self.xyz = calpha.xyz
+
+  def show(self, out=sys.stdout, prefix=""):
+    print(prefix+"backrub %s (%s,%s): angle=%.1f" % \
+      (self.id_str, self.i_mod, self.j_mod, self.backrub_angle), file=out)
+
+def evaluate_backrub_pair_impl(
+    calphas_A,
+    calphas_B,
+    labels=(),
+    max_calpha_sep=5.0,
+    rmsd_limit=0.1,
+    backrub_angle_limit=10.0) : # FIXME is this an appropriate cutoff?
+  assert (len(calphas_A) == len(calphas_B) == 5)
+  if (None in calphas_A) or (None in calphas_B):
+    return None
+  for k_res in range(0, 4):
+    dist = calphas_A[k_res].distance(calphas_A[k_res+1])
+    if (dist > max_calpha_sep):
+      return None
+  from scitbx.array_family import flex
+  from scitbx.math import superpose
+  from scitbx.matrix import col
+  import scitbx.math
+  sites_A = flex.vec3_double([ calphas_A[k].xyz for k in [0,1,3,4] ])
+  sites_B = flex.vec3_double([ calphas_B[k].xyz for k in [0,1,3,4] ])
+  lsq_fit = superpose.least_squares_fit(
+    reference_sites=sites_A,
+    other_sites=sites_B)
+  sites_B_new = lsq_fit.other_sites_best_fit()
+  rmsd = sites_B_new.rms_difference(sites_A)
+  ca2 = (col(sites_A[1]) + col(sites_B_new[1])) / 2
+  ca3r = col(calphas_A[2].xyz)
+  ca3m = lsq_fit.rt() * calphas_B[2].xyz
+  ca4 = (col(sites_A[2]) + col(sites_B_new[2])) / 2
+  backrub_angle = scitbx.math.dihedral_angle(
+    sites=[ca3r.elems, ca2.elems, ca4.elems, ca3m.elems],
+    deg=True)
+  if ((rmsd <= rmsd_limit) and
+      (abs(backrub_angle) >= backrub_angle_limit)):
+    if (len(labels) == 0):
+      labels = (calphas_A[2].fetch_labels().altloc,
+                calphas_B[2].fetch_labels().altloc)
+    return backrub_residue(
+      calpha=calphas_A[2],
+      i_mod=labels[0],
+      j_mod=labels[1],
+      rmsd=rmsd,
+      backrub_angle=backrub_angle)
+  return None
+
+def find_backrubs(
+    pdb_hierarchy=None,
+    residue_group=None,
+    max_calpha_sep=5.0,
+    rmsd_limit=0.1,
+    backrub_angle_limit=10.0):
+  assert ([pdb_hierarchy, residue_group].count(None) == 1)
+  if (residue_group is not None):
+    return find_ensemble_backrubs(
+      residue_group=residue_group,
+      max_calpha_sep=max_calpha_sep,
+      rmsd_limit=rmsd_limit,
+      backrub_angle_limit=backrub_angle_limit)
+  backrubs = []
+  for chain in pdb_hierarchy.only_model().chains():
+    if (not chain.is_protein()):
+      continue
+    residue_groups = chain.residue_groups()
+    for residue_group in residue_groups[2:-2] :
+      if (residue_group.atom_groups_size() == 1):
+        continue
+      br = find_ensemble_backrubs(
+        residue_group=residue_group,
+        max_calpha_sep=max_calpha_sep,
+        rmsd_limit=rmsd_limit,
+        backrub_angle_limit=backrub_angle_limit)
+      if (br is not None):
+        backrubs.extend(br)
+  return backrubs
+
+def find_ensemble_backrubs(
+    pdb_hierarchy=None,
+    residue_group=None,
+    max_calpha_sep=5.0,
+    rmsd_limit=0.1,
+    backrub_angle_limit=10.0):
+  assert ([pdb_hierarchy, residue_group].count(None) == 1)
+  from scitbx.array_family import flex
+  from scitbx.math import superpose
+  from scitbx.matrix import col
+  import scitbx.math
+  if (residue_group is not None):
+    pdb_hierarchy = extract_backrub_residue_groups(residue_group)
+    if (pdb_hierarchy is None):
+      return []
+  models = pdb_hierarchy.models()
+  n_models = len(models)
+  assert (n_models > 1)
+  calphas = get_calphas(pdb_hierarchy)
+  assert (len(calphas) == n_models)
+  backrubs = []
+  def get_labels(i_mod, j_mod):
+    return (models[i_mod].id.strip(), models[j_mod].id.strip())
+  for k_res in range(2, len(calphas[0]) - 2):
+    for i_mod in range(n_models-1):
+      for j_mod in range(i_mod+1, n_models):
+        calphas_i = [ calphas[i_mod][k] for k in range(k_res-2, k_res+3) ]
+        calphas_j = [ calphas[j_mod][k] for k in range(k_res-2, k_res+3) ]
+        if (not None in calphas_i) and (not None in calphas_j):
+          br = evaluate_backrub_pair_impl(
+            calphas_A=calphas_i,
+            calphas_B=calphas_j,
+            labels=get_labels(i_mod, j_mod),
+            max_calpha_sep=max_calpha_sep,
+            rmsd_limit=rmsd_limit,
+            backrub_angle_limit=backrub_angle_limit)
+          if (br is not None):
+            backrubs.append(br)
+  return backrubs
+
+#-----------------------------------------------------------------------
+# UTILITY FUNCTIONS
+def extract_backrub_residue_groups(residue_group,
+    as_ensemble=True):
+  import iotbx.pdb.hierarchy
+  chain = residue_group.parent()
+  root = chain.parent().parent()
+  assert (len(root.models()) == 1)
+  residue_groups = chain.residue_groups()
+  backrub_residues = None
+  for i_res, other_rg in enumerate(residue_groups):
+    if (other_rg == residue_group):
+      if (i_res < 2) or (i_res > len(residue_groups) - 3):
+        return None
+      backrub_residues = [ residue_groups[k] for k in range(i_res-2,i_res+3) ]
+      break
+  assert (backrub_residues is not None)
+  root = iotbx.pdb.hierarchy.root()
+  model = iotbx.pdb.hierarchy.model()
+  root.append_model(model)
+  new_chain = iotbx.pdb.hierarchy.chain(id=chain.id)
+  model.append_chain(new_chain)
+  for rg in backrub_residues :
+    new_chain.append_residue_group(rg.detached_copy())
+  if (as_ensemble):
+    return alternate_conformations_as_multiple_models(root)
+  return root
+
+def alternate_conformations_as_multiple_models(pdb_hierarchy):
+  from mmtbx.command_line import altloc_remediate
+  import iotbx.pdb.hierarchy
+  altlocs = set()
+  for chain in pdb_hierarchy.only_model().chains():
+    if (not chain.is_protein()) and (not chain.is_na()):
+      continue
+    for residue_group in chain.residue_groups():
+      atom_groups = residue_group.atom_groups()
+      if (len(atom_groups) > 1):
+        if (atom_groups[0].altloc.strip() == ''):
+          altloc_remediate.spread_to_residue(residue_group)
+      altlocs.update(set([ a.altloc for a in residue_group.atom_groups() ]))
+  if ('' in altlocs) : altlocs.remove('')
+  n_confs = len(altlocs)
+  if (n_confs <= 1):
+    return pdb_hierarchy
+  root = iotbx.pdb.hierarchy.root()
+  altlocs = sorted(altlocs)
+  models = {}
+  for i_mod in range(n_confs):
+    model = iotbx.pdb.hierarchy.model(id=altlocs[i_mod])
+    models[altlocs[i_mod]] = model
+    root.append_model(model)
+  for chain in pdb_hierarchy.only_model().chains():
+    if (not chain.is_protein()) and (not chain.is_na()):
+      continue
+    chains = {}
+    for altloc in altlocs :
+      new_chain = iotbx.pdb.hierarchy.chain(id=chain.id)
+      models[altloc].append_chain(new_chain)
+      chains[altloc] = new_chain
+    for residue_group in chain.residue_groups():
+      atom_groups = residue_group.atom_groups()
+      if (len(atom_groups) == 1):
+        for altloc in altlocs :
+          chains[altloc].append_residue_group(residue_group.detached_copy())
+      else :
+        def add_atom_group(ag, new_chain):
+          new_ag = ag.detached_copy()
+          new_ag.altloc = ''
+          new_rg = iotbx.pdb.hierarchy.residue_group(
+            resseq=residue_group.resseq,
+            icode=residue_group.icode)
+          new_rg.append_atom_group(new_ag)
+          new_chain.append_residue_group(new_rg)
+        have_altlocs = set()
+        for atom_group in atom_groups :
+          altloc = atom_group.altloc
+          add_atom_group(atom_group, chains[altloc])
+          have_altlocs.add(altloc)
+        for altloc in altlocs :
+          if (not altloc in have_altlocs):
+            add_atom_group(atom_groups[0], chains[altloc])
+  return root
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/disorder/tst.py
+
+from __future__ import absolute_import, division, print_function
+from mmtbx import disorder
+import iotbx.pdb
+from libtbx.test_utils import approx_equal
+from libtbx.utils import null_out
+
+def exercise():
+  pdb_str = """\
+MODEL        1
+ATOM      1  CA  ALA A  73      40.400   8.490  10.792  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.672   7.864  11.359  0.01 13.55           C
+ATOM      3  CA  LYS A  75      37.406   4.181  10.841  0.01 13.28           C
+ENDMDL
+MODEL        2
+ATOM      1  CA  ALA A  73      40.320   8.758  11.103  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.630   7.923  11.568  0.01 13.55           C
+ATOM      3  CA  LYS A  75      36.856   4.141  11.040  0.01 13.28           C
+ENDMDL
+MODEL        3
+ATOM      1  CA  ALA A  73      40.192   9.182  11.213  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.644   7.871  11.649  0.01 13.55           C
+ATOM      3  CA  LYS A  75      37.564   4.235  11.057  0.01 13.28           C
+ENDMDL
+MODEL        4
+ATOM      1  CA  ALA A  73      39.924   9.073  10.840  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.434   7.623  11.282  0.01 13.55           C
+ATOM      3  CA  LYS A  75      38.120   4.233  11.095  0.01 13.28           C
+ENDMDL
+MODEL        5
+ATOM      1  CA  ALA A  73      39.870   8.700  11.195  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.328   7.379  11.083  0.01 13.55           C
+ATOM      3  CA  LYS A  75      37.543   3.760  10.681  0.01 13.28           C
+ENDMDL
+MODEL        6
+ATOM      1  CA  ALA A  73      40.236   9.111  11.122  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.653   7.850  11.378  0.01 13.55           C
+ATOM      3  CA  LYS A  75      37.252   4.117  10.669  0.01 13.28           C
+ENDMDL
+MODEL        7
+ATOM      1  CA  ALA A  73      40.532   8.599  10.939  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.830   7.868  11.208  0.01 13.55           C
+ATOM      3  CA  LYS A  75      37.397   4.094  11.107  0.01 13.28           C
+ENDMDL
+MODEL        8
+ATOM      1  CA  ALA A  73      40.340   9.520  11.303  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.701   8.474  11.515  0.01 13.55           C
+ATOM      3  CA  LYS A  75      37.522   4.781  11.633  0.01 13.28           C
+ENDMDL
+MODEL        9
+ATOM      1  CA  ALA A  73      40.296   8.642  10.668  0.01 13.69           C
+ATOM      2  CA  ARG A  74      36.832   7.269  11.324  0.01 13.55           C
+ATOM      3  CA  LYS A  75      38.541   3.900  11.400  0.01 13.28           C
+ENDMDL
+MODEL       10
+ATOM      1  CA  ALA A  73      39.396   8.850  11.064  0.01 13.69           C
+ATOM      2  CA  ARG A  74      35.915   7.291  10.970  0.01 13.55           C
+ATOM      3  CA  LYS A  75      37.173   3.719  10.662  0.01 13.28           C
+ENDMDL
+"""
+  pdb_in = iotbx.pdb.input(source_info=None, lines=pdb_str)
+  hierarchy = pdb_in.construct_hierarchy()
+  disorder.set_ensemble_b_factors_to_xyz_displacement(
+    pdb_hierarchy=hierarchy,
+    method="rmsf",
+    log=null_out())
+  model = hierarchy.models()[0]
+  assert approx_equal(list(model.atoms().extract_b()),
+    [0.480574, 0.478505, 0.616683])
+  disorder.set_ensemble_b_factors_to_xyz_displacement(
+    pdb_hierarchy=hierarchy,
+    method="mcs",
+    log=null_out())
+  model = hierarchy.models()[0]
+  assert approx_equal(list(model.atoms().extract_b()),
+    [0.684434, 0.779022, 0.881886])
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/disorder/tst_analyze_model.py
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.disorder import analyze_model
+from mmtbx.validation import molprobity
+import iotbx.pdb
+from libtbx.utils import null_out
+import libtbx.load_env
+import mmtbx.model
+from six.moves import cStringIO as StringIO
+
+def analyze_fragment(pdb_str):
+  pdb_in = iotbx.pdb.input(source_info=None, lines=pdb_str)
+  model = mmtbx.model.manager(pdb_in)
+  validation = molprobity.molprobity(model, outliers_only=False)
+  result = analyze_model.process_pdb_hierarchy(
+    pdb_hierarchy=model.get_hierarchy(),
+    validation=validation,
+    log=null_out())
+  return result
+
+def exercise():
+  # single alternate, split at C-alpha (from 1ytt)
+  pdb_str = """\
+CRYST1   65.508   72.216   45.035  90.00  90.00  90.00 P 21 21 21    8
+ATOM    844  N   VAL A 216      11.617  50.561  30.170  1.00  5.99           N
+ATOM    845  CA  VAL A 216      12.023  51.936  29.899  1.00  6.80           C
+ATOM    846  C   VAL A 216      11.349  52.370  28.604  1.00  8.26           C
+ATOM    847  O   VAL A 216      11.479  51.707  27.569  1.00  6.98           O
+ATOM    848  CB  VAL A 216      13.550  52.097  29.765  1.00  6.32           C
+ATOM    849  CG1 VAL A 216      13.899  53.570  29.583  1.00  6.65           C
+ATOM    850  CG2 VAL A 216      14.248  51.530  31.002  1.00  6.72           C
+ATOM    851  N   CYS A 217      10.629  53.485  28.685  1.00 10.22           N
+ATOM    852  CA ACYS A 217       9.916  54.032  27.534  0.54 10.72           C
+ATOM    853  CA BCYS A 217       9.883  54.049  27.565  0.45 11.26           C
+ATOM    854  C   CYS A 217      10.525  55.369  27.120  1.00 11.35           C
+ATOM    855  O   CYS A 217      11.061  56.102  27.951  1.00 11.69           O
+ATOM    856  CB ACYS A 217       8.430  54.204  27.849  0.54 11.93           C
+ATOM    857  CB BCYS A 217       8.437  54.279  28.023  0.45 12.95           C
+ATOM    858  SG ACYS A 217       7.621  52.711  28.510  0.54 12.38           S
+ATOM    859  SG BCYS A 217       7.253  54.846  26.764  0.45 16.59           S
+ATOM    860  N   GLU A 218      10.471  55.668  25.825  1.00 11.30           N
+ATOM    861  CA  GLU A 218      11.046  56.908  25.302  1.00 12.00           C
+ATOM    862  C   GLU A 218       9.980  57.809  24.705  1.00 12.95           C
+ATOM    863  O   GLU A 218       8.952  57.329  24.209  1.00 12.30           O
+ATOM    864  CB  GLU A 218      12.127  56.628  24.248  1.00 13.87           C
+ATOM    865  CG  GLU A 218      11.638  55.952  22.978  1.00 15.94           C
+ATOM    866  CD  GLU A 218      12.723  55.827  21.912  1.00 17.80           C
+ATOM    867  OE1 GLU A 218      13.918  55.750  22.262  1.00 17.06           O
+ATOM    868  OE2 GLU A 218      12.382  55.827  20.711  1.00 20.67           O
+END
+"""
+  result = analyze_fragment(pdb_str)
+  out = StringIO()
+  result.show(out=out)
+  assert ("atom_group=B CYS  occ=0.45 phi=-111.6 psi=146.7  rot=t" in
+    out.getvalue())
+
+if (__name__ == "__main__"):
+  if (not libtbx.env.has_module("probe")):
+    print("Probe not configured, skipping test")
+  else :
+    exercise()
+    print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/disorder/tst_backbone.py
+
+from __future__ import absolute_import, division, print_function
+from mmtbx.disorder import backbone
+import iotbx.pdb
+from six.moves import cStringIO as StringIO
+
+pdb_raw = """
+CRYST1   21.937    6.000   23.477  90.00 107.08  90.00 P 1 21 1      2
+ATOM      1  N   GLY A   1      -9.009   4.612   6.102  1.00 16.77           N
+ATOM      2  CA  GLY A   1      -9.052   4.207   4.651  1.00 16.57           C
+ATOM      3  C   GLY A   1      -8.015   3.140   4.419  1.00 16.16           C
+ATOM      4  O   GLY A   1      -7.523   2.521   5.381  1.00 16.78           O
+ATOM      5  N   ASN A   2      -7.656   2.923   3.155  1.00 15.02           N
+ATOM      6  CA  ASN A   2      -6.522   2.038   2.831  1.00 14.10           C
+ATOM      7  C   ASN A   2      -5.241   2.537   3.427  1.00 13.13           C
+ATOM      8  O   ASN A   2      -4.978   3.742   3.426  1.00 11.91           O
+ATOM      9  CB  ASN A   2      -6.346   1.881   1.341  1.00 15.38           C
+ATOM     10  CG  ASN A   2      -7.584   1.342   0.692  1.00 14.08           C
+ATOM     11  OD1 ASN A   2      -8.025   0.227   1.016  1.00 17.46           O
+ATOM     12  ND2 ASN A   2      -8.204   2.155  -0.169  1.00 11.72           N
+ATOM     13  N  AASN A   3      -4.438   1.590   3.905  0.50 12.26           N
+ATOM     14  CA AASN A   3      -3.193   1.904   4.589  0.50 11.74           C
+ATOM     15  C  AASN A   3      -1.955   1.332   3.895  0.50 11.10           C
+ATOM     16  O  AASN A   3      -1.872   0.119   3.648  0.50 10.42           O
+ATOM     17  CB AASN A   3      -3.259   1.378   6.042  0.50 12.15           C
+ATOM     18  CG AASN A   3      -2.006   1.739   6.861  0.50 12.82           C
+ATOM     19  OD1AASN A   3      -1.702   2.925   7.072  0.50 15.05           O
+ATOM     20  ND2AASN A   3      -1.271   0.715   7.306  0.50 13.48           N
+ATOM     13  N  BASN A   3      -4.438   1.590   3.905  0.50 12.26           N
+ATOM     14  CA BASN A   3      -3.193   1.904   4.589  0.50 11.74           C
+ATOM     15  C  BASN A   3      -1.993   1.011   4.266  0.50 11.10           C
+ATOM     16  O  BASN A   3      -2.000  -0.192   4.568  0.50 10.42           O
+ATOM     17  CB BASN A   3      -3.259   1.378   6.042  0.50 12.15           C
+ATOM     18  CG BASN A   3      -2.006   1.739   6.861  0.50 12.82           C
+ATOM     19  OD1BASN A   3      -1.702   2.925   7.072  0.50 15.05           O
+ATOM     20  ND2BASN A   3      -1.271   0.715   7.306  0.50 13.48           N
+ATOM     21  N  AGLN A   4      -1.005   2.228   3.598  0.50 10.29           N
+ATOM     22  CA AGLN A   4       0.384   1.888   3.199  0.50 10.53           C
+ATOM     23  C  AGLN A   4       1.435   2.606   4.088  0.50 10.24           C
+ATOM     24  O  AGLN A   4       1.547   3.843   4.115  0.50  8.86           O
+ATOM     25  CB AGLN A   4       0.656   2.148   1.711  0.50  9.80           C
+ATOM     26  CG AGLN A   4       1.944   1.458   1.213  0.50 10.25           C
+ATOM     27  CD AGLN A   4       2.504   2.044  -0.089  0.50 12.43           C
+ATOM     28  OE1AGLN A   4       2.744   3.268  -0.190  0.50 14.62           O
+ATOM     29  NE2AGLN A   4       2.750   1.161  -1.091  0.50  9.05           N
+ATOM     21  N  BGLN A   4      -0.972   1.629   3.658  0.50 10.29           N
+ATOM     22  CA BGLN A   4       0.392   1.063   3.508  0.50 10.53           C
+ATOM     23  C  BGLN A   4       1.482   2.027   4.050  0.50 10.24           C
+ATOM     24  O  BGLN A   4       1.689   3.145   3.548  0.50  8.86           O
+ATOM     25  CB BGLN A   4       0.705   0.638   2.067  0.50  9.80           C
+ATOM     26  CG BGLN A   4       1.943  -0.280   1.974  0.50 10.25           C
+ATOM     27  CD BGLN A   4       2.565  -0.350   0.574  0.50 12.43           C
+ATOM     28  OE1BGLN A   4       2.900   0.692  -0.032  0.50 14.62           O
+ATOM     29  NE2BGLN A   4       2.757  -1.593   0.061  0.50  9.05           N
+ATOM     30  N  AGLN A   5       2.154   1.821   4.871  0.50 10.38           N
+ATOM     31  CA AGLN A   5       3.270   2.361   5.640  0.50 11.39           C
+ATOM     32  C  AGLN A   5       4.594   1.768   5.172  0.50 11.52           C
+ATOM     33  O  AGLN A   5       4.768   0.546   5.054  0.50 12.05           O
+ATOM     34  CB AGLN A   5       3.056   2.183   7.147  0.50 11.96           C
+ATOM     35  CG AGLN A   5       1.829   2.950   7.647  0.50 10.81           C
+ATOM     36  CD AGLN A   5       1.344   2.414   8.954  0.50 13.10           C
+ATOM     37  OE1AGLN A   5       0.774   1.325   9.002  0.50 10.65           O
+ATOM     38  NE2AGLN A   5       1.549   3.187  10.039  0.50 12.30           N
+ATOM     30  N  BGLN A   5       2.127   1.614   5.127  0.50 10.38           N
+ATOM     31  CA BGLN A   5       3.270   2.361   5.640  0.50 11.39           C
+ATOM     32  C  BGLN A   5       4.594   1.768   5.172  0.50 11.52           C
+ATOM     33  O  BGLN A   5       4.768   0.546   5.054  0.50 12.05           O
+ATOM     34  CB BGLN A   5       3.056   2.183   7.147  0.50 11.96           C
+ATOM     35  CG BGLN A   5       1.829   2.950   7.647  0.50 10.81           C
+ATOM     36  CD BGLN A   5       1.344   2.414   8.954  0.50 13.10           C
+ATOM     37  OE1BGLN A   5       0.774   1.325   9.002  0.50 10.65           O
+ATOM     38  NE2BGLN A   5       1.549   3.187  10.039  0.50 12.30           N
+ATOM     39  N   ASN A   6       5.514   2.664   4.856  1.00 11.99           N
+ATOM     40  CA  ASN A   6       6.831   2.310   4.318  1.00 12.30           C
+ATOM     41  C   ASN A   6       7.854   2.761   5.324  1.00 13.40           C
+ATOM     42  O   ASN A   6       8.219   3.943   5.374  1.00 13.92           O
+ATOM     43  CB  ASN A   6       7.065   3.016   2.993  1.00 12.13           C
+ATOM     44  CG  ASN A   6       5.961   2.735   2.003  1.00 12.77           C
+ATOM     45  OD1 ASN A   6       5.798   1.604   1.551  1.00 14.27           O
+ATOM     46  ND2 ASN A   6       5.195   3.747   1.679  1.00 10.07           N
+ATOM     47  N   TYR A   7       8.292   1.817   6.147  1.00 14.70           N
+ATOM     48  CA  TYR A   7       9.159   2.144   7.299  1.00 15.18           C
+ATOM     49  C   TYR A   7      10.603   2.331   6.885  1.00 15.91           C
+ATOM     50  O   TYR A   7      11.041   1.811   5.855  1.00 15.76           O
+ATOM     51  CB  TYR A   7       9.061   1.065   8.369  1.00 15.35           C
+ATOM     52  CG  TYR A   7       7.665   0.929   8.902  1.00 14.45           C
+ATOM     53  CD1 TYR A   7       6.771   0.021   8.327  1.00 15.68           C
+ATOM     54  CD2 TYR A   7       7.210   1.756   9.920  1.00 14.80           C
+ATOM     55  CE1 TYR A   7       5.480  -0.094   8.796  1.00 13.46           C
+ATOM     56  CE2 TYR A   7       5.904   1.649  10.416  1.00 14.33           C
+ATOM     57  CZ  TYR A   7       5.047   0.729   9.831  1.00 15.09           C
+ATOM     58  OH  TYR A   7       3.766   0.589  10.291  1.00 14.39           O
+ATOM     59  OXT TYR A   7      11.358   2.999   7.612  1.00 17.49           O
+TER      60      TYR A   7
+HETATM   61  O   HOH A   8      -6.471   5.227   7.124  1.00 22.62           O
+HETATM   62  O   HOH A   9      10.431   1.858   3.216  1.00 19.71           O
+HETATM   63  O   HOH A  10     -11.286   1.756  -1.468  1.00 17.08           O
+HETATM   64  O   HOH A  11      11.808   4.179   9.970  1.00 23.99           O
+HETATM   65  O   HOH A  12      13.605   1.327   9.198  1.00 26.17           O
+HETATM   66  O   HOH A  13      -2.749   3.429  10.024  1.00 39.15           O
+HETATM   67  O   HOH A  14      -1.500   0.682  10.967  1.00 43.49           O
+END
+"""
+
+def exercise():
+  hierarchy = iotbx.pdb.input(source_info=None, lines=pdb_raw).construct_hierarchy()
+  with open("tmp.pdb", "w") as f:
+    f.write(hierarchy.as_pdb_string())
+  backrubs = backbone.find_backrubs(
+    pdb_hierarchy=hierarchy)
+  assert (len(backrubs) == 1)
+  out = StringIO()
+  backrubs[0].show(out=out)
+  assert (out.getvalue() == """backrub  A   4  (A,B): angle=-26.0\n"""), \
+    out.getvalue()
+
+if (__name__ == "__main__"):
+  exercise()
+  print("OK")
+
+
+ *******************************************************************************

@@ -1,0 +1,1070 @@
+
+
+ *******************************************************************************
+mmtbx/den/__init__.py
+from __future__ import absolute_import, division, print_function
+import iotbx.phil
+from cctbx.array_family import flex
+from libtbx import easy_pickle
+from libtbx.utils import Sorry
+import sys
+
+den_params = iotbx.phil.parse("""
+ reference_file = None
+   .type = path
+   .optional = true
+   .short_caption = DEN reference model
+   .style = file_type:pdb input_file
+ gamma = 0.5
+   .type = float
+ kappa = 0.1
+   .type = float
+ weight = 30.0
+   .type = float
+ sigma = 0.44
+   .type = float
+ optimize = True
+   .type = bool
+   .short_caption = Optimize DEN parameters
+   .help = If selected, will run a grid search to determine optimal values \
+    of the weight and gamma parameters for DEN refinement.  This is very \
+    slow, but highly recommended, and can be parallelized across multiple \
+    CPU cores.
+ opt_gamma_values = 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
+   .type = floats
+   .short_caption = Gamma values for optimization
+ opt_weight_values = 3.0, 10.0, 30.0, 100.0, 300.0
+   .type = floats
+   .short_caption = Weight values for optimization
+ num_cycles = 10
+   .type = int
+   .short_caption = Number of cycles
+ kappa_burn_in_cycles = 2
+   .type = int
+   .short_caption = Number of cycles where kappa is set to 0.0
+ bulk_solvent_and_scale = True
+   .type = bool
+   .short_caption = Refine bulk solvent and anisou scale after \
+    each DEN cycle
+ refine_adp = True
+   .type = bool
+   .short_caption = Refine B-factors
+ final_refinement_cycle = False
+   .type = bool
+ verbose = False
+   .type = bool
+ annealing_type = *torsion \
+                   cartesian
+   .type = choice(multi=False)
+   .help = select strategy to apply DEN restraints
+ minimize_c_alpha_only = False
+   .type = bool
+   .short_caption = Restrain only C alpha positions in pre-dynamics \
+    coordinate minimization
+ output_kinemage = False
+   .type = bool
+   .help = output kinemage representation of starting DEN restraints
+ restraint_network
+    .style = box auto_align
+ {
+  lower_distance_cutoff = 3.0
+    .type = float
+  upper_distance_cutoff = 15.0
+    .type = float
+  sequence_separation_low = 0
+    .type = int
+  sequence_separation_limit = 10
+    .type = int
+  exclude_hydrogens = True
+    .type = bool
+  ndistance_ratio = 1.0
+    .type = float
+  export_den_pairs = False
+    .type = bool
+    .expert_level = 3
+  den_network_file = None
+    .type = path
+    .optional = True
+    .expert_level = 3
+ }
+""")
+
+den_params_development = iotbx.phil.parse("""
+ scale= 150.0
+   .type = float
+ relax_ncycle = 0
+   .type = int
+ post_ncycle = 0
+   .type = int
+ minimum_start = True
+   .type = bool
+ exponent = *2 4
+   .type = choice(multi=False)
+ atom_select = None
+   .type = atom_selection
+   .multiple = True
+   .optional = True
+""")
+
+class den_restraints(object):
+
+  def __init__(self,
+               pdb_hierarchy,
+               params,
+               pdb_hierarchy_ref=None,
+               log=None,
+               den_proxies=None):
+    if(log is None): log = sys.stdout
+    self.log = log
+    self.den_proxies = den_proxies
+    if len(pdb_hierarchy.models()) > 1:
+      raise Sorry("More than one model in input model. DEN refinement "+
+                  "is only available for a single model.")
+    if pdb_hierarchy_ref is not None:
+      if len(pdb_hierarchy_ref.models()) > 1:
+        raise Sorry("More than one model in reference model. "+
+                    "DEN refinement "+
+                    "is only available for a single model.")
+    self.pdb_hierarchy = pdb_hierarchy
+    atom_labels = list(self.pdb_hierarchy.atoms_with_labels())
+    segids = flex.std_string([ a.segid for a in atom_labels ])
+    self.use_model_segid = not segids.all_eq('    ')
+    if pdb_hierarchy_ref is None:
+      print("No input DEN reference model...restraining model "+ \
+        "to starting structure", file=self.log)
+      self.pdb_hierarchy_ref = pdb_hierarchy
+      self.restrain_to_starting_model = True
+      self.use_ref_segid = self.use_model_segid
+    else:
+      self.pdb_hierarchy_ref = pdb_hierarchy_ref
+      self.restrain_to_starting_model = False
+      ref_atom_labels = \
+        list(self.pdb_hierarchy_ref.atoms_with_labels())
+      ref_segids = \
+        flex.std_string([ a.segid for a in ref_atom_labels ])
+      self.use_ref_segid = not ref_segids.all_eq('    ')
+    if (not self.use_model_segid) and self.use_ref_segid:
+      raise Sorry("Reference model contains SEGIDs that do not match "+\
+                  "the working model.")
+    elif self.use_model_segid and (not self.use_ref_segid):
+      raise Sorry("Working model contains SEGIDs that do not match "+\
+                  "the reference model.")
+    import boost_adaptbx.boost.python as bp
+    self.ext = bp.import_ext("mmtbx_den_restraints_ext")
+    self.params = params
+    self.kappa = params.kappa
+    self.kappa_burn_in_cycles = params.kappa_burn_in_cycles
+    self.gamma = params.gamma
+    self.weight = params.weight
+    self.sigma = params.sigma
+    self.num_cycles = params.num_cycles
+    self.annealing_type = params.annealing_type
+    self.ndistance_ratio = \
+      params.restraint_network.ndistance_ratio
+    self.lower_distance_cutoff = \
+      params.restraint_network.lower_distance_cutoff
+    self.upper_distance_cutoff = \
+      params.restraint_network.upper_distance_cutoff
+    self.sequence_separation_low = \
+      params.restraint_network.sequence_separation_low
+    self.sequence_separation_limit = \
+      params.restraint_network.sequence_separation_limit
+    self.exclude_hydrogens = \
+      params.restraint_network.exclude_hydrogens
+    self.den_network_file = \
+      params.restraint_network.den_network_file
+    self.export_den_pairs = \
+      params.restraint_network.export_den_pairs
+    self.current_cycle = None
+    self.den_atom_pairs = None
+    self.den_pair_count = 0
+    self.torsion_mid_point = int(round(self.num_cycles / 2))
+    if self.den_proxies is None:
+      self.den_proxies = self.ext.shared_den_simple_proxy()
+
+  def build_den_proxies(self, pdb_hierarchy):
+    from mmtbx.geometry_restraints.torsion_restraints import utils
+    self.atoms_per_chain = \
+      self.count_atoms_per_chain(pdb_hierarchy=pdb_hierarchy)
+    self.atoms_per_chain_ref = \
+      self.count_atoms_per_chain(pdb_hierarchy=self.pdb_hierarchy_ref)
+    self.resid_hash_ref = \
+      utils.build_resid_hash(pdb_hierarchy=self.pdb_hierarchy_ref)
+    self.i_seq_hash = \
+      utils.build_i_seq_hash(pdb_hierarchy=pdb_hierarchy)
+    self.i_seq_hash_ref = \
+      utils.build_i_seq_hash(pdb_hierarchy=self.pdb_hierarchy_ref)
+    self.name_hash = \
+      utils.build_name_hash(pdb_hierarchy=pdb_hierarchy)
+    self.name_hash_ref = \
+      utils.build_name_hash(pdb_hierarchy=self.pdb_hierarchy_ref)
+    self.ref_atom_pairs, self.ref_distance_hash = \
+      self.find_atom_pairs(pdb_hierarchy=self.pdb_hierarchy_ref,
+                           resid_hash=self.resid_hash_ref)
+    self.remove_non_matching_pairs()
+    if self.den_network_file is not None:
+      self.den_atom_pairs = self.load_den_network()
+    else:
+      self.random_ref_atom_pairs = \
+        self.select_random_den_restraints()
+      self.den_atom_pairs = self.get_den_atom_pairs()
+    self.check_den_pair_consistency()
+    if self.export_den_pairs:
+      self.dump_den_network()
+
+  def check_den_pair_consistency(self):
+    if self.den_pair_count == 0:
+      raise Sorry("No DEN pairs matched to working model. "+\
+                  "Please check inputs.")
+
+  def get_n_proxies(self):
+    if self.den_proxies is not None:
+      return self.den_proxies.size()
+    return 0
+
+  def find_atom_pairs(self, pdb_hierarchy, resid_hash):
+    if self.restrain_to_starting_model:
+      reference_txt = "starting"
+    else:
+      reference_txt = "reference"
+    print("Finding DEN atom pairs from %s model..." % \
+      reference_txt, file=self.log)
+    atom_pairs = {}
+    distance_hash = {}
+    atom_pairs_test = {}
+    distance_hash_test = {}
+    #only supports first model
+    low_dist_sq = self.lower_distance_cutoff**2
+    high_dist_sq = self.upper_distance_cutoff**2
+    residue_range = \
+      self.sequence_separation_limit - self.sequence_separation_low
+    for chain in pdb_hierarchy.models()[0].chains():
+      found_conformer = chain.conformers()[0]
+      if not chain.is_protein() and not chain.is_na():
+        continue
+      if found_conformer is not None:
+        atom_pairs[chain.id] = []
+        atom_pairs_test[chain.id] = []
+        for i, res1 in enumerate(found_conformer.residues()):
+          for res2 in found_conformer.residues()[i:i+residue_range+1]:
+            separation = res2.resseq_as_int() - res1.resseq_as_int()
+            if separation < self.sequence_separation_low or \
+               separation > self.sequence_separation_limit:
+              continue
+            for j, atom1 in enumerate(res1.atoms()):
+              if self.exclude_hydrogens:
+                if atom1.element_is_hydrogen():
+                  continue
+              for atom2 in res2.atoms():
+                if atom2.i_seq <= atom1.i_seq:
+                  continue
+                if self.exclude_hydrogens:
+                  if atom2.element_is_hydrogen():
+                    continue
+                dist = distance_squared(atom1.xyz, atom2.xyz)
+                if dist >= low_dist_sq and \
+                   dist <= high_dist_sq:
+                  atom_pairs[chain.id].append( (atom1.i_seq, atom2.i_seq) )
+                  distance_hash[(atom1.i_seq, atom2.i_seq)] = \
+                    (dist**(0.5))
+    return atom_pairs, distance_hash
+
+  # remove any pairs of reference model atoms that do not
+  # have matching atom pairs in the working model
+  def remove_non_matching_pairs(self):
+    self.den_pair_count = 0
+    print("Removing non-matching pairs...", file=self.log)
+    temp_atom_pairs = {}
+    for chain in self.ref_atom_pairs.keys():
+      temp_atom_pairs[chain] = []
+      for i, pair in enumerate(self.ref_atom_pairs[chain]):
+        ref_atom1 = self.name_hash_ref[pair[0]]
+        ref_atom2 = self.name_hash_ref[pair[1]]
+        model_atom1 = self.i_seq_hash.get(ref_atom1)
+        model_atom2 = self.i_seq_hash.get(ref_atom2)
+        if model_atom1 != None and model_atom2 != None:
+          temp_atom_pairs[chain].append(pair)
+          self.den_pair_count += 1
+    self.ref_atom_pairs = temp_atom_pairs
+    self.check_den_pair_consistency()
+
+  def count_atoms_per_chain(self, pdb_hierarchy):
+    atoms_per_chain = {}
+    for chain in pdb_hierarchy.models()[0].chains():
+      if not chain.is_protein() and not chain.is_na():
+        continue
+      if self.exclude_hydrogens:
+        counter = 0
+        for atom in chain.atoms():
+          if not atom.element_is_hydrogen():
+            counter += 1
+        atoms_per_chain[chain.id] = counter
+      else:
+        atoms_per_chain[chain.id] = chain.atoms_size()
+    return atoms_per_chain
+
+  def select_random_den_restraints(self):
+    from cctbx.array_family import flex
+    print("Selecting random DEN pairs...", file=self.log)
+    random_pairs = {}
+    for chain in self.ref_atom_pairs.keys():
+      random_pairs[chain] = []
+      pair_list_size = len(self.ref_atom_pairs[chain])
+      num_restraints = round(self.atoms_per_chain_ref[chain] *
+                             self.ndistance_ratio)
+      if num_restraints > pair_list_size:
+        num_restraints = pair_list_size
+      random_selection = \
+        flex.random_selection(pair_list_size, int(num_restraints))
+      for i in random_selection:
+          random_pairs[chain].append(self.ref_atom_pairs[chain][i])
+    return random_pairs
+
+  def dump_den_network(self):
+    den_dump = {}
+    self.get_selection_strings()
+    for chain in self.den_atom_pairs.keys():
+      den_dump[chain] = []
+      for pair in self.den_atom_pairs[chain]:
+        i_seq_1 = pair[0]
+        i_seq_2 = pair[1]
+        select_1 = self.selection_string_hash[i_seq_1]
+        select_2 = self.selection_string_hash[i_seq_2]
+        dump_pair = (select_1, select_2)
+        den_dump[chain].append(dump_pair)
+    output_prefix = "den"
+    easy_pickle.dump(
+      "%s.pkl"%output_prefix,
+      den_dump)
+
+  def load_den_network(self):
+    self.den_pair_count = 0
+    den_atom_pairs = {}
+    network_pairs = easy_pickle.load(
+      self.den_network_file)
+    #check for current model compatibility
+    sel_cache = self.pdb_hierarchy.atom_selection_cache()
+    for chain in network_pairs.keys():
+      den_atom_pairs[chain] = []
+      for pair in network_pairs[chain]:
+        string = "(%s) or (%s)" % (pair[0], pair[1])
+        iselection = sel_cache.selection(string=string).iselection()
+        if iselection.size() != 2:
+          raise Sorry(
+            "input DEN network does not match current model")
+        den_atom_pairs[chain].append(iselection)
+        self.den_pair_count += 1
+    return den_atom_pairs
+
+  def get_selection_strings(self):
+    selection_string_hash = {}
+    atom_labels = list(self.pdb_hierarchy.atoms_with_labels())
+    segids = flex.std_string([ a.segid for a in atom_labels ])
+    for a in atom_labels:
+      chain = a.chain_id
+      resid = a.resid()
+      resname = a.resname
+      atomname = a.name
+      altloc = a.altloc
+      segid = a.segid
+      selection_string = \
+        "name '%s' and resname '%s' and chain '%s' and resid '%s'" % \
+        (atomname, resname, chain, resid) + \
+        " and segid '%s'" % (segid)
+      if altloc != "":
+        selection_string += " and altid '%s'" % altloc
+      selection_string_hash[a.i_seq] = selection_string
+    self.selection_string_hash = selection_string_hash
+
+  def get_den_atom_pairs(self):
+    self.den_pair_count = 0
+    den_atom_pairs = {}
+    for chain in self.random_ref_atom_pairs.keys():
+      den_atom_pairs[chain] = []
+      for pair in self.random_ref_atom_pairs[chain]:
+        i_seq_a = self.i_seq_hash[self.name_hash_ref[pair[0]]]
+        i_seq_b = self.i_seq_hash[self.name_hash_ref[pair[1]]]
+        i_seqs = flex.size_t([i_seq_a, i_seq_b])
+        den_atom_pairs[chain].append(i_seqs)
+        self.den_pair_count += 1
+    return den_atom_pairs
+
+  def build_den_restraints(self):
+    den_weight = self.weight*(1.0/(self.sigma**2))
+    print("building DEN restraints...", file=self.log)
+    for chain in self.den_atom_pairs.keys():
+      for pair in self.den_atom_pairs[chain]:
+        i_seq_a = self.i_seq_hash_ref[self.name_hash[pair[0]]]
+        i_seq_b = self.i_seq_hash_ref[self.name_hash[pair[1]]]
+        distance_ideal = self.ref_distance_hash[ (i_seq_a, i_seq_b) ]
+        i_seqs = tuple(pair)
+        proxy = self.ext.den_simple_proxy(
+          i_seqs=i_seqs,
+          eq_distance=distance_ideal,
+          eq_distance_start=distance_ideal,
+          weight=den_weight)
+        self.den_proxies.append(proxy)
+
+  def get_current_eq_distances(self):
+    current_eq_distances = []
+    for dp in self.den_proxies:
+      current_eq_distances.append(dp.eq_distance)
+    return current_eq_distances
+
+  def import_eq_distances(self, eq_distances):
+    for i, dp in enumerate(self.den_proxies):
+      dp.eq_distance = eq_distances[i]
+
+  def target_and_gradients(self,
+                           unit_cell,
+                           sites_cart,
+                           gradient_array):
+    return self.ext.den_simple_residual_sum(
+      sites_cart,
+      self.den_proxies,
+      gradient_array,
+      self.weight)
+
+  def update_eq_distances(self,
+                          sites_cart):
+    if self.current_cycle > self.kappa_burn_in_cycles:
+      kappa_local = self.kappa
+    else:
+      kappa_local = 0.0
+    self.ext.den_update_eq_distances(sites_cart,
+                            self.den_proxies,
+                            self.gamma,
+                            kappa_local)
+
+  def get_optimization_grid(self):
+    # defaults adapted from DEN Nature paper Fig. 1
+    gamma_array = self.params.opt_gamma_values
+    weight_array = self.params.opt_weight_values
+    grid = []
+    for g in gamma_array:
+      for w in weight_array:
+        grid.append( (g, w) )
+    return grid
+
+  def show_den_summary(self, sites_cart):
+    print("DEN restraints summary:", file=self.log)
+    print("\ntotal number of DEN restraints: %s\n" % \
+      len(self.den_proxies), file=self.log)
+    print("%s | %s | %s | %s | %s " % \
+      ("    atom 1     ",
+       "    atom 2     ",
+       "model dist",
+       "  eq dist ",
+       "eq dist start"), file=self.log)
+    for dp in self.den_proxies:
+      i_seqs = dp.i_seqs
+      a_xyz = sites_cart[i_seqs[0]]
+      b_xyz = sites_cart[i_seqs[1]]
+      distance_sq = distance_squared(a_xyz, b_xyz)
+      distance = distance_sq**(0.5)
+      if self.name_hash[i_seqs[0]].endswith("    "):
+        name1 = self.name_hash[i_seqs[0]][:-4]
+      else:
+        name1 = self.name_hash[i_seqs[0]]
+      if self.name_hash[i_seqs[1]].endswith("    "):
+        name2 = self.name_hash[i_seqs[1]][:-4]
+      else:
+        name2 = self.name_hash[i_seqs[1]]
+      print("%s | %s |   %6.3f   |   %6.3f   |   %6.3f  " % \
+        (name1,
+         name2,
+         distance,
+         dp.eq_distance,
+         dp.eq_distance_start), file=self.log)
+
+  def output_kinemage(self, sites_cart):
+    from mmtbx.kinemage import validation
+    f = open("den_restraints.kin", "w")
+    vec_header = "@kinemage\n"
+    vec_header += "@vectorlist {DEN} color= magenta master= {DEN}\n"
+    f.write(vec_header)
+    for dp in self.den_proxies:
+      i_seqs = dp.i_seqs
+      eq_distance = dp.eq_distance
+      site_a = sites_cart[i_seqs[0]]
+      site_b = sites_cart[i_seqs[1]]
+      sites = [site_a, site_b]
+      #distance_sq = distance_squared(site_a, site_b)
+      #distance = distance_sq**(0.5)
+      #diff = distance - eq_distance
+      #spring = validation.add_spring(sites, diff, "DEN")
+      vec = validation.kin_vec(start_key="A",
+                               start_xyz=site_a,
+                               end_key="B",
+                               end_xyz=site_b,
+                               width=None)
+      f.write(vec)
+      #STOP()
+    #for chain in self.random_ref_atom_pairs.keys():
+    #  for pair in self.random_ref_atom_pairs[chain]:
+    #    start_xyz = sites_cart[pair[0]]
+    #    end_xyz = sites_cart[pair[1]]
+    #    vec = validation.kin_vec(start_key="A",
+    #                             start_xyz=start_xyz,
+    #                             end_key="B",
+    #                             end_xyz=end_xyz,
+    #                             width=None)
+    #   f.write(vec)
+    f.close()
+
+  def proxy_select(self, n_seq, selection):
+    assert (self.den_proxies is not None)
+    return den_restraints(
+      pdb_hierarchy=self.pdb_hierarchy,
+      params=self.params,
+      pdb_hierarchy_ref=self.pdb_hierarchy_ref,
+      log=self.log,
+      den_proxies=self.den_proxies.proxy_select(n_seq, selection))
+
+def distance_squared(a, b):
+  return ((a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/den/plot_weights.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+def _plot_weights(figure, gamma, weight, z):
+  from matplotlib import cm
+  assert (len(z[0]) == len(gamma)) and (len(z) == len(weight))
+  p = figure.add_subplot(111)
+  p.set_position([0.1,0.1,0.85,0.85])
+  cset = p.contourf(z, 20, cmap=cm.YlGnBu, interpolation='bilinear')
+  p.contour(z, 20, colors=[(0.5,0.5,0.5)], linewidth=1)
+  figure.colorbar(cset, ax=p)
+  p.set_xticks(list(range(len(gamma))))
+  p.set_yticks(list(range(len(weight))))
+  p.set_xticklabels([ "%g" % x for x in gamma ])
+  p.set_yticklabels([ "%g" % x for x in weight ])
+  p.set_xlabel("gamma")
+  p.set_ylabel("weight")
+  p.set_title("DEN optimization (R-free)")
+  return p
+
+def plot_weights_pyplot(gamma, weight, z):
+  from matplotlib import pyplot as plt
+  figure = plt.figure()
+  _plot_weights(figure, gamma, weight, z)
+  plt.show()
+
+def exercise():
+  grid_results = [
+    (0.0, 0.5, 0.2330),
+    (0.0, 1.0, 0.2313),
+    (0.0, 3.0, 0.2259),
+    (0.0, 5.0, 0.2295),
+    (0.0, 10.0, 0.2252),
+    (0.0, 25.0, 0.2334),
+    (0.0, 50.0, 0.2329),
+    (0.0, 100.0, 0.2434),
+    (0.0, 200.0, 0.2612),
+    (0.2, 0.5, 0.2343),
+    (0.2, 1.0, 0.2346),
+    (0.2, 3.0, 0.2331),
+    (0.2, 5.0, 0.2328),
+    (0.2, 10.0, 0.2320),
+    (0.2, 25.0, 0.2280),
+    (0.2, 50.0, 0.2313),
+    (0.2, 100.0, 0.2379),
+    (0.2, 200.0, 0.2555),
+    (0.4, 0.5, 0.2352),
+    (0.4, 1.0, 0.2353),
+    (0.4, 3.0, 0.2328),
+    (0.4, 5.0, 0.2307),
+    (0.4, 10.0, 0.2272),
+    (0.4, 25.0, 0.2308),
+    (0.4, 50.0, 0.2300),
+    (0.4, 100.0, 0.2359),
+    (0.4, 200.0, 0.2427),
+    (0.6, 0.5, 0.2357),
+    (0.6, 1.0, 0.2300),
+    (0.6, 3.0, 0.2352),
+    (0.6, 5.0, 0.2356),
+    (0.6, 10.0, 0.2347),
+    (0.6, 25.0, 0.2249),
+    (0.6, 50.0, 0.2344),
+    (0.6, 100.0, 0.2332),
+    (0.6, 200.0, 0.2407),
+    (0.8, 0.5, 0.2311),
+    (0.8, 1.0, 0.2362),
+    (0.8, 3.0, 0.2288),
+    (0.8, 5.0, 0.2335),
+    (0.8, 10.0, 0.2337),
+    (0.8, 25.0, 0.2295),
+    (0.8, 50.0, 0.2283),
+    (0.8, 100.0, 0.2276),
+    (0.8, 200.0, 0.2310),
+    (1.0, 0.5, 0.2367),
+    (1.0, 1.0, 0.2293),
+    (1.0, 3.0, 0.2289),
+    (1.0, 5.0, 0.2373),
+    (1.0, 10.0, 0.2343),
+    (1.0, 25.0, 0.2322),
+    (1.0, 50.0, 0.2326),
+    (1.0, 100.0, 0.2269),
+    (1.0, 200.0, 0.2328),
+  ]
+  gamma = sorted(list(set([ x[0] for x in grid_results ])))
+  weight = sorted(list(set([ x[1] for x in grid_results ])))
+  values = [ [] for x in weight ]
+  n = len(weight)
+  for i in range(len(weight)):
+    for j in range(len(gamma)):
+      k = i + j * n
+      values[i].append(grid_results[k][2])
+  plot_weights_pyplot(gamma, weight, values)
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/den/refinement.py
+from __future__ import absolute_import, division, print_function
+from mmtbx import utils
+from mmtbx.dynamics import simulated_annealing
+from mmtbx.refinement import tardy
+from libtbx import easy_mp, Auto
+from mmtbx.refinement import print_statistics
+from mmtbx.refinement import adp_refinement
+from cctbx.array_family import flex
+from six.moves import cStringIO as StringIO
+import sys, random
+from mmtbx.refinement import geometry_minimization
+
+class manager(object):
+  def __init__(
+            self,
+            fmodels,
+            model,
+            params,
+            target_weights,
+            macro_cycle,
+            ncs_manager=None,
+            log=None):
+    if log is None:
+      log = sys.stdout
+    # self.ncs_manager = ncs_manager
+    self.nproc = params.main.nproc
+    if self.nproc is Auto:
+      self.nproc = 1
+    self.verbose = params.den.verbose
+    self.log = log
+    self.fmodels = fmodels
+    self.model = model
+    self.params = params
+    self.target_weights = target_weights
+    self.adp_refinement_manager = None
+    self.macro_cycle = macro_cycle
+    self.tan_b_iso_max = 0
+    self.random_seed = params.main.random_seed
+    den_manager = model.restraints_manager. \
+      geometry.den_manager
+    print_statistics.make_header("DEN refinement", out=self.log)
+    pdb_hierarchy = self.model.get_hierarchy()
+    if den_manager.get_n_proxies() == 0:
+      print_statistics.make_sub_header(
+        "DEN restraint nework", out = self.log)
+      den_manager.build_den_proxies(pdb_hierarchy=pdb_hierarchy)
+      den_manager.build_den_restraints()
+      den_manager.show_den_summary(
+        sites_cart=self.model.get_sites_cart())
+    if den_manager.params.output_kinemage:
+      den_manager.output_kinemage(
+        self.model.get_sites_cart())
+    print_statistics.make_sub_header(
+      "coordinate minimization before annealing", out=self.log)
+    self.minimize(ca_only=self.params.den.minimize_c_alpha_only)
+    self.save_scatterers_local = fmodels.fmodel_xray().\
+      xray_structure.deep_copy_scatterers().scatterers()
+    #DEN refinement start, turn on
+    if params.den.optimize:
+      grid = den_manager.get_optimization_grid()
+      print("Running DEN torsion optimization on %d processors..." % \
+        self.nproc, file=log)
+    else:
+      grid = [(params.den.gamma, params.den.weight)]
+    grid_results = []
+    grid_so = []
+
+    if "torsion" in params.den.annealing_type:
+      print("Running torsion simulated annealing", file=self.log)
+      if ( (params.den.optimize) and
+           ( (self.nproc is Auto) or (self.nproc > 1) )):
+        stdout_and_results = easy_mp.pool_map(
+          processes=params.main.nproc,
+          fixed_func=self.try_den_weight_torsion,
+          args=grid,
+          func_wrapper="buffer_stdout_stderr")
+        for so, r in stdout_and_results:
+          if (r is None):
+            raise RuntimeError(("DEN weight optimization failed:"+
+              "\n%s\nThis is a "+
+              "serious error; please contact help@phenix-online.org.") % so)
+          grid_so.append(so)
+          grid_results.append(r)
+      else:
+        for grid_pair in grid:
+          result = self.try_den_weight_torsion(
+                     grid_pair=grid_pair)
+          grid_results.append(result)
+      self.show_den_opt_summary_torsion(grid_results)
+    elif "cartesian" in params.den.annealing_type:
+      print("Running Cartesian simulated annealing", file=self.log)
+      if ( (params.den.optimize) and
+           ( (self.nproc is Auto) or (self.nproc > 1) )):
+        stdout_and_results = easy_mp.pool_map(
+          processes=params.main.nproc,
+          fixed_func=self.try_den_weight_cartesian,
+          args=grid,
+          func_wrapper="buffer_stdout_stderr")
+        for so, r in stdout_and_results:
+          if (r is None):
+            raise RuntimeError(("DEN weight optimization failed:"+
+              "\n%s\nThis is a "+
+              "serious error; please contact help@phenix-online.org.") % so)
+          grid_so.append(so)
+          grid_results.append(r)
+      else:
+        for grid_pair in grid:
+          result = self.try_den_weight_cartesian(
+                     grid_pair=grid_pair)
+          grid_results.append(result)
+      self.show_den_opt_summary_cartesian(grid_results)
+    else:
+      raise "error in DEN annealing type"
+    low_r_free = 1.0
+    best_xray_structure = None
+    best_eq_distances = None
+    best_gamma =  None
+    best_weight = None
+    best_so_i = None
+    for i, result in enumerate(grid_results):
+      cur_r_free = result[2]
+      if cur_r_free < low_r_free:
+        low_r_free = cur_r_free
+        best_gamma = result[0]
+        best_weight = result[1]
+        best_xray_structure = result[3]
+        best_eq_distances = result[4]
+        best_so_i = i
+    assert best_xray_structure is not None
+    if params.den.optimize:
+      print("\nbest gamma: %.1f" % best_gamma, file=self.log)
+      print("best weight: %.1f\n" % best_weight, file=self.log)
+      if params.den.verbose:
+        if len(grid_so) >= (best_so_i+1):
+          print("\nBest annealing results:\n", file=self.log)
+          print(grid_so[best_so_i], file=self.log)
+    fmodels.fmodel_xray().xray_structure.replace_scatterers(
+      best_xray_structure.deep_copy())
+    fmodels.update_xray_structure(
+      xray_structure = fmodels.fmodel_xray().xray_structure,
+      update_f_calc  = True)
+    utils.assert_xray_structures_equal(
+      x1 = fmodels.fmodel_xray().xray_structure,
+      x2 = model.get_xray_structure())
+    model.restraints_manager.geometry.\
+      den_manager.import_eq_distances(eq_distances=best_eq_distances)
+    self.model.torsion_ncs_restraints_update(log=self.log)
+    #DEN refinement done, turn off
+
+  def try_den_weight_torsion(self, grid_pair):
+    #backup_k_rep = self.params.tardy.\
+    #  prolsq_repulsion_function_changes.k_rep
+    local_seed = int(self.random_seed+grid_pair[1])
+    flex.set_random_seed(value=local_seed)
+    random.seed(local_seed)
+    self.fmodels.fmodel_xray().xray_structure.replace_scatterers(
+      self.save_scatterers_local.deep_copy())
+    self.fmodels.update_xray_structure(
+      xray_structure = self.fmodels.fmodel_xray().xray_structure,
+      update_f_calc  = True)
+    utils.assert_xray_structures_equal(
+      x1 = self.fmodels.fmodel_xray().xray_structure,
+      x2 = self.model.get_xray_structure())
+    gamma_local = grid_pair[0]
+    weight_local = grid_pair[1]
+    self.model.restraints_manager.geometry.\
+        den_manager.gamma = gamma_local
+    self.model.restraints_manager.geometry.\
+        den_manager.weight = weight_local
+    cycle = 0
+    self.model.restraints_manager.geometry.\
+        den_manager.current_cycle = cycle+1
+    num_den_cycles = self.model.restraints_manager.geometry.\
+        den_manager.num_cycles
+    if self.params.den.optimize and \
+       self.nproc != Auto and \
+       self.nproc > 1:
+      local_log = sys.stdout
+    elif self.params.den.optimize and \
+         self.nproc == 1:
+      if self.verbose:
+        local_log = self.log
+      else:
+        local_log = StringIO()
+    else:
+      local_log = self.log
+    print("  ...trying gamma %.1f, weight %.1f" % (
+      gamma_local, weight_local), file=self.log)
+    while cycle < num_den_cycles:
+      #if self.model.restraints_manager.geometry.\
+      #     generic_restraints_manager.den_manager.current_cycle == \
+      #     self.model.restraints_manager.geometry.\
+      #     generic_restraints_manager.den_manager.torsion_mid_point+1:
+      #  self.params.tardy.\
+      #    prolsq_repulsion_function_changes.k_rep = 1.0
+      print("DEN cycle %d" % (cycle+1), file=local_log)
+      #print >> local_log, "Random seed: %d" % flex.get_random_seed()
+      r_free = self.fmodels.fmodel_xray().r_free()
+      print("rfree at start of SA cycle: %.4f" % r_free, file=local_log)
+      print("k_rep = %.2f" % \
+        self.params.tardy.\
+          prolsq_repulsion_function_changes.k_rep, file=local_log)
+      tardy.run(
+        fmodels=self.fmodels,
+        model=self.model,
+        target_weights=self.target_weights,
+        params=self.params.tardy,
+        log=local_log,
+        format_for_phenix_refine=True,
+        call_back_after_step=False)
+      if self.params.den.bulk_solvent_and_scale:
+        self.bulk_solvent_and_scale(log=local_log)
+        self.fmodels.fmodel_xray().xray_structure = self.model.get_xray_structure()
+      if self.params.den.refine_adp:
+        self.adp_refinement(log=local_log)
+      self.model.torsion_ncs_restraints_update(log=local_log)
+      cycle += 1
+      self.model.restraints_manager.geometry.\
+          den_manager.current_cycle += 1
+      r_free = self.fmodels.fmodel_xray().r_free()
+      print("rfree at end of SA cycle: %f" % r_free, file=local_log)
+    r_free = self.fmodels.fmodel_xray().r_free()
+    step_xray_structure = self.fmodels.fmodel_xray().\
+      xray_structure.deep_copy_scatterers().scatterers()
+    step_eq_distances = self.model.restraints_manager.geometry.\
+        den_manager.get_current_eq_distances()
+    return (gamma_local,
+            weight_local,
+            r_free,
+            step_xray_structure,
+            step_eq_distances)
+
+  def try_den_weight_cartesian(self, grid_pair):
+    local_seed = int(self.random_seed+grid_pair[1])
+    flex.set_random_seed(value=local_seed)
+    random.seed(local_seed)
+    self.fmodels.fmodel_xray().xray_structure.replace_scatterers(
+      self.save_scatterers_local.deep_copy())
+    self.fmodels.update_xray_structure(
+      xray_structure = self.fmodels.fmodel_xray().xray_structure,
+      update_f_calc  = True)
+    utils.assert_xray_structures_equal(
+      x1 = self.fmodels.fmodel_xray().xray_structure,
+      x2 = self.model.get_xray_structure())
+    gamma_local = grid_pair[0]
+    weight_local = grid_pair[1]
+    self.model.restraints_manager.geometry.\
+        den_manager.gamma = gamma_local
+    self.model.restraints_manager.geometry.\
+        den_manager.weight = weight_local
+    cycle = 0
+    self.model.restraints_manager.geometry.\
+        den_manager.current_cycle = cycle+1
+    num_den_cycles = self.model.restraints_manager.geometry.\
+        den_manager.num_cycles
+    if self.params.den.optimize and \
+       self.nproc != Auto and \
+       self.nproc > 1:
+      local_log = sys.stdout
+    elif self.params.den.optimize and \
+         self.nproc == 1:
+      if self.verbose:
+        local_log = self.log
+      else:
+        local_log = StringIO()
+    else:
+      local_log = self.log
+    print("  ...trying gamma %f, weight %f" % (
+      gamma_local, weight_local), file=self.log)
+    while cycle < num_den_cycles:
+      print("DEN cycle %s" % (cycle+1), file=local_log)
+      r_free = self.fmodels.fmodel_xray().r_free()
+      print("rfree at start of SA cycle: %f" % r_free, file=local_log)
+      simulated_annealing.manager(
+        params         = self.params.simulated_annealing,
+        target_weights = self.target_weights,
+        macro_cycle    = self.macro_cycle,
+        h_params       = self.params.hydrogens,
+        fmodels        = self.fmodels,
+        model          = self.model,
+        all_params     = self.params,
+        out            = local_log)
+      if self.params.den.bulk_solvent_and_scale:
+        self.bulk_solvent_and_scale(log=local_log)
+      if self.params.den.refine_adp:
+        self.adp_refinement(log=local_log)
+      self.model.torsion_ncs_restraints_update(log=local_log)
+      cycle += 1
+      self.model.restraints_manager.geometry.\
+          den_manager.current_cycle += 1
+      r_free = self.fmodels.fmodel_xray().r_free()
+      print("rfree at end of SA cycle: %f" % r_free, file=local_log)
+    r_free = self.fmodels.fmodel_xray().r_free()
+    step_xray_structure = self.fmodels.fmodel_xray().\
+      xray_structure.deep_copy_scatterers().scatterers()
+    step_eq_distances = self.model.restraints_manager.geometry.\
+        den_manager.get_current_eq_distances()
+    return (gamma_local,
+            weight_local,
+            r_free,
+            step_xray_structure,
+            step_eq_distances)
+
+  def show_den_opt_summary_torsion(self, grid_results):
+    print_statistics.make_header(
+      "DEN torsion weight optimization results", out=self.log)
+    print("|---------------------------------------"+\
+                "--------------------------------------|", file=self.log)
+    print("|  Gamma    Weight    R-free            "+\
+                "                                      |", file=self.log)
+    for result in grid_results:
+      if result == None:
+        raise RuntimeError("Parallel DEN job failed: %s" % str(out))
+      cur_gamma = result[0]
+      cur_weight = result[1]
+      cur_r_free = result[2]
+      print("| %6.1f    %6.1f    %6.4f              " %\
+        (cur_gamma,
+         cur_weight,
+         cur_r_free)+\
+                    "                                    |", file=self.log)
+    print("|---------------------------------------"+\
+                "--------------------------------------|", file=self.log)
+
+  def show_den_opt_summary_cartesian(self, grid_results):
+    print_statistics.make_header(
+      "DEN Cartesian weight optimization results", out=self.log)
+    print("|---------------------------------------"+\
+                "--------------------------------------|", file=self.log)
+    print("|  Gamma    Weight    R-free            "+\
+                "                                      |", file=self.log)
+    for result in grid_results:
+      if result == None:
+        raise RuntimeError("Parallel DEN job failed: %s" % str(out))
+      cur_gamma = result[0]
+      cur_weight = result[1]
+      cur_r_free = result[2]
+      print("| %6.1f    %6.1f    %6.4f              " %\
+        (cur_gamma,
+         cur_weight,
+         cur_r_free)+\
+                    "                                    |", file=self.log)
+    print("|---------------------------------------"+\
+                "--------------------------------------|", file=self.log)
+
+  def bulk_solvent_and_scale(self, log):
+    self.fmodels.update_all_scales(
+      update_f_part1 = True,
+      params = self.params.bulk_solvent_and_scale,
+      optimize_mask = self.params.main.optimize_mask,
+      force_update_f_mask = True,
+      nproc=1,
+      log=log)
+
+  def adp_refinement(self, log):
+    if log is None:
+      log = sys.stdout
+    save_xray_structure = self.fmodels.fmodel_xray().\
+      xray_structure.deep_copy_scatterers().scatterers()
+      ###> Make ADP of H/D sites equal
+    self.model.reset_adp_of_hd_sites_to_be_equal()
+    self.fmodels.update_xray_structure(
+      xray_structure = self.model.get_xray_structure(),
+      update_f_calc  = True)
+    self.adp_refinement_manager = adp_refinement.manager(
+      fmodels                = self.fmodels,
+      model                  = self.model,
+      group_adp_selections   = self.model.refinement_flags.adp_group,
+      group_adp_selections_h = self.model.refinement_flags.group_h,
+      group_adp_params       = self.params.group_b_iso,
+      tls_selections         = self.model.refinement_flags.adp_tls,
+      all_params             = self.params,
+      tls_params             = self.params.tls,
+      individual_adp_params  = self.params.adp,
+      adp_restraints_params  = self.params.adp_restraints,
+      refine_adp_individual  = self.model.refinement_flags.individual_adp,
+      refine_adp_group       = self.model.refinement_flags.group_adp,
+      refine_tls             = self.model.refinement_flags.tls,
+      tan_b_iso_max          = self.tan_b_iso_max,
+      restraints_manager     = self.model.restraints_manager,
+      macro_cycle            = self.macro_cycle,
+      target_weights         = self.target_weights,
+      log                    = log,
+      h_params               = self.params.hydrogens,
+      nproc                  = 1)
+
+  def minimize(self, ca_only=False):
+    sel = "all"
+    restraint_sites_cart = self.model.get_sites_cart().deep_copy()
+    if ca_only:
+      restraint_sites_cart = self.model.get_sites_cart().\
+          deep_copy().select(self.model.get_atom_selection_cache().selection("name CA"))
+      sel = "name CA"
+    self.model.set_reference_coordinate_restraints(
+        ref_model=self.model,
+        selection=sel,
+        exclude_outliers=False)
+    ##### sanity check #####
+    # How this check was supposed to hold up when ca_only=True???
+    # When ca_only=True, number of restraints will be less than number of atoms.
+    # Good that users never change defaults (minimize_c_alpha_only = False).
+    #
+    # XXX finally, removing this assertion. On top of c_alpha_only case,
+    # it also fails (rightfully) when there are water molecules in the model,
+    # they are excluded. The same goes to hydrogens, but it seems no one yet
+    # tried den_refine for model with hydrogens on.
+    # n_rcp = self.model.get_restraints_manager().geometry.get_n_reference_coordinate_proxies()
+    # n_sc = len(restraint_sites_cart)
+    # assert n_rcp >= n_sc, "%d >= %d fail" % (n_rcp, n_sc)
+    ########################
+
+    # selection = self.model.selection_moving
+    geometry_minimization.run2(
+        restraints_manager = self.model.get_restraints_manager(),
+        pdb_hierarchy = self.model.get_hierarchy(),
+        max_number_of_iterations       = 500,
+        correct_special_position_tolerance=1.0,
+        number_of_macro_cycles         = 1,
+        bond                           = True,
+        nonbonded                      = True,
+        angle                          = True,
+        dihedral                       = True,
+        chirality                      = True,
+        planarity                      = True)
+    self.model.set_sites_cart_from_hierarchy()
+
+    utils.assert_xray_structures_equal(
+      x1 = self.fmodels.fmodel_xray().xray_structure,
+      x2 = self.model.get_xray_structure())
+    self.model.restraints_manager.geometry.\
+        remove_reference_coordinate_restraints_in_place()
+    # self.model.restraints_manager.geometry.generic_restraints_manager.\
+    #      flags.reference_coordinate = False
+
+
+ *******************************************************************************

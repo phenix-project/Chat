@@ -1,0 +1,2834 @@
+
+
+ *******************************************************************************
+mmtbx/refinement/tst_real_space_simple.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from libtbx import group_args
+from libtbx.utils import user_plus_sys_time
+import random
+import mmtbx.model
+import iotbx.pdb
+from mmtbx.refinement.real_space import individual_sites
+
+pdb_str_1 = """\
+CRYST1   19.547   20.035   19.435  90.00  90.00  90.00 P 1
+ATOM      1  N   ASP A  18      16.300  13.354  13.167  1.00 21.41           N
+ATOM      2  CA  ASP A  18      15.058  14.099  13.335  1.00 34.70           C
+ATOM      3  C   ASP A  18      14.270  14.157  12.030  1.00 35.50           C
+ATOM      4  O   ASP A  18      14.795  14.579  10.999  1.00 38.48           O
+ATOM      5  CB  ASP A  18      15.347  15.514  13.839  1.00 38.15           C
+ATOM      6  CG  ASP A  18      14.084  16.327  14.048  1.00 27.39           C
+ATOM      7  OD1 ASP A  18      13.508  16.260  15.154  1.00 35.78           O
+ATOM      8  OD2 ASP A  18      13.669  17.035  13.106  1.00 30.67           O
+ATOM      9  N   ASN A  19      13.011  13.728  12.091  1.00 22.94           N
+ATOM     10  CA  ASN A  19      12.119  13.717  10.933  1.00 22.82           C
+ATOM     11  C   ASN A  19      12.680  12.928   9.751  1.00 20.25           C
+ATOM     12  O   ASN A  19      13.252  13.500   8.824  1.00 33.24           O
+ATOM     13  CB  ASN A  19      11.763  15.145  10.505  1.00 28.83           C
+ATOM     14  CG  ASN A  19      10.717  15.181   9.407  1.00 26.44           C
+ATOM     15  OD1 ASN A  19       9.934  14.245   9.247  1.00 22.64           O
+ATOM     16  ND2 ASN A  19      10.700  16.267   8.643  1.00 28.91           N
+ATOM     17  N   TYR A  20      12.510  11.610   9.792  1.00 23.81           N
+ATOM     18  CA  TYR A  20      12.997  10.741   8.728  1.00 35.69           C
+ATOM     19  C   TYR A  20      11.911   9.771   8.272  1.00 28.94           C
+ATOM     20  O   TYR A  20      11.633   8.780   8.948  1.00 25.26           O
+ATOM     21  CB  TYR A  20      14.236   9.970   9.191  1.00 33.37           C
+ATOM     22  CG  TYR A  20      14.850   9.092   8.123  1.00 31.48           C
+ATOM     23  CD1 TYR A  20      15.713   9.623   7.173  1.00 36.91           C
+ATOM     24  CD2 TYR A  20      14.573   7.732   8.069  1.00 21.36           C
+ATOM     25  CE1 TYR A  20      16.279   8.825   6.196  1.00 36.56           C
+ATOM     26  CE2 TYR A  20      15.134   6.927   7.096  1.00 29.56           C
+ATOM     27  CZ  TYR A  20      15.986   7.478   6.162  1.00 35.08           C
+ATOM     28  OH  TYR A  20      16.547   6.680   5.192  1.00 38.73           O
+ATOM     29  N   ARG A  21      11.308  10.071   7.124  1.00 38.95           N
+ATOM     30  CA  ARG A  21      10.249   9.249   6.540  1.00 38.77           C
+ATOM     31  C   ARG A  21       9.065   9.062   7.488  1.00 27.69           C
+ATOM     32  O   ARG A  21       8.999   8.084   8.233  1.00 22.82           O
+ATOM     33  CB  ARG A  21      10.797   7.891   6.085  1.00 20.00           C
+ATOM     34  CG  ARG A  21       9.800   7.043   5.310  1.00 20.00           C
+ATOM     35  CD  ARG A  21      10.411   5.715   4.894  1.00 20.00           C
+ATOM     36  NE  ARG A  21       9.467   4.889   4.147  1.00 20.00           N
+ATOM     37  CZ  ARG A  21       9.747   3.681   3.668  1.00 20.00           C
+ATOM     38  NH1 ARG A  21      10.949   3.154   3.857  1.00 20.00           N
+ATOM     39  NH2 ARG A  21       8.826   3.000   3.000  1.00 20.00           N
+ATOM     40  N   GLY A  22       8.132  10.008   7.452  1.00 24.85           N
+ATOM     41  CA  GLY A  22       6.954   9.950   8.297  1.00 29.53           C
+ATOM     42  C   GLY A  22       7.262  10.260   9.749  1.00 33.22           C
+ATOM     43  O   GLY A  22       7.136  11.402  10.190  1.00 30.06           O
+ATOM     44  N   TYR A  23       7.668   9.236  10.494  1.00 27.25           N
+ATOM     45  CA  TYR A  23       7.994   9.398  11.906  1.00 34.16           C
+ATOM     46  C   TYR A  23       9.344  10.084  12.086  1.00 23.48           C
+ATOM     47  O   TYR A  23      10.142  10.160  11.151  1.00 39.30           O
+ATOM     48  CB  TYR A  23       7.994   8.042  12.615  1.00 29.65           C
+ATOM     49  CG  TYR A  23       6.662   7.327  12.574  1.00 34.88           C
+ATOM     50  CD1 TYR A  23       5.698   7.556  13.547  1.00 30.77           C
+ATOM     51  CD2 TYR A  23       6.369   6.422  11.562  1.00 32.29           C
+ATOM     52  CE1 TYR A  23       4.479   6.905  13.514  1.00 39.91           C
+ATOM     53  CE2 TYR A  23       5.153   5.766  11.520  1.00 30.45           C
+ATOM     54  CZ  TYR A  23       4.212   6.011  12.498  1.00 37.13           C
+ATOM     55  OH  TYR A  23       3.000   5.360  12.460  1.00 38.59           O
+ATOM     56  N   SER A  24       9.593  10.581  13.293  1.00 36.25           N
+ATOM     57  CA  SER A  24      10.847  11.260  13.598  1.00 26.44           C
+ATOM     58  C   SER A  24      11.747  10.391  14.470  1.00 20.40           C
+ATOM     59  O   SER A  24      11.284   9.756  15.417  1.00 39.27           O
+ATOM     60  CB  SER A  24      10.576  12.597  14.291  1.00 21.07           C
+ATOM     61  OG  SER A  24       9.802  13.451  13.466  1.00 34.95           O
+ATOM     62  N   LEU A  25      13.035  10.369  14.144  1.00 22.77           N
+ATOM     63  CA  LEU A  25      14.003   9.579  14.896  1.00 36.60           C
+ATOM     64  C   LEU A  25      14.997  10.476  15.627  1.00 28.89           C
+ATOM     65  O   LEU A  25      14.608  11.319  16.435  1.00 38.59           O
+ATOM     66  CB  LEU A  25      14.750   8.606  13.976  1.00 27.50           C
+ATOM     67  CG  LEU A  25      14.011   7.358  13.478  1.00 38.78           C
+ATOM     68  CD1 LEU A  25      13.007   7.690  12.381  1.00 22.10           C
+ATOM     69  CD2 LEU A  25      15.004   6.308  13.000  1.00 26.92           C
+TER
+END
+"""
+
+def get_pdb_inputs(pdb_str):
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_str)
+  model = mmtbx.model.manager(model_input=pdb_inp)
+  model.process(make_restraints=True)
+  return group_args(
+    ph  = model.get_hierarchy(),
+    grm = model.get_restraints_manager(),
+    xrs = model.get_xray_structure())
+
+def exercise(d_min = 3.5):
+  pi = get_pdb_inputs(pdb_str=pdb_str_1)
+  selection = flex.bool(pi.xrs.scatterers().size(), True)
+  f_obs = abs(pi.xrs.structure_factors(d_min = d_min).f_calc())
+  r_free_flags = f_obs.generate_r_free_flags()
+  for d_min in [1, 2, 3]:
+    print("d_min:", d_min)
+    f_calc = pi.xrs.structure_factors(d_min = d_min).f_calc()
+    fft_map = f_calc.fft_map(resolution_factor=0.25)
+    fft_map.apply_sigma_scaling()
+    target_map = fft_map.real_map_unpadded()
+    rsr_simple_refiner = individual_sites.simple(
+      target_map                  = target_map,
+      selection                   = selection,
+      real_space_gradients_delta  = d_min/4,
+      max_iterations              = 150,
+      geometry_restraints_manager = pi.grm.geometry)
+    for shake_size in [1,]:
+      print("  shake_size:", shake_size)
+      for p in [(0.01, 1.0), (0.03, 3.0)]:
+        print("    target:", p)
+        w_opt = flex.double()
+        for start_value in [0, 1000]:
+          xrs_poor = pi.xrs.deep_copy_scatterers()
+          random.seed(0)
+          flex.set_random_seed(0)
+          xrs_poor.shake_sites_in_place(mean_distance = shake_size)
+          #
+          refined = individual_sites.refinery(
+            refiner                  = rsr_simple_refiner,
+            xray_structure           = xrs_poor,
+            start_trial_weight_value = start_value,
+            rms_bonds_limit          = p[0],
+            rms_angles_limit         = p[1])
+          w_opt.append(refined.weight_final)
+          dist = flex.mean(flex.sqrt((pi.xrs.sites_cart() -
+            refined.sites_cart_result).dot()))
+          print("      start_value:", start_value,refined.weight_final, \
+            refined.rms_bonds_final, refined.rms_angles_final, dist)
+          assert refined.rms_bonds_final  <= p[0]
+          assert refined.rms_angles_final <= p[1]
+
+if(__name__ == "__main__"):
+  timer = user_plus_sys_time()
+  exercise()
+  print("Time: %6.2f" % timer.elapsed())
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/tst_refinement_flags.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from libtbx.test_utils import approx_equal, show_diff
+from libtbx.utils import format_cpu_times
+from mmtbx.refinement import refinement_flags
+from six.moves import cStringIO as StringIO
+
+expected_result_all = \
+  """Refinement flags and selection counts:
+  individual_sites       = %s (9 atoms)
+  torsion_angles         = %s (9 atoms)
+  rigid_body             = %s (9 atoms in 6 groups)
+  individual_adp         = %s (iso = 9 aniso = 9)
+  group_adp              = %s (9 atoms in 6 groups)
+  tls                    = %s (9 atoms in 6 groups)
+  occupancies            = %s (9 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(True)]*8)
+expected_result_none_false = \
+  """Refinement flags and selection counts:
+  individual_sites       = %s (0 atoms)
+  torsion_angles         = %s (0 atoms)
+  rigid_body             = %s (0 atoms in 0 groups)
+  individual_adp         = %s (iso = 0 aniso = 0)
+  group_adp              = %s (0 atoms in 0 groups)
+  tls                    = %s (0 atoms in 0 groups)
+  occupancies            = %s (0 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(False)]*8)
+expected_result_none_true = \
+  """Refinement flags and selection counts:
+  individual_sites       = %s (0 atoms)
+  torsion_angles         = %s (0 atoms)
+  rigid_body             = %s (0 atoms in 0 groups)
+  individual_adp         = %s (iso = 0 aniso = 0)
+  group_adp              = %s (0 atoms in 0 groups)
+  tls                    = %s (0 atoms in 0 groups)
+  occupancies            = %s (0 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(True)]*8)
+expected_result_mix = \
+  """Refinement flags and selection counts:
+  individual_sites       = %s (4 atoms)
+  torsion_angles         = %s (4 atoms)
+  rigid_body             = %s (4 atoms in 3 groups)
+  individual_adp         = %s (iso = 4 aniso = 4)
+  group_adp              = %s (4 atoms in 3 groups)
+  tls                    = %s (4 atoms in 3 groups)
+  occupancies            = %s (4 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(True)]*8)
+
+def all_defined():
+  #                 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+  barr = flex.int([0,1,1,0,1,1,0,1,1,0, 1, 1, 0, 1, 0, 0]).as_bool()
+  iarr = [ flex.size_t([1]),
+           flex.size_t([2]),
+           flex.size_t([4,5]),
+           flex.size_t([7,8]),
+           flex.size_t([10]),
+           flex.size_t([11,13]) ]
+  oarr = [ [flex.size_t([1]),flex.size_t([2])],
+           [flex.size_t([4,5]),flex.size_t([7,8])],
+           [flex.size_t([10])],
+           [flex.size_t([11,13])] ]
+  return refinement_flags.manager(
+    individual_sites     = True,
+    torsion_angles       = True,
+    rigid_body           = True,
+    individual_adp       = True,
+    group_adp            = True,
+    tls                  = True,
+    occupancies          = True,
+    group_anomalous      = True,
+    sites_individual     = barr,
+    sites_torsion_angles = barr,
+    sites_rigid_body     = iarr,
+    adp_individual_iso   = barr,
+    adp_individual_aniso = barr,
+    adp_group            = iarr,
+    group_h              = iarr,
+    adp_tls              = iarr,
+    s_occupancies        = oarr)
+
+def all_defined_1():
+  #                 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+  barr = flex.int([1,1,1,0,1,1,0,0,1,0, 0, 0, 1, 1, 1, 1]).as_bool()
+  iarr = [ flex.size_t([0]),
+           flex.size_t([1,2]),
+           flex.size_t([4,5]),
+           flex.size_t([8]),
+           flex.size_t([12,13,14]),
+           flex.size_t([15]) ]
+  oarr = [ [flex.size_t([0]),flex.size_t([1,2])],
+           [flex.size_t([4,5])],
+           [flex.size_t([8])],
+           [flex.size_t([12,13,14]),flex.size_t([15])] ]
+  return refinement_flags.manager(
+    individual_sites     = True,
+    torsion_angles       = True,
+    rigid_body           = True,
+    individual_adp       = True,
+    group_adp            = True,
+    tls                  = True,
+    occupancies          = True,
+    group_anomalous      = True,
+    sites_individual     = barr,
+    sites_torsion_angles = barr,
+    sites_rigid_body     = iarr,
+    adp_individual_iso   = barr,
+    adp_individual_aniso = barr,
+    adp_group            = iarr,
+    group_h              = iarr,
+    adp_tls              = iarr,
+    s_occupancies        = oarr)
+
+def compare(rm, expected_result, deep_copy=False, selection=None, show=False):
+  assert [deep_copy, selection].count(True) != 2
+  if(deep_copy):
+    rm = rm.deep_copy()
+  elif(selection is not None):
+    rm = rm.select(selection = selection)
+  out = StringIO()
+  rm.show(log = out)
+  if(show):
+    print("-"*80)
+    print(out.getvalue())
+    print(expected_result)
+  assert not show_diff(out.getvalue(), expected_result)
+
+def exercise_deepcopy_show_select():
+  sel_all       = flex.int([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]).as_bool()
+  sel_none      = flex.int([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]).as_bool()
+  sel_all_true  = flex.int([0,1,1,0,1,1,0,1,1,0,1,1,0,1,0,0]).as_bool()
+  sel_all_false = flex.int([1,0,0,1,0,0,1,0,0,1,0,0,1,0,1,1]).as_bool()
+  sel_mix       = flex.int([1,1,0,0,1,1,0,0,0,1,1,0,0,0,1,1]).as_bool()
+  #
+  compare(rm = all_defined(), expected_result = expected_result_all)
+  compare(rm = all_defined(), expected_result = expected_result_all,       deep_copy = True)
+  compare(rm = all_defined(), expected_result = expected_result_all,       selection = sel_all)
+  compare(rm = all_defined(), expected_result = expected_result_none_true, selection = sel_none)
+  compare(rm = all_defined(), expected_result = expected_result_all,       selection = sel_all_true)
+  compare(rm = all_defined(), expected_result = expected_result_none_true, selection = sel_all_false)
+  compare(rm = all_defined(), expected_result = expected_result_mix,       selection = sel_mix)
+  #
+  compare(rm = refinement_flags.manager(), expected_result = expected_result_none_false)
+  compare(rm = refinement_flags.manager(), expected_result = expected_result_none_false, deep_copy = True)
+  compare(rm = refinement_flags.manager(), expected_result = expected_result_none_false, selection = sel_all)
+  compare(rm = refinement_flags.manager(), expected_result = expected_result_none_false, selection = sel_none)
+  compare(rm = refinement_flags.manager(), expected_result = expected_result_none_false, selection = sel_all_true)
+  compare(rm = refinement_flags.manager(), expected_result = expected_result_none_false, selection = sel_all_false)
+  compare(rm = refinement_flags.manager(), expected_result = expected_result_none_false, selection = sel_mix)
+  #
+  rm = all_defined()
+  rm_dc = rm.deep_copy()
+  rm_dc.individual_sites     = False
+  rm_dc.torsion_angles       = False
+  rm_dc.rigid_body           = False
+  rm_dc.individual_adp       = False
+  rm_dc.group_adp            = False
+  rm_dc.tls                  = False
+  rm_dc.occupancies          = False
+  rm_dc.group_anomalous      = False
+  rm_dc.sites_individual     = None
+  rm_dc.sites_torsion_angles = None
+  rm_dc.sites_rigid_body     = None
+  rm_dc.adp_individual_iso   = None
+  rm_dc.adp_individual_aniso = None
+  rm_dc.adp_group            = None
+  rm_dc.group_h              = None
+  rm_dc.adp_tls              = None
+  rm_dc.s_occupancies        = None
+  out = StringIO()
+  rm.show(log = out)
+  assert out.getvalue() == expected_result_all
+  out = StringIO()
+  rm_dc.show(log = out)
+  assert out.getvalue() == expected_result_none_false
+
+def exercise_deepcopy_show_select_compare_arrays():
+  rm = all_defined()
+  sel_mix = flex.int([1,1,0,0,1,1,0,1,0,1,1,0,0,0,1,1]).as_bool()
+  rm_sel = rm.select(selection = sel_mix)
+  assert rm_sel.individual_sites
+  assert rm_sel.torsion_angles
+  assert rm_sel.rigid_body
+  assert rm_sel.individual_adp
+  assert rm_sel.group_adp
+  assert rm_sel.tls
+  assert rm_sel.occupancies
+  assert rm_sel.group_anomalous
+  barr_sel_mix = flex.int([0,1,1,1,1,0,1,  0, 0]).as_bool()
+  iarr_sel_mix = [ flex.size_t([1]),
+                   flex.size_t([2,3]),
+                   flex.size_t([4]),
+                   flex.size_t([6])]
+  oarr_sel_mix = [ [flex.size_t([1])],
+                   [flex.size_t([2,3]),flex.size_t([4])],
+                   [flex.size_t([6])]]
+  assert approx_equal(rm_sel.sites_individual     , barr_sel_mix)
+  assert approx_equal(rm_sel.sites_torsion_angles , barr_sel_mix)
+  assert approx_equal(rm_sel.sites_rigid_body     , iarr_sel_mix)
+  assert approx_equal(rm_sel.adp_individual_iso   , barr_sel_mix)
+  assert approx_equal(rm_sel.adp_individual_aniso , barr_sel_mix)
+  assert approx_equal(rm_sel.adp_group            , iarr_sel_mix)
+  assert approx_equal(rm_sel.group_h              , iarr_sel_mix)
+  assert approx_equal(rm_sel.adp_tls              , iarr_sel_mix)
+  assert approx_equal(rm_sel.s_occupancies        , oarr_sel_mix)
+
+def exercise_inflate():
+  rm = all_defined()
+  barr = flex.int([1,0,1,1,0,1]).as_bool()
+  iarr = [flex.size_t([16]), flex.size_t([18,19]), flex.size_t([21])]
+  oarr = [ [flex.size_t([16]), flex.size_t([18,19])], [flex.size_t([21])]]
+  rm = rm.inflate(
+    sites_individual     = barr,
+    sites_torsion_angles = barr,
+    sites_rigid_body     = iarr,
+    adp_individual_iso   = barr,
+    adp_individual_aniso = barr,
+    adp_group            = iarr,
+    group_h              = iarr,
+    adp_tls              = iarr,
+    s_occupancies        = oarr)
+  out = StringIO()
+  rm.show(log = out)
+  assert not show_diff(out.getvalue(), """\
+Refinement flags and selection counts:
+  individual_sites       = %s (13 atoms)
+  torsion_angles         = %s (13 atoms)
+  rigid_body             = %s (13 atoms in 9 groups)
+  individual_adp         = %s (iso = 13 aniso = 13)
+  group_adp              = %s (13 atoms in 9 groups)
+  tls                    = %s (13 atoms in 9 groups)
+  occupancies            = %s (13 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(True)]*8))
+  #
+  barr_result = flex.int([0,1,1,0,1,1,0,1,1,0,1,1,0,1,0,0,  1,0,1,1,0,1]) \
+    .as_bool()
+  iarr_result = [
+    flex.size_t([1]),
+    flex.size_t([2]),
+    flex.size_t([4,5]),
+    flex.size_t([7,8]),
+    flex.size_t([10]),
+    flex.size_t([11,13]),
+       flex.size_t([16]),flex.size_t([18,19]),flex.size_t([21])]
+  oarr_result = [
+    [flex.size_t([1]),flex.size_t([2])],
+    [flex.size_t([4,5]),flex.size_t([7,8])],
+    [flex.size_t([10])],
+    [flex.size_t([11,13])],
+       [flex.size_t([16]), flex.size_t([18,19])], [flex.size_t([21])] ]
+  assert approx_equal(rm.sites_individual      , barr_result)
+  assert approx_equal(rm.sites_torsion_angles  , barr_result)
+  assert approx_equal(rm.sites_rigid_body      , iarr_result)
+  assert approx_equal(rm.adp_individual_iso    , barr_result)
+  assert approx_equal(rm.adp_individual_aniso  , barr_result)
+  assert approx_equal(rm.adp_group             , iarr_result)
+  assert approx_equal(rm.group_h               , iarr_result)
+  assert approx_equal(rm.adp_tls               , iarr_result)
+  assert approx_equal(rm.s_occupancies         , oarr_result)
+
+def exercise_add_1a():
+  #
+  rm = all_defined()
+  rm = rm.add(next_to_i_seqs = flex.size_t([]))
+  out = StringIO()
+  rm.show(log = out)
+  assert out.getvalue() == expected_result_all
+  #
+  rm = rm.add(
+    next_to_i_seqs = flex.size_t([]),
+    sites_individual     = True,
+    sites_torsion_angles = True,
+    sites_rigid_body     = True,
+    adp_individual_iso   = True,
+    adp_individual_aniso = True,
+    adp_group            = True,
+    group_h              = True,
+    adp_tls              = True,
+    s_occupancies        = True)
+  out = StringIO()
+  rm.show(log = out)
+  assert out.getvalue() == expected_result_all
+
+def exercise_add_1b():
+  rm = all_defined()
+  # [ [1], [2], [4,5], [7,8], [10], [11,13] ] - original
+  # [ [1], [2], [5,7], [9,10], [13], [14,16] ] - after insertion for tuples
+  #
+  # [0,1,1,0,1,1,0,1,1,0, 1, 1, 0, 1, 0, 0] - original
+  # [0,1,1,0,0,1,0,1,0,1,1,0,0, 1, 1, 0, 1, 0, 0] - after insertion for tuples
+  #
+  # [ [[1],[2]], [[4,5],[7,8]], [[10]], [[11,13]] ] - original
+  # [ [[1],[2]], [[5,7],[9,10]], [[13]], [[14,16]] ] - after insertion for tuples
+  rm = rm.add(
+    next_to_i_seqs       = flex.size_t([4,8,3]),
+    sites_individual     = False,
+    sites_torsion_angles = False,
+    sites_rigid_body     = False,
+    adp_individual_iso   = False,
+    adp_individual_aniso = False,
+    adp_group            = False,
+    group_h              = False,
+    adp_tls              = False,
+    s_occupancies        = False)
+  out = StringIO()
+  rm.show(log = out)
+  assert out.getvalue() == expected_result_all
+  barr_result = flex.int([0,1,1,0,0,1,0,1,0,1,1,0,0,1,1,0,1,0,0]).as_bool()
+  iarr_result = [flex.size_t([1]), flex.size_t([2]), flex.size_t([5,7]),
+                 flex.size_t([9,10]), flex.size_t([13]), flex.size_t([14,16])]
+  oarr_result = [[flex.size_t([1]), flex.size_t([2])], [flex.size_t([5,7]),
+                 flex.size_t([9,10])], [flex.size_t([13])], [flex.size_t([14,16])]]
+  assert approx_equal(rm.sites_individual     , barr_result)
+  assert approx_equal(rm.sites_torsion_angles , barr_result)
+  assert approx_equal(rm.sites_rigid_body     , iarr_result)
+  assert approx_equal(rm.adp_individual_iso   , barr_result)
+  assert approx_equal(rm.adp_individual_aniso , barr_result)
+  assert approx_equal(rm.adp_group            , iarr_result)
+  assert approx_equal(rm.group_h              , iarr_result)
+  assert approx_equal(rm.adp_tls              , iarr_result)
+  compare_selections(rm.s_occupancies, oarr_result)
+
+def exercise_add_1c():
+  rm = all_defined()
+  # [ [1], [2], [4,5], [7,8], [10], [11,13] ] - original
+  # [ [1], [2], [4], [5,6,7], [9,10,11], [13], [14,16] ] - after insertion for tuples
+  #
+  # [0,1,1,0,1,1,0,1,1,0, 1, 1, 0, 1, 0, 0] - original
+  # [0,1,1,0,1,1,1,1,0,1,1,1,0, 1, 1, 0, 1, 0, 0] - after insertion for tuples
+  #
+  # [ [[1],[2]], [[4,5],[7,8]],  [[10]], [[11,13]] ] - original
+  #
+  # [ [[1],[2]], [[5,7],[9,10]], [[13]], [[14,16]], [[4]], [[6]], [[11]] ] - after insertion for tuples
+  rm = rm.add(
+    next_to_i_seqs       = flex.size_t([4,8,3]),
+    sites_individual     = True,
+    sites_torsion_angles = True,
+    sites_rigid_body     = True,
+    adp_individual_iso   = True,
+    adp_individual_aniso = True,
+    adp_group            = True,
+    group_h              = True,
+    adp_tls              = True,
+    s_occupancies        = True)
+  out = StringIO()
+  rm.show(log = out)
+  assert not show_diff(out.getvalue(), """\
+Refinement flags and selection counts:
+  individual_sites       = %s (12 atoms)
+  torsion_angles         = %s (12 atoms)
+  rigid_body             = %s (12 atoms in 7 groups)
+  individual_adp         = %s (iso = 12 aniso = 12)
+  group_adp              = %s (12 atoms in 7 groups)
+  tls                    = %s (12 atoms in 7 groups)
+  occupancies            = %s (12 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(True)]*8))
+  barr_result = flex.int([0,1,1,0,1,1,1,1,0,1,1,1,0, 1, 1, 0, 1, 0, 0]) \
+    .as_bool()
+  iarr_result = [ flex.size_t([1]), flex.size_t([2]),
+    flex.size_t([5,6,7]), flex.size_t([9,10,11]), flex.size_t([13]),
+    flex.size_t([14,16]), flex.size_t([4]) ]
+  oarr_result = [ [flex.size_t([1]),flex.size_t([2])], [flex.size_t([5,7]),
+    flex.size_t([9,10])], [flex.size_t([13])], [flex.size_t([14,16])],
+    [flex.size_t([4])], [flex.size_t([6])], [flex.size_t([11])] ]
+  assert approx_equal(rm.sites_individual    , barr_result)
+  assert approx_equal(rm.sites_torsion_angles, barr_result)
+  assert approx_equal(rm.sites_rigid_body    , iarr_result)
+  assert approx_equal(rm.adp_individual_iso  , barr_result)
+  assert approx_equal(rm.adp_individual_aniso, barr_result)
+  assert approx_equal(rm.adp_group           , iarr_result)
+  assert approx_equal(rm.group_h             , iarr_result)
+  assert approx_equal(rm.adp_tls             , iarr_result)
+  compare_selections(rm.s_occupancies, oarr_result)
+
+def exercise_add_2b():
+  rm = all_defined_1()
+  # [ [0], [1,2], [4,5], [8], [12,13,14], [15] ] - original
+  # [ [0], [2,3], [5,6], [9], [14,15,16], [18] ] - after insertion for tuples
+  #
+  # [ [[0],[1,2]], [[4,5]], [[8]], [[12,13,14],[15]] ] - original
+  # [ [[0],[2,3]], [[5,6]], [[9]], [[14,15,16],[18]] ] - after insertion for tuples
+  #
+  #  0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+  # [1,1,1,0,1,1,0,0,1,0, 0, 0, 1, 1, 1, 1] - original
+  # [1,0,1,1,0,1,1,0,0,1,0,0,0,0,1,1,1,0,1,0]  - after insertion for bool single
+  rm = rm.add(
+    next_to_i_seqs       = flex.size_t([0,10,14,15]),
+    sites_individual     = False,
+    sites_torsion_angles = False,
+    sites_rigid_body     = False,
+    adp_individual_iso   = False,
+    adp_individual_aniso = False,
+    adp_group            = False,
+    group_h              = False,
+    adp_tls              = False,
+    s_occupancies        = False)
+  out = StringIO()
+  rm.show(log = out)
+  assert not show_diff(out.getvalue(), """\
+Refinement flags and selection counts:
+  individual_sites       = %s (10 atoms)
+  torsion_angles         = %s (10 atoms)
+  rigid_body             = %s (10 atoms in 6 groups)
+  individual_adp         = %s (iso = 10 aniso = 10)
+  group_adp              = %s (10 atoms in 6 groups)
+  tls                    = %s (10 atoms in 6 groups)
+  occupancies            = %s (10 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(True)]*8))
+  barr_result = flex.int([1,0,1,1,0,1,1,0,0,1,0,0,0,0,1,1,1,0,1,0]).as_bool()
+  iarr_result = [ flex.size_t([0]), flex.size_t([2,3]), flex.size_t([5,6]),
+    flex.size_t([9]), flex.size_t([14,15,16]), flex.size_t([18]) ]
+  oarr_result = [ [flex.size_t([0]),flex.size_t([2,3])], [flex.size_t([5,6])],
+    [flex.size_t([9])], [flex.size_t([14,15,16]),flex.size_t([18])] ]
+  assert approx_equal(rm.sites_individual    , barr_result)
+  assert approx_equal(rm.sites_torsion_angles, barr_result)
+  assert approx_equal(rm.sites_rigid_body    , iarr_result)
+  assert approx_equal(rm.adp_individual_iso  , barr_result)
+  assert approx_equal(rm.adp_individual_aniso, barr_result)
+  assert approx_equal(rm.adp_group           , iarr_result)
+  assert approx_equal(rm.group_h             , iarr_result)
+  assert approx_equal(rm.adp_tls             , iarr_result)
+  compare_selections(rm.s_occupancies, oarr_result)
+
+def exercise_add_2c():
+  rm = all_defined_1()
+  # [ [0], [1,2], [4,5], [8], [12,13,14], [15] ] - original
+  # [ [0], [1], [2,3], [5,6], [9], [12], [14,15,16,17], [18], [19] ]  - after insertion for tuples
+  #
+  # [ [[0],[1,2]], [[4,5]], [[8]], [[12,13,14],[15]] ] - original
+  # [ [[0],[2,3]], [[5,6]], [[9]], [[14,15,16],[18]], [[1]], [[12]], [[17]], [[19]] ] - after insertion for tuples
+  #
+  #  0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+  # [1,1,1,0,1,1,0,0,1,0, 0, 0, 1, 1, 1, 1] - original
+  # [1,1,1,1,0,1,1,0,0,1,0, 0,1, 0, 1, 1, 1,1, 1,1] - after insertion for bool single
+  rm = rm.add(
+    next_to_i_seqs       = flex.size_t([0,10,14,15]),
+    sites_individual     = True,
+    sites_torsion_angles = True,
+    sites_rigid_body     = True,
+    adp_individual_iso   = True,
+    adp_individual_aniso = True,
+    adp_group            = True,
+    group_h              = True,
+    adp_tls              = True,
+    s_occupancies        = True)
+  out = StringIO()
+  rm.show(log = out)
+  assert not show_diff(out.getvalue(), """\
+Refinement flags and selection counts:
+  individual_sites       = %s (14 atoms)
+  torsion_angles         = %s (14 atoms)
+  rigid_body             = %s (14 atoms in 9 groups)
+  individual_adp         = %s (iso = 14 aniso = 14)
+  group_adp              = %s (14 atoms in 9 groups)
+  tls                    = %s (14 atoms in 9 groups)
+  occupancies            = %s (14 atoms)
+  group_anomalous        = %s
+""" % tuple(["%5s" % str(True)]*8))
+  barr_result = flex.int([1,1,1,1,0,1,1,0,0,1,0,0,1,0,1,1,1,1,1,1]).as_bool()
+  iarr_result = [ flex.size_t([0]), flex.size_t([1]), flex.size_t([2,3]),
+    flex.size_t([5,6]), flex.size_t([9]), flex.size_t([14,15,16,17]),
+    flex.size_t([18]), flex.size_t([19]), flex.size_t([12])]
+  oarr_result = [ [flex.size_t([0]),flex.size_t([2,3])], [flex.size_t([5,6])],
+                  [flex.size_t([9])], [flex.size_t([14,15,16]),flex.size_t([18])],
+                  [flex.size_t([1])], [flex.size_t([12])], [flex.size_t([17])],
+                  [flex.size_t([19])] ]
+  assert approx_equal(rm.sites_individual      , barr_result)
+  assert approx_equal(rm.sites_torsion_angles  , barr_result)
+  assert approx_equal(rm.sites_rigid_body      , iarr_result)
+  assert approx_equal(rm.adp_individual_iso    , barr_result)
+  assert approx_equal(rm.adp_individual_aniso  , barr_result)
+  assert approx_equal(rm.adp_group             , iarr_result)
+  assert approx_equal(rm.group_h               , iarr_result)
+  assert approx_equal(rm.adp_tls               , iarr_result)
+  compare_selections(rm.s_occupancies, oarr_result)
+
+def compare_selections(x, y):
+  x = [[list(k) for k in i] for i in x][:]
+  y = [[list(k) for k in i] for i in y][:]
+  x.sort()
+  y.sort()
+  assert approx_equal(x, y)
+
+
+def exercise():
+  exercise_deepcopy_show_select()
+  exercise_deepcopy_show_select_compare_arrays()
+  exercise_inflate()
+  exercise_add_1a()
+  exercise_add_1b()
+  exercise_add_1c()
+  exercise_add_2b()
+  exercise_add_2c()
+  print(format_cpu_times())
+
+if(__name__ == "__main__"):
+   exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/tst_rigid_body.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from iotbx import pdb
+import libtbx.load_env
+from iotbx import pdb
+import os, random
+import mmtbx.refinement.rigid_body
+from libtbx.test_utils import approx_equal
+from libtbx.utils import format_cpu_times
+import random, math
+from cctbx import xray
+import mmtbx.utils
+import iotbx.pdb
+from scitbx import matrix
+import scitbx.rigid_body
+from six.moves import range
+
+random.seed(0)
+flex.set_random_seed(0)
+
+def test_matrices_zyz():
+  for i in range(10000):
+    aa,bb,cc = random.randrange(-361,361),\
+               random.randrange(-361,361),\
+               random.randrange(-361,361)
+    a,b,c = aa * math.pi/180, bb * math.pi/180, cc * math.pi/180
+    r1 = matrix.sqr((math.cos(a), -math.sin(a), 0,
+                     math.sin(a),  math.cos(a), 0,
+                               0,            0, 1))
+    r2 = matrix.sqr((math.cos(b), 0, math.sin(b),
+                               0, 1,           0,
+                    -math.sin(b), 0, math.cos(b)))
+    r3 = matrix.sqr((math.cos(c), -math.sin(c), 0,
+                     math.sin(c),  math.cos(c), 0,
+                               0,            0, 1))
+    r_zyz_1 = (r1*r2*r3)
+    r_zyz_2 = scitbx.rigid_body.euler(phi = cc, psi = bb, the = aa,
+      convention = "zyz").rot_mat()
+    r_zyz_3 = matrix.sqr((
+      math.cos(a)*math.cos(b)*math.cos(c)-math.sin(a)*math.sin(c),-math.cos(a)*math.cos(b)*math.sin(c)-math.sin(a)*math.cos(c), math.cos(a)*math.sin(b),
+      math.sin(a)*math.cos(b)*math.cos(c)+math.cos(a)*math.sin(c),-math.sin(a)*math.cos(b)*math.sin(c)+math.cos(a)*math.cos(c), math.sin(a)*math.sin(b),
+     -math.sin(b)*math.cos(c)                                    , math.sin(b)*math.sin(c)                                    , math.cos(b)))
+    assert approx_equal(r_zyz_1, r_zyz_2)
+    assert approx_equal(r_zyz_1, r_zyz_3)
+
+def test_1(fmodel, convention, phi = 0.0, psi = 0.0, the = 0.0,
+           trans = [0.5,0.7,0.9]):
+  rot_obj = scitbx.rigid_body.euler(
+    phi = phi, psi = psi, the = the, convention = convention)
+  size = fmodel.xray_structure.scatterers().size()
+  fmodel.xray_structure.apply_rigid_body_shift(
+    rot = rot_obj.rot_mat(),
+    trans = trans)
+  fmodel.update_xray_structure(update_f_calc = True)
+  assert fmodel.r_work() > 0.5
+  params = mmtbx.refinement.rigid_body.master_params.extract()
+  params.refine_rotation = False
+  params.refine_translation = True
+  params.target="ls_wunit_k1"
+  rb = mmtbx.refinement.rigid_body.manager(
+    fmodel     = fmodel,
+    selections = [flex.bool(size,True).iselection()],
+    params     = params)
+  assert approx_equal(rb.translation()[0], [-0.5,-0.7,-0.9], eps=1.e-5)
+  assert approx_equal(rb.rotation()[0], [0.0,0.0,0.0])
+  assert approx_equal(fmodel.r_work(), 0.0, eps=1.e-5)
+
+def test_2(fmodel, convention, phi = 0.0, psi = 0.0, the = 0.0,
+           trans = [0.0,0.0,0.0]):
+  rot_obj = scitbx.rigid_body.euler(
+    phi = phi, psi = psi, the = the, convention = convention)
+  size = fmodel.xray_structure.scatterers().size()
+  fmodel.xray_structure.apply_rigid_body_shift(
+    rot = rot_obj.rot_mat(),
+    trans = trans)
+  fmodel.update_xray_structure(update_f_calc = True)
+  assert approx_equal(fmodel.r_work(), 0.0)
+  params = mmtbx.refinement.rigid_body.master_params.extract()
+  params.refine_rotation = True
+  params.refine_translation = True
+  params.target="ls_wunit_k1"
+  rb = mmtbx.refinement.rigid_body.manager(
+    fmodel     = fmodel,
+    selections = [flex.bool(size,True).iselection()],
+    params     = params)
+  assert approx_equal(rb.translation()[0], [0.0,0.0,0.0])
+  assert approx_equal(rb.rotation()[0], [0.0,0.0,0.0])
+  assert approx_equal(fmodel.r_work(), 0.0)
+
+def test_3(fmodel, convention, phi = 1, psi = 2, the = 3, trans = [0,0,0]):
+  rot_obj = scitbx.rigid_body.euler(
+    phi = phi, psi = psi, the = the, convention = convention)
+  size = fmodel.xray_structure.scatterers().size()
+  fmodel.xray_structure.apply_rigid_body_shift(
+    rot = rot_obj.rot_mat(),
+    trans = trans)
+  fmodel.update_xray_structure(update_f_calc = True)
+  assert fmodel.r_work() > 0.15
+  params = mmtbx.refinement.rigid_body.master_params.extract()
+  params.refine_rotation = True
+  params.refine_translation = False
+  params.high_resolution = 1.0
+  params.max_iterations = 50
+  params.lbfgs_line_search_max_function_evaluations = 50
+  params.target="ls_wunit_k1"
+  rb = mmtbx.refinement.rigid_body.manager(
+    fmodel     = fmodel,
+    selections = [flex.bool(size,True).iselection()],
+    params     = params)
+  if(convention == "xyz"):
+    assert approx_equal(rb.rotation()[0], [-1.0,-2.0,-3.0], 0.2) # XXX
+  assert approx_equal(rb.translation()[0], [0.0,0.0,0.0])
+  assert approx_equal(fmodel.r_work(), 0.0)
+
+def test_4(fmodel, convention, phi =1, psi =2, the =3, trans =[0.5,1.0,1.5]):
+  rot_obj = scitbx.rigid_body.euler(
+    phi = phi, psi = psi, the = the, convention = convention)
+  size = fmodel.xray_structure.scatterers().size()
+  fmodel.xray_structure.apply_rigid_body_shift(
+    rot = rot_obj.rot_mat(),
+    trans = trans)
+  fmodel.update_xray_structure(update_f_calc = True)
+  assert fmodel.r_work() > 0.15
+  params = mmtbx.refinement.rigid_body.master_params.extract()
+  params.refine_rotation = True
+  params.refine_translation = True
+  params.high_resolution = 1.0
+  params.target="ls_wunit_k1"
+  rb = mmtbx.refinement.rigid_body.manager(
+    fmodel     = fmodel,
+    selections = [flex.bool(size,True).iselection()],
+    params     = params)
+  if(convention == "xyz"):
+    assert approx_equal(rb.rotation()[0], [-1.0,-2.0,-3.0], 0.2) # XXX
+  assert approx_equal(rb.translation()[0], [-0.5,-1.0,-1.5], 1.e-3)
+  assert approx_equal(fmodel.r_work(), 0.0, 1.e-3)
+
+def test_5(fmodel, convention):
+  size = fmodel.xray_structure.scatterers().size()
+  sel1 = flex.bool()
+  sel2 = flex.bool()
+  for i in range(size):
+    if(i<500):
+       sel1.append(True)
+       sel2.append(False)
+    else:
+       sel1.append(False)
+       sel2.append(True)
+  selections = [sel1.iselection(), sel2.iselection()]
+  rot_obj_1 = scitbx.rigid_body.euler(
+    phi = 1, psi = 2, the = 3, convention = convention)
+  rot_obj_2 = scitbx.rigid_body.euler(
+    phi = 3, psi = 2, the = 1, convention = convention)
+  fmodel.xray_structure.apply_rigid_body_shift(
+    rot = rot_obj_1.rot_mat(),
+    trans = [0.5,1.0,1.5],
+    selection = sel1.iselection())
+  fmodel.xray_structure.apply_rigid_body_shift(
+    rot = rot_obj_2.rot_mat(),
+    trans = [1.5,0.5,1.0],
+    selection = sel2.iselection())
+  fmodel.update_xray_structure(update_f_calc = True)
+  assert fmodel.r_work() > 0.35
+  params = mmtbx.refinement.rigid_body.master_params.extract()
+  params.refine_rotation = True
+  params.refine_translation = True
+  params.high_resolution = 1.0
+  params.target="ls_wunit_k1"
+  rb = mmtbx.refinement.rigid_body.manager(fmodel     = fmodel,
+                                           selections = selections,
+                                           params     = params)
+  if(convention == "xyz"):
+    assert approx_equal(rb.rotation()[0], [-1,-2,-3], 0.2)
+    assert approx_equal(rb.rotation()[1], [-3,-2,-1], 0.2)
+  assert approx_equal(rb.translation()[0], [-0.5,-1.0,-1.5], 1.e-4)
+  assert approx_equal(rb.translation()[1], [-1.5,-0.5,-1.0], 1.e-4)
+  assert approx_equal(fmodel.r_work(), 0.0, 0.0005)
+  assert approx_equal(fmodel.r_free(), 0.0, 0.0005)
+
+def get_fmodel_from_pdb(pdb_file_name,
+                        algorithm = "direct",
+                        d_min = 2.0,
+                        target = "ls_wunit_k1"):
+  pdb_file = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/pdb/%s"%pdb_file_name,test=os.path.isfile)
+  xray_structure = iotbx.pdb.input(file_name =pdb_file).xray_structure_simple()
+  params = mmtbx.programs.fmodel.master_phil.extract()
+  assert params.high_resolution is None
+  assert params.scattering_table == 'n_gaussian'
+  assert params.structure_factors_accuracy.algorithm == 'fft'
+  params.high_resolution = d_min
+  params.scattering_table = "wk1995"
+  params.structure_factors_accuracy.algorithm = algorithm
+  fmodel = mmtbx.utils.fmodel_from_xray_structure(
+    xray_structure        = xray_structure,
+    params                = params,
+    target                = target,
+    r_free_flags_fraction = 0.01).fmodel
+  assert approx_equal(mmtbx.bulk_solvent.r_factor(fmodel.f_obs().data(),
+    fmodel.f_model().data()), 0)
+  sfg_params = mmtbx.f_model.sf_and_grads_accuracy_master_params.extract()
+  sfg_params.algorithm = algorithm
+  fmodel = mmtbx.f_model.manager(
+    target_name    = target,
+    xray_structure = xray_structure,
+    f_obs          = abs(fmodel.f_model()),
+    sf_and_grads_accuracy_params = sfg_params)
+  assert approx_equal(fmodel.r_work(), 0)
+  return fmodel
+
+def run_tests():
+  fmodel_small = get_fmodel_from_pdb(pdb_file_name = "enk_gbr.pdb")
+  fmodel_big = get_fmodel_from_pdb(pdb_file_name = "lys_rigid_body.pdb",
+    algorithm = "fft")
+  for convention in ["xyz", "zyz"]:
+    print("test 1: ", convention)
+    test_1(fmodel = fmodel_small.deep_copy(), convention = convention)
+    print("test 2: ", convention)
+    test_2(fmodel = fmodel_small.deep_copy(), convention = convention)
+    print("test 3: ", convention)
+    test_3(fmodel = fmodel_small.deep_copy(), convention = convention)
+    print("test 4: ", convention)
+    test_4(fmodel = fmodel_big.deep_copy(), convention = convention)
+    print("test 5: ", convention)
+    test_5(fmodel = fmodel_big.deep_copy(), convention = convention)
+
+
+def finite_differences_test():
+  print("finite_differences_test: ")
+  fmodel = get_fmodel_from_pdb(pdb_file_name = "enk_rbr.pdb",
+                               algorithm = "direct",
+                               d_min = 2.0,
+                               target = "ls_wunit_k1")
+  xray.set_scatterer_grad_flags(
+    scatterers = fmodel.xray_structure.scatterers(),
+    site       = True)
+  for convention in ["zyz","xyz"]:
+      rot_obj = scitbx.rigid_body.euler(
+        phi = 0, psi = 0, the = 0, convention = convention)
+      size = fmodel.xray_structure.scatterers().size()
+      selections = [flex.bool(size, True).iselection()]
+      fmodel.xray_structure.apply_rigid_body_shift(
+        rot = rot_obj.rot_mat(), trans = [1,2,3])
+      fmodel.update_xray_structure(update_f_calc = True)
+      fmodel_copy = fmodel.deep_copy()
+      centers_of_mass = []
+      for s in selections:
+        xrs = fmodel_copy.xray_structure.select(s)
+        centers_of_mass.append(xrs.center_of_mass())
+      tg_obj = mmtbx.refinement.rigid_body.target_and_grads(
+        centers_of_mass = centers_of_mass,
+        sites_cart      = fmodel_copy.xray_structure.sites_cart(),
+        target_functor  = fmodel_copy.target_functor(),
+        rot_objs        = [rot_obj],
+        selections      = selections,
+        suppress_gradients = False)
+      assert approx_equal(tg_obj.target(),fmodel_copy.target_w())
+      g_rot, g_transl = tg_obj.gradients_wrt_r(), tg_obj.gradients_wrt_t()
+      fd_transl = fd_translation(fmodel_copy, e = 0.0001)
+      assert approx_equal(list(g_transl[0]), fd_transl)
+      fd_rot = fd_rotation(fmodel     = fmodel_copy,
+                           e          = 0.0001,
+                           convention = convention)
+      assert approx_equal(list(g_rot[0]), fd_rot)
+
+
+def fd_translation(fmodel, e):
+  grads = []
+  for shift in [[e,0,0],[0,e,0],[0,0,e]]:
+      xrs1 = fmodel.xray_structure.deep_copy_scatterers()
+      xrs2 = fmodel.xray_structure.deep_copy_scatterers()
+      fm = fmodel.deep_copy()
+      xrs_g1_1 = xrs1.translate(x = shift[0], y = shift[1], z = shift[2])
+      xrs_g1_2 = xrs2.translate(x =-shift[0], y =-shift[1], z =-shift[2])
+      fm.update_xray_structure(xray_structure = xrs_g1_1,
+                               update_f_calc  = True)
+      t1 = fm.target_functor()().target_work()
+      fm.update_xray_structure(xray_structure = xrs_g1_2,
+                               update_f_calc  = True)
+      t2 = fm.target_functor()().target_work()
+      grads.append( (t1-t2)/(2*e) )
+  return grads
+
+def fd_rotation(fmodel, e, convention):
+  grads = []
+  for shift in [[e,0,0],[0,e,0],[0,0,e]]:
+      xrs1 = fmodel.xray_structure.deep_copy_scatterers()
+      xrs2 = fmodel.xray_structure.deep_copy_scatterers()
+      fm = fmodel.deep_copy()
+      #
+      rot_obj = scitbx.rigid_body.euler(phi = shift[0],
+                                        psi = shift[1],
+                                        the = shift[2],
+                                        convention = convention)
+      selections = [flex.bool(xrs1.scatterers().size(), True)]
+      xrs_g1_1 = mmtbx.refinement.rigid_body.apply_transformation(
+                         xray_structure      = xrs1,
+                         rotation_matrices   = [rot_obj.rot_mat()],
+                         translation_vectors = [(0.0,0.0,0.0)],
+                         selections          = selections)
+      #
+      rot_obj = scitbx.rigid_body.euler(phi = -shift[0],
+                                        psi = -shift[1],
+                                        the = -shift[2],
+                                        convention = convention)
+      selections = [flex.bool(xrs1.scatterers().size(), True)]
+      xrs_g1_2 = mmtbx.refinement.rigid_body.apply_transformation(
+                         xray_structure      = xrs2,
+                         rotation_matrices   = [rot_obj.rot_mat()],
+                         translation_vectors = [(0.0,0.0,0.0)],
+                         selections          = selections)
+      fm.update_xray_structure(xray_structure = xrs_g1_1,
+                               update_f_calc  = True)
+      t1 = fm.target_functor()().target_work()
+      fm.update_xray_structure(xray_structure = xrs_g1_2,
+                               update_f_calc  = True)
+      t2 = fm.target_functor()().target_work()
+      grads.append( (t1-t2)/(2*e*math.pi/180)  )
+  return grads
+
+
+def exercise():
+  test_matrices_zyz()
+  run_tests()
+  finite_differences_test()
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/tst_rigid_body_groups_from_pdb_chains.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+from libtbx.test_utils import approx_equal
+import mmtbx.refinement.rigid_body
+
+m1_in_str = """\
+CRYST1   72.240   72.010   86.990  90.00  90.00  90.00 P 21 21 21    4
+ATOM      1  N   ASP L  -1      49.347 -62.804  60.380  1.00 34.60           N
+ATOM      2  CA  ASP L  -1      47.975 -63.194  59.946  1.00 33.86           C
+ATOM      3  C   ASP L  -1      47.122 -63.665  61.114  1.00 34.02           C
+ATOM      4  O   ASP L  -1      47.573 -64.451  61.947  1.00 32.23           O
+ATOM      9  N   VAL L  -2      45.889 -63.176  61.175  1.00 31.94           N
+ATOM     10  CA  VAL L  -2      44.978 -63.576  62.233  1.00 29.81           C
+ATOM     20  CB  GLN L   0      45.127 -68.170  63.455  1.00 29.74           C
+ATOM     21  CG  GLN L   0      44.676 -69.611  63.591  1.00 39.72           C
+ATOM     22  CD  GLN L   0      45.288 -70.292  64.807  1.00 51.31           C
+
+ATOM     25  N   MET L   4      41.894 -68.026  62.256  1.00 24.27           N
+ATOM     26  CA CMET L   4      40.497 -68.318  62.576  0.30 22.89           C
+ATOM     27  C  CMET L   4      40.326 -69.824  62.795  0.30 21.48           C
+ATOM     28  O  CMET L   4      40.633 -70.625  61.911  0.30 23.73           O
+
+ATOM     25  N   TYR L   4      41.894 -68.026  62.256  1.00 24.27           N
+ATOM     26  CA DTYR L   4      40.497 -68.318  62.576  0.70 22.89           C
+ATOM     27  C  DTYR L   4      40.326 -69.824  62.795  0.70 21.48           C
+ATOM     28  O  DTYR L   4      40.633 -70.625  61.911  0.70 23.73           O
+
+ATOM    186  N   GLN L  27      43.266 -62.813  67.460  1.00 23.64           N
+ATOM    187  CA  GLN L  27      43.289 -61.405  67.832  1.00 24.84           C
+ATOM    197  C   SER L  27A     39.920 -58.676  67.377  1.00 22.05           C
+ATOM    198  O   SER L  27A     40.712 -58.050  66.678  1.00 19.83           O
+
+ATOM    202  CA  LEU L  27B     38.173 -58.446  65.720  1.00 20.41           C
+ATOM    203  C   LEU L  27B     37.484 -57.089  65.854  1.00 21.13           C
+
+ATOM    235  N   ASN L  28      36.659 -48.175  64.751  1.00 23.50           N
+ATOM    236  CA  ASN L  28      35.418 -47.408  64.733  1.00 19.92           C
+TER
+ATOM   1702  N   GLY H   1      19.054 -57.059  39.111  1.00 41.20           N
+ATOM   1703  CA  GLY H   1      20.002 -57.281  40.238  1.00 41.19           C
+ATOM   1704  C   GLY H   1      21.452 -57.171  39.802  1.00 40.03           C
+
+ATOM   1959  N   ASN H  35A     36.815 -57.860  44.928  1.00 15.79           N
+ATOM   1960  CA  ASN H  35A     37.803 -58.882  45.265  1.00 16.70           C
+ATOM   1967  N   TRP H  36      39.095 -60.772  44.593  1.00 17.23           N
+ATOM   1968  CA  TRP H  36      39.440 -62.016  43.926  1.00 19.02           C
+TER
+ATOM   3383  O   HOH S 215      45.158 -61.466  59.209  1.00 21.71           O
+ATOM   3384  O   HOH S 216      26.065 -71.512  48.872  1.00 18.56           O
+ATOM   3385  O   HOH S 217      26.885 -90.624  56.632  0.92 16.47           O
+ATOM   3386  O   HOH S 218      22.026 -89.723  46.422  1.04 19.34           O
+TER
+HETATM 3387  O   WAT L 219      33.576 -94.407  39.044  1.08 30.66
+HETATM 3388  O   WAT L 220      39.377 -73.892  61.395  1.40 42.96
+HETATM 3389  O  AWAT L 221      21.907 -98.365  40.731  0.40 16.45
+HETATM 3390  O  BWAT L 221      28.591 -95.257  59.711  0.60 20.75
+TER
+ATOM   1001 AU   AU    500      14.333   3.856  26.301  1.00  7.97          Au
+TER
+ATOM   3342  N   VAL   226      20.817 -97.348  23.861  1.00 34.12           N
+ATOM   3349  N   PRO   227      19.065-100.553  23.842  1.00 41.92           N
+ATOM   3350  CA  PRO   227      19.109-101.900  24.416  1.00 46.30           C
+ATOM   3351  C   PRO   227      20.202-102.722  23.753  1.00 50.65           C
+ATOM   3356  N   ARG   228      20.811-103.620  24.514  1.00 56.77           N
+TER
+ATOM     25  N   MET X   4      41.894 -68.026  62.256  1.00 24.27           N
+TER
+ATOM   1001 AU   AU  K 502      11.333   3.856  26.301  1.00  7.97
+ATOM   1001 AU   AU  K 100      14.333   0.856  26.301  1.00  7.97          Au
+ATOM   1001 AU   AU  K 900      14.333   3.856  21.301  1.00  7.97          Au
+END
+"""
+
+m1_out_str = """\
+CRYST1   72.240   72.010   86.990  90.00  90.00  90.00 P 21 21 21    4
+ATOM      1  N   ASP L  -1      49.347 -62.804  60.380  1.00 34.60           N
+ATOM      2  CA  ASP L  -1      47.975 -63.194  59.946  1.00 33.86           C
+ATOM      3  C   ASP L  -1      47.122 -63.665  61.114  1.00 34.02           C
+ATOM      4  O   ASP L  -1      47.573 -64.451  61.947  1.00 32.23           O
+ATOM      9  N   VAL L  -2      45.889 -63.176  61.175  1.00 31.94           N
+ATOM     10  CA  VAL L  -2      44.978 -63.576  62.233  1.00 29.81           C
+ATOM     20  CB  GLN L   0      45.127 -68.170  63.455  1.00 29.74           C
+ATOM     21  CG  GLN L   0      44.676 -69.611  63.591  1.00 39.72           C
+ATOM     22  CD  GLN L   0      45.288 -70.292  64.807  1.00 51.31           C
+
+ATOM     25  N   MET L   4      41.894 -68.026  62.256  1.00 24.27           N
+ATOM     26  CA CMET L   4      40.497 -68.318  62.576  0.30 22.89           C
+ATOM     27  C  CMET L   4      40.326 -69.824  62.795  0.30 21.48           C
+ATOM     28  O  CMET L   4      40.633 -70.625  61.911  0.30 23.73           O
+
+ATOM     25  N   TYR L   4      41.894 -68.026  62.256  1.00 24.27           N
+ATOM     26  CA DTYR L   4      40.497 -68.318  62.576  0.70 22.89           C
+ATOM     27  C  DTYR L   4      40.326 -69.824  62.795  0.70 21.48           C
+ATOM     28  O  DTYR L   4      40.633 -70.625  61.911  0.70 23.73           O
+
+ATOM    186  N   GLN L  27      43.266 -62.813  67.460  1.00 23.64           N
+ATOM    187  CA  GLN L  27      43.289 -61.405  67.832  1.00 24.84           C
+ATOM    197  C   SER L  27A     39.920 -58.676  67.377  1.00 22.05           C
+ATOM    198  O   SER L  27A     40.712 -58.050  66.678  1.00 19.83           O
+
+ATOM    202  CA  LEU L  27B     38.173 -58.446  65.720  1.00 20.41           C
+ATOM    203  C   LEU L  27B     37.484 -57.089  65.854  1.00 21.13           C
+
+ATOM    235  N   ASN L  28      36.659 -48.175  64.751  1.00 23.50           N
+ATOM    236  CA  ASN L  28      35.418 -47.408  64.733  1.00 19.92           C
+TER
+ATOM   1702  N   GLY H   1      19.054 -57.059  39.111  1.00 41.20           N
+ATOM   1703  CA  GLY H   1      20.002 -57.281  40.238  1.00 41.19           C
+ATOM   1704  C   GLY H   1      21.452 -57.171  39.802  1.00 40.03           C
+
+ATOM   1959  N   ASN H  35A     36.815 -57.860  44.928  1.00 15.79           N
+ATOM   1960  CA  ASN H  35A     37.803 -58.882  45.265  1.00 16.70           C
+ATOM   1967  N   TRP H  36      39.095 -60.772  44.593  1.00 17.23           N
+ATOM   1968  CA  TRP H  36      39.440 -62.016  43.926  1.00 19.02           C
+TER
+ATOM   3342  N   VAL   226      20.817 -97.348  23.861  1.00 34.12           N
+ATOM   3349  N   PRO   227      19.065-100.553  23.842  1.00 41.92           N
+ATOM   3350  CA  PRO   227      19.109-101.900  24.416  1.00 46.30           C
+ATOM   3351  C   PRO   227      20.202-102.722  23.753  1.00 50.65           C
+ATOM   3356  N   ARG   228      20.811-103.620  24.514  1.00 56.77           N
+TER
+END
+"""
+
+m2_in_str = """\
+CRYST1   72.240   72.010   86.990  90.00  90.00  90.00 P 21 21 21    4
+ATOM      1  O5'  DC A   1      29.670  19.013  -2.305  1.00 11.26           O
+ATOM      2  C5'  DC A   1      30.109  19.727  -1.144  1.00  2.03           C
+ATOM      3  C4'  DC A   1      30.024  19.014   0.202  1.00  4.76           C
+ATOM      4  O4'  DC A   1      28.912  18.160   0.419  1.00  7.08           O
+ATOM      5  C3'  DC A   1      31.204  18.275   0.705  1.00  9.25           C
+ATOM      6  O3'  DC A   1      31.448  18.682   2.066  1.00 11.24           O
+ATOM     20  P    DG A   2      32.339  20.004   2.406  1.00 11.95           P
+ATOM     45  P    DC A   3      28.538  23.069   6.214  1.00 19.73           P
+ATOM     46  OP1  DC A   3      29.232  24.056   7.091  1.00 19.15           O
+ATOM     47  OP2  DC A   3      29.008  21.652   6.240  1.00 19.23           O
+ATOM     48  O5'  DC A   3      26.905  23.120   6.436  1.00 16.82           O
+TER
+ATOM    139  O5'  DC B   7      13.405  26.346   3.336  1.00 15.19           O
+ATOM    140  C5'  DC B   7      13.472  24.969   2.944  1.00  4.19           C
+ATOM    158  P    DG B   8      11.130  21.728   3.702  1.00 12.13           P
+ATOM    159  OP1  DG B   8      10.341  22.682   2.901  1.00 14.52           O
+ATOM    186  O5'  DC B   9      16.676  16.828   1.638  1.00 13.48           O
+ATOM    187  C5'  DC B   9      17.151  15.620   2.196  1.00  3.67           C
+ATOM    188  C4'  DC B   9      17.855  15.745   3.510  1.00  2.48           C
+TER
+HETATM  277  O   HOH A  13      32.050  21.145   7.029  1.00 28.46           O
+HETATM  278  O   HOH A  14      29.068  18.914   5.393  1.00 44.50           O
+HETATM  279  O   HOH A  15      29.984  22.375  10.338  1.00 42.18           O
+END
+"""
+
+m2_out_str = """\
+CRYST1   72.240   72.010   86.990  90.00  90.00  90.00 P 21 21 21    4
+ATOM      1  O5'  DC A   1      29.670  19.013  -2.305  1.00 11.26           O
+ATOM      2  C5'  DC A   1      30.109  19.727  -1.144  1.00  2.03           C
+ATOM      3  C4'  DC A   1      30.024  19.014   0.202  1.00  4.76           C
+ATOM      4  O4'  DC A   1      28.912  18.160   0.419  1.00  7.08           O
+ATOM      5  C3'  DC A   1      31.204  18.275   0.705  1.00  9.25           C
+ATOM      6  O3'  DC A   1      31.448  18.682   2.066  1.00 11.24           O
+ATOM     20  P    DG A   2      32.339  20.004   2.406  1.00 11.95           P
+ATOM     45  P    DC A   3      28.538  23.069   6.214  1.00 19.73           P
+ATOM     46  OP1  DC A   3      29.232  24.056   7.091  1.00 19.15           O
+ATOM     47  OP2  DC A   3      29.008  21.652   6.240  1.00 19.23           O
+ATOM     48  O5'  DC A   3      26.905  23.120   6.436  1.00 16.82           O
+TER
+ATOM    139  O5'  DC B   7      13.405  26.346   3.336  1.00 15.19           O
+ATOM    140  C5'  DC B   7      13.472  24.969   2.944  1.00  4.19           C
+ATOM    158  P    DG B   8      11.130  21.728   3.702  1.00 12.13           P
+ATOM    159  OP1  DG B   8      10.341  22.682   2.901  1.00 14.52           O
+ATOM    186  O5'  DC B   9      16.676  16.828   1.638  1.00 13.48           O
+ATOM    187  C5'  DC B   9      17.151  15.620   2.196  1.00  3.67           C
+ATOM    188  C4'  DC B   9      17.855  15.745   3.510  1.00  2.48           C
+TER
+END
+"""
+
+m3_in_str = """\
+CRYST1   72.240   72.010   86.990  90.00  90.00  90.00 P 21 21 21    4
+ATOM      1  N   ASP L  -1      49.347 -62.804  60.380  1.00 34.60           N
+ATOM      2  CA  ASP L  -1      47.975 -63.194  59.946  1.00 33.86           C
+ATOM      3  C   ASP L  -1      47.122 -63.665  61.114  1.00 34.02           C
+ATOM      4  O   ASP L  -1      47.573 -64.451  61.947  1.00 32.23           O
+ATOM      9  N   VAL L  -2      45.889 -63.176  61.175  1.00 31.94           N
+ATOM     10  CA  VAL L  -2      44.978 -63.576  62.233  1.00 29.81           C
+ATOM     20  CB  GLN L   0      45.127 -68.170  63.455  1.00 29.74           C
+ATOM     21  CG  GLN L   0      44.676 -69.611  63.591  1.00 39.72           C
+ATOM     22  CD  GLN L   0      45.288 -70.292  64.807  1.00 51.31           C
+ATOM     25  N   MET L   4      41.894 -68.026  62.256  1.00 24.27           N
+ATOM     26  CA CMET L   4      40.497 -68.318  62.576  0.30 22.89           C
+ATOM     27  C  CMET L   4      40.326 -69.824  62.795  0.30 21.48           C
+ATOM     28  O  CMET L   4      40.633 -70.625  61.911  0.30 23.73           O
+TER
+HETATM 3387  O   WAT L 219      33.576 -94.407  39.044  1.08 30.66
+HETATM 3388  O   WAT L 220      39.377 -73.892  61.395  1.40 42.96
+HETATM 3389  O  AWAT L 221      21.907 -98.365  40.731  0.40 16.45
+HETATM 3390  O  BWAT L 221      28.591 -95.257  59.711  0.60 20.75
+TER
+ATOM   1001 AU   AU  L 500      14.333   3.856  26.301  1.00  7.97          Au
+TER
+END
+"""
+
+def exercise_00():
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=m1_in_str)
+  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  pdb_hierarchy.atoms().reset_i_seq()
+  sel_strings=mmtbx.refinement.rigid_body.rigid_groups_from_pdb_chains(
+    pdb_hierarchy=pdb_hierarchy)
+  answer = [
+    "(chain 'L' and resid -1 through 28)",
+    "(chain 'H' and resid 1 through 36)",
+    "(chain ' ' and resid 226 through 228)"]
+  for sel_string in sel_strings:
+    assert sel_string in answer
+  assert len(sel_strings) == 3
+  selection = pdb_hierarchy.atom_selection_cache().selection(
+    string=" or ".join(answer))
+  xrs_1 = pdb_inp.xray_structure_simple().select(selection = selection)
+  xrs_2 = iotbx.pdb.input(source_info=None,
+    lines=m1_out_str).xray_structure_simple()
+  assert approx_equal(
+    xrs_1.structure_factors(d_min=2).f_calc().data(),
+    xrs_2.structure_factors(d_min=2).f_calc().data())
+
+def exercise_01():
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=m2_in_str)
+  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  pdb_hierarchy.atoms().reset_i_seq()
+  sel_strings=mmtbx.refinement.rigid_body.rigid_groups_from_pdb_chains(
+    pdb_hierarchy=pdb_hierarchy)
+  answer = [
+    "(chain 'A' and resid 1 through 3)",
+    "(chain 'B' and resid 7 through 9)"]
+  for sel_string in sel_strings:
+    assert sel_string in answer
+  assert len(sel_strings) == 2
+  selection = pdb_hierarchy.atom_selection_cache().selection(
+    string=" or ".join(answer))
+  xrs_1 = pdb_inp.xray_structure_simple().select(selection = selection)
+  xrs_2 = iotbx.pdb.input(source_info=None,
+    lines=m2_out_str).xray_structure_simple()
+  assert approx_equal(
+    xrs_1.structure_factors(d_min=2).f_calc().data(),
+    xrs_2.structure_factors(d_min=2).f_calc().data())
+
+def exercise_02():
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=m3_in_str)
+  pdb_hierarchy = pdb_inp.construct_hierarchy()
+  pdb_hierarchy.atoms().reset_i_seq()
+  sel_strings=mmtbx.refinement.rigid_body.rigid_groups_from_pdb_chains(
+    pdb_hierarchy=pdb_hierarchy,
+    group_all_by_chain=True)
+  assert sel_strings == ["(chain 'L' and not (resname HOH or resname WAT))"]
+
+if (__name__ == "__main__"):
+  exercise_00()
+  exercise_01()
+  exercise_02()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/tst_select_best_starting_model.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx.test_utils import Exception_expected
+from libtbx.utils import null_out, Sorry
+from libtbx import easy_run
+from scitbx.array_family import flex
+from cctbx import uctbx, sgtbx
+import iotbx.pdb
+from iotbx import file_reader
+from mmtbx.refinement import select_best_starting_model
+import random
+from six.moves import range
+
+def exercise_main():
+  unit_cell = (24.937, 8.866, 25.477, 90.00, 107.08, 90.00)
+  space_group = "P21"
+  pdb_base = """\
+CRYST1   24.937    8.866   25.477  90.00 107.08  90.00 P 1 21 1
+SCALE1      0.040101  0.000000  0.012321        0.00000
+SCALE2      0.000000  0.112790  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.041062        0.00000
+ATOM      1  N   GLY A   1       8.992   0.474  -6.096  1.00 16.23           N
+ATOM      2  CA  GLY A   1       9.033   0.047  -4.707  1.00 16.20           C
+ATOM      3  C   GLY A   1       7.998  -1.029  -4.448  1.00 15.91           C
+ATOM      4  O   GLY A   1       7.548  -1.689  -5.385  1.00 16.11           O
+ATOM      5  N   ASN A   2       7.625  -1.218  -3.185  1.00 15.02           N
+ATOM      6  CA  ASN A   2       6.523  -2.113  -2.848  1.00 13.92           C
+ATOM      7  C   ASN A   2       5.220  -1.618  -3.428  1.00 12.24           C
+ATOM      8  O   ASN A   2       4.955  -0.418  -3.432  1.00 11.42           O
+ATOM      9  CB  ASN A   2       6.376  -2.261  -1.340  1.00 14.42           C
+ATOM     10  CG  ASN A   2       7.620  -2.786  -0.697  1.00 13.92           C
+ATOM     11  OD1 ASN A   2       8.042  -3.915  -0.978  1.00 14.39           O
+ATOM     12  ND2 ASN A   2       8.232  -1.975   0.168  1.00 12.78           N
+ATOM     13  N   ASN A   3       4.406  -2.553  -3.904  1.00 12.20           N
+ATOM     14  CA  ASN A   3       3.164  -2.226  -4.594  1.00 11.81           C
+ATOM     15  C   ASN A   3       1.925  -2.790  -3.910  1.00 10.59           C
+ATOM     16  O   ASN A   3       1.838  -3.991  -3.653  1.00 10.32           O
+ATOM     17  CB  ASN A   3       3.231  -2.727  -6.046  1.00 12.51           C
+ATOM     18  CG  ASN A   3       1.973  -2.405  -6.848  1.00 12.59           C
+ATOM     19  OD1 ASN A   3       1.662  -1.239  -7.106  1.00 13.64           O
+ATOM     20  ND2 ASN A   3       1.260  -3.443  -7.268  1.00 12.39           N
+ATOM     21  N   GLN A   4       0.973  -1.913  -3.608  1.00 10.34           N
+ATOM     22  CA  GLN A   4      -0.366  -2.335  -3.208  1.00 10.00           C
+ATOM     23  C   GLN A   4      -1.402  -1.637  -4.085  1.00 10.21           C
+ATOM     24  O   GLN A   4      -1.514  -0.414  -4.070  1.00  8.99           O
+ATOM     25  CB  GLN A   4      -0.656  -2.027  -1.736  1.00 10.00           C
+ATOM     26  CG  GLN A   4      -1.927  -2.705  -1.229  1.00 10.50           C
+ATOM     27  CD  GLN A   4      -2.482  -2.102   0.060  1.00 11.36           C
+ATOM     28  OE1 GLN A   4      -2.744  -0.900   0.151  1.00 12.29           O
+ATOM     29  NE2 GLN A   4      -2.684  -2.951   1.055  1.00 10.43           N
+ATOM     30  N   GLN A   5      -2.154  -2.406  -4.857  1.00 10.48           N
+ATOM     31  CA  GLN A   5      -3.247  -1.829  -5.630  1.00 11.24           C
+ATOM     32  C   GLN A   5      -4.591  -2.382  -5.178  1.00 11.40           C
+ATOM     33  O   GLN A   5      -4.789  -3.599  -5.092  1.00 11.94           O
+ATOM     34  CB  GLN A   5      -3.024  -2.023  -7.129  1.00 11.14           C
+ATOM     35  CG  GLN A   5      -1.852  -1.222  -7.653  1.00 10.65           C
+ATOM     36  CD  GLN A   5      -1.338  -1.748  -8.965  1.00 10.73           C
+ATOM     37  OE1 GLN A   5      -0.794  -2.845  -9.028  1.00 10.14           O
+ATOM     38  NE2 GLN A   5      -1.511  -0.968 -10.027  1.00 11.31           N
+ATOM     39  N   ASN A   6      -5.504  -1.471  -4.872  1.00 11.56           N
+ATOM     40  CA  ASN A   6      -6.809  -1.838  -4.359  1.00 12.07           C
+ATOM     41  C   ASN A   6      -7.856  -1.407  -5.353  1.00 13.18           C
+ATOM     42  O   ASN A   6      -8.257  -0.251  -5.362  1.00 13.64           O
+ATOM     43  CB  ASN A   6      -7.053  -1.149  -3.017  1.00 12.12           C
+ATOM     44  CG  ASN A   6      -5.966  -1.446  -1.998  1.00 12.31           C
+ATOM     45  OD1 ASN A   6      -5.833  -2.579  -1.517  1.00 13.43           O
+ATOM     46  ND2 ASN A   6      -5.198  -0.423  -1.645  1.00 11.88           N
+ATOM     47  N   TYR A   7      -8.298  -2.332  -6.193  1.00 14.34           N
+ATOM     48  CA  TYR A   7      -9.162  -1.980  -7.317  1.00 15.00           C
+ATOM     49  C   TYR A   7     -10.603  -1.792  -6.893  1.00 15.64           C
+ATOM     50  O   TYR A   7     -11.013  -2.278  -5.838  1.00 15.68           O
+ATOM     51  CB  TYR A   7      -9.064  -3.041  -8.412  1.00 15.31           C
+ATOM     52  CG  TYR A   7      -7.657  -3.197  -8.931  1.00 15.06           C
+ATOM     53  CD1 TYR A   7      -6.785  -4.118  -8.368  1.00 15.24           C
+ATOM     54  CD2 TYR A   7      -7.193  -2.400  -9.960  1.00 14.96           C
+ATOM     55  CE1 TYR A   7      -5.489  -4.253  -8.830  1.00 14.94           C
+ATOM     56  CE2 TYR A   7      -5.905  -2.526 -10.429  1.00 15.13           C
+ATOM     57  CZ  TYR A   7      -5.055  -3.451  -9.861  1.00 14.97           C
+ATOM     58  OH  TYR A   7      -3.768  -3.572 -10.335  1.00 14.93           O
+ATOM     59  OXT TYR A   7     -11.378  -1.149  -7.601  1.00 15.89           O
+TER
+"""
+  pdb_base_water = """\
+HETATM   64  O   HOH S   1     -10.466  -2.347  -3.168  1.00 17.57           O
+HETATM   65  O   HOH S   2       6.469   1.081  -7.070  1.00 21.27           O
+HETATM   66  O   HOH S   3     -11.809   0.108  -9.956  1.00 27.52           O
+HETATM   67  O   HOH S   4       1.580  -3.455 -11.035  1.00 44.76           O
+END
+"""
+  with open("tst_start_model_base.pdb", "w") as f:
+    f.write(pdb_base+pdb_base_water)
+  params = """
+    high_resolution = 1.75
+    add_sigmas = True
+    output {
+      label = F
+      type = *real complex
+      file_name = tst_start_model_base.mtz
+    }
+  """
+  with open("tst_start_model_fmodel.eff", "w") as f:
+    f.write(params)
+  assert (easy_run.fully_buffered(
+    "phenix.fmodel tst_start_model_base.pdb tst_start_model_fmodel.eff"
+  ).raise_if_errors().return_code == 0)
+  mtz_in = file_reader.any_file("tst_start_model_base.mtz")
+  f_obs = mtz_in.file_server.miller_arrays[0]
+  symm = f_obs.crystal_symmetry().customized_copy(
+    space_group_info=sgtbx.space_group_info("P2"))
+  f_obs = f_obs.customized_copy(crystal_symmetry=symm)
+  random.seed(12345) # XXX makes results more predictable
+  flags = f_obs.generate_r_free_flags(fraction=0.1)
+  mtz_data = f_obs.as_mtz_dataset(
+    column_root_label="F")
+  mtz_data.add_miller_array(flags,
+    column_root_label="FreeR_flag")
+  mtz_data.mtz_object().write("tst_start_model.mtz")
+  pdb_in = iotbx.pdb.input("tst_start_model_base.pdb")
+  hierarchy_in = pdb_in.construct_hierarchy()
+  xrs_in = pdb_in.xray_structure_simple()
+  selection = hierarchy_in.atom_selection_cache().selection
+  # Model 1: very few changes, but shifted by (1,0,0.5)
+  symm2 = xrs_in.crystal_symmetry().customized_copy(
+    unit_cell=uctbx.unit_cell((24.932, 8.841, 25.501, 90.00, 107.5, 90.00)))
+  #u_iso = xrs_in.extract_u_iso_or_u_equiv()
+  #xrs_out = xrs_in.deep_copy_scatterers().set_u_iso(
+  #  selection=flex.bool(u_iso.size(), True), values=u_iso*1.1)
+  xrs_out = xrs_in.deep_copy_scatterers()
+  sites_cart = xrs_out.sites_cart()
+  sites_cart += flex.vec3_double(sites_cart.size(), (1.0, 0.0, 0.5))
+  xrs_out.set_sites_cart(sites_cart)
+  hierarchy_out = hierarchy_in.deep_copy()
+  hierarchy_out.adopt_xray_structure(xrs_out)
+  with open("tst_start_model_1.pdb", "w") as f:
+    f.write(hierarchy_out.as_pdb_string(crystal_symmetry=symm2))
+  # Model 2: no sidechains
+  mc_sele = selection("(name N or name C or name O or name CA or name CB)")
+  hierarchy_out = hierarchy_in.select(mc_sele)
+  xrs_out = xrs_in.select(mc_sele)
+  with open("tst_start_model_2.pdb", "w") as f:
+    f.write(hierarchy_out.as_pdb_string(crystal_symmetry=xrs_out))
+  # Model 3: P1 symmetry
+  symm3 = xrs_in.crystal_symmetry().customized_copy(
+    space_group_info=sgtbx.space_group_info("P1"))
+  with open("tst_start_model_3.pdb", "w") as f:
+    f.write(hierarchy_out.as_pdb_string(crystal_symmetry=symm3))
+  # Model 4: shaken coordinates and ADPs
+  def random_double(size, factor=1):
+    d = flex.double()
+    for x in range(size):
+      d.append(random.random() * factor)
+    return d
+  xrs_out = xrs_in.customized_copy()
+  xrs_out.shake_sites_in_place(0.3, random_double=random_double)
+  xrs_out.shake_adp()
+  hierarchy_out = hierarchy_in.deep_copy()
+  hierarchy_out.adopt_xray_structure(xrs_out)
+  with open("tst_start_model_4.pdb", "w") as f:
+    f.write(hierarchy_out.as_pdb_string(crystal_symmetry=xrs_out))
+  # Model 5: perfect, but missing CRYST1
+  with open("tst_start_model_5.pdb", "w") as f:
+    f.write(hierarchy_in.as_pdb_string())
+  # run method
+  params = select_best_starting_model.master_phil.extract()
+  params.rigid_body_refine = False
+  model_names = [
+    "tst_start_model_1.pdb",
+    "tst_start_model_2.pdb",
+    "tst_start_model_3.pdb",
+    "tst_start_model_4.pdb",
+    "tst_start_model_5.pdb",
+  ]
+  result = select_best_starting_model.select_model(
+    model_names=model_names,
+    model_data=None,
+    f_obs=f_obs,
+    r_free_flags=flags,
+    params=params,
+    skip_twin_detection=True,
+    log=null_out())
+  # result.show(verbose=True)
+  assert (result.best_model_name == "tst_start_model_4.pdb"), result.best_model_name
+  params.rigid_body_refine = True
+  result = select_best_starting_model.select_model(
+    model_names=model_names,
+    model_data=None,
+    f_obs=f_obs,
+    r_free_flags=flags,
+    params=params,
+    skip_twin_detection=True,
+    log=null_out())
+  # result.show(verbose=True)
+  assert (result.best_model_name == "tst_start_model_1.pdb"), result.best_model_name
+
+def exercise_misc():
+  pdb_str = """\
+REMARK this is a remark record!
+CRYST1   21.937    4.866   23.477  90.00 107.08  90.00 P 1 21 1
+SCALE1      0.045585  0.000000  0.014006        0.00000
+SCALE2      0.000000  0.205508  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.044560        0.00000
+ATOM      1  N   GLY A   1      -9.009   4.612   6.102  0.00 16.77           N
+ATOM      2  CA  GLY A   1      -9.052   4.207   4.651  0.00 16.57           C
+ATOM      3  C   GLY A   1      -8.015   3.140   4.419  0.00 16.16           C
+ATOM      4  O   GLY A   1      -7.523   2.521   5.381  0.00 16.78           O
+ATOM      5  H1  GLY A   1      -9.802   4.938   6.343  0.00 16.77           H
+ATOM      6  H2  GLY A   1      -8.816   3.902   6.603  0.00 16.77           H
+ATOM      7  H3  GLY A   1      -8.385   5.236   6.218  0.00 16.77           H
+ATOM      8  HA2 GLY A   1      -9.928   3.856   4.426  0.00 16.57           H
+ATOM      9  HA3 GLY A   1      -8.858   4.970   4.084  0.00 16.57           H
+ATOM     10  N   ASN A   2      -7.656   2.923   3.155  1.00 15.02           N
+ATOM     11  CA  ASN A   2      -6.522   2.038   2.831  1.00 14.10           C
+ATOM     12  C   ASN A   2      -5.241   2.537   3.427  1.00 13.13           C
+ATOM     13  O   ASN A   2      -4.978   3.742   3.426  1.00 11.91           O
+ATOM     14  CB  ASN A   2      -6.346   1.881   1.341  1.00 15.38           C
+ATOM     15  CG  ASN A   2      -7.584   1.342   0.692  1.00 14.08           C
+ATOM     16  OD1 ASN A   2      -8.025   0.227   1.016  1.00 17.46           O
+ATOM     17  ND2 ASN A   2      -8.204   2.155  -0.169  1.00 11.72           N
+ATOM     18  H   ASN A   2      -8.044   3.269   2.470  1.00 15.02           H
+ATOM     19  HA  ASN A   2      -6.698   1.159   3.202  1.00 14.10           H
+ATOM     20  HB2 ASN A   2      -6.150   2.746   0.949  1.00 15.38           H
+ATOM     21  HB3 ASN A   2      -5.619   1.262   1.169  1.00 15.38           H
+ATOM     22 HD21 ASN A   2      -8.919   1.893  -0.569  1.00 11.72           H
+ATOM     23 HD22 ASN A   2      -7.888   2.940  -0.323  1.00 11.72           H
+ATOM     24  N  AASN A   3      -4.438   1.590   3.905  0.50 12.26           N
+ATOM     25  CA AASN A   3      -3.193   1.904   4.589  0.50 11.74           C
+ATOM     26  C  AASN A   3      -1.955   1.332   3.895  0.50 11.10           C
+ATOM     27  O  AASN A   3      -1.872   0.119   3.648  0.50 10.42           O
+ATOM     28  CB AASN A   3      -3.259   1.378   6.042  0.50 12.15           C
+ATOM     29  CG AASN A   3      -2.006   1.739   6.861  0.50 12.82           C
+ATOM     30  OD1AASN A   3      -1.702   2.925   7.072  0.50 15.05           O
+ATOM     31  ND2AASN A   3      -1.271   0.715   7.306  0.50 13.48           N
+ATOM     32  H  AASN A   3      -4.597   0.747   3.843  0.50 12.26           H
+ATOM     33  HA AASN A   3      -3.083   2.866   4.633  0.50 11.74           H
+ATOM     34  HB2AASN A   3      -4.029   1.767   6.485  0.50 12.15           H
+ATOM     35  HB3AASN A   3      -3.339   0.411   6.025  0.50 12.15           H
+ATOM     36 HD21AASN A   3      -0.560   0.864   7.766  0.50 13.48           H
+ATOM     37 HD22AASN A   3      -1.509  -0.093   7.132  0.50 13.48           H
+ATOM     38  N  BASN A   3      -4.338   1.590   3.905  0.50 12.26           N
+ATOM     39  CA BASN A   3      -3.093   1.904   4.589  0.50 11.74           C
+ATOM     40  C  BASN A   3      -1.855   1.332   3.895  0.50 11.10           C
+ATOM     41  O  BASN A   3      -1.772   0.119   3.648  0.50 10.42           O
+ATOM     42  CB BASN A   3      -3.159   1.378   6.042  0.50 12.15           C
+ATOM     43  CG BASN A   3      -4.127   2.189   6.923  0.50 12.82           C
+ATOM     44  OD1BASN A   3      -4.598   1.573   8.012  0.50 15.05           O
+ATOM     45  ND2BASN A   3      -4.430   3.358   6.630  0.50 13.48           N
+ATOM     46  H  BASN A   3      -4.464   0.743   3.823  0.50 12.26           H
+ATOM     47  HA BASN A   3      -2.983   2.866   4.621  0.50 11.74           H
+ATOM     48  HB2BASN A   3      -3.463   0.457   6.031  0.50 12.15           H
+ATOM     49  HB3BASN A   3      -2.275   1.432   6.438  0.50 12.15           H
+ATOM     50 HD21BASN A   3      -3.922   3.821   6.115  0.50 13.48           H
+ATOM     51 HD22BASN A   3      -5.147   3.708   6.952  0.50 13.48           H
+ATOM     52  N   GLN A   4      -1.005   2.228   3.598  1.00 10.29           N
+ATOM     53  CA  GLN A   4       0.384   1.888   3.199  1.00 10.53           C
+ATOM     54  C   GLN A   4       1.435   2.606   4.088  1.00 10.24           C
+ATOM     55  O   GLN A   4       1.547   3.843   4.115  1.00  8.86           O
+ATOM     56  CB  GLN A   4       0.656   2.148   1.711  1.00  9.80           C
+ATOM     57  CG  GLN A   4       1.944   1.458   1.213  1.00 10.25           C
+ATOM     58  CD  GLN A   4       2.504   2.044  -0.089  1.00 12.43           C
+ATOM     59  OE1 GLN A   4       2.744   3.268  -0.190  1.00 14.62           O
+ATOM     60  NE2 GLN A   4       2.750   1.161  -1.091  1.00  9.05           N
+ATOM     61  HA  GLN A   4       0.509   0.941   3.335  1.00 10.53           H
+ATOM     62  HB2 GLN A   4      -0.088   1.808   1.189  1.00  9.80           H
+ATOM     63  HB3 GLN A   4       0.752   3.103   1.569  1.00  9.80           H
+ATOM     64  HG2 GLN A   4       2.630   1.544   1.893  1.00 10.25           H
+ATOM     65  HG3 GLN A   4       1.753   0.520   1.057  1.00 10.25           H
+ATOM     66 HE21 GLN A   4       2.592   0.324  -0.975  1.00  9.05           H
+ATOM     67 HE22 GLN A   4       3.064   1.439  -1.842  1.00  9.05           H
+ATOM     68  H  AGLN A   4      -1.142   3.077   3.620  0.50 10.29           H
+ATOM     69  H  BGLN A   4      -1.168   3.072   3.606  0.50 10.29           H
+ATOM     70  N   GLN A   5       2.154   1.821   4.871  1.00 10.38           N
+ATOM     71  CA  GLN A   5       3.270   2.361   5.640  1.00 11.39           C
+ATOM     72  C   GLN A   5       4.594   1.768   5.172  1.00 11.52           C
+ATOM     73  O   GLN A   5       4.768   0.546   5.054  1.00 12.05           O
+ATOM     74  CB  GLN A   5       3.056   2.183   7.147  1.00 11.96           C
+ATOM     75  CG  GLN A   5       1.829   2.950   7.647  1.00 10.81           C
+ATOM     76  CD  GLN A   5       1.344   2.414   8.954  1.00 13.10           C
+ATOM     77  OE1 GLN A   5       0.774   1.325   9.002  1.00 10.65           O
+ATOM     78  NE2 GLN A   5       1.549   3.187  10.039  1.00 12.30           N
+ATOM     79  H   GLN A   5       2.021   0.978   4.977  1.00 10.38           H
+ATOM     80  HA  GLN A   5       3.333   3.315   5.487  1.00 11.39           H
+ATOM     81  HB2 GLN A   5       2.924   1.242   7.341  1.00 11.96           H
+ATOM     82  HB3 GLN A   5       3.834   2.516   7.621  1.00 11.96           H
+ATOM     83  HG2 GLN A   5       2.063   3.883   7.769  1.00 10.81           H
+ATOM     84  HG3 GLN A   5       1.111   2.866   7.000  1.00 10.81           H
+ATOM     85 HE21 GLN A   5       1.943   3.947   9.957  1.00 12.30           H
+ATOM     86 HE22 GLN A   5       1.286   2.920  10.813  1.00 12.30           H
+ATOM     87  N   ASN A   6       5.514   2.664   4.856  1.00 11.99           N
+ATOM     88  CA  ASN A   6       6.831   2.310   4.318  1.00 12.30           C
+ATOM     89  C   ASN A   6       7.854   2.761   5.324  1.00 13.40           C
+ATOM     90  O   ASN A   6       8.219   3.943   5.374  1.00 13.92           O
+ATOM     91  CB  ASN A   6       7.065   3.016   2.993  1.00 12.13           C
+ATOM     92  CG  ASN A   6       5.961   2.735   2.003  1.00 12.77           C
+ATOM     93  OD1 ASN A   6       5.798   1.604   1.551  1.00 14.27           O
+ATOM     94  ND2 ASN A   6       5.195   3.747   1.679  1.00 10.07           N
+ATOM     95  H   ASN A   6       5.401   3.512   4.945  1.00 11.99           H
+ATOM     96  HA  ASN A   6       6.909   1.352   4.189  1.00 12.30           H
+ATOM     97  HB2 ASN A   6       7.098   3.974   3.140  1.00 12.13           H
+ATOM     98  HB3 ASN A   6       7.901   2.707   2.610  1.00 12.13           H
+ATOM     99 HD21 ASN A   6       4.553   3.638   1.117  1.00 10.07           H
+ATOM    100 HD22 ASN A   6       5.334   4.521   2.028  1.00 10.07           H
+ATOM    101  N   MSE A   7       8.292   1.817   6.147  1.00 14.70           N
+ATOM    102  CA  MSE A   7       9.159   2.144   7.299  1.00 15.18           C
+ATOM    103  C   MSE A   7      10.603   2.331   6.885  1.00 15.91           C
+ATOM    104  O   MSE A   7      11.041   1.811   5.855  1.00 15.76           O
+ATOM    105  CB  MSE A   7       9.071   1.027   8.337  1.00 20.00           C
+ATOM    106  CG  MSE A   7       7.703   0.904   8.987  1.00 20.00           C
+ATOM    107 SE   MSE A   7       7.114   2.484   9.902  1.00 20.00          Se
+ATOM    108  CE  MSE A   7       8.400   2.453  11.367  1.00 20.00           C
+ATOM    109  H   MSE A   7       8.109   0.980   6.070  1.00 14.70           H
+ATOM    110  HA  MSE A   7       8.841   2.961   7.708  1.00 15.18           H
+ATOM    111  HB2 MSE A   7       9.270   0.186   7.900  1.00 20.00           H
+ATOM    112  HB3 MSE A   7       9.724   1.195   9.033  1.00 20.00           H
+ATOM    113  HG2 MSE A   7       7.042   0.539   8.377  1.00 20.00           H
+ATOM    114  HG3 MSE A   7       8.123   0.264   9.563  1.00 20.00           H
+ATOM    115  HE1 MSE A   7       8.976   3.219  11.304  1.00 20.00           H
+ATOM    116  HE2 MSE A   7       8.333   2.133  12.198  1.00 20.00           H
+ATOM    117  HE3 MSE A   7       9.010   1.805  10.983  1.00 20.00           H
+TER
+HETATM  118 CL    CL     1      -6.471   5.227   7.124  1.00 30.00          Cl
+TER
+HETATM  119  O   HOH A   9      10.431   1.858   3.216  1.00 19.71           O
+HETATM  120  O   HOH A  10     -11.286   1.756  -1.468  1.00 17.08           O
+HETATM  121  O   HOH A  11      11.808   4.179   9.970  1.00 23.99           O
+HETATM  122  O   HOH A  12      13.605   1.327   9.198  1.00 26.17           O
+HETATM  123  O   HOH A  13      -2.749   3.429  10.024  1.00 39.15           O
+HETATM  124  O   HOH A  14      -1.500   0.682  10.967  1.00 43.49           O
+TER
+END
+"""
+  pdb_file = "tst_start_model_misc.pdb"
+  with open(pdb_file, "w") as f:
+    f.write(pdb_str)
+  pdb_in = iotbx.pdb.input(file_name=pdb_file)
+  pdb_hierarchy = pdb_in.construct_hierarchy()
+  xray_structure = pdb_in.xray_structure_simple()
+  hd_sel = xray_structure.hd_selection()
+  assert hd_sel.count(True) == 55
+  xray_structure.convert_to_anisotropic(selection=~hd_sel)
+  pdb_hierarchy.adopt_xray_structure(xray_structure)
+  hierarchy_new, xrs_new = select_best_starting_model.strip_model(
+    pdb_hierarchy=pdb_hierarchy,
+    xray_structure=xray_structure,
+    output_file="tst_start_model_misc_new.pdb",
+    log=null_out())
+  # basic changes
+  hd_sel = xray_structure.hd_selection()
+  assert hd_sel.count(True) == 55 # should be left alone
+  assert xrs_new.hd_selection().count(True) == 0
+  sel = hierarchy_new.atom_selection_cache().selection
+  mse_sel = sel("resname MSE")
+  assert mse_sel.count(True) == 0
+  hoh_sel = sel("resname HOH")
+  assert hoh_sel.count(True) == 0
+  alt_sel = sel("altloc 'B'")
+  assert alt_sel.count(True) == 0
+  cl_sel = sel("element CL")
+  assert cl_sel.count(True) == 1
+  occ_xrs = xrs_new.scatterers().extract_occupancies()
+  occ_pdb = hierarchy_new.atoms().extract_occ()
+  assert occ_xrs.all_eq(occ_pdb) and occ_xrs.all_eq(1.0)
+  assert xrs_new.use_u_aniso().all_eq(False)
+  # remove all ligands
+  assert xray_structure.hd_selection().count(True) == 55
+  hierarchy_new, xrs_new = select_best_starting_model.strip_model(
+    pdb_hierarchy=pdb_hierarchy,
+    xray_structure=xray_structure,
+    remove_ligands=True,
+    remove_hydrogens=False,
+    output_file="tst_start_model_misc_new2.pdb",
+    log=null_out())
+  sel = hierarchy_new.atom_selection_cache().selection
+  assert sel("resname CL").count(True) == 0
+  assert xrs_new.hd_selection().count(True) == 48
+  # multi-model hierarchy
+  model2 = pdb_hierarchy.models()[0].detached_copy()
+  pdb_hierarchy.append_model(model2)
+  try :
+    hierarchy_new, xrs_new = select_best_starting_model.strip_model(
+      pdb_hierarchy=pdb_hierarchy,
+      xray_structure=xray_structure,
+      log=null_out())
+  except Sorry :
+    pass
+  else :
+    raise Exception_expected
+  # both structure and file name passed
+  try :
+    hierarchy_new, xrs_new = select_best_starting_model.strip_model(
+      pdb_hierarchy=pdb_hierarchy,
+      xray_structure=xray_structure,
+      file_name=pdb_file,
+      log=null_out())
+  except AssertionError :
+    pass
+  else :
+    raise Exception_expected
+  # preserve REMARK
+  hierarchy_new, xrs_new = select_best_starting_model.strip_model(
+    file_name=pdb_file,
+    preserve_remarks=True,
+    output_file="tst_start_model_misc_new.pdb",
+    log=null_out())
+  pdb_new = iotbx.pdb.input(file_name="tst_start_model_misc_new.pdb")
+  assert len(pdb_new.remark_section()) == 1
+  # reset HETATM
+  hierarchy_new, xrs_new = select_best_starting_model.strip_model(
+    file_name=pdb_file,
+    preserve_remarks=True,
+    reset_hetatm_flag=True,
+    output_file="tst_start_model_misc_new.pdb",
+    log=null_out())
+  with open("tst_start_model_misc_new.pdb") as f:
+    lines = f.readlines()
+  for line in lines :
+    assert (not line.startswith("HETATM"))
+
+if (__name__ == "__main__"):
+  exercise_misc()
+  exercise_main()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/utils.py
+from __future__ import absolute_import, division, print_function
+
+def two_group_selections_per_residue(
+      model):
+      # all_chain_proxies=None,
+      # pdb_hierarchy=None,
+      # sidechain_selection=None,
+      # backbone_selection=None):
+  # if(all_chain_proxies is None):
+  #   assert [pdb_hierarchy,sidechain_selection,backbone_selection].count(None)==0
+  #   sc = sidechain_selection
+  #   bb = backbone_selection
+  # else:
+  #   assert [pdb_hierarchy,sidechain_selection,backbone_selection].count(None)==3
+  #   pdb_hierarchy = all_chain_proxies.pdb_hierarchy
+  #   sc = all_chain_proxies.sel_sidechain().iselection()
+  #   bb = all_chain_proxies.sel_backbone().iselection()
+  sc = model.sel_sidechain().iselection()
+  bb = model.sel_backbone().iselection()
+  ogpr = [rg.atoms().extract_i_seq() for rg in model.get_hierarchy().residue_groups()]
+  result = []
+  for g in ogpr:
+    s1 = g.intersection(sc)
+    s2 = g.intersection(bb)
+    s3 = s1.intersection(s2)
+    assert s3.size() == 0
+    if(s1.size() > 0):
+      result.append( s1 )
+    if(s2.size() > 0):
+      result.append( s2 )
+  return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/weights.py
+from __future__ import division, print_function
+from mmtbx.refinement import print_statistics
+from cctbx.array_family import flex
+from libtbx import adopt_init_args
+import math
+import sys
+from libtbx.utils import Sorry, user_plus_sys_time
+from libtbx.str_utils import format_value
+import iotbx.phil
+
+
+time_weights_xray_chem_py  = 0.0
+
+core_params_str = """
+  optimize_xyz_weight = False
+    .alias = optimise_xyz_weight
+    .type = bool
+    .short_caption = Optimize X-ray/stereochemistry weight
+    .style = bold noauto
+  optimize_adp_weight = False
+    .alias = optimise_adp_weight
+    .type = bool
+    .short_caption = Optimize X-ray/ADP weight
+    .style = bold noauto
+  r_free_only = False
+    .type = bool
+    .help = Use only R-free to choose the best weight
+  wxc_scale = 0.5
+    .type = float
+    .optional = False
+    .short_caption = Scale factor for X-ray/stereochemistry weight (wxc_scale)
+  wxu_scale = 1.0
+    .type = float
+    .optional = False
+    .short_caption = Scale factor for X-ray/ADP weight (wxu_scale)
+  wc = 1.0
+    .type = float
+    .optional = False
+    .short_caption = Stereochemistry weight scale (wc)
+  wu = 1.0
+    .type = float
+    .optional = False
+    .short_caption = ADP weight scale (wu)
+  fix_wxc = None
+    .type = float
+    .short_caption = Fix X-ray/stereochemistry weight (wxc)
+  fix_wxu = None
+    .type = float
+    .short_caption = Fix X-ray/ADP weight (wxu)
+  shake_sites = True
+    .type = bool
+    .expert_level=3
+  shake_adp = 10.0
+    .type = float
+    .short_caption = Shake ADPs
+    .expert_level=3
+  regularize_ncycles = 50
+    .type = int
+    .expert_level=3
+    .short_caption = Number of regularization cycles
+  verbose = 1
+    .type = int
+  wnc_scale = 0.5
+    .type = float
+    .optional = False
+    .short_caption = Scale factor for neutron/stereochemistry weight (wnc_scale)
+  wnu_scale = 1.0
+    .type = float
+    .optional = False
+    .short_caption = Scale factor for neutron/ADP weight (wnu_scale)
+  rmsd_cutoff_for_gradient_filtering = 3.0
+    .type = float
+    .expert_level=3
+    .short_caption = RMSD cutoff for gradient filtering
+  force_optimize_weights = False
+    .type = bool
+    .expert_level = 3
+    .style = hidden
+"""
+
+master_params_str = """\
+%s
+  weight_selection_criteria
+    .style = box
+  {
+    bonds_rmsd = None
+      .type=float
+      .short_caption = RMS(bonds)
+    angles_rmsd = None
+      .type=float
+      .short_caption = RMS(angles)
+    r_free_minus_r_work = None
+      .type=float
+      .short_caption = R_free - R_work
+    r_free_range_width = None
+      .type = float
+      .short_caption = R-free range width
+    mean_diff_b_iso_bonded_fraction = None
+      .type = float
+    min_diff_b_iso_bonded = None
+      .type = float
+  }
+"""%core_params_str
+
+master_params = iotbx.phil.parse(master_params_str)
+
+class weights(object):
+  def __init__(self,
+               wx        = None,
+               wx_scale  = None,
+               angle_x   = None,
+               wn        = None,
+               wn_scale  = None,
+               angle_n   = None,
+               w         = None,
+               wxn       = None,
+               angle_xn  = None,
+               angle_xnr = None):
+    adopt_init_args(self, locals())
+
+class show(object):
+  def __init__(self, adp = None, xyz = None, log = None):
+    if(log is None): log = sys.stdout
+    if([xyz, adp].count(None)==0):
+      print("|"+"-"*77+"|", file=log)
+      if(xyz is not None):
+        if(xyz.wn is not None):
+          print("| XYZ refinement: T = (Exray*wxc_scale + Eneutron*wnc_scale)*wxnc + Echem*wc  |", file=log)
+          print("| wxnc = %s   wxc scale = %s   wnc scale = %s   wc = %s |" % self.format_4_values(obj = xyz), file=log)
+          print("|-----------------------------------------------------------------------------|", file=log)
+        else:
+          print("| XYZ refinement: T = Eexperimental * wxc * wxc_scale + Echem * wc"+" "*12+"|", file=log)
+          print("| wxc = %s       wxc_scale = %s       wc = %s    |" % self.format_3_values(obj = xyz), file=log)
+      if(adp is not None):
+        if(adp.wn is not None):
+          print("| ADP refinement: T = (Exray*wxu_scale + Eneutron*wnu_scale)*wxnu + Eadp *wu  |", file=log)
+          print("| wxnu = %s   wxu scale = %s   wnu scale = %s   wu = %s |" % self.format_4_values(obj = adp), file=log)
+        else:
+          if(xyz is not None): print("|"+" "*77+"|", file=log)
+          print("| ADP refinement: T = Eexperimental * wxu * wxu_scale + Eadp  * wu"+" "*12+"|", file=log)
+          print("| wxu = %s       wxu_scale = %s       wu = %s    |" % self.format_3_values(obj = adp), file=log)
+      print("|"+"-"*77+"|", file=log)
+      print(file=log)
+
+  def format_3_values(self, obj):
+    return (format_value("%-15.6f",obj.wx),
+            format_value("%-10.3f",obj.wx_scale),
+            format_value("%-10.3f",obj.w))
+
+  def format_4_values(self, obj):
+    return (format_value("%-8.6f",obj.wxn),
+            format_value("%-8.3f",obj.wx_scale),
+            format_value("%-8.3f",obj.wn_scale),
+            format_value("%-6.3f",obj.w))
+
+class adp_gradients(object):
+  def __init__(self, fmodel,
+                     model,
+                     iso_restraints,
+                     shake):
+    fmodel_dc = fmodel.deep_copy()
+    if fmodel_dc.is_taam(): fmodel_dc.sfg_params.taam=False # XXX discamb
+    xray_structure = fmodel_dc.xray_structure
+    sel_i = model.refinement_flags.adp_individual_iso
+    sel_a = model.refinement_flags.adp_individual_aniso
+    if model.ias_manager is not None:
+      ias_selection = model.ias_manager.get_ias_selection()
+      if ias_selection is not None:
+        xray_structure = xray_structure.select(~ias_selection)
+        sel_i = sel_i.select(~ias_selection)
+        sel_a = sel_a.select(~ias_selection)
+    restraints_manager = model.restraints_manager
+    hd_sel = xray_structure.hd_selection()
+    if(hd_sel.count(True) > 0 and hd_sel.count(True) != hd_sel.size()):
+      if(sel_i is not None):
+        sel_i = sel_i.select(~hd_sel)
+      if(sel_a is not None):
+        sel_a = sel_a.select(~hd_sel)
+      xray_structure = xray_structure.select(~hd_sel)
+      restraints_manager = model.restraints_manager.select(~hd_sel)
+      pp = restraints_manager.geometry.pair_proxies(sites_cart =
+        xray_structure.sites_cart())
+    xray_structure.shake_adp_if_all_equal(b_iso_tolerance = 1.e-3)
+    if(shake):
+      xray_structure.shake_adp(spread=shake, keep_anisotropic= False)
+    scatterers = xray_structure.scatterers()
+    scatterers.flags_set_grads(state=False)
+    # heavy atoms may overwhelm gradients
+    scat_types = xray_structure.scatterers().extract_scattering_types()
+    sel_use = (scat_types == "C") | (scat_types == "N") | (scat_types == "O") |\
+              (scat_types == "S") | (scat_types == "P")
+    if(sel_i is not None):
+      if((sel_i & sel_use).count(True)>0):
+        sel_i = sel_i & sel_use
+      scatterers.flags_set_grad_u_iso(iselection = sel_i.iselection())
+    if(sel_a is not None):
+      if((sel_a & sel_use).count(True)>0):
+        sel_a = sel_a & sel_use
+      scatterers.flags_set_grad_u_aniso(iselection = sel_a.iselection())
+    fmodel_dc.update_xray_structure(xray_structure = xray_structure,
+      update_f_calc = True)
+    gxu = fmodel_dc.one_time_gradients_wrt_atomic_parameters().packed()
+    gu = None
+    if(sel_a is None or sel_a.count(True) == 0):
+      restraints_manager.geometry.pair_proxies(sites_cart =
+        xray_structure.sites_cart())
+      energies_adp = restraints_manager.energies_adp_iso(
+        xray_structure    = xray_structure,
+        parameters        = iso_restraints,
+        use_u_local_only  = iso_restraints.use_u_local_only,
+        use_hd            = model.is_neutron(),
+        compute_gradients = True)
+      if(sel_i is not None):
+        gu = energies_adp.gradients.as_double().select(sel_i)
+    else:
+      restraints_manager.geometry.pair_proxies(sites_cart =
+        xray_structure.sites_cart())
+      energies_adp = restraints_manager.energies_adp_aniso(
+        xray_structure    = xray_structure,
+        compute_gradients = True)
+      gu_i = None
+      if(sel_a is not None):
+        gu = energies_adp.gradients_aniso_star.select(sel_a).as_double()
+        gu_i = energies_adp.gradients_iso
+      if(gu_i is not None):
+        if(sel_i is not None):
+          gu_i = gu_i.select(sel_i).as_double()
+          gu.extend(gu_i)
+    self.gu = gu
+    self.gxu = gxu
+    if([self.gu,self.gxu].count(None)==0):
+      assert self.gu.size() == self.gxu.size()
+
+class site_gradients(object):
+  def __init__(self, fmodel,
+                     model,
+                     correct_special_position_tolerance,
+                     cartesian_dynamics_parameters,
+                     shake,
+                     regularize_ncycles,
+                     rmsd_cutoff_for_gradient_filtering,
+                     gradient_filtering = False,
+                     log=None):
+    fmodel_dc = fmodel.deep_copy()
+    if fmodel_dc.is_taam(): fmodel_dc.sfg_params.taam=False # XXX discamb
+    xray_structure = fmodel_dc.xray_structure
+    sel_si  = model.refinement_flags.sites_individual
+    sel_sta = model.refinement_flags.sites_torsion_angles
+    sel_count = [sel_si, sel_sta].count(None)
+    assert sel_count != 2
+    if (sel_count == 0):
+      if (not sel_si.all_eq(sel_sta)):
+        raise Sorry(
+          "Not implemented: support for different sites.individual"
+          " and sites.torsion_angles selections.")
+      sel = sel_si
+    elif (sel_si is not None):
+      sel = sel_si
+    else:
+      sel = sel_sta
+    if model.ias_manager is not None:
+      ias_selection = model.ias_manager.get_ias_selection()
+      if ias_selection is not None:
+        xray_structure = xray_structure.select(~ias_selection)
+        sel = sel.select(~ias_selection)
+    assert sel.count(True) > 0
+    restraints_manager = model.restraints_manager
+    if(shake):
+      from phenix.refinement import memory_eraser
+      geometry = getattr(restraints_manager, "geometry", None)
+      xray_structure = memory_eraser.shake_sites(
+        cartesian_dynamics_parameters = cartesian_dynamics_parameters,
+        restraints_manager            = geometry,
+        xray_structure                = xray_structure,
+        max_iterations                = regularize_ncycles,
+        neutron                       = model.is_neutron(),
+        log=log,
+        verbose=0)
+    scatterers = xray_structure.scatterers()
+    scatterers.flags_set_grads(state=False)
+    scatterers.flags_set_grad_site(iselection = sel.iselection())
+    fmodel_dc.update_xray_structure(xray_structure = xray_structure,
+      update_f_calc = True, update_f_mask = True)
+    gxc = flex.vec3_double(
+      fmodel_dc.one_time_gradients_wrt_atomic_parameters(site = True).packed())
+    gco = restraints_manager.energies_sites(
+      sites_cart        = xray_structure.sites_cart(),
+      compute_gradients = True,
+      hd_selection      = xray_structure.hd_selection(), # need for afitt
+      )
+    gc=gco.gradients
+    self.gc = gc.select(sel)
+    self.gxc = gxc
+    assert self.gc.size() == self.gxc.size()
+    assert self.gc.size() == self.gxc.size()
+    self.gc_filtered = None
+    self.gxc_filtered = None
+    if(gradient_filtering):
+      self.gc_filtered = flex.sqrt(self.gc.dot())
+      gxc_f = flex.sqrt(self.gxc.dot())
+      gxc_f_mean = flex.mean(gxc_f)
+      #gxc_rms = math.sqrt(flex.mean(self.gxc.dot()))
+      if(rmsd_cutoff_for_gradient_filtering is None):
+        raise Sorry("rmsd_cutoff_for_gradient_filtering is set to None but a number is expected.")
+      gxc_f_selection = (gxc_f < gxc_f_mean*rmsd_cutoff_for_gradient_filtering)
+      self.gxc_filtered = gxc_f.select(gxc_f_selection)
+
+class weight:
+   def __init__(self, fmodel,
+                      model,
+                      correct_special_position_tolerance,
+                      target_weights_params,
+                      macro_cycle,
+                      cartesian_dynamics_parameters = None,
+                      iso_restraints                = None,
+                      amber_params                  = None,
+                      log                           = None,
+                      show_summary                  = True):
+     global time_weights_xray_chem_py
+     timer = user_plus_sys_time()
+     adopt_init_args(self, locals())
+     self.compute_wxc = self.model.refinement_flags.individual_sites \
+                     or self.model.refinement_flags.torsion_angles
+     self.compute_wxu = self.model.refinement_flags.individual_adp
+     self.twp = self.target_weights_params
+
+     if self.iso_restraints is None:
+       import mmtbx.refinement.adp_refinement
+       self.iso_restraints = mmtbx.refinement.adp_refinement.\
+         adp_restraints_master_params.extract().iso
+
+     self.special_case = False
+     d_min = self.fmodel.f_obs().d_min()
+     if(self.macro_cycle>1 and self.twp.fix_wxc is None and
+        d_min>=3.5 and d_min<=4.5):
+       self.special_case = True
+
+
+     if(self.log is None): self.log = sys.stdout
+     gxc = None
+     gxu = None
+     gc = None
+     gu = None
+     self.adp_weights_result = self.adp_weights()
+     wxu       = self.adp_weights_result.wx
+     wu        = self.adp_weights_result.w
+     self.xyz_weights_result = self.xyz_weights(log=log)
+     wxc       = self.xyz_weights_result.wx
+     wc        = self.xyz_weights_result.w
+     if(show_summary):
+       show(xyz = self.xyz_weights_result, adp = self.adp_weights_result,
+         log = self.log)
+     time_weights_xray_chem_py += timer.elapsed()
+
+   def xyz_weights(self, log=None):
+     wxc       = None
+     wxc_scale = self.twp.wxc_scale#None
+     angle_xc  = None
+     wc        = None
+     if(self.compute_wxc and self.model.restraints_manager is not None):
+        wc = self.twp.wc
+        if(self.twp.wxc_scale != 0.0 and
+           self.twp.fix_wxc is None and
+           self.twp.wc != 0.0
+          ):
+          if self.special_case:
+            result_a = site_gradients(
+              fmodel                        = self.fmodel,
+              model                         = self.model,
+              correct_special_position_tolerance=self.correct_special_position_tolerance,
+              cartesian_dynamics_parameters = self.cartesian_dynamics_parameters,
+              shake                         = False,
+              regularize_ncycles            = self.twp.regularize_ncycles,
+              rmsd_cutoff_for_gradient_filtering = self.twp.rmsd_cutoff_for_gradient_filtering,
+              gradient_filtering            = False,
+              log=self.log)
+            angle_xc = self.angle(result_a.gxc, result_a.gc)
+          result = site_gradients(
+            fmodel                        = self.fmodel,
+            model                         = self.model,
+            correct_special_position_tolerance=self.correct_special_position_tolerance,
+            cartesian_dynamics_parameters = self.cartesian_dynamics_parameters,
+            regularize_ncycles            = self.twp.regularize_ncycles,
+            shake                         = self.twp.shake_sites,
+            rmsd_cutoff_for_gradient_filtering = self.twp.rmsd_cutoff_for_gradient_filtering,
+            gradient_filtering            = True,
+            log=self.log)
+          gc = result.gc_filtered
+          gxc = result.gxc_filtered
+          gc_norm  = gc.norm()
+          gxc_norm = gxc.norm()
+          if math.isnan(gc_norm): raise Sorry("Norm of gc gradients is %s" % gc_norm)
+          if math.isnan(gxc_norm): raise Sorry("Norm of gxc gradients is %s" % gxc_norm)
+          if(gxc_norm != 0.0):
+            wxc = gc_norm / gxc_norm
+          else:
+            wxc = 1.0
+          if self.amber_params and self.amber_params.use_amber:
+            if wxc > 1000: raise Sorry("wxc is too high: wxc=%f" %wxc)
+            print("  Setting wxc_scale using amber.wxc_factor : %0.3f * %0.3f = %0.3f" % (
+              wxc_scale,
+              self.amber_params.wxc_factor,
+              wxc_scale*self.amber_params.wxc_factor,
+            ), file=log)
+            wxc_scale *= self.amber_params.wxc_factor
+        elif(self.twp.fix_wxc is not None):
+           wxc = self.twp.fix_wxc
+           wxc_scale = 1.0
+        elif(self.twp.wxc_scale == 0.0):
+           wxc = 0.0
+        elif(self.twp.wc == 0.0):
+           wxc = 1.0
+           wc  = 0.0
+           wnc = 1.0
+           wxnc = 1.0
+           wxc_scale = 1.0
+        else:
+           raise Sorry("Wrong parameter type, value or combination for "+
+            "stereochemistry/X-ray weighting.")
+     else:
+        wxc = 1.0
+        wc  = 0.0
+     # case-specific: resolutions 3.5-4.5A
+     if(self.special_case and angle_xc is not None):
+       wxc_scale_ = math.cos((180-angle_xc)*math.pi/180)
+       if(wxc_scale_<=0): wxc_scale_=wxc_scale
+       wxc_scale_ = 0.0204 * math.exp(3.7444*wxc_scale_)
+       if(wxc_scale_>0): wxc_scale = wxc_scale_
+     #
+     return weights(wx       = wxc,
+                    wx_scale = wxc_scale,
+                    w        = wc)
+
+
+   def adp_weights(self):
+     wxu       = None
+     wxu_scale = None
+     wu        = None
+     if(self.compute_wxu):
+       wu = self.twp.wu
+       if(self.twp.wxu_scale != 0.0 and self.twp.fix_wxu is None and
+          self.twp.wu != 0.0):
+         result = adp_gradients(
+           fmodel         = self.fmodel,
+           model          = self.model,
+           iso_restraints = self.iso_restraints,
+           shake          = self.twp.shake_adp)
+         gu = result.gu
+         gxu = result.gxu
+         gu_norm  = gu.norm()
+         gxu_norm = gxu.norm()
+         if(gxu_norm != 0.0):
+           if(gu_norm != 0):
+             wxu = gu_norm / gxu_norm
+           else:
+             wxu = 1.0
+         else:
+           wxu = 1.0
+       elif(self.twp.fix_wxu is not None):
+         wxu = self.twp.fix_wxu
+       elif(self.twp.wxu_scale == 0.0):
+         wxu = 0.0
+       elif(self.twp.wu == 0.0):
+         wxu = 1.0
+         wu  = 0.0
+       else:
+         raise Sorry("Wrong parameter type, value or combination for "+
+          "ADP/X-ray weighting.")
+     else:
+       wxu = 1.0
+       wu  = 0.0
+     return weights(wx       = wxu,
+                    wx_scale = self.twp.wxu_scale,
+                    w        = wu)
+
+   def angle(self, a, b):
+     if([a,b].count(None) > 0): return None
+     result = a.as_double().angle(b.as_double())
+     if(result is None): return None
+     return result * 180 / math.pi
+
+def run(
+      params,
+      fmodels,
+      model,
+      macro_cycle,
+      prefix,
+      log):
+  print_statistics.make_header(prefix, out = log)
+  result = weight(
+    fmodel                        = fmodels.fmodel_xray(),
+    model                         = model,
+    correct_special_position_tolerance =
+      params.main.correct_special_position_tolerance,
+    cartesian_dynamics_parameters = params.cartesian_dynamics,
+    target_weights_params         = params.target_weights,
+    iso_restraints                = params.adp_restraints.iso,
+    macro_cycle                   = macro_cycle,
+    amber_params                  = getattr(params, "amber", None),
+    log                           = log)
+  return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/weights_params.py
+from __future__ import absolute_import, division, print_function
+import iotbx.phil
+
+tw_customizations_str = """\
+weight_selection_criteria
+  .multiple=True
+{
+  d_min = 0.0
+    .type=float
+  d_max = 1.5
+    .type=float
+  bonds_rmsd = 0.025
+    .type=float
+  angles_rmsd = 3.0
+    .type=float
+  r_free_minus_r_work = 4
+    .type=float
+  r_free_range_width = 0
+    .type=float
+  mean_diff_b_iso_bonded_fraction = 0.1
+    .type=float
+  min_diff_b_iso_bonded = 10
+    .type=float
+}
+weight_selection_criteria
+  .multiple=True
+{
+  d_min = 1.5
+    .type=float
+  d_max = 2.0
+    .type=float
+  bonds_rmsd = 0.02
+    .type=float
+  angles_rmsd = 2.5
+    .type=float
+  r_free_minus_r_work = 5
+    .type=float
+  r_free_range_width = 0
+    .type=float
+  mean_diff_b_iso_bonded_fraction = 0.1
+    .type=float
+  min_diff_b_iso_bonded = 10
+    .type=float
+}
+weight_selection_criteria
+  .multiple=True
+{
+  d_min = 2.0
+    .type=float
+  d_max = 2.5
+    .type=float
+  bonds_rmsd = 0.015
+    .type=float
+  angles_rmsd = 2.0
+    .type=float
+  r_free_minus_r_work = 6
+    .type=float
+  r_free_range_width = 1
+    .type=float
+  mean_diff_b_iso_bonded_fraction = 0.1
+    .type=float
+  min_diff_b_iso_bonded = 10
+    .type=float
+}
+weight_selection_criteria
+  .multiple=True
+{
+  d_min = 2.5
+    .type=float
+  d_max = 3.5
+    .type=float
+  bonds_rmsd = 0.015
+    .type=float
+  angles_rmsd = 2.0
+    .type=float
+  r_free_minus_r_work = 6
+    .type=float
+  r_free_range_width = 1.5
+    .type=float
+  mean_diff_b_iso_bonded_fraction = 0.1
+    .type=float
+  min_diff_b_iso_bonded = 10
+    .type=float
+}
+weight_selection_criteria
+  .multiple=True
+{
+  d_min = 3.5
+    .type=float
+  d_max = 1.e+6
+    .type=float
+  bonds_rmsd = 0.015
+    .type=float
+  angles_rmsd = 2.0
+    .type=float
+  r_free_minus_r_work = 5
+    .type=float
+  r_free_range_width = 1.5
+    .type=float
+  mean_diff_b_iso_bonded_fraction = 0.2
+    .type=float
+  min_diff_b_iso_bonded = 10
+    .type=float
+}
+"""
+tw_customizations_params = iotbx.phil.parse(tw_customizations_str)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/wrappers.py
+from __future__ import division, print_function
+from libtbx import adopt_init_args
+from scitbx import minimizers
+import mmtbx.refinement.data
+from mmtbx.refinement import calculators
+from cctbx import adptbx
+from libtbx.utils import user_plus_sys_time
+from libtbx.str_utils import format_value
+import sys
+import libtbx.log
+from scitbx.array_family import flex
+import mmtbx.refinement.restraints
+import mmtbx.refinement.weights
+from libtbx import group_args
+import mmtbx.refinement.refinement_flags
+
+class unrestrained_qbr_fsr(object):
+  """
+  Unrestrained sequential occupancy (q) and isotropic ADP (b) refinement.
+  Use example: refinement of ocupancy and B-factors of newly placed water only.
+  Input fmodel is changed in-place.
+  """
+  def __init__(self,
+               fmodel,
+               model,
+               selection,
+               refine_q = True,
+               refine_b = True,
+               refine_xyz = True,
+               macro_cycles=3,
+               max_iterations=50,
+               q_min = 0.,
+               q_max = 1,
+               b_min = 5,
+               b_max = 45,
+               max_xyz_shift = 0.5,
+               log   = None):
+    adopt_init_args(self, locals())
+    data = mmtbx.refinement.data.fs(fmodel = fmodel)
+    restraints = mmtbx.refinement.restraints.manager(
+      model = model, use_target=False)
+    #
+    rt_old = model.get_refinement_flags()
+    rf = mmtbx.refinement.refinement_flags.manager( # This is ugly!!
+      individual_sites   = True,
+      individual_adp     = True,
+      occupancies        = True,
+      sites_individual   = flex.bool(model.size(), True),
+      adp_individual_iso = flex.bool(model.size(), True),
+      s_occupancies      = flex.bool(model.size(), True))
+    model.set_refinement_flags(flags = rf)
+    #
+    for micro_cycle in range(macro_cycles):
+      # Occupancy
+      if refine_q:
+        calculator = calculators.occ(
+          data       = data,
+          restraints = restraints,
+          selection  = selection,
+          q_min      = q_min,
+          q_max      = q_max).calculator()
+        minimized = minimizers.lbfgs(
+          calculator     = calculator,
+          max_iterations = max_iterations,
+          mode           = 'lbfgsb')
+        if log is not None:
+          print("occ: r_work=%6.4f r_free=%6.4f"%(
+            fmodel.r_work(), fmodel.r_free()), file = log)
+      # ADP
+      if refine_b:
+        calculator = calculators.adp(
+          data       = data,
+          restraints = restraints,
+          selection  = selection,
+          u_min      = adptbx.b_as_u(b_min),
+          u_max      = adptbx.b_as_u(b_max)).calculator()
+        minimized = minimizers.lbfgs(
+          calculator     = calculator,
+          max_iterations = max_iterations,
+          mode           = 'lbfgsb')
+        if log is not None:
+          print("adp: r_work=%6.4f r_free=%6.4f"%(
+            fmodel.r_work(), fmodel.r_free()), file = log)
+      # XYZ
+      if refine_xyz:
+        calculator = calculators.xyz(
+          data       = data,
+          restraints = restraints,
+          selection  = selection,
+          max_shift  = max_xyz_shift).calculator()
+        minimized = minimizers.lbfgs(
+          calculator     = calculator,
+          max_iterations = max_iterations,
+          mode           = 'lbfgsb')
+        if log is not None:
+          print("xyz: r_work=%6.4f r_free=%6.4f"%(
+            fmodel.r_work(), fmodel.r_free()), file = log)
+    # UGLY. Make sure to re-store flags
+    model.set_refinement_flags(flags = rt_old)
+
+class simple_fsr(object):
+  def __init__(self,
+               model,
+               fmodel,
+               sites_cart_list,
+               refine_xyz        = True,
+               refine_adp        = True,
+               twin_laws         = [None,],
+               macro_cycles      = 3,
+               max_iterations    = 25,
+               update_all_scales = True,
+               update_mask       = True,
+               max_xyz_shift     = 5.,
+               b_min             = 1,
+               b_max             = 200,
+               log               = sys.stdout):
+    adopt_init_args(self, locals())
+    self.ma             = libtbx.log.manager(log = self.log)
+    self.total_time     = 0
+    self.r_work         = None
+    self.r_free         = None
+    self.data           = None
+    self.u_iso_start    = None
+    self.xyz_restraints = False
+    self.weights        = None
+    self.results        = []
+    self._call(msg="Check and setup", func=self._check_and_setup)
+
+  def _check_and_setup(self):
+    assert self.model.get_xray_structure() == self.fmodel.xray_structure
+    self.data = mmtbx.refinement.data.fs(fmodel = self.fmodel)
+    assert len(self.sites_cart_list)>0 and isinstance(
+      self.sites_cart_list[0], flex.vec3_double)
+    assert len(set([_.size() for _ in self.sites_cart_list])) == 1
+    assert self.model.size() == self.sites_cart_list[0].size()
+    assert self.model.get_xray_structure().is_similar(self.fmodel.xray_structure)
+    self.u_iso_start = \
+      self.fmodel.xray_structure.extract_u_iso_or_u_equiv().deep_copy()
+    self.restraints = mmtbx.refinement.restraints.manager(model = self.model)
+    self._update_r_factors()
+
+  def run(self):
+    n = len(self.sites_cart_list)
+    for i, sites_cart in enumerate(self.sites_cart_list):
+      self._call(
+        msg="Refining sites %d out of %d"%(i,n), func=None)
+      self._call(msg="set sites ", func=self._set_sites_cart, args=sites_cart)
+      self._macrocycle()
+      self.results.append(
+        group_args(
+          sites_cart_start = sites_cart,
+          sites_cart_final = self.fmodel.xray_structure.sites_cart(),
+          r_work           = self.fmodel.r_work(),
+          r_free           = self.fmodel.r_free()
+        )
+      )
+      self.model.set_sites_cart(
+        sites_cart=self.fmodel.xray_structure.sites_cart())
+      self.model.set_b_iso(values=
+        self.fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1))
+
+  def _macrocycle(self):
+    for mc in range(self.macro_cycles):
+      self._call(msg="weights   ", func=self._compute_weights)
+      self._call(msg="refine xyz", func=self._refine_xyz)
+      self._call(msg="refine adp", func=self._refine_adp)
+      self.fmodel.update_all_scales(remove_outliers=False)
+
+  def _call(self, msg, func = None, args=None):
+    timer = user_plus_sys_time()
+    if(func is not None):
+      if args is None: func()
+      else:            func(args)
+    #
+    self.model.set_sites_cart(
+      sites_cart=self.fmodel.xray_structure.sites_cart())
+    self.model.set_b_iso(values=
+      self.fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1))
+    #
+    assert self.model.get_xray_structure() == self.fmodel.xray_structure
+    self._update_r_factors()
+    t = timer.elapsed()
+    self.total_time += t
+    self.ma.add_and_show( self._format_msg(m=msg, t=t) )
+
+  def _format_msg(self, m, t):
+    m1 = "r_work: %6s r_free: %6s"%(format_value("%6.4f",self.r_work),
+      format_value("%6.4f",self.r_free))
+    m2 = "time: %6.3f total time: %6.3f"%(t, self.total_time)
+    l = "%s | %s | %s"%(m, m1, m2)
+    return l
+
+  def _compute_weights(self):
+    params = mmtbx.refinement.weights.master_params.extract()
+    self.weights = mmtbx.refinement.weights.weight(
+      fmodel                             = self.fmodel,
+      model                              = self.model,
+      correct_special_position_tolerance = 1.0,
+      target_weights_params              = params,
+      macro_cycle                        = 0,
+      show_summary                       = False,
+      log                                = self.log)
+
+  def _update_r_factors(self):
+    self.r_work, self.r_free = self.fmodel.r_work(), self.fmodel.r_free()
+
+  def _set_sites_cart(self, sites_cart):
+    self.model.set_sites_cart(sites_cart = sites_cart)
+    self.model.set_b_iso(values = self.u_iso_start * adptbx.u_as_b(1))
+    self.fmodel.update_xray_structure(
+      xray_structure = self.model.get_xray_structure(),
+      update_f_calc  = True,
+      update_f_mask  = self.update_mask)
+    if(self.update_all_scales):
+      self.fmodel.update_all_scales(remove_outliers=False)
+
+  def _refine_xyz(self):
+    if not self.refine_xyz: return
+    weights = self.weights.xyz_weights_result
+    wx = weights.wx * weights.wx_scale
+    calculator = calculators.xyz(
+      data              = self.data,
+      data_weight       = wx,
+      restraints_weight = 1, # XXX
+      restraints        = self.restraints,
+      max_shift         = self.max_xyz_shift).calculator()
+    minimized = minimizers.lbfgs(
+      calculator     = calculator,
+      max_iterations = self.max_iterations,
+      mode           = "lbfgsb")
+
+  def _refine_adp(self):
+    if not self.refine_adp: return
+    weights = self.weights.adp_weights_result
+    wx = weights.wx * weights.wx_scale
+    calculator = calculators.adp(
+      data              = self.data,
+      data_weight       = wx,
+      restraints_weight = 1, # XXX
+      restraints        = self.restraints,
+      u_min             = adptbx.b_as_u(self.b_min),
+      u_max             = adptbx.b_as_u(self.b_max)).calculator()
+    minimized = minimizers.lbfgs(
+      calculator     = calculator,
+      max_iterations = self.max_iterations,
+      mode           = "lbfgsb")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/refinement/wx_tardy_pdb.py
+from __future__ import absolute_import, division, print_function
+from mmtbx.refinement import tst_tardy_pdb
+from gltbx import wx_viewer
+from gltbx import gl_managed
+from gltbx.gl import *
+import gltbx.util
+from libtbx.thread_utils import thread_with_callback_and_wait
+import scitbx.iso_surface
+from scitbx.math import minimum_covering_sphere, sphere_3d
+import wx
+import sys
+from six.moves import range
+
+class draw_map(object):
+
+  def __init__(O, iso_level=2):
+    O.iso_level = iso_level
+    O.set_unit_cell_and_density_map(unit_cell=None, density_map=None)
+
+  def set_unit_cell_and_density_map(O, unit_cell, density_map):
+    O.unit_cell = unit_cell
+    O.density_map = density_map
+    O.display_list = None
+
+  def change_iso_level(O, direction):
+    assert direction in ["up", "down"]
+    old = O.iso_level
+    if (old < 2): shift = 0.5
+    else:         shift = 1
+    if (direction == "down"):
+      shift *= -1
+    O.iso_level = min(max(0.5, old + shift), 10)
+    print("New iso-level: %.2f" % O.iso_level)
+    O.display_list = None
+
+  def draw_unit_cell(O):
+    glLineWidth(1)
+    glColor3f(1,0,0)
+    glBegin(GL_LINES)
+    glVertex3f(0,0,0)
+    glVertex3f(1,0,0)
+    glEnd()
+    glColor3f(0,1,0)
+    glBegin(GL_LINES)
+    glVertex3f(0,0,0)
+    glVertex3f(0,1,0)
+    glEnd()
+    glColor3f(0,0,1)
+    glBegin(GL_LINES)
+    glVertex3f(0,0,0)
+    glVertex3f(0,0,1)
+    glEnd()
+    glColor3f(1,1,1)
+    glBegin(GL_LINE_LOOP)
+    glVertex3f(1,0,0)
+    glVertex3f(1,0,1)
+    glVertex3f(1,1,1)
+    glVertex3f(1,1,0)
+    glEnd()
+    glBegin(GL_LINES)
+    glVertex3f(0,0,1)
+    glVertex3f(1,0,1)
+    glVertex3f(0,0,1)
+    glVertex3f(0,1,1)
+    glVertex3f(0,1,0)
+    glVertex3f(0,1,1)
+    glVertex3f(0,1,1)
+    glVertex3f(1,1,1)
+    glVertex3f(0,1,0)
+    glVertex3f(1,1,0)
+    glEnd()
+
+  def draw_triangulation(O):
+    triangulation = scitbx.iso_surface.triangulation(
+      map=O.density_map,
+      iso_level=O.iso_level,
+      map_extent=(1,1,1),
+      from_here=(0,0,0),
+      to_there=(1,1,1),
+      periodic=True,
+      ascending_normal_direction=False)
+    glLineWidth(1)
+    glColor3f(*[0.2]*3)
+    vertices = triangulation.vertices
+    for triangle in triangulation.triangles:
+      glBegin(GL_LINE_LOOP)
+      for i in triangle:
+        glVertex3f(*vertices[i])
+      glEnd()
+
+  def __call__(O):
+    if (O.unit_cell is None): return
+    if (O.display_list is None):
+      O.display_list = gltbx.gl_managed.display_list()
+      O.display_list.compile()
+      glMatrixMode(GL_MODELVIEW)
+      glPushMatrix()
+      glMultTransposeMatrixd(
+        gltbx.util.augment_3x3(m=O.unit_cell.orthogonalization_matrix()))
+      O.draw_unit_cell()
+      O.draw_triangulation()
+      glPopMatrix()
+      O.display_list.end()
+      gltbx.util.handle_error()
+    O.display_list.call()
+
+class viewer(wx_viewer.show_points_and_lines_mixin):
+
+  def __init__(O, *args, **kwds):
+    super(viewer, O).__init__(*args, **kwds)
+    O.draw_map = draw_map()
+    O.first_first = True
+
+  def DrawGL(O):
+    super(viewer, O).DrawGL()
+    O.draw_map()
+
+  def set_points_and_lines(O, args=None):
+    if (args is not None):
+      O.args = args
+    O.draw_map.set_unit_cell_and_density_map(unit_cell=None, density_map=None)
+    O.child_thread = thread_with_callback_and_wait(
+      run=tst_tardy_pdb.run,
+      run_kwds={"args": O.args},
+      callback=O.action_callback,
+      first_callback=O.first_action_callback)
+    O.child_thread.start_and_wait_for_first_callback()
+
+  def first_action_callback(O, tardy_model, rmsd_calculator):
+    O.tardy_model = tardy_model
+    tpo = tardy_model.potential_obj
+    O.draw_map.set_unit_cell_and_density_map(
+      unit_cell=tpo.geo_manager.crystal_symmetry.unit_cell(),
+      density_map=tpo.density_map)
+    O.points = tardy_model.sites_moved().deep_copy()
+    if (tpo.ideal_sites_cart is not None):
+      O.points.extend(tpo.ideal_sites_cart)
+    if (O.points.size() < 20):
+      if (tpo.ideal_sites_cart is None):
+        O.labels = tardy_model.labels
+      else:
+        O.labels = tardy_model.labels + [""] * len(tardy_model.labels)
+    def draw_ideal_line():
+      if (tpo.ideal_sites_cart is None): return
+      n = tardy_model.tardy_tree.n_vertices
+      ideal_line = tuple([i+n for i in line])
+      O.line_i_seqs.append(ideal_line)
+      O.line_colors[ideal_line] = [0.6]*3
+    if (tardy_model.potential_obj.reduced_geo_manager is not None):
+      for line,color in tardy_model.tardy_tree.viewer_lines_with_colors(
+            include_loop_edge_bendings=False):
+        draw_ideal_line()
+        O.line_i_seqs.append(line)
+        O.line_colors[line] = color
+      print("\n".join(tardy_model.tardy_tree.viewer_lines_with_colors_legend(
+        include_loop_edge_bendings=False)))
+    else:
+      for line in tardy_model.potential_obj.geo_manager.simple_edge_list():
+        draw_ideal_line()
+        O.line_i_seqs.append(line)
+        O.line_colors[line] = (1,0,0)
+    mcs = minimum_covering_sphere(O.points, epsilon=1.e-2)
+    O.minimum_covering_sphere = sphere_3d(
+      center=mcs.center(),
+      radius=mcs.radius()*2.0)
+    O.flag_show_minimum_covering_sphere = False
+    O.flag_show_rotation_center = False
+    O.show_key_stroke_help()
+    if (O.first_first): O.first_first = False
+    else:               O.action_callback()
+
+  def show_key_stroke_help(O):
+    print("Press and hold Tab key to continue execution.")
+    print("Press i to change iso-surface level down.")
+    print("Press I to change iso-surface level up.")
+    print("Press R to re-run from the start.")
+
+  def process_key_stroke(O, key):
+    if   (key == ord("i")):
+      O.draw_map.change_iso_level(direction="down")
+    elif (key == ord("I")):
+      O.draw_map.change_iso_level(direction="up")
+    elif (key == ord("R")):
+      O.child_thread.resume(last_iteration=True)
+      O.set_points_and_lines()
+    else:
+      print("No action for this key stroke.")
+      O.show_key_stroke_help()
+    O.OnRedraw()
+
+  def action_callback(O):
+    wx.PostEvent(O, wx_viewer.ViewerUpdateEvent(
+      data=O.tardy_model.sites_moved()))
+
+  def OnUpdate(O, event):
+    sites_moved = event.data
+    for i in range(len(sites_moved)):
+      O.points[i] = sites_moved[i]
+    O.labels_display_list = None
+    O.lines_display_list = None
+    O.points_display_list = None
+    O.OnRedraw()
+
+  def tab_callback(O, shift_down=False, control_down=False):
+    O.child_thread.resume()
+
+  def CleanupBeforeFrameClose(O):
+    O.child_thread.resume(last_iteration=True)
+
+class App(wx_viewer.App):
+
+  def __init__(O, args):
+    O.args = args
+    super(App, O).__init__(title="wx_tardy_pdb")
+
+  def init_view_objects(O):
+    box = wx.BoxSizer(wx.VERTICAL)
+    O.view_objects = viewer(O.frame, size=(600,600))
+    O.view_objects.set_points_and_lines(args=O.args)
+    box.Add(O.view_objects, wx.EXPAND, wx.EXPAND)
+    O.frame.SetSizer(box)
+    box.SetSizeHints(O.frame)
+
+def run(args):
+  App(args=args).MainLoop()
+
+if (__name__ == "__main__"):
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************

@@ -1,0 +1,2681 @@
+
+
+ *******************************************************************************
+cctbx/__init__.py
+from __future__ import absolute_import, division, print_function
+from libtbx.version import get_version
+
+__version__ = get_version()
+
+factor_kev_angstrom = 6.62607015 * 2.99792458 / 1.602176634
+factor_ev_angstrom  = factor_kev_angstrom * 1000
+
+# (ab)use miller extension to provide hendrickson_lattman constructors
+_as_hendrickson_lattman = None
+def hendrickson_lattman(*args, **kw):
+  global _as_hendrickson_lattman
+  if (_as_hendrickson_lattman is None):
+    import cctbx.miller
+    _as_hendrickson_lattman = cctbx.miller.as_hendrickson_lattman
+  return _as_hendrickson_lattman(*args, **kw)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/adptbx.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex # for tuple mappings
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+ext = bp.import_ext("cctbx_adptbx_ext")
+from cctbx_adptbx_ext import *
+
+import scitbx.math
+import random
+import math
+
+u_as_b_factor = u_as_b(1)
+b_as_u_factor = b_as_u(1)
+
+mtps = -2 * math.pi**2
+mtpss = mtps**2
+
+def random_rotate_ellipsoid(u_cart, r_min = 0, r_max = 360):
+  c = scitbx.math.euler_angles_as_matrix(
+    [random.uniform(r_min,r_max) for i in range(3)], deg=True).elems
+  return c_u_c_transpose(c, u_cart)
+
+def random_u_cart(u_scale=1, u_min=0):
+  return random_rotate_ellipsoid(u_cart=[random.random()*u_scale+u_min
+    for i in range(3)] + [0,0,0])
+
+def debye_waller_factor_u_star_gradients(h, u_star):
+  return flex.double(debye_waller_factor_u_star_gradient_coefficients(h=h)) \
+       * (mtps * debye_waller_factor_u_star(h, u_star))
+
+def debye_waller_factor_u_star_curvatures(h, u_star):
+  return debye_waller_factor_u_star_curvature_coefficients(h=h) \
+       * (mtpss * debye_waller_factor_u_star(h, u_star))
+
+def random_traceless_symmetry_constrained_b_cart(crystal_symmetry, u_scale=1,
+      u_min=0.1):
+  from cctbx import sgtbx
+  symbol = crystal_symmetry.space_group().type().lookup_symbol()
+  point_group = sgtbx.space_group_info(
+    symbol=symbol).group().build_derived_point_group()
+  adp_constraints = sgtbx.tensor_rank_2_constraints(
+    space_group=point_group,
+    reciprocal_space=True)
+  u_star = u_cart_as_u_star(crystal_symmetry.unit_cell(),
+    random_u_cart(u_scale=u_scale,u_min=u_min))
+  u_indep = adp_constraints.independent_params(all_params=u_star)
+  u_star = adp_constraints.all_params(independent_params=u_indep)
+  b_cart = u_as_b(u_star_as_u_cart(crystal_symmetry.unit_cell(), u_star))
+  tr = (b_cart[0]+b_cart[1]+b_cart[2])/3
+  b_cart = [b_cart[0]-tr, b_cart[1]-tr, b_cart[2]-tr,
+           b_cart[3],b_cart[4],b_cart[5]]
+  return b_cart
+
+def intersection(u_1, u_2, site_1, site_2, unit_cell):
+  """
+  Calculate the intersection of two scatterers, given coordinates and atomic
+  displacements.  If the scatterers do not actually intersect the result will
+  be negative.
+  """
+  from scitbx.matrix import col
+  if (site_1 == site_2):
+    return sys.maxsize
+  if isinstance(u_1, float):
+    u_1 = u_iso_as_u_star(unit_cell, u_1)
+  if isinstance(u_2, float):
+    u_2 = u_iso_as_u_star(unit_cell, u_2)
+  site_cart_1 = col(unit_cell.orthogonalize(site_frac=site_1))
+  site_cart_2 = col(unit_cell.orthogonalize(site_frac=site_2))
+  dxyz = abs(site_cart_1 - site_cart_2)
+  proj_sum = projection_sum(
+    ustar1=u_1,
+    ustar2=u_2,
+    site1=site_1,
+    site2=site_2,
+    unit_cell=unit_cell).delta_z()
+  return proj_sum - dxyz
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/anharmonic.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("cctbx_anharmonic_ext")
+from cctbx_anharmonic_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/crystal_orientation.py
+from __future__ import absolute_import, division, print_function
+import cctbx.array_family.flex # import dependency
+from cctbx import uctbx # import dependency
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("cctbx_orientation_ext")
+from cctbx_orientation_ext import *
+
+class basis_type:
+  direct = False
+  reciprocal = True
+
+@bp.inject_into(ext.crystal_orientation)
+class _():
+
+  def __getattr__(self,tag):
+    from scitbx.matrix import col
+    if tag in ['astar','bstar','cstar']:
+      F = self.reciprocal_matrix()
+      if tag == 'astar': return col((F[0],F[3],F[6]))
+      if tag == 'bstar': return col((F[1],F[4],F[7]))
+      if tag == 'cstar': return col((F[2],F[5],F[8]))
+    if tag in 'abc':
+      direct = self.direct_matrix()
+      if tag=='a':
+        return col((direct[0],direct[1],direct[2]))
+      elif tag=='b':
+        return col((direct[3],direct[4],direct[5]))
+      elif tag=='c':
+        return col((direct[6],direct[7],direct[8]))
+    mm = self.unit_cell().metrical_matrix()
+    if tag=='A':
+      return mm[0]
+    elif tag=='B':
+      return mm[1]
+    elif tag=='C':
+      return mm[2]
+    elif tag=='D':
+      return mm[5]
+    elif tag=='E':
+      return mm[4]
+    elif tag=='F':
+      return mm[3]
+    mm = self.unit_cell().reciprocal().metrical_matrix()
+    if tag=='As':
+      return mm[0]
+    elif tag=='Bs':
+      return mm[1]
+    elif tag=='Cs':
+      return mm[2]
+    elif tag=='Ds':
+      return mm[5]
+    elif tag=='Es':
+      return mm[4]
+    elif tag=='Fs':
+      return mm[3]
+    else:
+      return
+
+  def make_positive(self):
+    from scitbx import matrix
+    signed_volume = matrix.sqr(self.direct_matrix()).determinant()
+    if signed_volume<0:
+      return self.change_basis((-1.,0.,0.,0.,-1.,0.,0.,0.,-1.))
+    return self
+
+  def reduced_cell(self):
+    #convenience function to transform the orientation matrix to the reduced cell
+    from cctbx.uctbx import fast_minimum_reduction
+    from scitbx import matrix
+    uc = self.unit_cell()
+    R = fast_minimum_reduction(uc)
+    rinverse = matrix.sqr( R.r_inv() )
+    return self.change_basis(rinverse.transpose().inverse().elems)
+
+  def __copy__(self):
+    return crystal_orientation(self.reciprocal_matrix(),basis_type.reciprocal)
+
+  def __getinitargs__(self):
+    return (self.reciprocal_matrix(),basis_type.reciprocal)
+
+  def __str__(self):
+    return "A-star:%10.6f%10.6f%10.6f%10.6f%10.6f%10.6f%10.6f%10.6f%10.6f\n" \
+           "cell:"%self.reciprocal_matrix()+\
+       str(self.unit_cell())+"%.0f"%self.unit_cell().volume()
+
+  def __eq__(self,other):
+    S = self.reciprocal_matrix()
+    O = other.reciprocal_matrix()
+    return S[0]==O[0] and S[1]==O[1] and S[2]==O[2] \
+       and S[3]==O[3] and S[4]==O[4] and S[5]==O[5] \
+       and S[6]==O[6] and S[7]==O[7] and S[8]==O[8]
+
+  # The "U" matrix such that A(reciprocal) = U * B, where B is orthogonalization.transpose()
+  def crystal_rotation_matrix(self):
+    from scitbx import matrix
+    return matrix.sqr(self.reciprocal_matrix()) \
+         * matrix.sqr(self.unit_cell().orthogonalization_matrix()).transpose()
+
+  def get_U_as_sqr(self):
+    U = self.crystal_rotation_matrix()
+    assert U.is_r3_rotation_matrix()
+    return U
+
+  def set_new_crystal_rotation_matrix(self,mat3):
+    from scitbx import matrix
+    return crystal_orientation( mat3 \
+         * matrix.sqr(self.unit_cell().fractionalization_matrix()).transpose(),\
+         basis_type.reciprocal)
+
+  def show(self,legend=None,basis=basis_type.direct):
+    from scitbx import matrix
+    uc = self.unit_cell()
+    U  = self.crystal_rotation_matrix()
+    A  = self.direct_matrix()
+    B = matrix.sqr(self.unit_cell().fractionalization_matrix()).transpose()
+    if legend is not None: print ("%s:"%legend)
+    print ("""    Unit cell:  %9.4f,%9.4f,%9.4f,%7.2f,%7.2f,%7.2f"""%(uc.parameters()))
+    print ("""    U matrix:   %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f"""%(U.elems)
+    )
+    print ("""    B matrix:   %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f"""%(B.elems)
+    )
+    print ("""    A recipr:   %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f"""%(self.reciprocal_matrix())
+    )
+    print ("""    A direct:   %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f,
+                %9.4f,%9.4f,%9.4f"""%(A)
+    )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/dmtbx.py
+from __future__ import absolute_import, division, print_function
+import cctbx.array_family.flex # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("cctbx_dmtbx_ext")
+from cctbx_dmtbx_ext import *
+
+@bp.inject_into(weighted_triplet_phase_relation)
+class _():
+
+  def format(self, miller_indices, ih=None):
+    l = [miller_indices[self.ik()],
+         self.friedel_flag_k(),
+         miller_indices[self.ihmk()],
+         self.friedel_flag_hmk(),
+         self.ht_sum(),
+         self.weight()]
+    if (ih is not None):
+      l.insert(0, miller_indices[ih])
+    return " ".join([str(item).replace(" ", "") for item in l])
+
+def triplet_generator(miller_set,
+                      amplitudes=None, max_relations_per_reflection=0,
+                      sigma_2_only=False, discard_weights=False):
+  return ext.triplet_generator(
+    miller_set.space_group(), miller_set.indices(),
+    amplitudes, max_relations_per_reflection,
+    sigma_2_only, discard_weights)
+
+@bp.inject_into(ext.triplet_generator)
+class _():
+
+  def apply_tangent_formula(self, amplitudes, phases_rad,
+                                  selection_fixed=None,
+                                  use_fixed_only=False,
+                                  reuse_results=False,
+                                  sum_epsilon=1.e-10):
+    return self.raw_apply_tangent_formula(
+      amplitudes, phases_rad,
+      selection_fixed, use_fixed_only, reuse_results, sum_epsilon)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/euclidean_model_matching.py
+from __future__ import absolute_import, division, print_function
+
+import operator
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from scitbx import matrix
+from scitbx.python_utils import dicts
+from libtbx.utils import user_plus_sys_time
+from libtbx import adopt_init_args
+import sys, math
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+from six.moves import zip
+ext = bp.import_ext("cctbx_emma_ext")
+
+def sgtbx_rt_mx_as_matrix_rt(s):
+  return matrix.rt((s.r().as_double(), s.t().as_double()))
+
+class position(object):
+
+  def __init__(self, label, site):
+    adopt_init_args(self, locals())
+
+  def __repr__(self):
+    return "%-4s %7.4f %7.4f %7.4f" % ((self.label,) + tuple(self.site))
+
+class model(crystal.special_position_settings):
+
+  def __init__(self, special_position_settings, positions=None):
+    crystal.special_position_settings._copy_constructor(
+      self, special_position_settings)
+    self.reset_cb_op()
+    self._positions = []
+    if (positions is not None):
+      self.add_positions(positions)
+
+  def cb_op(self):
+    return self._cb_op
+
+  def reset_cb_op(self):
+    self._cb_op = sgtbx.change_of_basis_op()
+    return self
+
+  def positions(self):
+    return self._positions
+
+  def __len__(self):
+    return len(self._positions)
+
+  def size(self):
+    return len(self._positions)
+
+  def __getitem__(self, key):
+    return self._positions[key]
+
+  def add_position(self, pos):
+    self._positions.append(position(
+      pos.label,
+      self.site_symmetry(pos.site).exact_site()))
+
+  def add_positions(self, positions):
+    for pos in positions:
+      self.add_position(pos)
+
+  def change_basis(self, cb_op):
+    positions = []
+    for pos in self._positions:
+      positions.append(position(pos.label, cb_op(pos.site)))
+    result = model(
+      crystal.special_position_settings.change_basis(self, cb_op),
+      positions)
+    result._cb_op = cb_op.new_denominators(self.cb_op()) * self.cb_op()
+    return result
+
+  def transform_to_reference_setting(self):
+    cb_op = self.space_group_info().type().cb_op()
+    result = self.change_basis(cb_op)
+    assert result.space_group_info().is_reference_setting()
+    return result
+
+  def change_hand(self):
+    ch_op = self.space_group_info().type().change_of_hand_op()
+    return self.change_basis(ch_op)
+
+  def expand_to_p1(self):
+    new_model = model(
+      crystal.special_position_settings(
+        crystal.symmetry.cell_equivalent_p1(self)))
+    for pos in self._positions:
+      site_symmetry = self.site_symmetry(pos.site)
+      equiv_sites = sgtbx.sym_equiv_sites(site_symmetry)
+      i = 0
+      for site in equiv_sites.coordinates():
+        i += 1
+        new_model.add_position(position(
+          label=pos.label+"_%03d"%i,
+          site=site))
+    return new_model
+
+  def show(self, title, f=None):
+    if (f is None): f = sys.stdout
+    print(title, file=f)
+    crystal.special_position_settings.show_summary(self, f)
+    if (not self.cb_op().is_identity_op()):
+      print("Change of basis:", file=f)
+      print("  c:", self.cb_op().c(), file=f)
+      print("  c_inv:", self.cb_op().c_inv(), file=f)
+    for pos in self.positions(): print(pos, file=f)
+    print(file=f)
+
+  def as_xray_structure(self, scatterer=None):
+    from cctbx import xray
+    if (scatterer is None):
+      scatterer = xray.scatterer(scattering_type="const")
+    result = xray.structure(special_position_settings=self)
+    for position in self.positions():
+      result.add_scatterer(scatterer.customized_copy(
+        label=position.label,
+        site=position.site))
+    return result
+
+  def combine_with_other(self, other_model, tolerance = 1.5,
+    models_are_diffraction_index_equivalent = True,
+    break_if_match_with_no_singles=True, f=sys.stdout,
+    improved_only=True,new_model_number=0):
+    # 2013-01-25 tt superpose other on this one and return composite
+    match_list=self.best_superpositions_on_other(other_model,
+      tolerance=tolerance,models_are_diffraction_index_equivalent=
+           models_are_diffraction_index_equivalent,
+           break_if_match_with_no_singles=break_if_match_with_no_singles,
+           f=f,specifically_test_inverse=True)
+
+    new_model_list=[]
+    for x in other_model.component_model_numbers:
+      if x in self.component_model_numbers:
+        return new_model_list # cannot combine with something already used
+    for match in match_list:
+      if match is None: continue
+      if improved_only and (len(match.singles2) ==0):
+         continue
+
+      test_new_model= model(special_position_settings=self)
+      new_model= model(special_position_settings=self)
+      new_model.model_number=new_model_number
+      new_model.component_model_numbers=[new_model_number]+ \
+         self.component_model_numbers+other_model.component_model_numbers
+      new_model_number+=1
+      for pos in self.positions():
+        new_model.add_position(position(label=pos.label, site=(pos.site)))
+      i=new_model.size()-1
+      for s in match.singles2:
+        site=match.ref_model2[s].site
+        new_model.add_position(position(
+           label="ATOM_%03d"%i,
+           site=(match.rt*site).elems))
+        test_new_model.add_position(position(
+           label="ATOM_%03d"%i,
+           site=(match.rt*site).elems))
+      new_model_list.append(new_model)
+    return new_model_list
+
+
+  def best_superpositions_on_other(self, other_model, tolerance = 1.5,
+    models_are_diffraction_index_equivalent = True,
+    break_if_match_with_no_singles=True, f=sys.stdout,
+    specifically_test_inverse=True):
+    # 2013-01-25 tt.Find best match to other_model and return it
+    # 2013-01-19 return list of best ones (can be alternatives)
+
+    # if you want the superposed model use:
+    #  superposed_model2=match.get_transformed_model2(
+    #     template=other_model)
+
+    if not hasattr(self,'match_dict'):
+      self.match_dict={}
+      match_list=None
+    else:
+      match_list=self.match_dict.get(other_model,None)
+
+    if match_list is None:   # need to get it
+      from cctbx import euclidean_model_matching as emma
+      test_list=[other_model]
+      match_list=[]
+      if specifically_test_inverse:
+        from copy import deepcopy
+        inv_other_model=other_model.change_hand()
+        inv_other_model._cb_op=deepcopy(other_model._cb_op)
+        test_list.append(inv_other_model)
+      for test_model in test_list:
+        matches = emma.model_matches(
+          model1 = self,
+          model2 = test_model,
+          tolerance = tolerance,
+          models_are_diffraction_index_equivalent = \
+              models_are_diffraction_index_equivalent,
+          break_if_match_with_no_singles=break_if_match_with_no_singles,
+          )
+
+        if (matches.n_matches() > 0):
+          best_number_of_matches=len(matches.refined_matches[0].pairs)
+          for match in matches.refined_matches:
+            n=len(match.pairs)
+            if n > 0 and n >= best_number_of_matches:
+              match_list.append(match)
+
+      self.match_dict[other_model]=match_list # save it
+
+    if not match_list: match_list=[None]
+    return match_list
+
+
+def filter_shift(continuous_shift_flags, shift, selector=1):
+  filtered_shift = [0,0,0]
+  for i in range(3):
+    if (continuous_shift_flags[i] == selector):
+      filtered_shift[i] = shift[i]
+  return filtered_shift
+
+class euclidean_match_symmetry(object):
+
+  def __init__(self, space_group_info, use_k2l, use_l2n):
+    adopt_init_args(self, locals())
+    search_symmetry = sgtbx.search_symmetry(
+      flags=sgtbx.search_symmetry_flags(
+        use_space_group_symmetry=False,
+        use_space_group_ltr=-1,
+        use_seminvariants=True,
+        use_normalizer_k2l=use_k2l,
+        use_normalizer_l2n=use_l2n),
+      space_group_type=space_group_info.type(),
+      seminvariant=space_group_info.structure_seminvariants())
+    self.rt_mx = search_symmetry.subgroup()
+    self.continuous_shifts = search_symmetry.continuous_shifts()
+    assert search_symmetry.continuous_shifts_are_principal()
+    self.continuous_shift_flags = search_symmetry.continuous_shift_flags()
+
+  def filter_shift(self, shift, selector=1):
+    return filter_shift(self.continuous_shift_flags, shift, selector)
+
+  def show(self, title="", f=None):
+    if (f is None): f = sys.stdout
+    print(("euclidean_match_symmetry: " + title).rstrip(), file=f)
+    print(self.rt_mx.type().lookup_symbol(), file=f)
+    print(self.continuous_shifts, file=f)
+
+def generate_singles(n, i):
+  singles = list(range(n))
+  del singles[i]
+  return singles
+
+def pair_sort_function(pair_a, pair_b):
+  # Deprecated. Do not use
+  from libtbx.math_utils import cmp
+  return cmp(pair_a[0], pair_b[0])
+
+def inside_zero_one(c):
+  new_c=[]
+  for x in c:
+    new_c.append(math.fmod(x+100.,1.0))
+  return matrix.col(new_c)
+
+def match_refine_times():
+  return dicts.easy(
+    exclude_pairs=0,
+    add_pairs=0,
+    eliminate_weak_pairs=0,
+    refine_adjusted_shift=0)
+
+class match_refine(object):
+
+  def __init__(self, tolerance,
+               ref_model1, ref_model2,
+               match_symmetry,
+               add_pair_ext,
+               i_pivot1, i_pivot2,
+               eucl_symop,
+               initial_shift,
+               times=None):
+    adopt_init_args(self, locals(), exclude=("initial_shift",))
+    self.singles1 = generate_singles(self.ref_model1.size(), self.i_pivot1)
+    self.singles2 = generate_singles(self.ref_model2.size(), self.i_pivot2)
+    self.pairs = [(self.i_pivot1, self.i_pivot2)]
+    self.adjusted_shift = matrix.col(initial_shift)
+    if (self.times is None):
+      self.times = match_refine_times()
+    self.exclude_pairs()
+    self.add_pairs()
+    self.eliminate_weak_pairs()
+    self.ref_eucl_rt = sgtbx_rt_mx_as_matrix_rt(self.eucl_symop) \
+                     + self.adjusted_shift
+    self.pairs.sort(key=operator.itemgetter(0))
+    self.singles1.sort()
+    self.singles2.sort()
+    self.calculate_rms()
+
+  def exclude_pairs(self):
+    # exclude all pairs with dist >= 4 * tolerance
+    # dist_allowed is invariant under refine_adjusted_shift:
+    #   exclude all pairs with dist_allowed >= tolerance
+    # if 0 continuous shifts: dist_allowed == dist:
+    #   exclude all pairs with dist >= tolerance
+    timer = user_plus_sys_time()
+    self.add_pair_ext.next_pivot(
+      self.match_symmetry.continuous_shift_flags,
+      self.eucl_symop,
+      self.adjusted_shift,
+      flex.int(self.singles1),
+      flex.int(self.singles2))
+    self.times.exclude_pairs += timer.delta()
+
+  def add_pairs(self):
+    # XXX possible optimizations:
+    #   if 0 continuous shifts:
+    #     tabulate dist
+    #     keep all < tolerance
+    #     we do not need eliminate_weak_matches
+    timer = user_plus_sys_time()
+    while (len(self.singles1) and len(self.singles2)):
+      if (not self.add_pair_ext.next_pair(
+        self.adjusted_shift,
+        flex.int(self.singles1),
+        flex.int(self.singles2))):
+        break
+      new_pair = (self.add_pair_ext.new_pair_1(),
+                  self.add_pair_ext.new_pair_2())
+      self.pairs.append(new_pair)
+      self.singles1.remove(new_pair[0])
+      self.singles2.remove(new_pair[1])
+      self.refine_adjusted_shift()
+    self.times.add_pairs += timer.delta()
+
+  def eliminate_weak_pairs(self):
+    timer = user_plus_sys_time()
+    while 1:
+      weak_pair = 0
+      max_dist = 0
+      for pair in self.pairs[1:]:
+        dist = self.calculate_shortest_dist(pair)
+        if (dist > max_dist):
+          weak_pair = pair
+          max_dist = dist
+      if (weak_pair == 0): break
+      if (max_dist < self.tolerance):
+        dist = self.calculate_shortest_dist(self.pairs[0])
+        if (dist < self.tolerance):
+          break
+      assert len(self.pairs) > 1
+      self.pairs.remove(weak_pair)
+      self.singles1.append(weak_pair[0])
+      self.singles2.append(weak_pair[1])
+      self.refine_adjusted_shift()
+    self.times.eliminate_weak_pairs += timer.delta()
+
+  def apply_eucl_ops(self, i_model2):
+    c2 = matrix.col(self.eucl_symop * self.ref_model2[i_model2].site)
+    return c2 + self.adjusted_shift
+
+  def calculate_shortest_diff(self, pair):
+    c2 = self.apply_eucl_ops(pair[1])
+    return sgtbx.min_sym_equiv_distance_info(
+      self.add_pair_ext.equiv1(pair[0]), c2).diff()
+
+  def calculate_shortest_dist(self, pair):
+    length = self.ref_model1.unit_cell().length
+    return length(self.calculate_shortest_diff(pair))
+
+  def calculate_shortest_diffs(self):
+    shortest_diffs = []
+    for pair in self.pairs:
+      shortest_diffs.append(self.calculate_shortest_diff(pair))
+    return shortest_diffs
+
+  def refine_adjusted_shift(self):
+    timer = user_plus_sys_time()
+    unit_cell = self.ref_model1.unit_cell()
+    sum_diff_cart = matrix.col([0.,0.,0.])
+    for diff in self.calculate_shortest_diffs():
+      diff_allowed = self.match_symmetry.filter_shift(diff, selector=1)
+      diff_cart = unit_cell.orthogonalize(diff_allowed)
+      sum_diff_cart += matrix.col(diff_cart)
+    mean_diff_cart = sum_diff_cart / len(self.pairs)
+    mean_diff_frac = matrix.col(unit_cell.fractionalize(mean_diff_cart))
+    self.adjusted_shift = matrix.col(self.adjusted_shift) + mean_diff_frac
+    self.times.refine_adjusted_shift += timer.delta()
+
+  def calculate_rms(self):
+    length = self.ref_model1.unit_cell().length
+    self.shortest_distances = flex.double([
+      length(d) for d in self.calculate_shortest_diffs() ])
+    self.rms = math.sqrt(flex.sum_sq(self.shortest_distances)/len(self.pairs))
+
+  def show(self, f=None, truncate_singles=None, singles_per_line=5):
+    if (f is None): f = sys.stdout
+    print("Match summary:", file=f)
+    print("  Operator:", file=f)
+    print("       rotation:", self.rt.r.mathematica_form(format="%.6g"), file=f)
+    print("    translation:", \
+      self.rt.t.transpose().mathematica_form(format="%.6g")[1:-1], file=f)
+    print("  rms coordinate differences: %.2f" % (self.rms,), file=f)
+    print("  Pairs:", len(self.pairs), file=f)
+    for pair in self.pairs:
+      print("   ", self.ref_model1[pair[0]].label, end=' ', file=f)
+      print(self.ref_model2[pair[1]].label, end=' ', file=f)
+      print("%.3f" % (self.calculate_shortest_dist(pair),), file=f)
+    for i_model,ref_model,singles in ((1,self.ref_model1,self.singles1),
+                                      (2,self.ref_model2,self.singles2)):
+      print("  Singles model %s:" % i_model, len(singles), end=' ', file=f)
+      i = 0
+      for s in singles:
+        if (i == truncate_singles): break
+        if (i % singles_per_line == 0):
+          print(file=f)
+          print(" ", end=' ', file=f)
+        print(" ", ref_model[s].label, end=' ', file=f)
+        i += 1
+      print(file=f)
+    print(file=f)
+
+  def get_transformed_model2(self,output_pdb=None,
+    scattering_type="SE",f=sys.stdout,
+    return_superposed_model2=True,template_pdb_inp=None):
+      # tt 2013-01-25; 2016-10-31
+      from cctbx import xray
+      xray_scatterer = xray.scatterer( scattering_type = scattering_type)
+      model2=self.ref_model2.as_xray_structure(xray_scatterer)
+      from cctbx.array_family import flex
+      new_coords=flex.vec3_double()
+      for i_model2 in range(self.ref_model2.size()):
+        c2 = matrix.col(self.eucl_symop * self.ref_model2[i_model2].site)
+        c2 += self.adjusted_shift
+        c2=inside_zero_one(c2)
+        new_coords.append(c2)
+      model2.set_sites_frac(new_coords)
+
+
+      if output_pdb is not None:
+        assert template_pdb_inp is not None
+        # Set up new xrs with these sites and with scattering types, occ, b,
+        #   labels from original 2nd model
+        xrs=xray.structure(model2.xray_structure())
+        assert len(model2.scatterers())==len(template_pdb_inp.atoms())
+        b_iso_values=flex.double()
+        for scatterer,atom in zip(model2.scatterers(),template_pdb_inp.atoms()):
+          b_iso_values.append(atom.b)
+          new_scatterer = xray.scatterer(
+            scattering_type = atom.element,
+            label=atom.name,
+            occupancy=atom.occ,
+            site=scatterer.site)
+          xrs.add_scatterer(new_scatterer)
+        xrs.set_b_iso(values = b_iso_values)
+        pdb_string=xrs.as_pdb_file()
+        ff=open(output_pdb,'w')
+        print(pdb_string, file=ff)
+        ff.close()
+        print("\nWrote model 2 mapped to model 1 to file %s " %(output_pdb), file=f)
+
+      if return_superposed_model2:
+        return model2.as_emma_model()
+
+def match_sort_function(match_a, match_b):
+  # Deprecated. Do not use
+  from libtbx.math_utils import cmp
+  i = -cmp(len(match_a.pairs), len(match_b.pairs))
+  if (i): return i
+  return cmp(match_a.rms, match_b.rms)
+
+def weed_refined_matches(space_group_number, refined_matches,
+                         rms_penalty_per_site):
+  n_matches = len(refined_matches)
+  if (n_matches == 0): return
+  best_rms = refined_matches[0].rms
+  best_n_pairs = len(refined_matches[0].pairs)
+  is_redundant = [0] * n_matches
+  for i in range(n_matches-1):
+    match_i = refined_matches[i]
+    if (is_redundant[i]): continue
+    if (match_i.rms < best_rms):
+      best_rms = match_i.rms
+      best_n_pairs = len(match_i.pairs)
+    for j in range(i+1, n_matches):
+      match_j = refined_matches[j]
+      if (   match_i.pairs == match_j.pairs
+          or (    rms_penalty_per_site
+              and match_j.rms > best_rms * (1 - rms_penalty_per_site * (
+                    best_n_pairs - len(match_j.pairs))))):
+        is_redundant[j] = 1
+  for i in range(n_matches-1, -1, -1):
+    if (is_redundant[i]):
+      del refined_matches[i]
+  if (space_group_number == 1 and n_matches > 0):
+    trivial_matches_only = True
+    for match in refined_matches:
+      if (len(match.pairs) > 1):
+        trivial_matches_only = False
+        break
+    if (trivial_matches_only):
+      while (    len(refined_matches) > 1
+             and refined_matches[0].pairs[0] != (0,0)): del refined_matches[0]
+      while (len(refined_matches) > 1): del refined_matches[-1]
+    else:
+      while (len(refined_matches[-1].pairs) == 1): del refined_matches[-1]
+
+def match_rt_from_ref_eucl_rt(model1_cb_op, model2_cb_op, ref_eucl_rt):
+  inv_m1 = sgtbx_rt_mx_as_matrix_rt(model1_cb_op.c_inv())
+  m2 = sgtbx_rt_mx_as_matrix_rt(model2_cb_op.c())
+  # X2_orig -> X2_ref -> X1_ref -> X1_orig
+  #          m2   ref_eucl_rt   inv_m1
+  # X1 = inv_m1 * ref_eucl_rt * m2 * X2
+  return inv_m1 * ref_eucl_rt * m2
+
+def compute_refined_matches(ref_model1, ref_model2,
+                            tolerance,
+                            models_are_diffraction_index_equivalent,
+                            shall_break):
+  match_symmetry = euclidean_match_symmetry(
+    ref_model1.space_group_info(),
+    use_k2l=True, use_l2n=(not models_are_diffraction_index_equivalent))
+  ref_model1_sites = flex.vec3_double([pos.site for pos in ref_model1])
+  ref_model2_sites = flex.vec3_double([pos.site for pos in ref_model2])
+  add_pair_ext = ext.add_pair(
+    tolerance,
+    ref_model1.unit_cell(),
+    ref_model1.space_group(),
+    ref_model1.min_distance_sym_equiv(),
+    ref_model1_sites,
+    ref_model2_sites)
+  accumulated_match_refine_times = match_refine_times()
+  refined_matches = []
+  for i_pivot1 in range(ref_model1.size()):
+    for i_pivot2 in range(ref_model2.size()):
+      for eucl_symop in match_symmetry.rt_mx:
+        c2 = eucl_symop * ref_model2[i_pivot2].site
+        dist_info = sgtbx.min_sym_equiv_distance_info(
+          add_pair_ext.equiv1(i_pivot1),
+          c2,
+          match_symmetry.continuous_shift_flags)
+        if (dist_info.dist() < tolerance):
+          allowed_shift = dist_info.continuous_shifts()
+          match = match_refine(tolerance,
+                               ref_model1, ref_model2,
+                               match_symmetry,
+                               add_pair_ext,
+                               i_pivot1, i_pivot2,
+                               eucl_symop,
+                               allowed_shift,
+                               accumulated_match_refine_times)
+          match.rt = match_rt_from_ref_eucl_rt(
+            ref_model1.cb_op(),
+            ref_model2.cb_op(),
+            match.ref_eucl_rt)
+          refined_matches.append(match)
+          if shall_break(match):
+            return refined_matches
+  #print accumulated_match_refine_times
+  return refined_matches
+
+
+class delegating_model_matches(object):
+  """
+  emma loops over all pairs of sites from the first and second structure.
+  If a pair is closer than tolerance (under Euclidean symmetry) it
+  initiates a "match and refine" procedure which incrementally adds the
+  "next closest" pair, with a distance below 2*tolerance. Each time
+  a pair is added the allowed origin shifts (if any) are refined to
+  minimize the rmsd of all the pairs matched so far. When there are
+  no more pairs to add, emma goes into a "weeding" procedure. This
+  procedure sorts the pairs by distance. If there are distances above
+  tolerance, the worst pair is removed, followed by the same allowed
+  origin shift refinement as before. The weeding is repeated until
+  there are no pairs above tolerance.
+
+  emma was written with substructures in mind, which usually have a few
+  (by macromolecular standards) sites placed far apart in space.
+  """
+
+  def __init__(self, model1, model2,
+                     tolerance=1.,
+                     models_are_diffraction_index_equivalent=False,
+                     shall_break=None,
+                     rms_penalty_per_site=0.05):
+    if shall_break is None:
+      def shall_break(match): return False
+    adopt_init_args(self, locals())
+    assert model1.cb_op().is_identity_op()
+    assert model2.cb_op().is_identity_op()
+    ref_model1 = model1.transform_to_reference_setting()
+    ref_model2 = model2.transform_to_reference_setting()
+    assert ref_model1.unit_cell().is_similar_to(ref_model2.unit_cell())
+    if (ref_model1.space_group() != ref_model2.space_group()):
+      ref_model2 = ref_model2.change_hand()
+    assert ref_model1.unit_cell().is_similar_to(ref_model2.unit_cell())
+    assert ref_model1.space_group() == ref_model2.space_group()
+    self.refined_matches = compute_refined_matches(
+      ref_model1, ref_model2,
+      tolerance,
+      models_are_diffraction_index_equivalent,
+      shall_break)
+    self.refined_matches.sort(key=lambda element: (-len(element.pairs), element.rms))
+    weed_refined_matches(model1.space_group_info().type().number(),
+                         self.refined_matches, rms_penalty_per_site)
+
+
+  def n_matches(self):
+    return len(self.refined_matches)
+
+  def n_pairs_best_match(self):
+    if (len(self.refined_matches) == 0): return 0
+    return len(self.refined_matches[0].pairs)
+
+  def consensus_model(self, i_model=1, i_refined_matches=0):
+    assert i_model in (1,2)
+    assert 0 <= i_refined_matches < self.n_matches()
+    if (i_model == 1):
+      source_model = self.model1
+    else:
+      source_model = self.model2
+    if (self.n_matches() == source_model.size()):
+      return source_model
+    result = model(special_position_settings=source_model)
+    i_model -= 1
+    for pair in self.refined_matches[i_refined_matches].pairs:
+      result.add_position(source_model.positions()[pair[i_model]])
+    return result
+
+  def transform_model(self, i_model, i_refined_matches=0):
+    assert i_model in (1,2)
+    assert 0 <= i_refined_matches < self.n_matches()
+    rt = self.refined_matches[i_refined_matches].rt
+    if (i_model == 1):
+      result = model(special_position_settings=self.model2)
+      source_model = self.model1
+      rt = rt.inverse()
+    else:
+      result = model(special_position_settings=self.model1)
+      source_model = self.model2
+    for pos in source_model.positions():
+      result.add_position(position(label=pos.label, site=(rt*pos.site).elems))
+    return result
+
+
+class model_matches(delegating_model_matches):
+
+  def __init__(self, model1, model2,
+                     tolerance=1.,
+                     models_are_diffraction_index_equivalent=False,
+                     break_if_match_with_no_singles=False,
+                     rms_penalty_per_site=0.05):
+    if break_if_match_with_no_singles:
+      def shall_break(match):
+        return len(match.singles1) == 0 or len(match.singles2) == 0
+    else:
+      shall_break = None
+    super(model_matches, self).__init__(
+      model1, model2,
+      tolerance,
+      models_are_diffraction_index_equivalent,
+      shall_break,
+      rms_penalty_per_site)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/french_wilson.py
+from __future__ import absolute_import, division, print_function
+import sys, math
+from libtbx.str_utils import make_sub_header
+from libtbx.utils import Sorry
+import libtbx.phil
+import libtbx.callbacks # import dependency
+from six.moves import zip
+
+#acentric tables from French-Wilson supplement, 1978
+ac_zj =    [ 0.226,0.230,0.235,0.240,0.246,0.251,0.257,0.263,0.270,
+             0.276,0.283,0.290,0.298,0.306,0.314,0.323,0.332,0.341,0.351,
+             0.362,0.373,0.385,0.397,0.410,0.424,0.439,0.454,0.470,0.487,
+             0.505,0.525,0.545,0.567,0.590,0.615,0.641,0.668,0.698,0.729,
+             0.762,0.798,0.835,0.875,0.917,0.962,1.009,1.059,1.112,1.167,
+             1.226,1.287,1.352,1.419,1.490,1.563,1.639,1.717,1.798,1.882,
+             1.967,2.055,2.145,2.236,2.329,2.422,2.518,2.614,2.710,2.808,
+             2.906,3.004 ]
+ac_zj_sd = [ 0.217,0.221,0.226,0.230,0.235,0.240,0.245,0.250,0.255,
+             0.261,0.267,0.273,0.279,0.286,0.292,0.299,0.307,0.314,0.322,
+             0.330,0.339,0.348,0.357,0.367,0.377,0.387,0.398,0.409,0.421,
+             0.433,0.446,0.459,0.473,0.488,0.503,0.518,0.535,0.551,0.568,
+             0.586,0.604,0.622,0.641,0.660,0.679,0.698,0.718,0.737,0.757,
+             0.776,0.795,0.813,0.831,0.848,0.865,0.881,0.895,0.909,0.921,
+             0.933,0.943,0.953,0.961,0.968,0.974,0.980,0.984,0.988,0.991,
+             0.994,0.996 ]
+ac_zf =    [ 0.423,0.428,0.432,0.437,0.442,0.447,0.453,0.458,0.464,
+             0.469,0.475,0.482,0.488,0.495,0.502,0.509,0.516,0.524,0.532,
+             0.540,0.549,0.557,0.567,0.576,0.586,0.597,0.608,0.619,0.631,
+             0.643,0.656,0.670,0.684,0.699,0.714,0.730,0.747,0.765,0.783,
+             0.802,0.822,0.843,0.865,0.887,0.911,0.935,0.960,0.987,1.014,
+             1.042,1.070,1.100,1.130,1.161,1.192,1.224,1.257,1.289,1.322,
+             1.355,1.388,1.421,1.454,1.487,1.519,1.551,1.583,1.615,1.646,
+             1.676,1.706 ]
+ac_zf_sd = [ 0.216,0.218,0.220,0.222,0.224,0.226,0.229,0.231,0.234,
+             0.236,0.239,0.241,0.244,0.247,0.250,0.253,0.256,0.259,0.262,
+             0.266,0.269,0.272,0.276,0.279,0.283,0.287,0.291,0.295,0.298,
+             0.302,0.307,0.311,0.315,0.319,0.324,0.328,0.332,0.337,0.341,
+             0.345,0.349,0.353,0.357,0.360,0.364,0.367,0.369,0.372,0.374,
+             0.375,0.376,0.377,0.377,0.377,0.376,0.374,0.372,0.369,0.366,
+             0.362,0.358,0.353,0.348,0.343,0.338,0.332,0.327,0.321,0.315,
+             0.310,0.304 ]
+
+#centric tables from French-Wilson supplement, 1978
+c_zj =     [ 0.114,0.116,0.119,0.122,0.124,0.127,0.130,0.134,0.137,
+             0.141,0.145,0.148,0.153,0.157,0.162,0.166,0.172,0.177,0.183,
+             0.189,0.195,0.202,0.209,0.217,0.225,0.234,0.243,0.253,0.263,
+             0.275,0.287,0.300,0.314,0.329,0.345,0.363,0.382,0.402,0.425,
+             0.449,0.475,0.503,0.534,0.567,0.603,0.642,0.684,0.730,0.779,
+             0.833,0.890,0.952,1.018,1.089,1.164,1.244,1.327,1.416,1.508,
+             1.603,1.703,1.805,1.909,2.015,2.123,2.233,2.343,2.453,2.564,
+             2.674,2.784,2.894,3.003,3.112,3.220,3.328,3.435,3.541,3.647,
+             3.753,3.962 ]
+c_zj_sd =  [ 0.158,0.161,0.165,0.168,0.172,0.176,0.179,0.184,0.188,
+             0.192,0.197,0.202,0.207,0.212,0.218,0.224,0.230,0.236,0.243,
+             0.250,0.257,0.265,0.273,0.282,0.291,0.300,0.310,0.321,0.332,
+             0.343,0.355,0.368,0.382,0.397,0.412,0.428,0.445,0.463,0.481,
+             0.501,0.521,0.543,0.565,0.589,0.613,0.638,0.664,0.691,0.718,
+             0.745,0.773,0.801,0.828,0.855,0.881,0.906,0.929,0.951,0.971,
+             0.989,1.004,1.018,1.029,1.038,1.044,1.049,1.052,1.054,1.054,
+             1.053,1.051,1.049,1.047,1.044,1.041,1.039,1.036,1.034,1.031,
+             1.029,1.028 ]
+c_zf =     [ 0.269,0.272,0.276,0.279,0.282,0.286,0.289,0.293,0.297,
+             0.301,0.305,0.309,0.314,0.318,0.323,0.328,0.333,0.339,0.344,
+             0.350,0.356,0.363,0.370,0.377,0.384,0.392,0.400,0.409,0.418,
+             0.427,0.438,0.448,0.460,0.471,0.484,0.498,0.512,0.527,0.543,
+             0.560,0.578,0.597,0.618,0.639,0.662,0.687,0.713,0.740,0.769,
+             0.800,0.832,0.866,0.901,0.938,0.976,1.016,1.057,1.098,1.140,
+             1.183,1.227,1.270,1.313,1.356,1.398,1.439,1.480,1.519,1.558,
+             1.595,1.632,1.667,1.701,1.735,1.767,1.799,1.829,1.859,1.889,
+             1.917,1.945 ]
+c_zf_sd =  [ 0.203,0.205,0.207,0.209,0.211,0.214,0.216,0.219,0.222,
+             0.224,0.227,0.230,0.233,0.236,0.239,0.243,0.246,0.250,0.253,
+             0.257,0.261,0.265,0.269,0.273,0.278,0.283,0.288,0.293,0.298,
+             0.303,0.309,0.314,0.320,0.327,0.333,0.340,0.346,0.353,0.361,
+             0.368,0.375,0.383,0.390,0.398,0.405,0.413,0.420,0.427,0.433,
+             0.440,0.445,0.450,0.454,0.457,0.459,0.460,0.460,0.458,0.455,
+             0.451,0.445,0.438,0.431,0.422,0.412,0.402,0.392,0.381,0.370,
+             0.360,0.349,0.339,0.330,0.321,0.312,0.304,0.297,0.290,0.284,
+             0.278,0.272 ]
+
+master_phil = libtbx.phil.parse("""
+  max_bins = 60
+    .type = int
+    .short_caption = Max. resolution bins
+    .help = '''Maximum number of resolution bins'''
+  min_bin_size = 40
+    .type = int
+    .short_caption = Minimum bin size
+    .help = '''Minimum number of reflections per bin'''
+""")
+
+def fw_acentric(
+      I,
+      sigma_I,
+      mean_intensity,
+      sigma_iobs_rejection_criterion):
+  assert (mean_intensity != 0) and (sigma_I != 0)
+  h = (I/sigma_I) - (sigma_I/mean_intensity)
+  h_min = sigma_iobs_rejection_criterion
+  i_sig_min = h_min+0.3
+  if (I/sigma_I) < i_sig_min or h < h_min:
+    return -1.0, -1.0, -1.0, -1.0
+  else:
+    if h < 3.0:
+      point = 10.0*(h+4.0)
+      pt_1 = int(point)
+      pt_2 = pt_1 + 1
+      delta = point - pt_1
+      J = interpolate(pt_1=ac_zj[pt_1],
+                      pt_2=ac_zj[pt_2],
+                      delta=delta) * sigma_I
+      sigma_J = interpolate(pt_1=ac_zj_sd[pt_1],
+                            pt_2=ac_zj_sd[pt_2],
+                            delta=delta) * sigma_I
+      F = interpolate(pt_1=ac_zf[pt_1],
+                      pt_2=ac_zf[pt_2],
+                      delta=delta) * math.sqrt(sigma_I)
+      sigma_F = interpolate(pt_1=ac_zf_sd[pt_1],
+                            pt_2=ac_zf_sd[pt_2],
+                            delta=delta) * math.sqrt(sigma_I)
+    else:
+      J = h*sigma_I
+      sigma_J = sigma_I
+      F = math.sqrt(J)
+      sigma_F = 0.5*(sigma_I/F)
+    return J, sigma_J, F, sigma_F
+
+def fw_centric(
+      I,
+      sigma_I,
+      mean_intensity,
+      sigma_iobs_rejection_criterion):
+  assert (mean_intensity != 0) and (sigma_I != 0)
+  h = (I/sigma_I) - ( sigma_I/(2.0*mean_intensity) )
+  h_min = sigma_iobs_rejection_criterion
+  i_sig_min = h_min+0.3
+  if (I/sigma_I) < i_sig_min or h < h_min:
+    return -1.0, -1.0, -1.0, -1.0
+  else:
+    if h < 4.0:
+      point = 10.0*(h+4.0)
+      pt_1 = int(point)
+      pt_2 = pt_1 + 1
+      delta = point - pt_1
+      J = interpolate(pt_1=c_zj[pt_1],
+                      pt_2=c_zj[pt_2],
+                      delta=delta) * sigma_I
+      sigma_J = interpolate(pt_1=c_zj_sd[pt_1],
+                            pt_2=c_zj_sd[pt_2],
+                            delta=delta) * sigma_I
+      F = interpolate(pt_1=c_zf[pt_1],
+                      pt_2=c_zf[pt_2],
+                      delta=delta) * math.sqrt(sigma_I)
+      sigma_F = interpolate(pt_1=c_zf_sd[pt_1],
+                            pt_2=c_zf_sd[pt_2],
+                            delta=delta) * math.sqrt(sigma_I)
+    else:
+      #adapted from French-Wilson w/ added x^6 term in the expansion
+      h_2 = 1.0 / (h*h)
+      h_4 = h_2 * h_2
+      h_6 = h_2 * h_4
+      #posterier of F
+      post_F = math.sqrt(h) * (1.0 - (3.0/8.0)*h_2 - (87.0/128.0)*h_4 - (2889.0/1024.0)*h_6)
+      #posterier of sigma_F
+      post_sig_F = math.sqrt( h * ((1.0/4.0)*h_2 + (15.0/32.0)*h_4 + (273.0/128.0)*h_6) )
+      J = h*sigma_I*(1.0 - (1.0/2.0)*h_2 - (3.0/4.0)*h_4 - 3.0*h_6)
+      sigma_J = 2.0*sigma_I*post_F*post_sig_F
+      F = post_F*math.sqrt(sigma_I)
+      sigma_F = post_sig_F*math.sqrt(sigma_I)
+  return J, sigma_J, F, sigma_F
+
+def get_mean_intensity(miller_array):
+  sum = 0.0
+  for d in miller_array.data():
+    sum += d
+  return (sum / len(miller_array.data()))
+
+# default number of bins is 60, but require that each bin has at least 40 reflections
+# if not try again with less bins until condition is satisfied
+def f_w_binning(miller_array, max_bins=60, min_bin_size=40, log=None):
+  if log == None:
+    log = sys.stdout
+  bin_success = False
+  while not bin_success:
+    miller_array.setup_binner(n_bins=max_bins)
+    bin_success = True
+    for i_bin in miller_array.binner().range_all():
+      sel = miller_array.binner().selection(i_bin)
+      bin = miller_array.select(sel)
+      if bin.size() > 0:
+        if bin.size() < min_bin_size:
+          max_bins = max_bins - 1
+          if max_bins == 0:
+            raise ValueError("Too few reflections for accurate binning.")
+          print("bin too small, trying %d bins" % max_bins, file=log)
+          bin_success = False
+          break
+          #f_w_binning(miller_array, max_bins=new_max_bins, log=log)
+  return True
+
+def get_bin_centers(miller_array):
+  from cctbx.array_family import flex
+  centers = flex.double()
+  for i_bin in miller_array.binner().range_all():
+    sel = miller_array.binner().selection(i_bin)
+    bin = miller_array.select(sel)
+    bin_center = (bin.d_max_min()[0]+bin.d_max_min()[1])/2
+    centers.append(bin_center)
+  return centers
+
+def interpolate(pt_1, pt_2, delta):
+  return ( ((1.0-delta)*pt_1) + (delta*pt_2) )
+
+def calculate_mean_intensities(miller_array, log=None):
+  if log == None:
+    log = sys.stdout
+  print("** Calculating bin mean intensity values for each intensity **", file=log)
+  bin_mean_intensities = miller_array.mean(use_binning=True).data
+  bin_centers = get_bin_centers(miller_array=miller_array)
+  d_mean_intensities = dict()
+  for i_bin in miller_array.binner().range_all():
+    sel = miller_array.binner().selection(i_bin)
+    bin = miller_array.select(sel)
+    if bin.size() > 0:
+      bin_center = bin_centers[i_bin]
+      for index, d in bin.d_spacings():
+        # d is between bin_center[i-1] and bin_center[i]
+        if d > bin_center:
+          d_1 = bin_centers[i_bin-1]
+          d_2 = bin_centers[i_bin]
+          m_1 = bin_mean_intensities[i_bin-1]
+          m_2 = bin_mean_intensities[i_bin]
+          # there is no bin[i-1]
+          if m_1 == None:
+            mean_i = bin_mean_intensities[i_bin]
+            #TO-DO deal with tail
+            #d_1 = d_2
+            #d_2 = bin_centers[i_bin+1]
+            #m_1 = m_2
+            #m_2 = bin_mean_intensities[i_bin+1]
+            #slope = (m_2-m_1) / (d_2-d_1)
+            #width = bin.d_max_min()[0] - bin.d_max_min()[1]
+            #d_2 = d_1
+            #d_1 = d_1 - width
+            #m_2 = m_1
+            #m_1 = -1 * (slope*(d_2-d_1)-m_2)
+            #delta = d - d_1
+            #mean_i = interpolate(pt_1=m_1,
+            #                     pt_2=m_2,
+            #                     delta=delta)
+            #d_mean_intensities[index] = mean_i
+          else:
+            delta = (d_1 - d) / (d_1 - d_2)
+            mean_i = interpolate(pt_1=m_1,
+                                 pt_2=m_2,
+                                 delta=delta)
+            assert (d_1 > d > d_2)
+            if ( not ( (m_1 > mean_i > m_2) or (m_2 > mean_i > m_1) ) and
+                 not (m_1 == mean_i == m_2 == 0.0) and
+                     (math.fabs(m_1-m_2) > 1.0e-10) ):
+              raise RuntimeError(
+                "Internal error: i_bin=%d d=%f m_1=%f mean_i=%f m_2=%f" %
+                  (i_bin, d, m_1, mean_i, m_2))
+          d_mean_intensities[index] = mean_i
+        # d is between bin_center[i] and bin_center[i+1]
+        elif d < bin_center:
+          d_1 = bin_centers[i_bin]
+          d_2 = bin_centers[i_bin+1]
+          m_1 = bin_mean_intensities[i_bin]
+          m_2 = bin_mean_intensities[i_bin+1]
+          # there is no bin[i+1]
+          if m_2 == None:
+            mean_i = bin_mean_intensities[i_bin]
+            #TO-DO deal with tail
+            #d_2 = d_1
+            #d_1 = bin_centers[i_bin-1]
+            #m_2 = m_1
+            #m_1 = bin_mean_intensities[i_bin-1]
+            #slope = (m_2-m_1) / (d_2-d_1)
+            #width = bin.d_max_min()[0] - bin.d_max_min()[1]
+            #d_1 = d_2
+            #d_2 = d_1 + width
+            #m_1 = m_2
+            #m_2 = slope*(d_2-d_1)+m_1
+            #delta = d - d_1
+            #mean_i = interpolate(pt_1=m_1,
+            #                     pt_2=m_2,
+            #                     delta=delta)
+            #d_mean_intensities[index] = mean_i
+          else:
+            delta = (d_1 - d) / (d_1 - d_2)
+            mean_i = interpolate(pt_1=m_1,
+                                 pt_2=m_2,
+                                 delta=delta)
+            assert (d_1 > d > d_2)
+            if ( not ( (m_1 > mean_i > m_2) or (m_2 > mean_i > m_1) ) and
+                 not (m_1 == mean_i == m_2 == 0.0) and
+                     (math.fabs(m_1-m_2) > 1.0e-10) ):
+              raise RuntimeError(
+                "Internal error: i_bin=%d d=%f m_1=%f mean_i=%f m_2=%f" %
+                  (i_bin, d, m_1, mean_i, m_2))
+          d_mean_intensities[index] = mean_i
+        # d = the current bin center
+        else:
+          mean_i = bin_mean_intensities[i_bin]
+          d_mean_intensities[index] = mean_i
+  return d_mean_intensities
+
+def french_wilson_scale(
+      miller_array,
+      params=None,
+      sigma_iobs_rejection_criterion=None,
+      merge=False,
+      min_bin_size=40,
+      max_bins=60,
+      log=None):
+  from cctbx.array_family import flex
+  if not miller_array.is_xray_intensity_array():
+    raise Sorry("Input array appears to be amplitudes. "+
+      "This method is only appropriate for input intensities.")
+  if miller_array.unit_cell() is None:
+    raise Sorry("No unit cell information found. Please supply unit cell data.")
+  if miller_array.crystal_symmetry() is None:
+    raise Sorry("No crystal symmetry information found. Please supply "+
+                "crystal symmetry data.")
+  if miller_array.sigmas() is None:
+    raise Sorry("Input array does not contain sigma values. "+
+      "This method requires input intensities with associated sigmas.")
+  if (not miller_array.is_unique_set_under_symmetry()):
+    if (merge):
+      miller_array = miller_array.merge_equivalents().array()
+    else :
+      raise Sorry("Unmerged data not allowed - please merge "+
+        "symmetry-equivalent reflections first.")
+  if (miller_array.data().all_eq(miller_array.data()[0])):
+    # XXX some Scalepack files (and possibly others) crash the routine if this
+    # check is not performed.  presumably an HKL2000 bug?
+    raise Sorry(("The input intensities have uniform values (%g); this is probably "+
+      "a bug in one of the data processing and/or conversion programs.") %
+      miller_array.data()[0])
+  # Phil defaults are set in master_phil above - they should be kept in sync with the
+  # default arguments for this function
+  if params and params.max_bins:
+    max_bins = params.max_bins
+  if params and params.min_bin_size:
+    min_bin_size = params.min_bin_size
+  if log == None:
+    log = sys.stdout
+  if (sigma_iobs_rejection_criterion is None):
+    sigma_iobs_rejection_criterion = -4.0
+  elif (sigma_iobs_rejection_criterion == 0.0):
+    libtbx.warn(
+      "For French and Wilson scaling, sigma_iobs_rejection_criterion " +
+      "must be a value between -4.0 and -1.0, or None. " +
+      "Setting sigma_iobs_rejection_criteriont to -4.0.")
+    sigma_iobs_rejection_criterion = -4.0
+  elif ((sigma_iobs_rejection_criterion < -4.0) or
+        (sigma_iobs_rejection_criterion > -1.0)):
+    raise Sorry(
+      "For French and Wilson scaling, sigma_iobs_rejection_criterion " +
+      "must be a value between -4.0 and -1.0, or None.")
+  rejected = []
+  make_sub_header("Scaling input intensities via French-Wilson Method",
+    out=log)
+  print("Trying %d bins..." % max_bins, file=log)
+  try:
+    f_w_binning(
+      miller_array=miller_array,
+      max_bins=max_bins,
+      min_bin_size=min_bin_size,
+      log=log
+    )
+  except ValueError:
+    try:
+      miller_array.setup_binner_counting_sorted(reflections_per_bin=5)
+    except AssertionError:
+      print(
+        "Too few reflections for accurate binning.\n"
+        "** Skipping French-Wilson scaling **",
+        file=log
+      )
+      return None
+  print("Number of bins = %d" % miller_array.binner().n_bins_used(), file=log)
+  new_I = flex.double()
+  new_sigma_I = flex.double()
+  new_F = flex.double()
+  new_sigma_F = flex.double()
+  new_indices = flex.miller_index()
+  bin_mean_intensities = miller_array.mean(use_binning=True).data
+  d_mean_intensities = \
+    calculate_mean_intensities(miller_array=miller_array, log=log)
+  assert len(d_mean_intensities) == miller_array.data().size()
+  for i_bin in miller_array.binner().range_all():
+    sel = miller_array.binner().selection(i_bin)
+    bin = miller_array.select(sel)
+    if bin.size() > 0:
+      #bin_mean_intensity = bin_mean_intensities[i_bin]
+      cen = bin.select_centric()
+      acen = bin.select_acentric()
+      for I, sigma_I, index in zip(cen.data(),
+                                   cen.sigmas(),
+                                   cen.indices()):
+        mean_intensity = d_mean_intensities[index]
+        if (mean_intensity == 0):
+          # XXX is this the appropriate way to handle this?
+          rejected.append( (index, I, sigma_I, mean_intensity) )
+        elif (sigma_I <= 0):
+          if I <= 0 or sigma_I < 0 :
+            rejected.append( (index, I, sigma_I, mean_intensity) )
+            continue
+          else:
+            J = I
+            sigma_J = sigma_I
+            F = math.sqrt(I)
+            sigma_F = sigma_I
+        else :
+          J, sigma_J, F, sigma_F = fw_centric(
+                                     I=I,
+                                     sigma_I=sigma_I,
+                                     mean_intensity=mean_intensity,
+                                     sigma_iobs_rejection_criterion=\
+                                     sigma_iobs_rejection_criterion)
+        if J >= 0:
+          assert sigma_J >= 0 and F >= 0 and sigma_F >= 0
+          new_I.append(J)
+          new_indices.append(index)
+          new_sigma_I.append(sigma_J)
+          new_F.append(F)
+          new_sigma_F.append(sigma_F)
+        else:
+          rejected.append( (index, I, sigma_I, mean_intensity) )
+      for I, sigma_I, index in zip(acen.data(),
+                                   acen.sigmas(),
+                                   acen.indices()):
+        mean_intensity = d_mean_intensities[index]
+        if (mean_intensity == 0):
+          rejected.append( (index, I, sigma_I, mean_intensity) )
+        elif (sigma_I <= 0):
+          if I <= 0 or sigma_I < 0 :
+            rejected.append( (index, I, sigma_I, mean_intensity) )
+            continue
+          else:
+            J = I
+            sigma_J = sigma_I
+            F = math.sqrt(I)
+            sigma_F = sigma_I
+        else :
+          J, sigma_J, F, sigma_F = fw_acentric(
+                                     I=I,
+                                     sigma_I=sigma_I,
+                                     mean_intensity=mean_intensity,
+                                     sigma_iobs_rejection_criterion=\
+                                     sigma_iobs_rejection_criterion)
+        if J >= 0:
+          assert sigma_J >= 0 and F >= 0 and sigma_F >= 0
+          new_I.append(J)
+          new_indices.append(index)
+          new_sigma_I.append(sigma_J)
+          new_F.append(F)
+          new_sigma_F.append(sigma_F)
+        else:
+          rejected.append( (index, I, sigma_I, mean_intensity) )
+  f_obs = miller_array.customized_copy(indices=new_indices,
+                                       data=new_F,
+                                       sigmas=new_sigma_F)
+  f_obs.set_observation_type_xray_amplitude()
+  show_rejected_summary(rejected=rejected, log=log)
+  return f_obs
+
+def show_rejected_summary(rejected, log=None):
+  if log == None:
+    log = sys.stdout
+  print("** Total # rejected intensities: %d **" % len(rejected), file=log)
+  if len(rejected) > 0:
+    print("** Summary or rejected intensities **", file=log)
+    print("-----------------------------------------------------------------", file=log)
+    print("Miller Index  :  Intensity  :  Sigma  :  Bin Mean Intensity", file=log)
+    for rej in rejected:
+      print("%s    %.3f      %.3f    %.3f" % \
+                    (str(rej[0]),rej[1],rej[2],rej[3]), file=log)
+    print("-----------------------------------------------------------------", file=log)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/libtbx_refresh.py
+from __future__ import absolute_import, division, print_function
+import os
+from libtbx.utils import warn_if_unexpected_md5_hexdigest
+
+if self.env.is_ready_for_build():
+  message_template = '  Generating C++ files in:\n    "%s"'
+
+  # eltbx
+  from cctbx.source_generators.eltbx import generate_henke_cpp
+  from cctbx.source_generators.eltbx import generate_sasaki_cpp
+  target_dir = self.env.under_build("cctbx/eltbx")
+  print(message_template % target_dir)
+  for label,generator_module in [("Henke", generate_henke_cpp),
+                                 ("Sasaki", generate_sasaki_cpp)]:
+    if os.path.isdir(generator_module.reference_tables_directory):
+      if not os.path.isdir(target_dir):
+        os.makedirs(target_dir)
+      generator_module.run(target_dir=target_dir)
+    else:
+      print("*"*79)
+      print("Warning: directory with %s tables is missing:" % label)
+      print(" ", repr(generator_module.reference_tables_directory))
+      print("*"*79)
+
+  # flex_fwd.h
+  from cctbx.source_generators import flex_fwd_h
+  target_dir = self.env.under_build("include/cctbx/boost_python")
+  print(message_template % target_dir)
+  if not os.path.isdir(target_dir):
+    os.makedirs(target_dir)
+  flex_fwd_h.run(target_dir)
+
+  # reference_table.cpp : checking that it is up-to-date
+  for f,sig in [
+      ("reference_table.py", "b4d948c292357b90c8b4d5716d607bb9"),
+      ("short_cuts.py", "93235c1a5adfb2d53cf3f19d03be1324"),
+      ("proto/generate_cpp_asu_table.py", "0f19e51b469650aa23e81483051eeb10")]:
+    fn = "sgtbx/direct_space_asu/" + f
+    warn_if_unexpected_md5_hexdigest(
+      path=self.env.under_dist( module_name="cctbx", path=fn),
+      expected_md5_hexdigests=[ sig ],
+      hints=[
+        "  Files to review:",
+        "    "+fn,
+        "    cctbx/libtbx_refresh.py"])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/math_module.py
+from __future__ import absolute_import, division, print_function
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("cctbx_math_ext")
+from cctbx_math_ext import *
+
+def basis_of_mirror_plane_with_normal(u):
+  """ Primitive setting assumed """
+  assert u != (0,0,0)
+  basis = ()
+  for t in ((1,0,0), (0,1,0), (0,0,1),
+            (1,1,0), (1,0,1), (0,1,1),
+            (-1,1,0), (-1,0,1), (0,-1,1),
+            (1,1,1),
+            (-1,1,1), (1,-1,1), (1,1,-1)):
+    if len(basis) == 2: break
+    if u[0]*t[0] + u[1]*t[1] + u[2]*t[2] == 0:
+      basis += (t,)
+  return basis
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/multipolar.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex # for tuple mappings
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("cctbx_multipolar_ext")
+from cctbx_multipolar_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/r_free_utils.py
+from __future__ import absolute_import, division, print_function
+from libtbx.math_utils import iceil
+from libtbx.utils import null_out, Sorry
+from itertools import count
+import random
+import sys
+from six.moves import range
+
+generate_r_free_params_str = """\
+    fraction = 0.1
+      .type=float
+      .short_caption = Fraction of reflections in test set
+      .expert_level=0
+    max_free = 2000
+      .type=int
+      .short_caption = Maximum number of reflections in test set
+      .expert_level=2
+    lattice_symmetry_max_delta = 5
+      .type=float
+      .expert_level=2
+    use_lattice_symmetry = True
+      .type=bool
+      .short_caption = Use lattice symmetry to generate test set
+      .expert_level=0
+    use_dataman_shells = False
+      .type = bool
+      .short_caption = Assign test set in thin resolution shells
+      .help = Used to avoid biasing of the test set by certain types of \
+        non-crystallographic symmetry.
+    n_shells = 20
+      .type = int
+      .short_caption = Number of resolution shells
+"""
+
+def assign_random_r_free_flags(n_refl, fraction_free, format="cns"):
+  assert (fraction_free > 0) and (fraction_free < 0.5)
+  from scitbx.array_family import flex
+  from libtbx.math_utils import iround
+  group_size = 1/(fraction_free)
+  assert group_size >= 2
+  if (format == "cns") or (format == "shelx"):
+    result = flex.bool(n_refl, False)
+    i_start = 0
+    for i_group in count(1):
+      i_end = min(n_refl, iround(i_group*group_size) )
+      if (i_start == i_end):
+        break
+      if (i_end + 1 == n_refl):
+        i_end += 1
+      # assert i_end - i_start >= 2
+      if i_end - i_start >= 2:
+        result[random.randrange(i_start, i_end)] = True
+      i_start = i_end
+    if (format == "shelx"):
+      result_ = flex.int(n_refl, 1)
+      result_.set_selected(result, -1)
+      result = result_
+  elif (format == "ccp4"):
+    result = flex.int()
+    flag_max = iround(group_size) - 1
+    for i in range(n_refl):
+      result.append(random.randint(0, flag_max))
+  return result
+
+def assign_r_free_flags_by_shells(n_refl, fraction_free, n_bins):
+  assert (fraction_free > 0) and (fraction_free < 0.5)
+  assert (n_bins > 1) and (n_bins < n_refl) # XXX this should be smarter
+  from scitbx.array_family import flex
+  from libtbx.math_utils import iround
+  n_free = iround(n_refl * fraction_free)
+  n_per_bin = iround(n_refl / n_bins)
+  half_n_work_per_bin = iround((n_refl-n_free) / n_bins / 2)
+  n_free_per_bin = n_per_bin - 2*half_n_work_per_bin
+  flags = flex.bool()
+  flags.reserve(n_refl)
+  for i_bin in range(n_bins):
+    flags.resize(min(n_refl, flags.size()+half_n_work_per_bin), False)
+    flags.resize(min(n_refl, flags.size()+n_free_per_bin), True)
+    flags.resize(min(n_refl, flags.size()+half_n_work_per_bin), False)
+  flags.resize(n_refl, False)
+  return flags
+
+def export_r_free_flags_for_ccp4(flags, test_flag_value):
+  assert (test_flag_value == True) or isinstance(test_flag_value, int)
+  from scitbx.array_family import flex
+  if (isinstance(flags, flex.bool)):
+    test_flag_value = True
+  else :
+    assert isinstance(flags, flex.int)
+  unique_values = set(flags)
+  if len(unique_values) > 2 : # XXX: is this safe?
+    return flags
+  new_flags = flex.int(flags.size())
+  n_free = flags.count(test_flag_value)
+  if (n_free > 0):
+    n_bins = iceil(flags.size() / n_free)
+  else :
+    n_bins = 1 # XXX dangerous!  but necessary for tiny sets
+  for i in range(flags.size()):
+    if flags[i] == test_flag_value :
+      new_flags[i] = 0
+    else :
+      new_flags[i] = iceil(random.random() * (n_bins - 1))
+  return new_flags
+
+def export_r_free_flags_for_shelx(flags, test_flag_value):
+  assert (test_flag_value == True) or isinstance(test_flag_value, int)
+  from scitbx.array_family import flex
+  if (isinstance(flags, flex.bool)):
+    test_flag_value = True
+  else :
+    assert isinstance(flags, flex.int)
+  new_flags = flex.int(flags.size(), 1)
+  for i in range(flags.size()):
+    if (flags[i] == test_flag_value):
+      new_flags[i] = -1
+  return new_flags
+
+def looks_like_ccp4_flags(flags):
+  from scitbx.array_family import flex
+  assert isinstance(flags.data(), flex.int)
+  return (flex.max(flags.data()) >= 4)
+
+def adjust_fraction(miller_array, fraction, log=None):
+  """
+  Expand or shrink an existing set of R-free flags to match the target
+  fraction.
+  """
+  from scitbx.array_family import flex
+  assert (isinstance(miller_array.data(), flex.bool))
+  assert (fraction > 0) and (fraction < 1)
+  if (log is None) : log = sys.stdout
+  n_refl = miller_array.data().size()
+  n_free = miller_array.data().count(True)
+  assert (n_refl > 0)
+  current_fraction = n_free / n_refl
+  print("  current fraction free: %g" % current_fraction, file=log)
+  print("                 target: %g" % fraction, file=log)
+  new_flags = None
+  # XXX this should probably be more approximate
+  if (current_fraction == fraction):
+    new_flags = miller_array
+  elif (current_fraction > fraction):
+    # move existing flags to work set
+    sub_fraction = fraction / current_fraction
+    print("  shrinking old test set by a factor of %g" % sub_fraction, file=log)
+    work_set = miller_array.select(~miller_array.data())
+    free_set = miller_array.select(miller_array.data())
+    # XXX the code in cctbx.miller requires a fraction between 0 and 0.5 -
+    # since I'm not sure if this is an implementation detail or just something
+    # to prevent users from doing something stupid, I'm using this clumsy
+    # workaround.
+    assert (sub_fraction > 0) and (sub_fraction < 1.0)
+    if (sub_fraction == 0.5):
+      sub_fraction = 0.501
+    if (sub_fraction >= 0.5):
+      free_set_new = free_set.generate_r_free_flags(
+        fraction=1.0-sub_fraction,
+        max_free=None,
+        use_lattice_symmetry=True)
+      free_set_new = free_set_new.customized_copy(
+        data=~free_set_new.data())
+    else :
+      free_set_new = free_set.generate_r_free_flags(
+        fraction=sub_fraction,
+        max_free=None,
+        use_lattice_symmetry=True)
+    new_flags = work_set.complete_with(other=free_set_new)
+  else :
+    # generate additional flags
+    fraction_new = (fraction - current_fraction) / (1 - current_fraction)
+    print("  flagging %g of current work set for R-free" % fraction_new, file=log)
+    assert (fraction_new > 0)
+    work_set = miller_array.select(~miller_array.data())
+    free_set = miller_array.select(miller_array.data())
+    assert (work_set.indices().size() > 0)
+    flags_new = work_set.generate_r_free_flags(
+      fraction=fraction_new,
+      max_free=None,
+      use_lattice_symmetry=True)
+    new_flags = flags_new.complete_with(other=free_set)#miller_array)
+  assert (new_flags.indices().size() == miller_array.indices().size())
+  print("    old flags: %d free (out of %d) " % (n_free, n_refl), file=log)
+  print("    new flags: %d free" % new_flags.data().count(True), file=log)
+  return new_flags
+
+# XXX if the flags don't actually need extending, the original
+# values will be preserved.  I think this is a good thing, but does
+# this inconsistency cause problems elsewhere?
+def extend_flags(
+    r_free_flags,
+    test_flag_value,
+    array_label,
+    complete_set=None,
+    accumulation_callback=None,
+    preserve_input_values=False,
+    allow_uniform_flags=False,
+    d_max=None,
+    d_min=None,
+    log=None):
+  from scitbx.array_family import flex
+  if (log is None) : log = null_out()
+  assert (test_flag_value is not None)
+  r_free_as_bool = get_r_free_as_bool(r_free_flags,
+    test_flag_value).data()
+  assert isinstance(r_free_as_bool, flex.bool)
+  if(r_free_as_bool.size() == 0):
+    msg = """\
+WARNING: array of R-free flags (%s) is empty.""" % array_label
+    print(msg, file=log)
+    return r_free_flags
+  fraction_free = r_free_as_bool.count(True) / r_free_as_bool.size()
+  print("%s: fraction_free=%.3f" %(array_label, fraction_free), file=log)
+  if (fraction_free == 0):
+    if (allow_uniform_flags):
+      msg = """\
+WARNING: R-free flags in %s do not appear to contain a valid test, so they \
+can't be extended to higher resolution.""" % array_label
+      print(msg, file=log)
+      return r_free_flags
+    else :
+      raise Sorry(("Can't extend R-free flags in %s to higher resolution "+
+        "because no valid test set with flag value '%s' was found.") %
+        (array_label, test_flag_value))
+  if (complete_set is not None):
+    missing_set = complete_set.lone_set(r_free_flags)
+  else :
+    tmp_d_max, tmp_d_min = r_free_flags.d_max_min()
+    if (d_max is None) : d_max = tmp_d_max
+    if (d_min is None) : d_min = tmp_d_min
+    missing_set = r_free_flags.complete_set(d_min=d_min,
+      d_max=d_max).lone_set(r_free_flags.map_to_asu())
+  n_missing = missing_set.indices().size()
+  print("%s: missing %d reflections" % (array_label, n_missing), file=log)
+  output_array = r_free_flags
+  if (n_missing != 0):
+    if (n_missing <= 20):
+      # FIXME: MASSIVE CHEAT necessary for tiny sets
+      missing_flags = missing_set.array(data=flex.bool(n_missing,False))
+    else :
+      if accumulation_callback is not None :
+        if not accumulation_callback(miller_array=r_free_flags,
+                                     test_flag_value=test_flag_value,
+                                     n_missing=n_missing,
+                                     column_label=array_label):
+          return r_free_flags
+      missing_flags = missing_set.generate_r_free_flags(
+        fraction=fraction_free,
+        max_free=None,
+        use_lattice_symmetry=True)
+    if (preserve_input_values):
+      if (looks_like_ccp4_flags(r_free_flags)):
+        print("Exporting missing flags to CCP4 convention", file=log)
+        exported_flags = export_r_free_flags_for_ccp4(
+          flags=missing_flags.data(),
+          test_flag_value=True) #test_flag_value)
+        output_array = r_free_flags.concatenate(
+          other=missing_flags.customized_copy(data=exported_flags))
+      else :
+        # XXX this is gross too - what conventions (if any) should be
+        # followed here?
+        work_flag_value = None
+        if (test_flag_value in [1,-1]):
+          work_flag_value = 0
+        elif (test_flag_value == 0):
+          work_flag_value = 1
+        if (work_flag_value is None):
+          raise Sorry(("PHENIX doesn't know how to deal with the "+
+            "R-free flag convention in %s; you will need to "+
+            "disable either extending the flags or preserving the "+
+            "input values.") % (array_label))
+        exported_flags = flex.int()
+        new_flags = missing_flags.data()
+        for i_seq in range(missing_flags.data().size()):
+          if (new_flags[i_seq]):
+            exported_flags.append(test_flag_value)
+          else :
+            exported_flags.append(work_flag_value)
+        output_array = r_free_flags.concatenate(
+          other=missing_flags.customized_copy(data=exported_flags))
+    else :
+      output_array = r_free_flags.concatenate(other=missing_flags)
+  return output_array
+
+def get_r_free_stats(miller_array, test_flag_value):
+  from scitbx.array_family import flex
+  array = get_r_free_as_bool(miller_array, test_flag_value)
+  n_free = array.data().count(True)
+  accu =  array.sort(by_value="resolution").r_free_flags_accumulation()
+  lr = flex.linear_regression(accu.reflection_counts.as_double(),
+                              accu.free_fractions)
+  assert lr.is_well_defined()
+  slope = lr.slope()
+  y_ideal = accu.reflection_counts.as_double() * slope
+  sse = 0
+  n_bins = 0
+  n_ref_last = 0
+  sse = flex.sum(flex.pow(y_ideal - accu.free_fractions, 2))
+  for x in accu.reflection_counts :
+    if x > (n_ref_last + 1):
+      n_bins += 1
+    n_ref_last = x
+  return (n_bins, n_free, sse, accu)
+
+def get_r_free_as_bool(miller_array, test_flag_value=0):
+  if miller_array.is_bool_array():
+    return miller_array
+  else :
+    from scitbx.array_family import flex
+    assert isinstance(test_flag_value, int)
+    assert miller_array.is_integer_array()
+    new_data = miller_array.data() == test_flag_value
+    assert isinstance(new_data, flex.bool)
+    return miller_array.customized_copy(data=new_data, sigmas=None)
+
+def remediate_mismatches(array, verbose=False, log=None):
+  """
+  Given a set of R-free flags generated for anomalous data, detect any
+  mismatches between Friedel/Bijvoet mates, and move reflections to the
+  free set as needed to ensure consistency.
+  """
+  if (log is None) : log = null_out()
+  if (not array.anomalous_flag()):
+    return array
+  assert array.is_bool_array()
+  array = array.map_to_asu()
+  orig_array = array.deep_copy()
+  array = array.as_non_anomalous_array()
+  merge = array.merge_equivalents(incompatible_flags_replacement=True)
+  if (merge.n_incompatible_flags > 0):
+    print("  %d reflections moved to test set" % \
+      merge.n_incompatible_flags, file=log)
+  new_flags = merge.array().generate_bijvoet_mates().common_set(
+    other=orig_array)
+  assert len(new_flags.indices()) == len(orig_array.indices())
+  return new_flags
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/run_examples.py
+from __future__ import absolute_import, division, print_function
+from libtbx import test_utils
+import libtbx.load_env
+
+def run():
+  tst_list = (
+  "$B/../exe_dev/cctbx.getting_started",
+  "$B/../exe_dev/cctbx.sym_equiv_sites",
+  "$D/examples/getting_started.py",
+  ["$D/examples/space_group_matrices.py", "P31"],
+  ["$D/examples/space_subgroups.py", "2", "P41212"],
+  "$D/examples/trigonal_r_vs_tetragonal_i.py",
+  "$D/examples/quartz_structure.py",
+  "$D/examples/fft_map_electron_density_around_atom.py",
+  "$D/examples/find_sys_abs_equiv_space_groups.py",
+  "$D/examples/find_distances_using_cpp_objects.py",
+  "$D/examples/analyze_adp.py",
+  "$D/examples/g_exp_i_partial_derivatives.py",
+  "$D/examples/tst_exp_i_alpha_derivatives.py",
+  "$D/examples/tst_g_exp_i_alpha_derivatives.py",
+  "$D/examples/tst_structure_factor_derivatives.py",
+  "$D/examples/tst_structure_factor_derivatives_2.py",
+  ["$D/examples/tst_structure_factor_derivatives_3.py", "P31"],
+  ["$D/examples/tst_structure_factor_derivatives_4.py", "--tag=internal"],
+  "$D/examples/structure_factor_calculus/site_derivatives.py",
+  "$D/examples/structure_factor_calculus/u_star_derivatives.py",
+  "$D/examples/structure_factor_calculus/sites_derivatives.py",
+  "$D/examples/structure_factor_calculus/sites_least_squares_derivatives.py",
+  ["$D/examples/all_axes.py", "P31"],
+  ["$D/examples/tst_phase_o_phrenia.py", "P2"],
+  "$D/examples/map_skewness.py",
+  "$D/examples/site_symmetry_table.py",
+  "$D/examples/site_symmetry_constraints.py",
+  "$D/examples/adp_symmetry_constraints.py",
+  "$D/examples/unit_cell_refinement.py",
+  "$D/examples/miller_common_sets.py",
+  "$D/examples/miller_transform.py",
+  "$D/examples/change_hand_p31.py",
+  "$D/examples/steve_collins.py",
+  "$D/examples/cr2o3_primitive_cell.py",
+  "$D/examples/cr2o3_consistency_checks.py",
+  "$D/examples/reduced_cell_two_folds.py",
+  "$D/examples/lebedev_2005_perturbation.py",
+  "$D/examples/le_page_1982_vs_lebedev_2005.py",
+  "$D/examples/random_puckers.py",
+  )
+
+  build_dir = libtbx.env.under_build("cctbx")
+  dist_dir = libtbx.env.dist_path("cctbx")
+
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+from libtbx import test_utils
+import libtbx.load_env
+
+tst_list = [
+  "$D/regression/tst_sf_low_res_accuracy.py",
+  "$D/regression/tst_miller_double_step_filtration.py",
+  "$D/regression/tst_map_is_periodic.py",
+  "$D/miller/tst_reindexing.py",
+  "$D/miller/tst_map_to_asu_isym.py",
+  "$D/regression/tst_miller_data_manipulation.py",
+  "$D/omz/tst_bfgs.py",
+  ["$D/omz/tst_dev.py", "P31"],
+  "$D/geometry/tests/tst_geometry.py",
+  "$D/covariance/tests/tst_covariance.py",
+  "$D/symmetry_search/tests/tst_goodness_of_symmetry.py",
+  ["$D/symmetry_search/tests/tst_from_map.py", "P312"],
+  "$D/regression/tst_adp_aniso_restraints.py",
+  "$D/math/boost_python/tst_math.py",
+  "$D/xray/boost_python/tst_targets_fd.py",
+  "$D/xray/boost_python/tst_xray.py",
+  ["$D/regression/tst_xray.py", "I41/acd"],
+  "$D/xray/targets/tst_r1.py",
+  "$D/xray/targets/tst_shelxl_wght_ls.py",
+  "$D/xray/boost_python/tst_f_model.py",
+  "$D/array_family/boost_python/tst_flex.py",
+  "$D/uctbx/boost_python/tst_uctbx.py",
+  "$D/uctbx/boost_python/tst_crystal_orientation.py",
+  "$D/sgtbx/boost_python/tst_sgtbx.py",
+  "$D/sgtbx/boost_python/tst_N_fold_rot.py",
+  "$D/crystal/tst_ext.py",
+  "$D/crystal/tst_distance_based_connectivity.py",
+  "$D/crystal/tst_super_cell.py",
+  "$D/adptbx/boost_python/tst_adptbx.py",
+  #["$D/adptbx/boost_python/tst_hirshfeld.py", "--fix-random-seeds"],
+  "$D/miller/boost_python/tst_miller.py",
+  "$D/eltbx/tests/tst_chemical_elements.py",
+  "$D/eltbx/tests/tst_xray_scattering.py",
+  "$D/eltbx/tests/tst_henke.py",
+  "$D/eltbx/tests/tst_icsd_radii.py",
+  "$D/eltbx/tests/tst_covalent_radii.py",
+  "$D/eltbx/tests/tst_neutron.py",
+  "$D/eltbx/tests/tst_sasaki.py",
+  "$D/eltbx/tests/tst_tiny_pse.py",
+  "$D/eltbx/tests/tst_wavelengths.py",
+  "$D/eltbx/tests/tst_formula.py",
+  "$D/eltbx/tests/tst_attenuation_coefficient.py",
+  "$D/maptbx/boost_python/tst_maptbx.py",
+  "$D/maptbx/tst_bcr.py",
+  "$D/maptbx/tst_loft.py",
+  "$D/dmtbx/boost_python/tst_dmtbx.py",
+  "$D/translation_search/boost_python/tst_translation_search.py",
+  "$D/geometry_restraints/tst_ext.py",
+  "$D/geometry_restraints/tst_proxy_registry.py",
+  "$D/geometry_restraints/tst_nonbonded_overlaps.py",
+  "$D/geometry_restraints/tst_process_nonbonded_proxies.py",
+  "$D/geometry_restraints/tst_angle_derivs.py",
+  "$D/geometry_restraints/tst_motif.py",
+  "$D/adp_restraints/tst_ext.py",
+  "$D/regression/tst_math_module.py",
+  ["$D/regression/tst_krivy_gruber.py", "--Quick"],
+  "$D/regression/tst_sgtbx.py",
+  "$D/regression/tst_itvb_2001_table_a1427_hall_symbols.py",
+  "$D/regression/tst_space_group_type_tidy_cb_op_t.py",
+  ["$D/regression/tst_sgtbx_denominators.py", "P31"],
+  "$D/regression/tst_sgtbx_subgroups.py",
+  "$D/regression/tst_sgtbx_lattice_symmetry.py",
+  ["$D/regression/tst_adp_constraints.py", "P3"],
+  "$D/regression/tst_adp_constraints_cartesian.py",
+  "$D/regression/tst_sgtbx_site_constraints.py",
+  "$D/regression/tst_reflection_statistics.py",
+  "$D/regression/tst_sgtbx_harker.py",
+  "$D/regression/tst_sgtbx_special_op_simplifier.py",
+  "$D/regression/tst_twin_target.py",
+  "$D/sgtbx/symbol_confidence.py",
+  "$D/sgtbx/bravais_types.py",
+  "$D/regression/tst_miller_lookup_utils.py",
+  ["$D/regression/tst_crystal.py", "I41/acd"],
+  ["$D/regression/tst_direct_space_asu.py", "I41/acd"],
+  "$D/regression/tst_pair_asu_table.py",
+  "$D/regression/tst_crystal_asu_clusters.py",
+  "$D/regression/tst_coordination_sequences.py",
+  ["$D/regression/tst_crystal_close_packing.py", "R-3mr"],
+  ["$D/regression/tst_fourier_transform_real_part_at_x.py", "P31"],
+  ["$D/regression/tst_miller.py", "P31"],
+  "$D/regression/tst_mem.py",
+  "$D/regression/tst_mem_2.py",
+  ["$D/regression/tst_reciprocal_space_asu.py", "P312"],
+  ["$D/regression/tst_triplet_generator.py", "P41"],
+  ["$D/regression/tst_emma.py", "P31"],
+  ["$D/regression/tst_expand_to_p1.py", "P31"],
+  ["$D/regression/tst_change_basis.py", "P31"],
+  ["$D/regression/tst_wilson_plot.py", "P31"],
+  #"$D/regression/tst_xray_target_functors.py",
+  ["$D/regression/tst_xray_derivatives.py", "P31"],
+  ["$D/regression/tst_xray_fast_gradients.py", "P31"],
+  ["$D/regression/tst_xray_minimization.py", "--F", "P31"],
+  ["$D/regression/tst_xray_minimization.py", "--F_sq", "P31"],
+  ["$D/regression/tst_maptbx_structure_factors.py", "P31"],
+  ["$D/regression/tst_map_weights_for_symmetry_summation.py", "Pmmm"],
+  "$D/maptbx/tst_real_space_refinement_simple.py",
+  "$D/maptbx/tst_interpolation.py",
+  "$D/maptbx/tst_interpolation_2.py",
+  "$D/regression/tst_loc_res.py",
+  "$D/maptbx/tst_target_and_gradients.py",
+  ["$D/regression/tst_miller_merge_equivalents.py", "P31"],
+  ["$D/regression/tst_grouped_data.py", "P31"],
+  ["$D/regression/tst_miller_fft_map.py", "P31"],
+  ["$D/regression/tst_sampled_model_density.py", "P31"],
+  ["$D/regression/tst_fast_nv1995.py", "F222"],
+  "$D/regression/tst_geometry_restraints.py",
+  "$D/regression/tst_geometry_restraints_lbfgs.py",
+  "$D/regression/tst_geometry_restraints_2.py",
+  "$D/regression/tst_grm_pickling.py",
+  "$D/regression/tst_french_wilson.py",
+  ["$D/development/make_cns_input.py", "P31"],
+  ["$D/development/tst_cns_epsilon.py", "P31"],
+  ["$D/development/tst_cns_hl.py", "P31"],
+  #["$D/development/run_shelx.py", "P31"],
+  ["$D/development/run_shelx76.py", "P31"],
+   "$D/regression/tst_pointgroup_tools.py",
+   "$D/sgtbx/sub_lattice_tools.py",
+   "$D/sgtbx/rational_matrices_point_groups.py",
+   "$D/sgtbx/cosets.py",
+   "$D/sgtbx/reticular_pg_tools.py",
+   "$D/sgtbx/reticular_twin_laws.py",
+   "$D/regression/tst_find_best_cell.py",
+   "$D/regression/tst_amplitude_normalisation.py",
+   "$D/regression/tst_statistics_graphs.py",
+   "$D/regression/tst_web_change_basis.py",
+   "$D/sgtbx/direct_space_asu/proto/tst_asu.py",
+   "$D/regression/tst_sgtbx_tidy_pickling.py",
+   "$D/masks/tests/tst_flood_fill.py",
+   "$D/regression/tst_r_free_utils.py",
+   "$D/xray/observations/tst_observations.py",
+   "$D/maptbx/tst_ccp.py",
+   "$D/maptbx/tst_mask.py",
+   "$D/maptbx/tst_map_peak_3d_as_2d.py",
+   "$D/maptbx/tst_asymmetric_map.py",
+   "$D/maptbx/tst_peak_volume_estimate.py",
+   "$D/maptbx/tst_resolution_from_map_and_model.py",
+   "$D/maptbx/tst_atom_curves.py",
+   "$D/maptbx/tst_atom_radius_as_central_peak_width.py",
+   "$D/maptbx/tst_get_percentile_cutoffs.py",
+   "$D/regression/tst_maptbx_box.py",
+   "$D/regression/tst_create_models_or_maps.py",
+   "$D/regression/tst_sphericity.py",
+   "$D/regression/tst_miller_statistics.py",
+   "$D/merging/brehm_diederichs.py",
+   #
+   "$D/multipolar/regression/tst_multipolar.py",
+   "$D/regression/tst_connectivity.py",
+   "$D/regression/tst_connectivity_allsym.py",
+   "$D/regression/tst_diffuse.py",
+   "$D/regression/tst_grm_modifications.py",
+   "$D/regression/tst_grm_modifications_rm.py",
+   "$D/regression/tst_prepare_map_for_docking.py",
+   "$D/regression/tst_wavelength_units.py",
+  ]
+
+try:
+  import torch # test import
+except ImportError:
+  pass
+else:
+  tst_list.extend([
+    "$D/dispersion/tests/tst_kramers_kronig_helper.py",
+    "$D/dispersion/tests/tst_kramers_kronig_optimize.py",
+    "$D/dispersion/tests/tst_kramers_kronig.py",
+    ])
+
+tst_list_expected_unstable = [
+  "$D/regression/tst_fcalc_fft_stability.py",
+  ]
+
+def run():
+  build_dir = libtbx.env.under_build("cctbx")
+  dist_dir = libtbx.env.dist_path("cctbx")
+
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/statistics.py
+from __future__ import absolute_import, division, print_function
+
+import cctbx.eltbx.xray_scattering
+from cctbx import eltbx
+from cctbx.array_family import flex
+from libtbx.utils import plural_s
+import math
+from cctbx import xray, crystal
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+ext = bp.import_ext("cctbx_statistics_ext")
+from cctbx_statistics_ext import *
+
+mean_number_of_atoms_per_amino_acid = {'C': 5, 'N': 3, 'O': 1}
+
+class empty: pass
+
+class wilson_plot(object):
+
+  def __init__(self, f_obs, asu_contents, scattering_table="wk1995", e_statistics=False):
+    assert scattering_table in [
+      "n_gaussian", "it1992", "wk1995", "electron", "neutron"]
+    assert f_obs.is_real_array()
+    self.info = f_obs.info()
+    f_obs_selected = f_obs.select(f_obs.data() > 0)
+    f_obs_selected.use_binning_of(f_obs)
+    # compute <fobs^2> in resolution shells
+    self.mean_fobs_sq = f_obs_selected.mean_sq(
+      use_binning=True,
+      use_multiplicities=True).data[1:-1]
+    n_none = self.mean_fobs_sq.count(None)
+    if (n_none > 0):
+      error_message = "wilson_plot error: %d empty bin%s:" % plural_s(n_none)
+      if (self.info is not None):
+        error_message += "\n  Info: " + str(self.info)
+      error_message += "\n  Number of bins: %d" % len(self.mean_fobs_sq)
+      error_message += "\n  Number of f_obs > 0: %d" % (
+        f_obs_selected.indices().size())
+      error_message += "\n  Number of f_obs <= 0: %d" % (
+        f_obs.indices().size() - f_obs_selected.indices().size())
+      raise RuntimeError(error_message)
+    self.mean_fobs_sq = flex.double(self.mean_fobs_sq)
+    # compute <s^2> = <(sin(theta)/lambda)^2> in resolution shells
+    stol_sq = f_obs_selected.sin_theta_over_lambda_sq()
+    stol_sq.use_binner_of(f_obs_selected)
+    self.mean_stol_sq = flex.double(stol_sq.mean(
+      use_binning=True,
+      use_multiplicities=True).data[1:-1])
+    #
+    scatterers = flex.xray_scatterer()
+    for chemical_type in asu_contents.keys():
+      sc = xray.scatterer(
+       scattering_type = chemical_type,
+       site            = (0, 0, 0),
+       u               = 0)
+      scatterers.append(sc)
+    cs = crystal.symmetry((1, 1, 1, 90, 90, 90), "P 1")
+    sp = crystal.special_position_settings(cs)
+    xrs = xray.structure(sp, scatterers)
+    xrs.scattering_type_registry(table = scattering_table)
+    scr = xrs.scattering_type_registry()
+    self.expected_f_sq = flex.double()
+    for stol_sq in self.mean_stol_sq:
+      sum_fj_sq = 0
+      for chemical_type, n_atoms in asu_contents.items():
+        f0 = scr.gaussian(chemical_type).at_stol_sq(stol_sq)
+        sum_fj_sq += f0 * f0 * n_atoms
+      self.expected_f_sq.append(sum_fj_sq)
+    self.expected_f_sq *= f_obs_selected.space_group().order_z() \
+                        * f_obs_selected.space_group().n_ltr()
+#
+# Valuable example of an alternative was to calculate self.expected_f_sq
+#
+#    # cache scattering factor info
+#    gaussians = {}
+#    for chemical_type in asu_contents.keys():
+#      gaussians[chemical_type] = eltbx.xray_scattering.wk1995(
+#        chemical_type).fetch()
+#    # compute expected f_calc^2 in resolution shells
+#    self.expected_f_sq = flex.double()
+#    for stol_sq in self.mean_stol_sq:
+#      sum_fj_sq = 0
+#      for chemical_type, n_atoms in asu_contents.items():
+#        f0 = gaussians[chemical_type].at_stol_sq(stol_sq)
+#        sum_fj_sq += f0 * f0 * n_atoms
+#      self.expected_f_sq.append(sum_fj_sq)
+#    self.expected_f_sq *= f_obs_selected.space_group().order_z() \
+#                        * f_obs_selected.space_group().n_ltr()
+#
+    # fit to straight line
+    self.x = self.mean_stol_sq
+    self.y = flex.log(self.mean_fobs_sq / self.expected_f_sq)
+    fit = flex.linear_regression(self.x, self.y)
+    assert fit.is_well_defined()
+    self.fit_y_intercept = fit.y_intercept()
+    self.fit_slope = fit.slope()
+    self.wilson_intensity_scale_factor = math.exp(self.fit_y_intercept) # intensity scale factor
+    self.wilson_k = math.sqrt(self.wilson_intensity_scale_factor) # conversion to amplitude scale factor
+    self.wilson_b = -self.fit_slope / 2
+    self.fit_correlation = flex.linear_correlation(self.x,self.y).coefficient()
+
+    if e_statistics:
+      normalised = f_obs_selected.normalised_amplitudes(asu_contents, self)
+      self.normalised_f_obs = normalised.array()
+      self.mean_e_sq_minus_1 = normalised.mean_e_sq_minus_1()
+      self.percent_e_sq_gt_2 = normalised.percent_e_sq_gt_2()
+
+  def xy_plot_info(self):
+    r = empty()
+    r.title = "Wilson Plot"
+    if (self.info != 0):
+      r.title += ": " + str(self.info)
+    r.x = self.x
+    r.y = self.y
+    r.xLegend = "(sin(theta)/lambda)^2"
+    r.yLegend = "ln(<Fobs^2>/<Fcalc^2>)"
+    r.fit_y_intercept = self.fit_y_intercept
+    r.fit_slope = self.fit_slope
+    r.fit_correlation = self.fit_correlation
+    r.overlayLegend = ("k=%f, b=%f, corr=%f" % (
+      self.wilson_k, self.wilson_b, self.fit_correlation))
+    return r
+
+class cumulative_intensity_distribution(object):
+  # As described by  Howells, Phillips and Rogers, Acta Cryst. (1950). 3, 210
+
+  def __init__(self, f_obs=None, f_obs_sq=None):
+    assert [f_obs, f_obs_sq].count(None) == 1
+    if f_obs is not None:
+      assert f_obs.binner() is not None
+      self.info = f_obs.info()
+      f_obs_sq = f_obs.f_as_f_sq()
+      f_obs_sq.use_binner_of(f_obs)
+    else:
+      assert f_obs_sq.binner() is not None
+      self.info = f_obs_sq.info()
+    mean_f_obs_sq = f_obs_sq.mean(use_binning=True)
+    mean_data = flex.double(mean_f_obs_sq.data[1:f_obs_sq.binner().n_bins_used()+1])
+    bin_d_max = flex.double([mean_f_obs_sq.binner.bin_d_range(i)[1]
+                   for i in range(1,f_obs_sq.binner().n_bins_used()+1)])
+    result = cumulative_intensity_core(f_obs_sq.data(),
+                                    f_obs_sq.d_spacings().data(),
+                                    mean_data,
+                                    bin_d_max,
+                                    f_obs_sq.indices())
+    self.x = result.x()
+    self.y = result.y()
+
+  def xy_plot_info(self):
+    r = empty()
+    r.title = "Cumulative Intensity Distribution"
+    if (self.info != 0):
+      r.title += ": " + str(self.info)
+    r.x = self.x
+    r.y = self.y
+    r.xLegend = "z"
+    r.yLegend = "N(z)"
+    return r
+
+class sys_absent_intensity_distribution(object):
+  # I/sigma(I) vs I
+
+  def __init__(self, f_obs):
+    self.info = f_obs.info()
+    sys_absences = f_obs.select_sys_absent()
+    if sys_absences.size() == 0:
+      self.x = None
+      self.y = None
+      self.indices = None
+    else:
+      assert sys_absences.sigmas() is not None
+      intensities = sys_absences.as_intensity_array()
+      self.x = (intensities/sys_absences.sigmas()).data()
+      self.y = intensities.data()
+      self.indices = intensities.indices()
+
+  def xy_plot_info(self):
+    r = empty()
+    r.title = "Systematic Absences Intensity Distribution"
+    if (self.info != 0):
+      r.title += ": " + str(self.info)
+    r.x = self.x
+    r.y = self.y
+    r.indices = self.indices
+    r.xLegend = "I/sigma(I)"
+    r.yLegend = "Intensity"
+    return r
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/symmetry_search.py
+from __future__ import absolute_import, division, print_function
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+ext = bp.import_ext("cctbx_symmetry_search_ext")
+from cctbx_symmetry_search_ext import ls_with_scale_and_bias
+
+from cctbx import miller
+from cctbx import sgtbx
+from cctbx.sgtbx import lattice_symmetry
+from cctbx import maptbx
+from libtbx import adopt_optional_init_args
+from scitbx import matrix as mat
+import scitbx.math
+from scitbx.math import clustering
+from cctbx.array_family import flex
+import itertools
+
+class symmetrised_shifted_structure_factors(object):
+
+  def __init__(self, miller_set, f_c_in_p1, x, compute_gradient=False):
+    assert miller_set.unit_cell().is_similar_to(f_c_in_p1.unit_cell())
+    sssft = ext.symmetrised_shifted_structure_factors(
+      miller_set.space_group(),
+      miller_set.indices(),
+      miller.f_calc_map(f_c_in_p1.indices(), f_c_in_p1.data(),
+                        miller_set.anomalous_flag()),
+      x,
+      compute_gradient)
+    self.f_x = miller.array(miller_set, sssft.f_x)
+    self.grad_f_x = sssft.grad_f_x
+
+  def misfit(self, f_o_or_f_o_sq):
+    assert self.f_x.is_similar_symmetry(f_o_or_f_o_sq)
+    assert self.f_x.indices().all_eq(f_o_or_f_o_sq.indices())
+    assert (f_o_or_f_o_sq.is_xray_amplitude_array()
+            or f_o_or_f_o_sq.is_xray_intensity_array())
+    if f_o_or_f_o_sq.is_xray_amplitude_array():
+      f_o_sq = f_o_or_f_o_sq.f_as_f_sq()
+    else:
+      f_o_sq = f_o_or_f_o_sq
+    return ls_with_scale_and_bias(self.f_x.data(),
+                                  self.grad_f_x,
+                                  f_o_sq.data(),
+                                  self.f_x.multiplicities().data().as_double())
+
+
+class shift_refinement(object):
+
+  def __init__(self, f_obs, fc_in_p1, initial_shift):
+    self.f_obs = f_obs
+    self.fc_in_p1 = fc_in_p1
+    self.initial_shift = initial_shift
+    self.x = flex.double(self.initial_shift)
+    self.initial_goos = None
+    scitbx.lbfgs.run(self,
+                     scitbx.lbfgs.termination_parameters(
+                       traditional_convergence_test_eps=0.01))
+    self.shift = mat.col(self.x)
+    del self.x
+
+  def compute_functional_and_gradients(self):
+    sssf = symmetrised_shifted_structure_factors(self.f_obs,
+                                                 self.fc_in_p1,
+                                                 tuple(self.x),
+                                                 compute_gradient=True)
+    self.symmetrised_shifted_sf = sssf
+    goos = sssf.misfit(self.f_obs)
+    if self.initial_goos is None:
+      self.initial_goos = goos
+    self.goos = goos
+    return goos.value, flex.double(goos.gradient)
+
+
+# the denominator used throughout for space-group symmetries
+sg_t_den = 12
+
+class structure_factor_symmetry(object):
+  """ Crystallographic symmetry of complex structure factors.
+
+  All attributes featuring crystallographic elements (origin, spacegroup,
+  etc) are in a primitive unit cell. """
+
+  grid_resolution_factor = 0.4
+  cross_correlation_cutoff_for_centring = 0.75
+  phi_sym_acceptance_cutoff = 0.25
+  phi_sym_rejection_cutoff = 0.5
+
+  def __init__(self, f_in_p1, **kwds):
+    isinstance(f_in_p1, miller.array)
+    assert f_in_p1.space_group().type().hall_symbol() == ' P 1'
+    self.f_in_p1 = f_in_p1
+    adopt_optional_init_args(self, kwds)
+
+    self.search_parameters = maptbx.peak_search_parameters(
+      peak_search_level=3,
+      interpolate=True,
+      min_distance_sym_equiv=0.25,
+    )
+
+    self.space_group = sgtbx.space_group('P 1', t_den=sg_t_den)
+    self.origin = None
+    self.symmetry_pool = []
+
+    self.find_centring_translations()
+
+    if self.space_group.order_z() > 1:
+      f_in_centered = self.f_in_p1.customized_copy(
+        space_group_info=sgtbx.space_group_info(group=self.space_group)
+        ).eliminate_sys_absent().merge_equivalents().array()
+      self.cb_op_to_primitive = \
+          f_in_centered.change_of_basis_op_to_primitive_setting()
+      self.f_in_p1 = f_in_centered.change_basis(self.cb_op_to_primitive)
+      self.space_group = self.f_in_p1.space_group()
+    else:
+      self.cb_op_to_primitive = sgtbx.change_of_basis_op()
+
+    self.f_in_p1 = self.f_in_p1.generate_bijvoet_mates()
+    self.find_space_group()
+    self.space_group = sgtbx.space_group(self.space_group.type().hall_symbol(),
+                                         t_den=sgtbx.sg_t_den)
+    self.space_group_info = sgtbx.space_group_info(group=self.space_group)
+
+  def centring_translation_peak_sites(self):
+    f = self.f_in_p1
+    cc_sf = f * f.conjugate().data() / f.sum_sq()
+    cc_map = cc_sf.fft_map(
+      symmetry_flags=maptbx.use_space_group_symmetry,
+      resolution_factor=self.grid_resolution_factor)
+
+    heights = flex.double()
+    sites = []
+    cc_map_peaks = cc_map.peak_search(self.search_parameters)
+    zero = mat.zeros(3)
+    for cc_peak_info in itertools.islice(cc_map_peaks, 5):
+      if abs(mat.col(cc_peak_info.site) - zero) < 0.01: continue
+      heights.append(cc_peak_info.height)
+      sites.append(cc_peak_info.site)
+
+    if not heights: return ()
+    clusters = clustering.two_means(heights)
+    if clusters.highest_stat < self.cross_correlation_cutoff_for_centring:
+      return ()
+    return sites[:clusters.cut]
+
+  def find_centring_translations(self):
+    for d in self.centring_translation_peak_sites():
+      t = [ scitbx.math.continued_fraction.from_real(x, 1e-2).as_rational()
+            for x in d ]
+      if t.count(0) > 1: continue
+      unique_denominators = list(dict(
+        [ (r.denominator(), 1) for r in t if r.numerator() != 0 ]).keys())
+      assert len(unique_denominators) in (0, 1)
+      if len(unique_denominators) == 1:
+        den = unique_denominators[0]
+        num = [ r.numerator() for r in t ]
+        tr_vec = sgtbx.tr_vec(num, den)
+        try:
+          tr_vec = tr_vec.new_denominator(sg_t_den)
+        except RuntimeError as e:
+          if (not str(e).endswith(
+                "Unsuitable value for rational translation vector.")):
+            raise
+          raise RuntimeError(
+            "Sorry not implemented: handling of translation vector %s"
+              % str(tuple(t)))
+        self.space_group.expand_ltr(tr_vec)
+
+  def possible_point_group_generators(self):
+    lattice_group = lattice_symmetry.group(self.f_in_p1.unit_cell(),
+                                           max_delta=1)
+    lattice_group.expand_inv(sgtbx.tr_vec((0,0,0)))
+    rot_parts = set()
+    decorated_rot_parts = []
+    for op in lattice_group:
+      r = op.r()
+      if r.is_unit_mx(): continue
+      if op.inverse() in rot_parts: continue
+      r_info = sgtbx.rot_mx_info(r)
+      if r_info.type() < -2: continue
+      rot_parts.add(op)
+      decorated_rot_parts.append(
+        (r_info.type() == -1, # inversion shall come first,
+         list(r_info.ev()).count(0), # axes // to unit cell shall come first
+                                     # note Python 2.5- compatibility
+         r_info.type() == -2, # mirrors preferred.
+         r.order(), # higher order preferred
+         op))
+    decorated_rot_parts.sort()
+    decorated_rot_parts.reverse()
+    for item in decorated_rot_parts: yield item[-1]
+
+  def cross_correlation_peaks(self):
+    f0 = self.f_in_p1
+    for op in self.possible_point_group_generators():
+      f, op_times_f = f0.common_sets(
+        f0.change_basis(sgtbx.change_of_basis_op(op)),
+        assert_is_similar_symmetry=False)
+      #assert f.size() == f0.size()
+      #XXX a better sanity check is needed here to check the amount of overlap
+      #XXX between transformed indices
+      cc_sf = f * op_times_f.conjugate().data() / f.sum_sq()
+      cc_map = cc_sf.fft_map(
+        symmetry_flags=maptbx.use_space_group_symmetry,
+        resolution_factor=self.grid_resolution_factor)
+      if 0: # display 3D map
+        from crys3d.qttbx import map_viewer
+        map_viewer.display(window_title=op.as_xyz(),
+                           fft_map = cc_map,
+                           iso_level_positive_range_fraction=0.8,
+                           wires=True,
+                           orthographic=True)
+      cc_map_peaks = cc_map.peak_search(self.search_parameters)
+      peak = next(cc_map_peaks)
+      yield (op.r(), mat.col(peak.site))
+
+  def find_space_group(self):
+    decorated_symmetry_pool = []
+    denominator = 12**3
+    for i, (r, d) in enumerate(self.cross_correlation_peaks()):
+      t = sgtbx.tr_vec((d*denominator).as_int(), tr_den=denominator)
+      cb_op = sgtbx.change_of_basis_op(sgtbx.rt_mx(r, t))
+      phi_sym = self.f_in_p1.symmetry_agreement_factor(
+        cb_op, assert_is_similar_symmetry=False)
+      if phi_sym < self.phi_sym_acceptance_cutoff:
+        status = possible_symmetry.accepted
+      elif phi_sym < self.phi_sym_rejection_cutoff:
+        status = possible_symmetry.unsure
+      else:
+        status = possible_symmetry.rejected
+      decorated_symmetry_pool.append(
+        (-status, i, possible_symmetry(r, d, phi_sym, status)))
+    decorated_symmetry_pool.sort()
+    self.symmetry_pool = [ item[-1] for item in decorated_symmetry_pool ]
+
+    self.origin = mat.mutable_zeros(3)
+    for symm in self.symmetry_pool:
+      if symm.status != symm.accepted: continue
+      symm.set_components_of_global_origin(self.origin)
+      if self.origin.elems.count(0) == 0: break
+    for symm in self.symmetry_pool:
+      if symm.status != symm.accepted: continue
+      symm.change_origin(self.origin)
+      self.space_group.expand_smx(symm.rt)
+
+  def __str__(self):
+    return '\n'.join([ str(e) for e in self.symmetry_pool ])
+
+  def symmetrised_structure_factors(self, x=None, delta=None):
+    assert x is None or delta is None
+    if delta is not None: x = -self.origin - delta
+    elif x is None: x = -self.origin
+    f_o = self.f_in_p1\
+        .as_amplitude_array()\
+        .customized_copy(space_group_info=self.space_group_info)\
+        .merge_equivalents().array()
+    ssf = symmetrised_shifted_structure_factors(f_o, self.f_in_p1, x)
+    gos = ssf.misfit(f_o)
+    return gos, ssf.f_x
+
+
+class possible_symmetry(object):
+
+  accepted, unsure, rejected = range(3) # possible values of self.status
+
+  def __init__(self, r, d, symmetry_agreement, status):
+    assert r.den() == 1
+    self.r = r
+    order = r.order()
+    self.r_info = sgtbx.rot_mx_info(r)
+    type = self.r_info.type()
+    axis = self.r_info.ev()
+
+    self.symmetry_agreement = symmetry_agreement
+    self.status = status
+
+    # compute intrinsic and location part of d, using p, which is
+    # the order times the projector onto r's invariant space
+    p = mat.sqr(r.accumulate().as_double())
+    t_i_num = (p*d).as_int()
+    t_l = d - t_i_num/order
+    t_i = sgtbx.tr_vec(sg_t_den//order*t_i_num, tr_den=sg_t_den)
+
+    # compute the origin corresponding to t_l by solving
+    # (1 - r) o = t_l
+    one_minus_r = -mat.sqr(self.r.minus_unit_mx().num())
+    one_minus_r_row_echelon = one_minus_r.as_flex_int_matrix()
+    q = mat.identity(3).as_flex_int_matrix()
+    rank = scitbx.math.row_echelon_form_t(one_minus_r_row_echelon, q)
+    qd = flex.double(mat.sqr(q)*t_l)[:rank]
+    o = flex.double((0,0,0))
+    scitbx.math.row_echelon_back_substitution_float(
+      one_minus_r_row_echelon, qd, o)
+
+    # construct object state
+    self.t_i, self.raw_origin = t_i, mat.col(o)
+    self.origin = None
+    self.one_minus_r = one_minus_r
+
+  def set_components_of_global_origin(self, origin):
+    for i in range(3):
+      if origin[i] == 0 and self.raw_origin[i] != 0:
+        origin[i] = self.raw_origin[i]
+
+  def change_origin(self, origin):
+    o = self.raw_origin - origin
+    t_l = self.one_minus_r*o
+    t_l = sgtbx.tr_vec((sg_t_den*t_l).as_int(), tr_den=sg_t_den)
+    self.rt = sgtbx.rt_mx(self.r, self.t_i.plus(t_l).new_denominator(sg_t_den))
+    tr_info = sgtbx.translation_part_info(self.rt)
+    self.origin = tr_info.origin_shift()
+    self.t_i = tr_info.intrinsic_part()
+
+  fmt3vec = ','.join(["%.3f"]*3)
+
+  def __str__(self):
+    return "[%s] % i |(%s) +(%s) @(%s)<=(%s): %.4f" % (
+      {self.accepted: '*', self.unsure: '~', self.rejected: ' '}[self.status],
+      self.r.type(), "% i, % i, % i" % self.r_info.ev(), self.t_i, self.origin,
+      self.fmt3vec % tuple(self.raw_origin), self.symmetry_agreement)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/translation_search.py
+from __future__ import absolute_import, division, print_function
+import cctbx.maptbx # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("cctbx_translation_search_ext")
+from cctbx_translation_search_ext import *
+
+
+ *******************************************************************************

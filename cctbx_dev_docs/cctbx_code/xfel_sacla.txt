@@ -1,0 +1,175 @@
+
+
+ *******************************************************************************
+xfel/sacla/dump_sacla_data.py
+from __future__ import absolute_import, division, print_function
+import sys, os, dxtbx
+from xfel.cxi.cspad_ana import cspad_tbx
+from libtbx import easy_pickle
+from libtbx import easy_mp
+from xfel.command_line.cxi_image2pickle import crop_image_pickle
+from six.moves import range
+
+# Jiffy script to dump SACLA data processed by Cheetah into image pickles.  Usage:
+# libtbx.python dump_sacla_data.py <path to h5 file> <destination directory for pickles>.
+# Uses 4 processors, hardcoded at the end of the file
+
+data_path = sys.argv[1]
+dest_dir = sys.argv[2]
+
+data = dxtbx.load(data_path)
+detector = data.get_detector()
+distance = detector[0].get_directed_distance()
+beam = data.get_beam()
+wavelength = beam.get_wavelength()
+pixel_size = detector[0].get_pixel_size()[0]
+beam_x, beam_y = detector[0].get_beam_centre_px(beam.get_s0())
+beam_x *= pixel_size
+beam_y += 0 #earlier work required a 3 pixel shift based on powder pattern/fit to unit cell
+beam_y *= pixel_size
+overload = detector[0].get_trusted_range()[1]
+from xfel.cxi.cspad_ana.cspad_tbx import xpp_active_areas
+active_areas = xpp_active_areas["Sacla.MPCCD.8tile"]["active_areas"]
+# the active areas are already determined for the cropped size
+# (ran once without active areas, then measured cropped active areas on image viewer)
+
+dest_base = os.path.basename(os.path.splitext(data_path)[0])
+
+def do_work(img_no):
+  n_fails = 0
+  while True:
+    try:
+      raw_data = data.get_raw_data(img_no)
+      break
+    except (KeyError, ValueError):
+      n_fails +=1
+      print("Fail to read, attempt number", n_fails)
+      if n_fails > 100:
+        raise Exception("Couldn't read the data")
+    import time; time.sleep(n_fails * 0.1)
+
+  imgdict = cspad_tbx.dpack(data=raw_data,
+     distance=distance,
+     pixel_size=pixel_size,
+     wavelength=wavelength,
+     beam_center_x=beam_x,
+     beam_center_y=beam_y,
+     ccd_image_saturation=overload,
+     saturated_value=overload,
+     address="Sacla.MPCCD.8tile",
+     active_areas=active_areas
+     )
+  imgdict = crop_image_pickle(imgdict,
+    preserve_active_areas_even_though_cropping_would_invalidate_them=True)
+
+  dest_path = os.path.join(dest_dir, dest_base + "_%06d.pickle"%img_no)
+  print("Saving image", img_no, "to", dest_path)
+  easy_pickle.dump(dest_path, imgdict)
+
+easy_mp.pool_map(
+            args=list(range(data.get_num_images())),
+            func=do_work,
+            processes=4)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/sacla/mpccd_geom2json.py
+from __future__ import absolute_import, division, print_function
+import sys, os
+from dxtbx.model.detector import Detector
+from scitbx import matrix
+from libtbx.phil import parse
+from libtbx.utils import Sorry, Usage
+
+help_str = """Converts a SACLA geometry file to DIALS json format."""
+
+phil_scope = parse("""
+  geom_path = None
+    .type = str
+    .help = SACLA geometry file to convert
+  distance = None
+    .type = float
+    .help = Detector distance
+  pixel_size = 0.05
+    .type = float
+    .help = Pixel size in mm
+  wavelength = 1.0
+    .type = float
+    .help = Wavelength for the simple beam model that will be included
+""")
+
+def run(args):
+  if '-h' in args or '--help' in args or '-c' in args:
+    print(help_str)
+    phil_scope.show(attributes_level=2)
+    return
+
+  user_phil = []
+  for arg in args:
+    if os.path.isfile(arg):
+      user_phil.append(parse("geom_path=%s"%arg))
+    else:
+      try:
+        user_phil.append(parse(arg))
+      except Exception as e:
+        raise Sorry("Unrecognized argument: %s"%arg)
+  params = phil_scope.fetch(sources=user_phil).extract()
+  if params.distance is None:
+    raise Usage("Please specify detector distance")
+
+  geom = {}
+  for line in open(params.geom_path):
+    if len(line.split("=")) != 2: continue
+    if "rigid_group" in line and not "collection" in line:
+      geom[line.split("=")[1].strip()] = {}
+    else:
+      for key in geom:
+        if line.startswith("%s/"%key):
+          geom[key][line.split("=")[0].split("/")[1].strip()] = line.split("=")[-1].strip()
+
+  detector = Detector()
+  root = detector.hierarchy()
+  root.set_frame(
+    (1, 0, 0),
+    (0, 1, 0),
+    (0, 0, - params.distance))
+
+  for i, key in enumerate(sorted(geom)):
+    fs_x, fs_y = geom[key]['fs'].split(" ")
+    ss_x, ss_y = geom[key]['ss'].split(" ")
+    fast = matrix.col((-float(fs_x.rstrip('x')),float(fs_y.rstrip('y')), 0.0))
+    slow = matrix.col((-float(ss_x.rstrip('x')),float(ss_y.rstrip('y')), 0.0))
+
+    origin = matrix.col((-float(geom[key]['corner_x']) * params.pixel_size,
+                          float(geom[key]['corner_y']) * params.pixel_size,
+                          0.0))
+
+    # OBS! you need to set the panel to a root before set local frame...
+    p = root.add_panel()
+    p.set_name('panel-%s' % key)
+    p.set_image_size((512, 1024))
+    p.set_trusted_range((-1, 1000000))
+    p.set_pixel_size((params.pixel_size, params.pixel_size))
+    p.set_local_frame(
+      fast.elems,
+      slow.elems,
+      origin.elems)
+
+  from dxtbx.model import BeamFactory
+  wavelength = params.wavelength
+  beam = BeamFactory.simple(wavelength)
+
+  from dxtbx.model import Experiment, ExperimentList
+  experiments = ExperimentList()
+  experiment = Experiment(detector = detector, beam = beam)
+  experiments.append(experiment)
+  experiments.as_file("geometry.expt")
+
+if __name__ == "__main__":
+  run(sys.argv[1:])
+
+
+ *******************************************************************************

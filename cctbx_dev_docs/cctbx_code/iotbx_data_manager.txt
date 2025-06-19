@@ -1,0 +1,2957 @@
+
+
+ *******************************************************************************
+iotbx/data_manager/__init__.py
+'''
+Base DataManager class and factory function for generating DataManager
+objects
+'''
+from __future__ import absolute_import, division, print_function
+import importlib
+import inspect
+import os
+import re
+import sys
+
+from collections import OrderedDict
+from copy import copy
+from six.moves import range
+
+import iotbx.phil
+import libtbx.phil
+
+from iotbx.file_reader import any_file
+from libtbx import Auto
+from libtbx.utils import multi_out, Sorry
+
+# =============================================================================
+# mapping from DataManager datatypes to any_file file types
+any_file_type = {
+  'map_coefficients':'hkl',
+  'miller_array':'hkl',
+  'model':'pdb',
+  'ncs_spec':'ncs',
+  'phil':'phil',
+  'real_map':'ccp4_map',
+  'restraint':'cif',
+  'sequence':'seq',
+}
+
+# reverse dictionary to map any_file types to DataManager datatypes
+data_manager_type = {value:key for key, value in any_file_type.items()}
+data_manager_type['hkl'] = 'miller_array'   # map hkl to parent, miller_array
+
+# build list of supported datatypes
+# datatypes have corresponding modules in iotbx/data_manager
+# e.g. iotbx/data_manager/model.py
+supported_datatypes = os.listdir(os.path.dirname(__file__))
+re_search = re.compile('.py$')
+supported_datatypes = list(filter(re_search.search, supported_datatypes))
+supported_datatypes.remove('__init__.py')
+supported_datatypes.sort()
+for i in range(len(supported_datatypes)):
+  supported_datatypes[i] = supported_datatypes[i].split('.')[0]
+
+default_datatypes = ['map_coefficients', 'miller_array', 'model', 'ncs_spec',
+                     'phil', 'real_map', 'restraint', 'sequence']
+
+# custom options for processing data
+# generally the format is <datatype>_<custom option>
+data_manager_options = [
+  'miller_array_skip_merge',       # does not merge Miller arrays
+  'model_skip_expand_with_mtrix',  # does not expand a model using MTRIX
+  'model_skip_ss_annotations',     # ignore secondary structure annotations
+  ]
+
+# =============================================================================
+def load_datatype_modules(datatypes=None):
+  '''
+  Function for dynamically loading a subset of modules for the DataManager
+  The default directory for modules is iotbx/data_manager
+
+  Parameters
+  ----------
+    dataypes: list
+      List of strings for datatypes to load. If None, default_datatypes
+      is used.
+
+  '''
+
+  # set default if necessary
+  if datatypes is None:
+    datatypes = default_datatypes
+
+  # check datatypes
+  error_message_1 = '%s is not a supported datatype'
+  error_message_2 = 'Please provide a list of supported datatypes (%s)' % \
+                    ','.join(supported_datatypes)
+  if not (isinstance(datatypes, list) or isinstance(datatypes, tuple)):
+    if isinstance(datatypes, str):
+      if datatypes in supported_datatypes:
+        datatypes = [datatypes]
+      else:
+        raise Sorry(error_message_1 % datatypes)
+    else:
+      raise Sorry(error_message_2)
+  for datatype in datatypes:
+    if isinstance(datatype, str):
+      if datatype not in supported_datatypes:
+        raise Sorry(error_message_1 % datatype)
+    else:
+      raise Sorry(error_message_2)
+
+  # load modules
+  modules = []
+  importlib.import_module('iotbx')
+  for datatype in datatypes:
+    modules.append(
+      importlib.import_module('.' + datatype, package='iotbx.data_manager'))
+
+  return modules
+
+# =============================================================================
+def DataManager(datatypes=None, phil=None, custom_options=None,
+                custom_master_phil_str=None, logger=None):
+  '''
+  Function for dynamically creating a DataManager instance that supports a
+  specific set of datatypes.
+
+  All DataManager modules in iotbx/data_manager follow this pattern:
+    filename = <datatype>.py -> module name = iotbx.data_manager.<datatype>
+    DataManagerBase subclass name = <Datatype>DataManager
+
+  So for the models, the filename is iotbx/data_manager/model.py and in that
+  file, there should be a subclass of DataManagerBase named ModelDataManager
+  '''
+
+  if logger is None:
+    logger = multi_out()
+
+  # set default if necessary
+  if datatypes is None:
+    datatypes = default_datatypes
+
+  # get classes
+  modules = load_datatype_modules(datatypes)
+  manager_classes = []
+  for datatype in datatypes:
+    module_name = 'iotbx.data_manager.' + datatype
+    class_name = datatype.capitalize() + 'DataManager'
+    if '_' in datatype: # real_map becomes RealMapDataManager
+      class_name = ''.join(tmp_str.capitalize()
+                           for tmp_str in datatype.split('_')) + 'DataManager'
+    manager_classes.append(getattr(sys.modules[module_name], class_name))
+
+  # check inheritance and add datatypes if necessary
+  class_datatypes = set()
+  parent_classes = []
+  for manager_class in copy(manager_classes):
+    if hasattr(manager_class, 'datatype'):
+      class_datatypes.add(manager_class.datatype)
+    # get full inheritance order and check
+    for parent_class in inspect.getmro(manager_class)[1:]:
+      if hasattr(parent_class, 'datatype'):
+        class_datatypes.add(parent_class.datatype)
+        parent_classes.append(parent_class)
+        try:  # remove parent class and add back later
+          manager_classes.remove(parent_class)
+        except ValueError:  # parent class already removed
+          pass
+  datatypes = list(class_datatypes)
+
+  # add mixin classes if necessary
+  mixin_classes = []
+  if 'model' in datatypes or 'miller_array' in datatypes:
+    importlib.import_module('.common', package='iotbx.data_manager')
+    mixin_classes.append(
+      getattr(sys.modules['iotbx.data_manager.common'], 'scattering_table_mixins'))
+  if 'real_map' in datatypes and 'map_coefficients' in datatypes:
+    importlib.import_module('.common', package='iotbx.data_manager')
+    mixin_classes.append(
+      getattr(sys.modules['iotbx.data_manager.common'], 'map_mixins'))
+  if 'model' in datatypes and 'real_map' in datatypes:
+    importlib.import_module('.common', package='iotbx.data_manager')
+    mixin_classes.append(
+      getattr(sys.modules['iotbx.data_manager.common'], 'map_model_mixins'))
+  if 'model' in datatypes and 'miller_array' in datatypes:
+    importlib.import_module('.common', package='iotbx.data_manager')
+    mixin_classes.append(
+      getattr(sys.modules['iotbx.data_manager.common'], 'fmodel_mixins'))
+
+  # construct new class and return instance
+  classes = tuple(manager_classes + parent_classes + mixin_classes)
+  data_manager_class = type('DataManager', classes, dict())
+  return data_manager_class(
+    datatypes=datatypes,
+    phil=phil,
+    custom_options=custom_options,
+    custom_master_phil_str=custom_master_phil_str,
+    logger=logger)
+
+# =============================================================================
+class DataManagerBase(object):
+
+  def __init__(self, datatypes=None, phil=None, custom_options=None,
+               custom_master_phil_str=None, logger=None):
+    '''
+    Base DataManager class
+    '''
+
+    self.datatypes = datatypes
+    if self.datatypes is None:
+      self.datatypes = []
+    if hasattr(self, 'datatype') and (self.datatype not in self.datatypes):
+      self.datatypes.append(self.datatype)
+
+    # custom data processing options
+    self.custom_options = custom_options
+    if self.custom_options is not None:
+      for option in self.custom_options:
+        if option not in data_manager_options:
+          raise Sorry('''\
+{option} is not a valid custom option for the DataManager. The available
+options are {options}.\
+'''.format(option=option, options=', '.join(data_manager_options)))
+    else:
+      self.custom_options = []
+
+    # functions for custom PHIL
+    self.add_custom_phil_str = 'add_%s_phil_str'
+    self.export_custom_phil_extract = 'export_%s_phil_extract'
+    self.load_custom_phil_extract = 'load_%s_phil_extract'
+
+    # dynamically construct master PHIL string
+    self.master_phil_str = '''\
+data_manager
+  .style = noauto
+{'''
+    for datatype in self.datatypes:
+
+      # check if a datatype has a custom PHIL str
+      if hasattr(self, self.add_custom_phil_str % datatype):
+        custom_phil_str = getattr(self, self.add_custom_phil_str % datatype)()
+        self.master_phil_str += custom_phil_str
+
+      # default PHIL
+      else:
+        # sequence_files = None
+        #   .type = path
+        #   .multiple = True
+        self.master_phil_str += '%s_files = None\n' % datatype
+        self.master_phil_str += '.type = path\n.multiple=True\n'
+
+        # property for wx GUI (will be removed)
+        file_type = any_file_type.get(datatype, None)
+        if file_type is not None:
+          self.master_phil_str += '.style = file_type:%s input_file\n' % \
+                                            file_type
+
+      # default_sequence = None
+      #   .type = path
+      self.master_phil_str += 'default_%s = None\n' % datatype
+      self.master_phil_str += '.type = path\n'
+    self.master_phil_str += '}'
+
+    self.master_phil = iotbx.phil.parse(self.master_phil_str, process_includes=True)
+
+    # Add custom PHIL settings
+    if custom_master_phil_str is not None:
+      custom_master_phil = iotbx.phil.parse(custom_master_phil_str, process_includes=True)
+      new_master_phil, unused_phil = self.master_phil.fetch(
+        sources=[custom_master_phil], track_unused_definitions=True)
+      if len(unused_phil) > 0:
+        raise Sorry('There are unrecognized PHIL in your custom DataManager PHIL.')
+      self.master_phil_str = new_master_phil.as_str(expert_level=3, attributes_level=3)
+      self.master_phil = iotbx.phil.parse(self.master_phil_str, process_includes=True)
+
+    self._storage = '_%ss'
+    self._default = '_default_%s'
+    self._current_storage = None
+    self._current_default = None
+
+    # generate storage for each data type
+    for datatype in self.datatypes:
+      # data attributes for each data type
+      # e.g self._models, self._default_model
+      self._set_datatype(datatype)
+      setattr(self, self._current_storage, OrderedDict())
+      setattr(self, self._current_default, None)
+
+    # track output files for internal use
+    self._output_files = []
+    self._output_types = []
+
+    # set defaults
+    self._default_output_filename = 'cctbx_program'
+    self._overwrite = False
+    self._used_output_ext = set()
+
+    # set program
+    self._program = None
+
+    if self.supports('model') and self.supports('miller_array'):
+      self._fmodel_phil_scope = None
+
+    # logger (currently used for models)
+    self.logger = logger
+    if self.logger is None:
+      self.logger = multi_out()
+
+    # load information from phil
+    if phil is not None:
+      self.load_phil_scope(phil)
+
+  # ---------------------------------------------------------------------------
+  def export_phil_scope(self, as_extract=False):
+    '''
+    Function for exporting DataManager information into a PHIL scope
+    The returned PHIL scope can be used to recreate the DataManager object with
+    the load_phil_scope function
+
+    This assumes that the key names in the data structures are valid filenames.
+
+    Parameters
+    ----------
+      as_extract: bool
+        If True, a libtbx.phil.extract object is returned instead of a
+        libtbx.phil.scope object
+
+    Returns
+    -------
+      phil: libtbx.phil.scope or libtbx.phil.extract depending on as_extract parameter
+        The working scope or extract
+    '''
+    phil_extract = self.master_phil.extract()
+    for datatype in self.datatypes:
+      if hasattr(self, self.export_custom_phil_extract % datatype):
+        setattr(phil_extract.data_manager, '%s' % datatype,
+                getattr(self, self.export_custom_phil_extract % datatype)())
+      else:
+        filenames = self._get_names(datatype)
+        setattr(phil_extract.data_manager, '%s_files' % datatype, filenames)
+
+      default = self._get_default_name(datatype)
+      setattr(phil_extract.data_manager, 'default_%s' % datatype, default)
+
+    if self.supports('model') and self.supports('miller_array'):
+      if self._fmodel_phil_scope is not None:  # non-default fmodel parameters
+        phil_extract.data_manager.fmodel = self.get_fmodel_params()
+
+    if as_extract:
+      return phil_extract
+
+    working_phil = self.master_phil.format(python_object=phil_extract)
+
+    return working_phil
+
+  # ---------------------------------------------------------------------------
+  def load_phil_scope(self, phil, process_files=True):
+    '''
+    Function for loading information from a PHIL scope. This will append files
+    to the existing ones and will NOT override the current default file
+    '''
+    # sanity checks
+    if isinstance(phil, libtbx.phil.scope):
+      working_phil = self.master_phil.fetch(source=phil)
+    elif isinstance(phil, libtbx.phil.scope_extract):
+      working_phil = self.master_phil.format(python_object=phil)
+    else:
+      raise Sorry('A libtbx.phil.scope or libtbx.phil.scope_extract object is required')
+    phil_extract = working_phil.extract()
+
+    if not hasattr(phil_extract, 'data_manager'):
+      raise Sorry('The phil scope does not have a DataManager scope.')
+
+    # append files, default file is not overridden
+    for datatype in self.datatypes:
+      if hasattr(self, self.load_custom_phil_extract % datatype):
+        getattr(self, self.load_custom_phil_extract % datatype)(phil_extract, process_files=process_files)
+      else:
+        filenames = getattr(phil_extract.data_manager, '%s_files' % datatype,
+                            None)
+        for filename in filenames:
+          # call type-specific function (e.g. self.process_model_file())
+          # checks if file is already in DataManager
+          if process_files:
+            getattr(self, 'process_%s_file' % datatype)(filename)
+
+    # other options
+    self._default_output_filename = getattr(
+      phil_extract.data_manager, 'default_output_filename', None)
+    self._overwrite = getattr(
+      phil_extract.data_manager, 'overwrite', False)
+    if self.supports('model') and self.supports('miller_array'):
+      self.set_fmodel_params(phil_extract)
+
+  # ---------------------------------------------------------------------------
+  def supports(self, datatype):
+    '''
+    Function that checks if the DataManager instance supports a particular
+    datatype
+    '''
+    return datatype in self.datatypes
+
+  # ---------------------------------------------------------------------------
+  def set_default_output_filename(self, filename):
+    self._default_output_filename = filename
+
+  def get_default_output_filename(self):
+    if self._program is not None:
+      return self._program.get_default_output_filename()
+    return self._default_output_filename
+
+  # ---------------------------------------------------------------------------
+  def set_overwrite(self, overwrite):
+    self._overwrite = overwrite
+
+  def get_overwrite(self):
+    return self._overwrite
+
+  # ---------------------------------------------------------------------------
+  def set_program(self, program):
+    '''
+    Function for linking the program to the DataManager. This allows the
+    DataManager to update values in the program if necessary.
+    '''
+    self._program = program
+
+  # ---------------------------------------------------------------------------
+  # Generic functions for manipulating data
+  def _set_datatype(self, datatype):
+    '''
+    '''
+    if datatype not in self.datatypes:
+      msg = '"%s" is not a recognized datatype. Only\n %s\n are recognized'
+      raise Sorry(msg % (datatype, '\n  '.join(self.datatypes)))
+    self._current_storage = self._storage % datatype
+    self._current_default = self._default % datatype
+
+  def _get_current_storage(self):
+    '''
+    '''
+    return getattr(self, self._current_storage)
+
+  def _get_current_default(self):
+    '''
+    '''
+    return getattr(self, self._current_default)
+
+  def _add(self, datatype, filename, data):
+    '''
+    '''
+    self._set_datatype(datatype)
+    self._get_current_storage()[filename] = data
+    if self._get_current_default() is None:
+      self._set_default(datatype, filename)
+
+  def _set_default(self, datatype, filename):
+    '''
+    '''
+    self._set_datatype(datatype)
+    if filename not in self._get_current_storage().keys():
+      processed = getattr(self, 'process_%s_file' % datatype)(filename)
+      if filename != processed:
+        raise Sorry('"%s" is not a known %s type.' % (filename, datatype))
+    else:
+      setattr(self, self._current_default, filename)
+
+  def _get(self, datatype, filename=None):
+    self._set_datatype(datatype)
+    if filename is None:
+      default_filename = self._get_current_default()
+      if default_filename is None:
+        raise Sorry('No default %s defined' % datatype)
+      else:
+        return self._get(datatype, filename=default_filename)
+    elif filename not in self._get_current_storage().keys():
+      # try to load file if not already available
+      # use type-specific function call instead of _process_file because
+      # process_model_file is unique
+      # change to _process_file after any_file is updated
+      processed = getattr(self, 'process_%s_file' % datatype)(filename)
+      if processed == filename:
+        return self._get_current_storage()[filename]
+      else:
+        raise Sorry('"%s" is not a known %s type.' % (filename, datatype))
+    else:
+      return self._get_current_storage()[filename]
+
+  def _get_names(self, datatype):
+    self._set_datatype(datatype)
+    return list(self._get_current_storage().keys())
+
+  def _get_default_name(self, datatype):
+    self._set_datatype(datatype)
+    return self._get_current_default()
+
+  def _remove(self, datatype, filename):
+    self._set_datatype(datatype)
+    if filename not in self._get_current_storage().keys():
+      raise Sorry('"%s" is not being managed.' % filename)
+    else:
+      self._get_current_storage().pop(filename)
+      if filename == self._get_current_default():
+        setattr(self, self._current_default, None)
+
+  def _check_count(self, datatype, actual_n, expected_n, exact_count, raise_sorry):
+    '''
+    Helper function for _has_data like functions
+    '''
+    if exact_count:
+      if actual_n != expected_n:
+        if raise_sorry:
+          raise Sorry('%i %s(s) found. Expected exactly %i.' %
+                      (actual_n, datatype, expected_n))
+        else:
+          return False
+      else:
+        return True
+    else:
+      if raise_sorry:
+        if actual_n < expected_n:
+          raise Sorry('%i %s(s) found. Expected at least %i.' %
+                      (actual_n, datatype, expected_n))
+      return actual_n >= expected_n
+
+  def _has_data(self, datatype, expected_n=1, exact_count=False,
+                raise_sorry=False):
+    self._set_datatype(datatype)
+    actual_n = len(self._get_names(datatype))
+    return self._check_count(
+      datatype, actual_n, expected_n, exact_count, raise_sorry)
+
+  def _process_file(self, datatype, filename):
+    if filename not in self._get_names(datatype):
+      a = any_file(filename)
+      if a.file_type != any_file_type[datatype]:
+        raise Sorry('%s is not a recognized %s file' % (filename, datatype))
+      else:
+        self._add(datatype, filename, a.file_object)
+    return filename
+
+  def _update_default_output_filename(self, filename):
+    '''
+    Increments program.params.serial by 1 and sets new default output
+    filename
+
+    Parameters
+    ----------
+    filename: str
+      The filename to be updated. This will only be done when the
+      filename follows the default output format.
+
+    Returns
+    -------
+    filename: str
+      The updated filename if it has been updated, otherwise the original
+      filename
+    '''
+    basename, ext = os.path.splitext(filename)
+    if (basename.startswith(self._default_output_filename)
+        and os.path.exists(filename)
+        and not self._overwrite):
+      if (self._program is not None and
+          self._program.params.output.serial is not None):
+        while os.path.exists(filename):
+          self._program.params.output.serial += 1
+          old_default = self._default_output_filename
+          self.set_default_output_filename(
+            self._program.get_default_output_filename())
+          basename = basename.replace(old_default, self.get_default_output_filename())
+          filename = basename + ext
+      else:  # filename cannot be automatically updated, just return
+        self._used_output_ext.add(ext)
+    return filename
+
+  def _write_text(self, datatype, text_str, filename=Auto, overwrite=Auto):
+    '''
+    Convenience function for writing text to file
+    '''
+
+    # default options
+    if filename is Auto:
+      filename = self._default_output_filename
+    if overwrite is Auto:
+      overwrite = self._overwrite
+
+    # update default output filename, if necessary
+    filename = self._update_default_output_filename(filename)
+
+    # check arguments
+    if (os.path.isfile(filename) and (not overwrite)):
+      raise Sorry('%s already exists and overwrite is set to %s.' %
+                  (filename, overwrite))
+    if not isinstance(text_str, str):
+      raise AssertionError('Please provide a text string for writing.')
+
+    try:
+      with open(filename, 'w') as f:
+        f.write(text_str)
+    except IOError as err:
+      raise Sorry('There was an error with writing %s.\n%s' %
+                  (filename, err))
+
+    self._output_files.append(filename)
+    self._output_types.append(datatype)
+
+    return filename
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/common.py
+'''
+Extra functions for DataManager
+'''
+from __future__ import absolute_import, division, print_function
+from iotbx.data_manager.map_coefficients import MapCoefficientsDataManager
+from iotbx.data_manager.real_map import RealMapDataManager
+from iotbx.map_model_manager import map_model_manager
+from libtbx import Auto
+from libtbx.utils import Sorry
+import mmtbx.utils
+from cctbx import crystal
+from iotbx import crystal_symmetry_from_any
+from iotbx import extract_xtal_data
+import libtbx.phil
+from copy import deepcopy
+
+# =============================================================================
+# general functions for scattering type (applies to model and/or miller_array)
+class scattering_table_mixins(object):
+  '''
+  Functions for mapping scattering table types (wk1995 it1992 n_gaussian
+  neutron electron) to model and array types (x_ray, electron, neutron).
+  These will handle the mapping between the X-ray scattering tables
+  (wk1995 it1992 n_gaussian) to the x_ray type.
+  '''
+  possible_scattering_table_types = ['wk1995', 'it1992', 'n_gaussian',
+    'x_ray', 'neutron',  'electron']
+
+  def check_scattering_table_type(self, scattering_table):
+    '''
+    Checks that the argument is a valid scattering table type
+
+    Parameters
+    ----------
+    scattering_table : str
+      The scattering table type
+    data_type : str, optional
+      The data type, e.g. 'model' or 'array'. This is for the error message
+
+    Returns
+    -------
+    scattering_table : str
+      The input scattering table. If x_ray is provided, n_gaussian is returned
+      as the default scattering table.
+    '''
+    if scattering_table not in self.possible_scattering_table_types:
+      raise Sorry('Unrecognized scattering table type, "%s," possible choices are %s.' %
+                  (scattering_table, ', '.join(self.possible_scattering_table_types)))
+    if scattering_table == 'x_ray':
+      return 'n_gaussian'
+    return scattering_table
+
+  def map_scattering_table_type(self, scattering_table):
+    '''
+    Returns the appropriate model/array type based on the scattering table
+
+    Parameters
+    ----------
+    scattering_table : str
+      The scattering table type
+
+    Returns
+    -------
+    mapped_type : str
+      The mapped type
+    '''
+    self.check_scattering_table_type(scattering_table)
+    if scattering_table in ['wk1995', 'it1992', 'n_gaussian']:
+      return 'x_ray'
+    else:
+      return scattering_table
+
+# -----------------------------------------------------------------------------
+# extra functions for model and reflections
+class fmodel_mixins(object):
+  '''
+  Function to extract fmodel when the DataManager supports both the "model"
+  and "miller_array" data types.
+  '''
+
+  def update_all_defaults(self, data_type):
+    '''
+    Convenience function for setting the data_type of all models and
+    Miller arrays. This sets the default as well as the type for all
+    currently loaded files.
+
+    Parameters
+    ----------
+    data_type : str
+        The type to set (e.g. 'x_ray', 'neutron', or 'electron')
+    '''
+    # model
+    checked_type = self.map_scattering_table_type(data_type)
+    model_type = [checked_type]
+    self._is_valid_model_type(model_type)
+    self.set_default_model_type(model_type)
+    for filename in self.get_model_names():
+      if 'reference' in self.get_model_type(filename):
+        self.set_model_type(filename, [checked_type, 'reference'])
+      else:
+        self.set_model_type(filename, model_type)
+
+    # miller_array
+    array_type = [checked_type]
+    self.set_default_miller_array_type(array_type)
+    for filename in self.get_miller_array_names():
+      for label in self.get_miller_array_all_labels(filename):
+        self.set_miller_array_type(filename, label, array_type)
+
+  def get_fmodel_params(self):
+    '''
+    Return the fmodel parameters as a libtbx.phil.extract object
+    '''
+    if self._fmodel_phil_scope is None:
+      return self.export_phil_scope(as_extract=True).data_manager.fmodel
+    return self._fmodel_phil_scope.extract().data_manager.fmodel
+
+  def set_fmodel_params(self, phil_extract):
+    '''
+    Set the fmodel parameters. The phil_extract can be the full DataManager
+    PHIL extract or the output from get_fmodel_params
+    '''
+    full_extract = phil_extract
+    if not hasattr(full_extract, 'data_manager'):
+      full_extract = self.master_phil.extract()
+      full_extract.data_manager.fmodel = phil_extract
+    self._fmodel_phil_scope = self.master_phil.format(python_object=full_extract)
+
+  def _resolve_symmetry_conflicts(self, model, reflection_file_server,
+                                  params=None):
+    '''
+    Use logic of crystal.select_crystal_symmetry to select consensus crystal
+    symmetry from multiple sources.
+    '''
+    if(reflection_file_server is None): return
+    crystal_symmetries_from_coordinate_file = []
+    crystal_symmetries_from_reflection_file = []
+    rfns = []
+    rfns.extend(reflection_file_server.file_name_miller_arrays.keys())
+    crystal_symmetry_from_any.extract_and_append(
+      file_names  = rfns,
+      target_list = crystal_symmetries_from_reflection_file)
+    crystal_symmetries_from_coordinate_file.append(model.crystal_symmetry())
+    from_parameter_file = None
+    if(params is not None):
+      from_parameter_file = crystal.symmetry(
+          unit_cell        = params.unit_cell,
+          space_group_info = params.space_group)
+    crystal_symmetry = crystal.select_crystal_symmetry(
+      from_parameter_file   = from_parameter_file,
+      from_coordinate_files = crystal_symmetries_from_coordinate_file,
+      from_reflection_files = crystal_symmetries_from_reflection_file)
+    model.set_crystal_symmetry(crystal_symmetry = crystal_symmetry)
+    if(reflection_file_server.crystal_symmetry is None or not
+       crystal_symmetry.is_similar_symmetry(
+       reflection_file_server.crystal_symmetry)):
+      reflection_file_server.update_crystal_symmetry(
+        crystal_symmetry = model.crystal_symmetry())
+
+  def get_fmodel(self,
+                 crystal_symmetry = None,
+                 experimental_phases_params = None,# XXX Need to be part of 'parameters'
+                 scattering_table = None,
+                 mask_params = None,
+                 sf_accuracy_params = None,
+                 free_r_flags_scope = 'miller_array.labels.name',
+                 model_filename = None,
+                 ):
+    """
+    Create mmtbx.fmodel.manager object using atomic model and diffraction data.
+    crystal_symmetry: comes as cctbx.crystal.symmetry or Phil scope.
+    scattering_table will trigger the use of model and reflections with corrct
+    array_type.
+    free_r_flags_scope defines the how-to message given if no free_r flags
+      are found
+    """
+    array_type = self.map_scattering_table_type(scattering_table)
+    scattering_table = self.check_scattering_table_type(scattering_table)
+    crystal_symmetry_phil = crystal_symmetry
+    if(crystal_symmetry is not None):
+      if(isinstance(crystal_symmetry, libtbx.phil.scope_extract)):
+        crystal_symmetry = crystal.symmetry(
+          unit_cell        = crystal_symmetry.unit_cell,
+          space_group_info = crystal_symmetry.space_group)
+      else:
+        assert isinstance(crystal_symmetry, libtbx.phil.scope_extract)
+    # Gather models of appropriate type
+    models = []
+    if model_filename:
+      models.append(self.get_model(model_filename,model_type=array_type))
+    else:
+      for filename in self.get_model_names(model_type=array_type):
+        models.append(self.get_model(filename, model_type=array_type))
+    if(len(models) == 0):
+      raise Sorry("No model of '%s' type found to make fmodel."%array_type)
+    if(len(models) > 1):
+      raise Sorry("More than one model of '%s' type found."%array_type)
+    model = models[0]
+    # Get reflection file server
+    rfs = self.get_reflection_file_server(
+      array_type       = array_type,
+      crystal_symmetry = crystal_symmetry,
+      ignore_intensities_if_amplitudes_present = True)
+    if rfs is None:
+      raise Sorry("No reflection data provided.")
+    # Resolve symmetry issues (in-place)
+    self._resolve_symmetry_conflicts(
+      params                 = crystal_symmetry_phil,
+      model                  = model,
+      reflection_file_server = rfs)
+    #
+    fmodel_params = self.get_fmodel_params()
+
+    if array_type == 'neutron':
+      parameters = fmodel_params.neutron_data
+    else:
+      parameters = fmodel_params.xray_data
+
+    #print("LOOK : parameters.r_free_flags.required", parameters.r_free_flags.required)
+    #print("LOOK : parameters.force_anomalous_flag_to_be_equal_to", parameters.force_anomalous_flag_to_be_equal_to)
+
+    #
+    # XXX
+    # XXX Temporary hack/work-around (REMOVE later) start
+    # XXX
+    tmp_p = deepcopy(parameters)
+    tmp_p.__inject__("file_name", None)
+    tmp_p.__inject__("labels", None)
+    tmp_p.r_free_flags.__inject__("file_name", None)
+    tmp_p.r_free_flags.__inject__("label", None)
+    # XXX
+    # XXX Temporary hack/work-around (REMOVE later) end
+    # XXX
+    # Get reflection data
+    dpg = None
+    if(model.crystal_symmetry() is not None):
+      dpg = model.crystal_symmetry().space_group().build_derived_point_group()
+    # if both low_resolution and high_resolution are set, check that low_resolution > high_resolution
+    if parameters.low_resolution is not None and parameters.high_resolution is not None \
+      and parameters.low_resolution < parameters.high_resolution:
+        raise Sorry('The low_resolution parameter is less than the high_resolution parameter. Please swap those values.')
+    data = extract_xtal_data.run(
+      keep_going                        = not tmp_p.r_free_flags.required,
+      extract_r_free_flags              = not tmp_p.r_free_flags.ignore_r_free_flags,
+      reflection_file_server            = rfs,
+      parameters                        = tmp_p,
+      experimental_phases_params        = experimental_phases_params,
+      working_point_group               = dpg,
+      free_r_flags_scope                = free_r_flags_scope,
+      remark_r_free_flags_md5_hexdigest = model.get_header_r_free_flags_md5_hexdigest()).result()
+    #
+    # Set DataManager parameters extracted from inputs
+    #
+    # Extract and set twin_law
+    if parameters.twin_law is None or parameters.twin_law is Auto:
+      parameters.twin_law = model.twin_law_from_model_input()
+    # Set test flag value
+    parameters.r_free_flags.test_flag_value = data.test_flag_value
+    # Load all back
+    self.set_fmodel_params(fmodel_params)
+    #
+    if(len(data.err)>0):
+      raise Sorry("\n".join(data.err))
+    if(data.f_obs is None):
+      raise Sorry("Diffraction data are not available to make fmodel.")
+    # Setup scattering table of xray_structure
+    model.setup_scattering_dictionaries(
+      scattering_table = scattering_table,
+      d_min            = data.f_obs.d_min())
+    # Create and return fmodel
+    twin_law = fmodel_params.xray_data.twin_law
+    fmodel = mmtbx.utils.fmodel_manager2(
+      f_obs               = data.f_obs,
+      r_free_flags        = data.r_free_flags,
+      abcd                = data.experimental_phases,
+      xray_structure      = model.get_xray_structure(),
+      twin_law            = twin_law,
+      mask_params         = mask_params,
+      sf_accuracy_params  = sf_accuracy_params,
+      ignore_r_free_flags = parameters.r_free_flags.ignore_r_free_flags,
+      mtz_object          = data.mtz_object,
+      data_type           = array_type)
+    return fmodel
+
+# -----------------------------------------------------------------------------
+# extra functions for maps
+class map_mixins(object):
+  '''
+  Functions that are available when the DataManager supports both the
+  "real_map" and "map_coefficients" data types.
+  '''
+  def has_real_maps_or_map_coefficients(
+    self, expected_n=1, exact_count=False, raise_sorry=False):
+    '''
+    Combination of has_real_maps and has_map_coefficients
+    '''
+    n_real_maps = len(self._get_names(RealMapDataManager.datatype))
+    n_map_coefficients = len(self._get_names(MapCoefficientsDataManager.datatype))
+    actual_n = n_real_maps + n_map_coefficients
+    datatype = 'real_maps or map coefficient'
+    return self._check_count(datatype, actual_n, expected_n, exact_count, raise_sorry)
+
+# -----------------------------------------------------------------------------
+# extra functions for models and real_maps
+class map_model_mixins(object):
+  '''
+  Functions that are available when the DataManager supports both the
+  "model" and "real_map" data types.
+  '''
+  def remove_maps_and_models(self):
+    ''' Remove all existing maps and models so they are not used by default'''
+
+    for file_name in self.get_real_map_names():   # list of previously read maps
+      self.remove_real_map(file_name)   # forget previous reads
+    for file_name in self.get_model_names():
+      self.remove_model(file_name)   # forget previous reads
+
+  def get_map_model_manager(
+    self,
+    model_file=None,
+    map_files=None,
+    from_phil=False,
+    guess_files=True,
+    files_to_exclude = None,
+    **kwargs):
+    '''
+    A convenience function for constructing a map_model_manager from the
+    files in the DataManager.
+
+    Parameters
+    ==========
+      model_file: str
+        The name of the model file
+      map_files: str or list
+        The name(s) of the map files. If there is only one map, the name (str)
+        is sufficient. A list is expected to have only 1 (full) or 2 (two half-
+        maps) or 3 (full and 2 half-maps) map files. If three map files
+        are in the list,
+        the first map file is assumed to be the full map.
+      from_phil: bool
+        If set to True, the model and map names are retrieved from the
+        standard PHIL names. The model_file and map_files parameters must
+        be None if this parameter is set to True.
+      files_to_exclude: str or list
+        Any files listed will not be used from data_manager. For example,
+          this can be used to exclude a file from being considered a half map
+      **kwargs: keyworded arguments
+        Extra keyworded arguments for map_model_manager constructor
+
+    Return
+    ======
+      map_model_manager object
+    '''
+
+    # get filenames from PHIL
+    map_model = None
+    if map_files and (not isinstance(map_files,list)):
+      map_files = [map_files]
+
+    if from_phil:
+      if model_file is not None or map_files is not None:
+        raise Sorry(
+          'If from_phil is set to True, model_file and map_files must be None.')
+
+      params = self._program.params
+      if hasattr(params, 'map_model'):
+        map_model = params.map_model
+      elif hasattr(params, 'input_files') and hasattr(
+          params.input_files, 'map_model'):
+        map_model = params.input_files.map_model
+      else:
+        raise Sorry('Program does not have the "map_model" PHIL scope.')
+
+      model_file = getattr(map_model,'model', None)
+
+      map_files = []
+      full_map = getattr(map_model, 'full_map', None)
+      if full_map is not None:
+        map_files.append(full_map)
+      half_maps = getattr(map_model, 'half_map', None)
+
+      # Catch case where full_map is also present in half_maps as the only
+      #   half map
+      maps_to_exclude = [full_map] if full_map else []
+      if files_to_exclude:
+        if isinstance(files_to_exclude,list):
+          maps_to_exclude += files_to_exclude
+        else:
+          maps_to_exclude.append(files_to_exclude)
+      for fn in (maps_to_exclude if maps_to_exclude else []):
+        if fn and (len(half_maps) == 1) and (half_maps[0] == fn):
+          half_maps = []
+      if half_maps:
+        if len(half_maps) != 2:
+          raise Sorry('Please provide 2 half-maps or one full map.')
+        map_files += half_maps
+    # If we didn't get anything, try looking directly at the
+    #  available maps and models. If there are 1, 2 or 3 maps and 1 model,
+    #  take them
+    if guess_files and (not model_file) and self.get_model_names() and \
+         len(self.get_model_names()) == 1:
+      model_file = self.get_default_model_name()
+      if map_model:
+        map_model.model = model_file
+    if guess_files and (not map_files) and self.get_real_map_names():
+      if len(self.get_real_map_names()) == 1:
+        map_files = [self.get_default_real_map_name()]
+
+      elif len(self.get_real_map_names()) in [2,3]:
+        map_files = self.get_real_map_names()
+    if isinstance(map_files, list):
+      new_map_files = []
+      for fn in map_files:
+        if (not files_to_exclude) or (not fn in files_to_exclude):
+          new_map_files.append(fn)
+      map_files = new_map_files
+    # check map_files argument
+    mm = None
+    mm_1 = None
+    mm_2 = None
+    if isinstance(map_files, list):
+      if len(map_files) != 0 and \
+         len(map_files) != 1 and len(map_files) != 2 and len(map_files) != 3:
+        msg = 'Please provide only 1 full map or 2 half maps or 1 ' +\
+         'full map and 2 half maps.\n Found:\n'
+        for map_file in map_files:
+          msg += ('  {map_file}\n'.format(map_file=map_file))
+        raise Sorry(msg)
+      elif len(map_files) == 0:
+        mm = None
+      elif len(map_files) == 1:
+        mm = self.get_real_map(map_files[0])
+        if map_model:
+          map_model.full_map = map_files[0]
+      elif len(map_files) == 2:
+        mm_1 = self.get_real_map(map_files[0])
+        mm_2 = self.get_real_map(map_files[1])
+        if map_model:
+          map_model.half_map = map_files
+      elif len(map_files) == 3:
+        if map_model:
+          map_model.full_map = map_files[0]
+          map_model.half_map = map_files[1:3]
+        mm = self.get_real_map(map_files[0])
+        mm_1 = self.get_real_map(map_files[1])
+        mm_2 = self.get_real_map(map_files[2])
+    elif map_files:
+      mm = self.get_real_map(map_files) # it is a single file name
+      if map_model:
+        map_model.full_map = map_files
+    else:
+      mm = None
+
+    if model_file:
+      model = self.get_model(model_file)
+    else:
+      model = None
+
+    # Check to make sure all map_managers are similar
+    managers = [mm, mm_1,mm_2]
+    comp_mm = None
+    for m in managers:
+      if not m: continue
+      if m and (not comp_mm):
+        comp_mm = m
+      else:
+        if (not comp_mm.is_similar(m)):
+          raise Sorry("Input map files need to all have the same origin, gridding, and dimensions")
+    mmm = map_model_manager(model=model, map_manager=mm, map_manager_1=mm_1,
+      map_manager_2=mm_2, **kwargs)
+
+    # clean up so that another read of maps and model will read again (these
+    # are shifted when map_model_manager is called)
+    if isinstance(map_files, list):
+      for file_name in map_files[:3]:
+        if file_name and file_name in self.get_real_map_names():
+          self.remove_real_map(file_name)
+    elif map_files:
+          self.remove_real_map(map_files)
+    if model_file:
+      self.remove_model(model_file)
+
+    return mmm
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/map_coefficients.py
+'''
+Child class of MillerArrayDataManager for handling map coefficients
+
+This will eventually be deprecated.
+The array_type PHIL parameter should be used instead
+'''
+from __future__ import absolute_import, division, print_function
+
+from iotbx.data_manager.miller_array import MillerArrayDataManager
+from iotbx.cif_mtz_data_labels import mtz_map_coefficient_labels, \
+  cif_map_coefficient_labels
+from libtbx import Auto
+
+# =============================================================================
+class MapCoefficientsDataManager(MillerArrayDataManager):
+
+  datatype = 'map_coefficients'
+
+  # ---------------------------------------------------------------------------
+  # Map coefficients
+
+  def add_map_coefficients_phil_str(self):
+    '''
+    Add custom PHIL and storage for labels
+    '''
+    return self._add_miller_array_phil_str(MapCoefficientsDataManager.datatype)
+
+  def export_map_coefficients_phil_extract(self):
+    '''
+    Export custom PHIL extract
+    '''
+    return self._export_miller_array_phil_extract(
+      MapCoefficientsDataManager.datatype)
+
+  def load_map_coefficients_phil_extract(self, phil_extract, process_files=True):
+    '''
+    Load custom PHIL extract
+    '''
+    self._load_miller_array_phil_extract(MapCoefficientsDataManager.datatype,
+                                         phil_extract,
+                                         process_files=process_files)
+
+  def add_map_coefficients(self, filename, data):
+    self.add_miller_array(filename, data)
+
+  def set_default_map_coefficients_type(self, array_type=None):
+    return self._set_default_miller_array_type(
+      MapCoefficientsDataManager.datatype, array_type)
+
+  def get_default_map_coefficients_type(self):
+    return self._get_default_miller_array_type(
+      MapCoefficientsDataManager.datatype)
+
+  def set_default_map_coefficients(self, filename):
+    return self._set_default(MapCoefficientsDataManager.datatype, filename)
+
+  def get_map_coefficients(self, filename=None):
+    '''
+    Returns the main file object
+    '''
+    return self._get(MapCoefficientsDataManager.datatype, filename)
+
+  def set_map_coefficients_type(self, filename=None, label=None, array_type=None):
+    return self._set_miller_array_type(MapCoefficientsDataManager.datatype,
+                                       filename, label, array_type)
+
+  def get_map_coefficients_type(self, filename=None, label=None):
+    return self._get_miller_array_type(MapCoefficientsDataManager.datatype,
+                                       filename, label)
+
+  def get_map_coefficients_all_labels(self, filename=None):
+    return self.get_miller_array_all_labels(filename)
+
+  def get_map_coefficients_labels(self, filename=None):
+    '''
+    Returns a list of array labels
+    '''
+    return self._get_array_labels(MapCoefficientsDataManager.datatype, filename)
+
+  def get_map_coefficients_user_selected_labels(self, filename=None):
+    '''
+    Returns a list of user selected array labels
+    '''
+    return self._get_user_selected_array_labels(MapCoefficientsDataManager.datatype, filename)
+
+  def get_map_coefficients_types(self, filename=None):
+    '''
+    Returns a dict of array types, keyed by label
+    '''
+    return self._get_array_types(MapCoefficientsDataManager.datatype, filename)
+
+  def get_map_coefficients_arrays(self, labels=None, filename=None):
+    '''
+    Returns a list of map coefficients from the file
+    '''
+    return self._get_arrays(MapCoefficientsDataManager.datatype, labels=labels,
+                            filename=filename)
+
+  def get_map_coefficients_names(self):
+    return self._get_names(MapCoefficientsDataManager.datatype)
+
+  def get_default_map_coefficients_name(self):
+    return self._get_default_name(MapCoefficientsDataManager.datatype)
+
+  def remove_map_coefficients(self, filename):
+    return self._remove(MapCoefficientsDataManager.datatype, filename)
+
+  def has_map_coefficients(
+      self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(
+      MapCoefficientsDataManager.datatype, expected_n=expected_n,
+      exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_map_coefficients_file(self, filename):
+    self.process_miller_array_file(filename)
+
+  def filter_map_coefficients_arrays(self, filename):
+    '''
+    Populate data structures by checking labels in miller_arrays to determine
+    type and by setting all complex miller arrays as map coefficients
+    '''
+    # check for labels
+    known_labels = mtz_map_coefficient_labels.union(cif_map_coefficient_labels)
+    datatype = MapCoefficientsDataManager.datatype
+    self._child_filter_arrays(datatype, filename, known_labels)
+
+    # check for complex arrays
+    data = self.get_miller_array(filename)
+    miller_arrays = data.as_miller_arrays()
+    current_labels = []
+    labels = []
+    types = {}
+    array_types = {}
+    datatype_dict = getattr(self, '_%s_arrays' % datatype)
+    for array in miller_arrays:
+      label = array.info().label_string()
+      if array.is_complex_array() and label not in current_labels:
+        labels.append(label)
+        if filename not in datatype_dict.keys():
+          datatype_dict[filename] = dict()
+        datatype_dict[filename][label] = array
+        types[label] = getattr(self, self._default_type_str % datatype)
+        array_types[label] = 'complex'
+
+    # update data structures
+    if len(labels) > 0:
+      current_labels = getattr(self, self._labels_str % datatype)
+      if filename not in current_labels:
+        current_labels[filename] = labels
+      else:
+        for label in labels:
+          if label not in current_labels[filename]:
+            current_labels[filename].append(label)
+      current_types = getattr(self, self._type_str % datatype)
+      if filename not in current_types:
+        current_types[filename] = types
+      else:
+        current_types[filename].update(types)
+      current_array_types = getattr(self, self._array_type_str % datatype)
+      if filename not in current_array_types:
+        current_array_types[filename] = array_types
+      else:
+        current_array_types[filename].update(array_types)
+      current_user_selected_labels = getattr(self, self._user_selected_labels_str % datatype)
+      current_user_selected_labels[filename] = []
+      self._add(datatype, filename, data)
+
+  def write_map_coefficients_file(
+      self, mtz_object, filename=Auto, overwrite=Auto):
+    return self.write_miller_array_file(
+      mtz_object, filename=filename, overwrite=overwrite)
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/miller_array.py
+'''
+Parent DataManager class for handling reciprocal space data
+'''
+from __future__ import absolute_import, division, print_function
+from six.moves import zip
+
+import os
+from copy import deepcopy
+
+import iotbx.phil
+
+from cctbx import crystal
+from iotbx.data_manager import DataManagerBase
+from iotbx.reflection_file_utils import label_table, get_experimental_phases_scores, \
+  get_phase_scores, get_r_free_flags_scores, reflection_file_server
+from libtbx import Auto
+from libtbx.utils import Sorry
+
+# =============================================================================
+class MillerArrayDataManager(DataManagerBase):
+
+  datatype = 'miller_array'
+  miller_array_child_datatypes = []                     # track children
+
+  # template storage names
+  _type_str = '_%s_types'
+  _default_type_str = '_default_%s_type'
+  _possible_types_str = '_possible_%s_types'
+  _array_type_str = '_%s_array_types'
+  _default_array_type_str = '_default_%s_array_type'
+  _possible_array_types_str = '_possible_%s_array_types'
+  _labels_str = '_%s_labels'
+  _arrays_str = '_%s_arrays'
+  _user_selected_labels_str = '_user_selected_%s_labels'
+  _all_labels_str = '_all_%s_labels'
+
+  # template error message
+  _unrecognized_type_error_str = 'Unrecognized %s type, "%s," possible choices are %s.'
+
+  # ---------------------------------------------------------------------------
+  # Miller arrays
+
+  def add_miller_array_phil_str(self):
+    '''
+    Add custom PHIL and storage for type and labels
+    '''
+    return self._add_miller_array_phil_str(MillerArrayDataManager.datatype)
+
+  def export_miller_array_phil_extract(self):
+    '''
+    Export custom PHIL extract
+    '''
+    return self._export_miller_array_phil_extract(
+      MillerArrayDataManager.datatype)
+
+  def load_miller_array_phil_extract(self, phil_extract, process_files=True):
+    '''
+    Load custom PHIL extract
+    '''
+    self._load_miller_array_phil_extract(MillerArrayDataManager.datatype,
+                                         phil_extract,
+                                         process_files=process_files)
+
+  def add_miller_array(self, filename, data):
+    self._add(MillerArrayDataManager.datatype, filename, data)
+    self._filter_miller_array_child_datatypes(filename)
+
+  def set_default_miller_array_type(self, array_type=None):
+    return self._set_default_miller_array_type(MillerArrayDataManager.datatype,
+                                               array_type)
+
+  def get_default_miller_array_array_type(self):
+    return self._get_default_miller_array_array_type(MillerArrayDataManager.datatype)
+
+  def set_default_miller_array_array_type(self, array_type=None):
+    return self._set_default_miller_array_array_type(MillerArrayDataManager.datatype,
+                                                     array_type)
+
+  def get_default_miller_array_type(self):
+    return self._get_default_miller_array_type(MillerArrayDataManager.datatype)
+
+  def set_default_miller_array(self, filename):
+    return self._set_default(MillerArrayDataManager.datatype, filename)
+
+  def get_miller_array(self, filename=None):
+    '''
+    Returns the main file object
+    '''
+    return self._get(MillerArrayDataManager.datatype, filename)
+
+  def set_miller_array_type(self, filename=None, label=None, array_type=None):
+    return self._set_miller_array_type(MillerArrayDataManager.datatype,
+                                       filename, label, array_type)
+
+  def get_miller_array_type(self, filename=None, label=None):
+    return self._get_miller_array_type(MillerArrayDataManager.datatype,
+                                       filename, label)
+
+  def set_miller_array_array_type(self, filename=None, label=None, array_type=None):
+    return self._set_miller_array_array_type(MillerArrayDataManager.datatype,
+                                             filename, label, array_type)
+
+  def get_miller_array_array_type(self, filename=None, label=None):
+    return self._get_miller_array_array_type(MillerArrayDataManager.datatype,
+                                             filename, label)
+
+  def get_miller_array_all_labels(self, filename=None):
+    return self._get_all_array_labels(MillerArrayDataManager.datatype, filename)
+
+  def get_miller_array_labels(self, filename=None, return_all=True):
+    '''
+    Returns a list of array labels. If the list has no items, the
+    return_all parameter controls whether or not to return all the labels
+
+    Parameters
+    ----------
+    filename : str
+      The filename for the labels, if None, the default filename is used
+    return_all : bool, optional
+      Keeps original behavior of returning all the labels
+
+    Returns
+    -------
+    labels : list
+      The list of labels
+    '''
+    labels = self._get_array_labels(MillerArrayDataManager.datatype, filename)
+    if len(labels) == 0 and return_all:
+      labels = self._get_all_array_labels(MillerArrayDataManager.datatype, filename)
+    return labels
+
+  def get_miller_array_user_selected_labels(self, filename=None):
+    return self._get_user_selected_array_labels(MillerArrayDataManager.datatype, filename)
+
+  def set_miller_array_user_selected_labels(self, filename=None, labels=None):
+    '''
+    Set the array of selected labels.
+
+    Parameters
+    ----------
+    filename : str
+      The filename for the labels, if None, the default filename is used
+    labels : list
+      The list of labels to set, if None, all labels in the file are selected
+    '''
+    if filename is None:
+      filename = self.get_default_miller_array_name()
+    all_labels = self.get_miller_array_all_labels(filename)
+    if labels is None:
+      labels = all_labels
+    for label in labels:
+      if label not in all_labels:
+        raise Sorry('{} does not exist in {}.'.format(label, filename))
+    getattr(self, self._user_selected_labels_str % MillerArrayDataManager.datatype)[filename] = labels
+
+  def get_miller_array_types(self, filename=None):
+    '''
+    Returns a dict of array types, keyed by label
+    '''
+    return self._get_array_types(MillerArrayDataManager.datatype, filename)
+
+  def get_miller_array_array_types(self, filename=None):
+    '''
+    Returns a dict of array array_types, keyed by label
+    '''
+    return self._get_array_array_types(MillerArrayDataManager.datatype, filename)
+
+  def get_miller_arrays(self, labels=None, filename=None):
+    '''
+    Returns a list of arrays
+    '''
+    return self._get_arrays(MillerArrayDataManager.datatype, labels=labels,
+                            filename=filename)
+
+  def get_miller_array_names(self):
+    return self._get_names(MillerArrayDataManager.datatype)
+
+  def get_default_miller_array_name(self):
+    return self._get_default_name(MillerArrayDataManager.datatype)
+
+  def remove_miller_array(self, filename):
+    return self._remove(MillerArrayDataManager.datatype, filename)
+
+  def has_miller_arrays(self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(MillerArrayDataManager.datatype, expected_n=expected_n,
+                          exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_miller_array_file(self, filename):
+    if filename not in self.get_miller_array_names():
+      self._process_file(MillerArrayDataManager.datatype, filename)
+      self._filter_miller_array_child_datatypes(filename)
+    return filename
+
+  def _detect_miller_array_array_type(self, array):
+    '''
+    Convenience function for getting the array_type of a Miller array
+
+
+    Parameters
+    ----------
+    array : cctbx.miller.array
+      The Miller array object
+
+    Returns
+    -------
+    array_type : str
+      The array_type as determined by the is_*_array functions
+    '''
+    array_type = self._default_miller_array_array_type
+    if array.is_xray_amplitude_array():
+      array_type = 'amplitude'
+    elif array.is_xray_intensity_array():
+      array_type = 'intensity'
+    elif array.is_complex_array():
+      array_type = 'complex'
+    elif array.is_hendrickson_lattman_array():
+      array_type = 'hendrickson_lattman'
+    elif array.is_integer_array():
+      array_type = 'integer'
+    elif array.is_bool_array():
+      array_type = 'bool'
+    elif array.is_nonsense():
+      array_type = 'nonsense'
+    return array_type
+
+  def filter_miller_array_arrays(self, filename):
+    '''
+    Populate data structures with all arrays
+    '''
+    if filename not in self._miller_array_arrays.keys():
+      self._miller_array_arrays[filename] = {}
+    if filename not in self._miller_array_types.keys():
+      self._miller_array_types[filename] = {}
+    if filename not in self._miller_array_array_types.keys():
+      self._miller_array_array_types[filename] = {}
+    merge_equivalents = 'miller_array_skip_merge' not in self.custom_options
+    miller_arrays = self.get_miller_array(filename).\
+      as_miller_arrays(merge_equivalents=merge_equivalents)
+    labels = []
+    for array in miller_arrays:
+      label = array.info().label_string()
+      labels.append(label)
+      self._miller_array_arrays[filename][label] = array
+      self._miller_array_types[filename][label] = self._default_miller_array_type
+      self._miller_array_array_types[filename][label] = self._detect_miller_array_array_type(array)
+    self._all_miller_array_labels[filename] = labels
+    self._miller_array_labels[filename] = []
+    self._user_selected_miller_array_labels[filename] = []
+
+  def write_miller_array_file(self, mtz_object, filename=Auto, overwrite=Auto):
+    '''
+    Write an MTZ file
+
+    :param mtz_object:        iotbx_mtz_ext.object
+    :param filename:          str for the output filename
+    :param overwrite:         bool for overwriting files
+
+    The mtz_object can be constructed from a cctbx.miller_array object to
+    make a iotbx_mtz_ext.dataset, which can then construct the mtz_object.
+    '''
+    # default options
+    if filename is Auto:
+      filename = self.get_default_output_filename() + '.mtz'
+    if overwrite is Auto:
+      overwrite = self._overwrite
+
+    # check overwrite
+    if os.path.isfile(filename) and (not overwrite):
+      raise Sorry('%s already exists and overwrite is set to %s.' %
+                  (filename, overwrite))
+
+    try:
+      mtz_object.write(file_name=filename)
+    except IOError as err:
+      raise Sorry('There was an error with writing %s.\n%s' %
+                  (filename, err))
+
+    self._output_files.append(filename)
+    self._output_types.append(MillerArrayDataManager.datatype)
+
+    return filename
+
+  def get_reflection_file_server(self, filenames=None, labels=None,
+                                 array_type=None,
+                                 crystal_symmetry=None, force_symmetry=None,
+                                 ignore_intensities_if_amplitudes_present=False,
+                                 logger=None):
+    '''
+    Return the file server for a single miller_array file or mulitple files
+
+    :param filenames:         list of filenames or None
+    :param labels:            list of lists of labels or None
+    :param array_type:        "x_ray", "neutron", "electron", or None
+    :param crystal_symmetry:  cctbx.crystal.symmetry object or None
+    :param force_symmetry:    bool or None
+    :param ignore_intensities_if_amplitudes_present: bool
+    :param logger:            defaults to self.logger (multi_out)
+
+    The order in filenames and labels should match, e.g. labels[0] should be the
+    labels for filenames[0]. The lengths of filenames and labels should be equal
+    as well. If all the labels in a file are to be added, set the labels entry
+    to None, e.g. labels[0] = None.
+
+    If array_type is None, files of any type are allowed.
+
+    If ignore_intensities_if_amplitudes_present is set to True, intensity
+    arrays are not automatically added to the reflection_file_server if
+    amplitude arrays have been selected (as user_selected_arrays). This
+    is to avoid fmodel from prioritizing intensity arrays if both are
+    present. If both intensity and amplitude arrays are selected,
+    setting this parameter to True will not ignore the selected intensity
+    arrays.
+
+    None is returned if the file_server has no arrays
+    '''
+
+    # use default logger if no logger for reflection_file_server is provided
+    if logger is None:
+      logger = self.logger
+
+    # use all miller_array files if no filenames are provided
+    if filenames is None:
+      filenames = self.get_miller_array_names()
+
+    # set labels
+    if labels is None:
+      labels = [None for filename in filenames]
+
+    # set labels if the length of labels does not match length of filenames
+    assert len(filenames) >= len(labels)
+    if len(filenames) > len(labels):
+      labels += [None]*(len(filenames) - len(labels))
+    assert len(filenames) == len(labels)
+
+    # determine types of selected arrays across all files and decide
+    # whether to ignore intensity arrays that are not explicitly selected
+    selected_types = set()
+    for i, filename in enumerate(filenames):
+      current_selected_labels = self.get_miller_array_user_selected_labels(filename)
+      if len(current_selected_labels) > 0:
+        for j, label in enumerate(current_selected_labels):
+          label = self._match_label(label, self.get_miller_arrays(filename=filename))
+          selected_types.add(self.get_miller_array_array_types(filename)[label])
+    if 'amplitude' in selected_types and ignore_intensities_if_amplitudes_present:
+      selected_types.add('intensity')
+
+    # check for user selected labels
+    selected_labels = deepcopy(labels)
+    for i, filename in enumerate(filenames):
+      current_selected_labels = deepcopy(self.get_miller_array_user_selected_labels(filename))
+      current_all_labels = labels[i]
+      if labels[i] is None:
+        current_all_labels = self.get_miller_array_all_labels(filename)
+      if len(current_selected_labels) > 0:
+        # add selected labels
+        for j, label in enumerate(current_selected_labels):
+          label = self._match_label(label, self.get_miller_arrays(filename=filename))
+          current_selected_labels[j] = label
+        # add remaining labels that are a different type
+        for label in current_all_labels:
+          if self.get_miller_array_array_types(filename)[label] not in selected_types \
+            or self.get_miller_array_array_types(filename)[label] == 'unknown':
+            current_selected_labels.append(label)
+        selected_labels[i] = current_selected_labels
+    labels = selected_labels
+
+    # force crystal symmetry if a crystal symmetry is provided
+    if crystal_symmetry is not None and force_symmetry is None:
+      force_symmetry = True
+    if force_symmetry is None:
+      force_symmetry = False
+
+    #  determine crystal symmetry from file list, if not provided
+    if crystal_symmetry is None:
+      try:
+        from_reflection_files = []
+        for filename, file_labels in zip(filenames, labels):
+          miller_arrays = self.get_miller_arrays(filename=filename)
+          for miller_array in miller_arrays:
+            if ((file_labels is None) or
+                (miller_array.info().label_string() in file_labels)):
+              from_reflection_files.append(miller_array.crystal_symmetry())
+        crystal_symmetry = crystal.select_crystal_symmetry(
+          from_reflection_files=from_reflection_files)
+      except Exception:
+        raise Sorry('A unit cell and space group could not be determined from the "filenames" argument. Please make sure there are enough data arrays being selected.')
+
+    # crystal_symmetry and force_symmetry should be set by now
+    miller_arrays = []
+    miller_array_labels = []  # filename:array_label
+    def get_array_label(filename, array):
+      '''
+      Convenience function for creating filename:array_label label
+      '''
+      return filename + ':' + array.info().label_string()
+    merge_equivalents = 'miller_array_skip_merge' not in self.custom_options
+    for filename, file_labels in zip(filenames, labels):
+      file_arrays = self.get_miller_array(filename).\
+        as_miller_arrays(crystal_symmetry=crystal_symmetry,
+                         force_symmetry=force_symmetry,
+                         merge_equivalents=merge_equivalents)
+      if file_labels is None:
+        file_labels = self.get_miller_array_all_labels(filename)
+      for miller_array in file_arrays:
+        label_name = miller_array.info().label_string()
+        # check array label
+        if label_name in file_labels:
+          # check array type
+          if (array_type is None
+              or array_type in self.get_miller_array_type(filename, label_name)):
+            miller_arrays.append(miller_array)
+            miller_array_labels.append(get_array_label(filename, miller_array))
+
+    # final check of selected labels with scores
+    problem_arrays = set()  # arrays with the same score as selected arrays
+    # -------------------------------------------------------------------------
+    def filter_arrays_by_scores(filename, arrays, test_scores):
+      '''
+      Convenience function for using scores to select arrays for removal
+      '''
+      remove_set = set()
+      selected_array_labels = [get_array_label(filename, selected_array) for selected_array in arrays]
+      for selected_array_label in selected_array_labels:
+        if selected_array_label in score_dict:
+          score = score_dict[selected_array_label]
+          if score > 0 and test_scores.count(score) > 1:
+            for array, array_label in zip(miller_arrays, miller_array_labels):
+              if score_dict[array_label] == score and array_label not in selected_array_labels:
+                remove_set.add(array)
+      return remove_set
+    # -------------------------------------------------------------------------
+    for scores in [
+      get_experimental_phases_scores(miller_arrays, False),
+      get_phase_scores(miller_arrays),
+      get_r_free_flags_scores(miller_arrays, None).scores,
+      ]:
+      score_dict = {miller_array_labels[i]:scores[i] for i in range(len(miller_arrays))}
+      for filename in filenames:
+        selected_arrays = self.get_miller_arrays(
+          labels=self.get_miller_array_user_selected_labels(filename=filename),
+          filename=filename)
+        problem_arrays.update(filter_arrays_by_scores(filename, selected_arrays, scores))
+    new_arrays = [ma for ma in miller_arrays if ma not in problem_arrays]
+
+    miller_arrays = new_arrays
+
+    file_server = reflection_file_server(
+      crystal_symmetry=crystal_symmetry,
+      force_symmetry=force_symmetry,
+      miller_arrays=miller_arrays,
+      err=logger)
+    if len(file_server.miller_arrays) == 0:
+      file_server = None
+    return file_server
+
+  # -----------------------------------------------------------------------------
+  # base functions for miller_array datatypes
+  def _add_miller_array_phil_str(self, datatype):
+
+    # set up storage
+    # self._miller_array_types = {}                 # [filename] = type dict
+    # self._miller_array_array_types = {}           # [filename] = type dict
+    # self._miller_array_all_labels = {}            # [filename] = label list
+    # self._miller_array_labels = {}                # [filename] = label list
+    # self._miller_array_arrays = {}                # [filename] = array dict
+    # self._user_selected_miller_array_labels = {}  # [filename] = array dict
+    setattr(self, self._type_str % datatype, {})
+    setattr(self, self._default_type_str % datatype, ['x_ray'])
+    setattr(self, self._possible_types_str % datatype,
+            ['x_ray', 'neutron', 'electron'])
+    setattr(self, self._array_type_str % datatype, {})
+    setattr(self, self._default_array_type_str % datatype, 'unknown')
+    setattr(self, self._possible_array_types_str % datatype,
+            ['unknown', 'amplitude', 'bool', 'complex', 'hendrickson_lattman', 'integer',
+             'intensity', 'nonsense'])
+    setattr(self, self._all_labels_str % datatype, {})
+    setattr(self, self._labels_str % datatype, {})
+    setattr(self, self._arrays_str % datatype, {})
+    setattr(self, self._user_selected_labels_str % datatype, {})
+
+    # custom PHIL section
+    # all the array labels in a file is not stored
+    # user_selected_labels stores the actual use selection
+    # labels stores the full selected label and metadata
+    custom_phil_str = '''
+%s
+  .multiple = True
+{
+  file = None
+    .type = path
+    .short_caption = MTZ file
+    .style = file_type:hkl input_file
+  labels
+    .multiple = True
+    .help = Storage for all labels in the file
+  {
+    name = None
+      .type = str
+    type = *%s
+      .type = choice(multi=True)
+    array_type = *%s
+      .type = choice(multi=False)
+  }
+  user_selected_labels = None
+    .type = str
+    .multiple = True
+    .help = Storage for user selected labels (can be shorter)
+    .style = hidden
+}
+''' % (datatype,
+       ' '.join(getattr(self, self._possible_types_str % datatype)),
+       ' '.join(getattr(self, self._possible_array_types_str % datatype)))
+    # add fmodel PHIL
+    if self.supports('model'):
+      custom_phil_str += '''
+fmodel {
+  include scope iotbx.extract_xtal_data.xray_data_str_no_filenames
+  include scope iotbx.extract_xtal_data.neutron_data_str_no_filenames
+}
+'''
+
+    # custom PHIL scope
+    setattr(self, '_custom_%s_phil' % datatype,
+            iotbx.phil.parse(custom_phil_str, process_includes=True))
+
+    # add to child datatypes
+    MillerArrayDataManager.miller_array_child_datatypes.append(datatype)
+
+    return custom_phil_str
+
+  def _export_miller_array_phil_extract(self, datatype):
+    extract = []
+    filenames = getattr(self, 'get_%s_names' % datatype)()
+    for filename in filenames:
+      item_extract = getattr(self, '_custom_%s_phil' % datatype).extract()
+      item_extract = deepcopy(getattr(item_extract, '%s' % datatype)[0])
+      item_extract.file = filename
+      types = self._get_array_types(datatype, filename=filename)
+      array_types = self._get_array_array_types(datatype, filename=filename)
+      user_selected_labels = self._get_user_selected_array_labels(datatype, filename=filename)
+      arrays = self.get_miller_arrays(filename=filename)
+      labels = [self._match_label(label, arrays) for label in user_selected_labels]
+      if len(labels) > len(types.keys()):
+        raise Sorry('Some labels do not have types.\n{}\n{}'.format(labels, list(types.keys())))
+      labels_extract = []
+      for label in labels:
+        label_extract = deepcopy(item_extract.labels[0])
+        label_extract.name = label
+        if label not in types.keys():
+          raise Sorry('The label, %s, is not recognized to be %s data.' % (label, datatype))
+        label_extract.type = types[label]
+        label_extract.array_type = array_types[label]
+        labels_extract.append(label_extract)
+      item_extract.labels = labels_extract
+      item_extract.user_selected_labels = user_selected_labels
+      extract.append(item_extract)
+    return extract
+
+  def _match_label(self, label, miller_arrays):
+    '''
+    Convenience function for matching partially specified labels
+
+    Parameters
+    ----------
+    label : str
+      label to check
+    miller_arrays : list (use self.get_miller_arrays)
+      arrays to check against
+
+    Return
+    ------
+    matching_label: str or None
+      The most closely matching label or None if no match is found
+    '''
+    label_match = None
+    lbl_tab = label_table(miller_arrays=miller_arrays, err=os.devnull)
+    match = lbl_tab.match_data_label(
+      label=label, command_line_switch='miller_array.label', f=self.logger)
+    if match is not None:
+      label_match = match.info().label_string()
+    return label_match
+
+  def _reconcile_user_labels(self, filename):
+    '''
+    Ensures that user_selected_labels are consistent between miller_array
+    and map_coefficient types. Also ensures that user_selected_labels
+    are uniquely selecting arrays.
+    '''
+    miller_arrays = self.get_miller_arrays(filename=filename)
+    ma_user_selected_labels = self.get_miller_array_user_selected_labels(filename)
+    matched_ma_user_selected_labels = [
+      self._match_label(label, miller_arrays) for label in ma_user_selected_labels]
+    datatype_user_selected_labels = []
+    matched_datatype_user_selected_labels = []
+    if self.supports('map_coefficients') and self.has_map_coefficients():
+      for datatype in self.miller_array_child_datatypes:
+        datatype_user_selected_labels = self._get_user_selected_array_labels(datatype, filename)
+        matched_datatype_user_selected_labels = [
+          self._match_label(label, miller_arrays) for label in datatype_user_selected_labels]
+        datatype_labels = self._get_array_labels(datatype, filename)
+        # append to parent labels if missing
+        for label in datatype_user_selected_labels:
+          matched_label = self._match_label(label, miller_arrays)
+          if label not in ma_user_selected_labels \
+            and matched_label not in matched_ma_user_selected_labels:
+            ma_user_selected_labels.append(label)
+        # append to datatype labels if missing
+        for label in ma_user_selected_labels:
+          matched_label = self._match_label(label, miller_arrays)
+          if label not in datatype_user_selected_labels \
+            and matched_label not in matched_datatype_user_selected_labels \
+            and matched_label in datatype_labels:
+            datatype_user_selected_labels.append(label)
+
+    # check for duplicates
+    for label_pair in [(matched_ma_user_selected_labels, ma_user_selected_labels),
+                       (matched_datatype_user_selected_labels, datatype_user_selected_labels)]:
+      if len(set(label_pair[0])) < len(label_pair[0]):
+        raise Sorry('''
+There are duplicate user_selected_labels. Please only specify unique labels.
+user_selected_labels: %s
+      matched labels: %s
+''' % (label_pair[1], label_pair[0]))
+
+  def _load_miller_array_phil_extract(self, datatype, phil_extract, process_files=True):
+    if self.supports('model'):
+      self._fmodel_phil_scope = self.master_phil.format(python_object=phil_extract)
+    extract = phil_extract.data_manager
+    extract = getattr(extract, '%s' % datatype)
+    for item_extract in extract:
+      if not hasattr(item_extract, 'file'):
+        raise Sorry('This PHIL is not properly defined for the %s datatype.\n There should be a parameter for the filename ("file").\n')
+
+      # process file, or last loaded file
+      if item_extract.file is None:
+        filenames = self.get_miller_array_names()
+        if len(filenames) == 0:
+          raise Sorry('No reflection files are available to continue processing PHIL.')
+        item_extract.file = filenames[-1]
+      if process_files:
+        getattr(self, 'process_%s_file' % datatype)(item_extract.file)
+
+        # check labels (if available)
+        if len(item_extract.labels) > 0 or len(item_extract.user_selected_labels) > 0:
+          # all labels in file
+          file_labels = getattr(self, self._all_labels_str % 'miller_array')[item_extract.file]
+
+          # labels from PHIL
+          phil_labels = []
+          phil_types = {}
+          phil_array_types = {}
+          phil_user_selected_labels = []
+          specified_labels = item_extract.labels + item_extract.user_selected_labels
+          for label in specified_labels:
+            label_name = label
+            if hasattr(label_name, 'name'):
+              label_name = label_name.name
+            phil_user_selected_labels.append(label_name)
+            if label_name not in file_labels:
+
+              # try matching
+              label_match = self._match_label(label_name, self.get_miller_arrays(filename=item_extract.file))
+              if label_match is None:
+                raise Sorry('The label, %s, could not be found in %s.' %
+                  (label_name, item_extract.file))
+              else:
+                label_name = label_match
+            phil_labels.append(label_name)
+            if hasattr(label, 'type'):
+              if not self._is_valid_miller_array_type(datatype, label.type):
+                raise Sorry(self._unrecognized_type_error_str %
+                            (datatype,
+                            ', '.join(label.type),
+                            ', '.join(getattr(self, self._possible_types_str % datatype))))
+              phil_types[label_name] = label.type
+            if hasattr(label, 'array_type'):
+              if label.array_type not in getattr(self, self._possible_array_types_str % datatype):
+                raise Sorry(self._unrecognized_type_error_str %
+                            (datatype, label.array_type, ', '.join(
+                              getattr(self, self._possible_array_types_str % datatype))))
+              # if a non-default type is set, assume it is manually set
+              # otherwise, automatically detect array_type
+              array_type = label.array_type
+              if array_type == self.get_default_miller_array_array_type():
+                array = self.get_miller_arrays(labels=[label_name], filename=item_extract.file)[0]
+                array_type = self._detect_miller_array_array_type(array)
+              phil_array_types[label_name] = array_type
+
+          # update storage
+          labels_storage = getattr(self, self._labels_str % datatype)
+          if item_extract.file not in labels_storage.keys():
+            raise Sorry('The file, %s, does not seem to have %s data.' % (item_extract.file, datatype))
+          labels_storage = labels_storage[item_extract.file]
+          types_storage = getattr(self, self._type_str % datatype)[item_extract.file]
+          array_types_storage = getattr(self, self._array_type_str % datatype)[item_extract.file]
+          for label in phil_labels:
+            if label not in labels_storage:
+              labels_storage.append(label)
+            if label in phil_types:
+              types_storage[label] = phil_types[label]
+            if label in phil_array_types:
+              array_types_storage[label] = phil_array_types[label]
+          user_selected_labels_storage = getattr(self, self._user_selected_labels_str % datatype)[item_extract.file]
+          for label in phil_user_selected_labels:
+            if label not in user_selected_labels_storage:
+              user_selected_labels_storage.append(label)
+
+        # ensure user_selected_labels are consistent
+        self._reconcile_user_labels(filename=item_extract.file)
+
+  def _is_valid_miller_array_type(self, datatype, array_type):
+    """
+    Convenience function for checking if the array type is valid
+    This will also check that model_type is a list to conform with the
+    PHIL parameter
+
+    Parameters
+    ----------
+    datatype: str
+      The datatype (i.e. miller_array)
+    array_type: list
+      The model_type(s) to check.
+
+    Returns
+    -------
+    bool:
+    """
+    if not isinstance(array_type, list):
+      raise Sorry('The type argument must be a list.')
+    if len(array_type) == 0:
+      return False
+    valid = True
+    for at in array_type:
+      valid = valid and (at in getattr(self, self._possible_types_str % datatype))
+    return valid
+
+  def _set_default_miller_array_type(self, datatype, array_type):
+    if not self._is_valid_miller_array_type(datatype, array_type):
+      raise Sorry(self._unrecognized_type_error_str %
+                  (datatype,
+                   ', '.join(array_type),
+                   ', '.join(getattr(self, self._possible_types_str % datatype))))
+    setattr(self, self._default_type_str % datatype, array_type)
+
+  def _get_default_miller_array_type(self, datatype):
+    return getattr(self, self._default_type_str % datatype)
+
+  def _set_default_miller_array_array_type(self, datatype, array_type):
+    if array_type not in getattr(self, self._possible_array_types_str % datatype):
+      raise Sorry(self._unrecognized_type_error_str %
+                  (datatype, array_type,
+                   ', '.join(getattr(self, self._possible_array_types_str % datatype))))
+    setattr(self, self._default_array_type_str % datatype, array_type)
+
+  def _get_default_miller_array_array_type(self, datatype):
+    return getattr(self, self._default_array_type_str % datatype)
+
+  def _set_miller_array_type(self, datatype, filename=None, label=None,
+                             array_type=None):
+    if filename is None:
+      filename = self._get_default_name(datatype)
+    if label is None:
+      label = self._get_all_array_labels(datatype, filename)[0]
+    if array_type is None:
+      array_type = [getattr(self, self._default_type_str % datatype)]
+    if not self._is_valid_miller_array_type(datatype, array_type):
+      raise Sorry(self._unrecognized_type_error_str %
+                  (datatype,
+                  ', '.join(array_type),
+                  ', '.join(getattr(self, self._possible_types_str % datatype))))
+    getattr(self, self._type_str % datatype)[filename][label] = array_type
+
+  def _get_miller_array_type(self, datatype, filename=None, label=None):
+    if filename is None:
+      filename = self._get_default_name(datatype)
+    if label is None:
+      label = self._get_all_array_labels(datatype, filename)[0]
+    types = self._get_array_types(datatype, filename)
+    return types.get(label, getattr(self, self._default_type_str % datatype))
+
+  def _set_miller_array_array_type(self, datatype, filename=None, label=None,
+                                   array_type=None):
+    if filename is None:
+      filename = self._get_default_name(datatype)
+    if label is None:
+      label = self._get_all_array_labels(datatype, filename)[0]
+    if array_type is None:
+      array_type = getattr(self, self._default_array_type_str % datatype)
+    elif array_type not in getattr(self, self._possible_array_types_str % datatype):
+      raise Sorry(self._unrecognized_type_error_str %
+                  (datatype,
+                   array_type,
+                   ', '.join(getattr(self, self._possible_array_types_str % datatype))))
+    getattr(self, self._array_type_str % datatype)[filename][label] = array_type
+
+  def _get_miller_array_array_type(self, datatype, filename=None, label=None):
+    if filename is None:
+      filename = self._get_default_name(datatype)
+    if label is None:
+      label = self._get_all_array_labels(datatype, filename)[0]
+    types = self._get_array_array_types(datatype, filename)
+    return types.get(label, getattr(self, self._default_array_type_str % datatype))
+
+  def _filter_miller_array_child_datatypes(self, filename):
+    # filter arrays (e.g self.filter_map_coefficients_arrays)
+    for datatype in MillerArrayDataManager.miller_array_child_datatypes:
+      function_name = 'filter_%s_arrays' % datatype
+      if hasattr(self, function_name):
+        getattr(self, function_name)(filename)
+
+  def _check_miller_array_default_filename(self, datatype, filename=None):
+    '''
+    Helper function for handling default filenames
+    '''
+    if filename is None:
+      filename = getattr(self, 'get_default_%s_name' % datatype)()
+      if filename is None:
+        raise Sorry('There is no default filename for %s.' % datatype)
+    return filename
+
+  def _check_miller_array_storage_dict(self, datatype, storage_dict, filename):
+    '''
+    Helper function for checking filename and datatypes
+    '''
+    if filename not in storage_dict.keys():
+      self.process_miller_array_file(filename)
+      if filename not in storage_dict.keys():
+        raise Sorry('There are no known %s arrays in %s' % (datatype, filename))
+
+  def _get_all_array_labels(self, datatype, filename=None):
+    filename = self._check_miller_array_default_filename(datatype, filename)
+    storage_dict = getattr(self, self._all_labels_str % datatype)
+    self._check_miller_array_storage_dict(datatype, storage_dict, filename)
+    labels = storage_dict[filename]
+    return labels
+
+  def _get_array_labels(self, datatype, filename=None):
+    filename = self._check_miller_array_default_filename(datatype, filename)
+    storage_dict = getattr(self, self._labels_str % datatype)
+    self._check_miller_array_storage_dict(datatype, storage_dict, filename)
+    labels = storage_dict[filename]
+    return labels
+
+  def _get_user_selected_array_labels(self, datatype, filename=None):
+    filename = self._check_miller_array_default_filename(datatype, filename)
+    storage_dict = getattr(self, self._user_selected_labels_str % datatype)
+    self._check_miller_array_storage_dict(datatype, storage_dict, filename)
+    labels = storage_dict[filename]
+    return labels
+
+  def _get_array_types(self, datatype, filename=None):
+    filename = self._check_miller_array_default_filename(datatype, filename)
+    storage_dict = getattr(self, self._type_str % datatype)
+    self._check_miller_array_storage_dict(datatype, storage_dict, filename)
+    types = storage_dict[filename]
+    return types
+
+  def _get_array_array_types(self, datatype, filename=None):
+    filename = self._check_miller_array_default_filename(datatype, filename)
+    storage_dict = getattr(self, self._array_type_str % datatype)
+    self._check_miller_array_storage_dict(datatype, storage_dict, filename)
+    types = storage_dict[filename]
+    return types
+
+  def _get_arrays(self, datatype, filename=None, labels=None):
+    filename = self._check_miller_array_default_filename(datatype, filename)
+    if filename not in getattr(self, 'get_%s_names' % datatype)():
+      self.process_miller_array_file(filename)
+    if labels is None:
+      labels = self._get_all_array_labels(datatype, filename=filename)
+    else:
+      if not isinstance(labels, list):
+        raise Sorry('The labels argument should be a list of labels')
+    storage_dict = getattr(self, self._arrays_str % datatype)
+    self._check_miller_array_storage_dict(datatype, storage_dict, filename)
+    arrays = []
+    for label in labels:
+      arrays.append(self._get_array_by_label(datatype, filename, label))
+    return arrays
+
+  def _get_array_by_label(self, datatype, filename, label, try_matching=True):
+    storage_dict = getattr(self, self._arrays_str % datatype)
+    if label in storage_dict[filename].keys():
+      return storage_dict[filename][label]
+    elif label in self._get_user_selected_array_labels(datatype, filename) and try_matching:
+      matched_label = self._match_label(label, self._get_arrays(datatype, filename, labels=None))
+      return self._get_array_by_label(datatype, filename, matched_label, try_matching=False)
+    else:
+      raise Sorry('%s does not have any arrays labeled %s' %
+                  (filename, label))
+
+  def _child_filter_arrays(self, datatype, filename, known_labels):
+    '''
+    Populate data structures by checking labels in miller arrays to determine
+    child type
+    '''
+    if datatype not in MillerArrayDataManager.miller_array_child_datatypes:
+      raise Sorry('%s is not a valid child datatype of miller_array.')
+
+    user_labels = getattr(self, self._user_selected_labels_str % datatype)
+    user_labels[filename] = []
+
+    data = self.get_miller_array(filename)
+    merge_equivalents = 'miller_array_skip_merge' not in self.custom_options
+    miller_arrays = data.as_miller_arrays(merge_equivalents=merge_equivalents)
+    labels = []
+    types = {}
+    # array_types = {}
+    datatype_dict = getattr(self, self._arrays_str % datatype)
+    for array in miller_arrays:
+      label = set(array.info().labels)
+      common_labels = known_labels.intersection(label)
+      if len(common_labels) > 0:
+        label = array.info().label_string()
+        labels.append(label)
+        if filename not in datatype_dict.keys():
+          datatype_dict[filename] = {}
+        datatype_dict[filename][label] = array
+        types[label] = getattr(self, self._default_type_str % datatype)
+        # array_types[label] = getattr(self, self._default_array_type_str % datatype)
+
+    # if arrays exist, start tracking
+    if len(labels) > 0:
+      getattr(self, self._labels_str % datatype)[filename] = labels
+      getattr(self, self._type_str % datatype)[filename] = types
+      # getattr(self, self._array_type_str % datatype)[filename] = array_types
+      self._add(datatype, filename, data)
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/model.py
+from __future__ import absolute_import, division, print_function
+'''
+'''
+
+import iotbx.pdb
+import mmtbx.model
+
+from iotbx.file_reader import any_file
+from iotbx.data_manager import DataManagerBase
+from libtbx import Auto
+from libtbx.utils import Sorry
+import os
+
+# =============================================================================
+class ModelDataManager(DataManagerBase):
+
+  datatype = 'model'
+
+  # ---------------------------------------------------------------------------
+  # Models
+  def add_model_phil_str(self):
+    '''
+    Add custom PHIL and storage for type
+    The type is a choice(multi=True) PHIL parameter, so it is always a list
+    '''
+
+    # set up storage
+    # self._model_types = dict()  # [filename] = [type]
+    self._model_types = dict()
+    self._default_model_type = ['x_ray']
+    self._possible_model_types = ['x_ray', 'neutron', 'electron', 'reference']
+
+    # custom PHIL section
+    custom_phil_str = '''
+model
+  .multiple = True
+{
+  file = None
+    .type = path
+    .short_caption = Model file
+    .style = file_type:pdb input_file
+  type = *%s
+    .type = choice(multi=True)
+    .short_caption = Model type(s)
+}
+''' % ' '.join(self._possible_model_types)
+
+    # custom PHIL scope
+    self._custom_model_phil = iotbx.phil.parse(custom_phil_str)
+
+    return custom_phil_str
+
+  def export_model_phil_extract(self):
+    '''
+    Export custom PHIL extract
+    '''
+    extract = list()
+    filenames = self.get_model_names()
+    for filename in filenames:
+      item_extract = self._custom_model_phil.extract().model[0]
+      item_extract.file = filename
+      item_extract.type = self._model_types.get(
+        filename, self._default_model_type)
+      extract.append(item_extract)
+    return extract
+
+  def load_model_phil_extract(self, phil_extract, process_files=True):
+    '''
+    Load custom PHIL extract
+    '''
+    extract = phil_extract.data_manager.model
+    for item_extract in extract:
+      if ((not hasattr(item_extract, 'file')) or
+          (not hasattr(item_extract, 'type'))):
+        raise Sorry('This PHIL is not properly defined for the "model" datatype.\n There should be a parameter for the filename ("file") and type ("type").\n')
+
+      # process file
+      if process_files and item_extract.file is not None:
+        self.process_model_file(item_extract.file)
+        self._model_types[item_extract.file] = item_extract.type
+
+  def add_model(self, filename, data):
+    return self._add(ModelDataManager.datatype, filename, data)
+
+  def _is_valid_model_type(self, model_type):
+    """
+    Convenience function for checking if the model type is valid
+    This will also check that model_type is a list to conform with the
+    PHIL parameter
+
+    Parameters
+    ----------
+    model_type: list
+      The model_type(s) to check.
+
+    Returns
+    -------
+    bool:
+    """
+    if not isinstance(model_type, list):
+      raise Sorry('The model_type argument must be a list.')
+    if len(model_type) == 0:
+      return False
+    valid = True
+    for mt in model_type:
+      valid = valid and (mt in self._possible_model_types)
+    return valid
+
+  def set_target_output_format(self, target_output_format):
+   if target_output_format == 'mmcif': target_output_format='cif'
+   if not target_output_format in ['cif','pdb']:
+     raise  Sorry("Target output format (%s) not recognized, options are" %(
+       target_output_format) + "pdb or cif")
+   self._target_output_format = target_output_format
+
+  def set_default_model_type(self, model_type):
+    if not self._is_valid_model_type(model_type):
+      raise Sorry('Unrecognized model type, "%s," possible choices are %s.' %
+                  (model_type, ', '.join(self._possible_model_types)))
+    self._default_model_type = model_type
+
+  def get_default_model_type(self):
+    return self._default_model_type
+
+  def set_default_model(self, filename):
+    return self._set_default(ModelDataManager.datatype, filename)
+
+  def get_model(self, filename=None, model_type=None):
+    """
+    Retrieve a stored mmtbx.model.manager object
+
+    If model_type is None and there is only one model type, then the
+    model is returned. If there is more than one model type, then a
+    Sorry is raised.
+
+    If a model_type is specified when a model has more than one type, a
+    copy of the model is returned if model_type is not the default type.
+
+    Parameters
+    ----------
+    filename : str
+        Optionally specify which model using its filepath
+    model_type: str
+        Optionally specify the type of the model
+        The options are the same as for the scattering dictionary
+        ["n_gaussian", "wk1995", "it1992", "electron", "neutron"] and
+        "x_ray" which will default to "n_gaussian".
+
+    Returns
+    -------
+    model
+        The mmtbx.model.manager object
+
+    """
+    model = self._get(ModelDataManager.datatype, filename)
+    if self.supports('restraint'):
+      restraint_objects = list()
+      for restraint_filename in self.get_restraint_names():
+        restraint_objects.append((restraint_filename, self.get_restraint(restraint_filename)))
+      model.set_restraint_objects(restraint_objects)
+    if hasattr(model,'info'):  # save filename if possible
+      if filename is None:
+        filename = self.get_default_model_name()
+      if filename:
+        model.info().full_file_name = os.path.abspath(filename)
+        model.info().file_name = os.path.split(filename)[-1]
+    if model_type is None:
+      if len(self.get_model_type(filename=filename)) > 1:
+        raise Sorry('''
+There is more than one model type, {}. You must specify one.
+'''.format(self.get_model_type(filename=filename)))
+    else:
+      check_type = self.map_scattering_table_type(model_type)
+      if check_type not in self.get_model_type(filename=filename):
+        raise Sorry('''
+The model type, {}, is not one of the types set for the model, {}.
+The choices are {}.
+'''.format(model_type, filename, self.get_model_type(filename=filename)))
+      if len(self.get_model_type(filename=filename)) > 1 \
+        and model_type not in self.get_default_model_type():
+          model = model.deep_copy()
+
+      # set scattering dictionary based on model type
+      # if model_type == 'x_ray':
+      #   model_type = 'n_gaussian'
+      # model.setup_scattering_dictionaries(scattering_table=model_type)
+
+    return model
+
+  def set_model_type(self, filename=None, model_type=None):
+    if (filename is None):
+      filename = self.get_default_model_name()
+    if (model_type is None):
+      model_type = self._default_model_type
+    elif not self._is_valid_model_type(model_type):
+      raise Sorry('Unrecognized model type, "%s," possible choices are %s.' %
+                  (model_type, ', '.join(self._possible_model_types)))
+    self._model_types[filename] = model_type
+
+  def get_model_type(self, filename=None):
+    if (filename is None):
+      filename = self.get_default_model_name()
+    return self._model_types.get(filename, self._default_model_type)
+
+  def get_model_names(self, model_type=None):
+    all_names = self._get_names(ModelDataManager.datatype)
+    names = list()
+    if (model_type is None):
+      names = all_names
+    else:
+      for filename in all_names:
+        if (model_type in self.get_model_type(filename)):
+          names.append(filename)
+    return names
+
+  def get_default_model_name(self):
+    return self._get_default_name(ModelDataManager.datatype)
+
+  def remove_model(self, filename):
+    return self._remove(ModelDataManager.datatype, filename)
+
+  def has_models(self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(ModelDataManager.datatype, expected_n=expected_n,
+                          exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_model_file(self, filename):
+    """
+    Parse a model file and store the mmtbx.model.manager object
+
+    Parameters
+    ----------
+    filename : str
+        The filepath as a string
+
+    Returns
+    -------
+    None
+        The model is added to the DataManager
+
+    """
+    # unique because any_file does not return a model object
+    if (filename not in self.get_model_names()):
+      a = any_file(filename)
+      if (a.file_type != 'pdb'):
+        raise Sorry('%s is not a recognized model file' % filename)
+      else:
+        model_in = a.file_content.input
+        expand_with_mtrix = True  # default
+        skip_ss_annotations = False
+        if 'model_skip_expand_with_mtrix' in self.custom_options:
+          expand_with_mtrix = False
+        if 'model_skip_ss_annotations' in self.custom_options:
+          skip_ss_annotations = True
+        model = mmtbx.model.manager(
+          model_input=model_in,
+          expand_with_mtrix=expand_with_mtrix,
+          skip_ss_annotations=skip_ss_annotations,
+          log=self.logger)
+        self.add_model(filename, model)
+    return filename
+
+  def process_model_str(self, label, model_str):
+    model = mmtbx.model.manager(
+      model_input=iotbx.pdb.input(source_info=None, lines=model_str),
+      log=self.logger)
+    self.add_model(label, model)
+
+  def get_default_output_model_filename(self, extension=Auto):
+    '''
+    Function for returning the filename with extension. By default ".cif" will
+    be used.
+    '''
+    filename = self.get_default_output_filename()
+    if extension is Auto:
+      extension = '.cif'
+    if not (filename.endswith('.cif') or filename.endswith('.pdb')):
+      filename += extension
+    return filename
+
+  def write_model_file(self, model_str, filename=Auto,
+                       format=Auto, overwrite=Auto,
+                       output_cs=True):
+    '''
+    Function for writing a model to file
+
+    Parameters
+    ----------
+      model_str: str or mmtbx.model.manager object
+        The string to be written or a model object. If a model object is
+        provided, the format (PDB or mmCIF) of the original file is kept
+        unless specified with format or target_output_format below.
+        If a string is provided, the format must be specified as pdb or cif
+      filename: str or Auto
+        The output filename. If set to Auto, a default filename is
+        generated based on params.output.prefix, params.output.suffix,
+        and params.output.serial
+      format: pdb or cif (mmcif treated as cif) or Auto.  If set to
+         Auto, defaults to format of original file.
+         If self._target_output_format is not None,
+         always write model objects to this format if possible.
+      overwrite: bool or Auto
+        Overwrite filename if it exists. If set to Auto, the overwrite
+        state of the DataManager is used.
+      output_cs: bool
+        Defines if crystal symmetry needs to be outputted. Passed directly
+        into model_as_mmcif() and model_as_pdb()
+
+    Returns
+    -------
+      filename: str
+        The actual output filename. This may differ from the
+        get_default_output_model_filename function since that sets the
+        extension to cif by default. This function may alter the extension
+        based on the desired format.
+    '''
+
+
+    if format == 'mmcif': format = 'cif'  # mmcif and cif are synonyms here
+
+    if isinstance(model_str, mmtbx.model.manager):
+
+      # Get overall preference for output format
+      if (format is Auto) and hasattr(self,'_target_output_format') and (
+           self._target_output_format is not None):
+        format = self._target_output_format
+
+      # Write as mmCIF if:
+      #  1. format was supplied as 'cif' or
+      #  2. format was Auto and target_output_format was set to 'cif', or
+      #  3. format was Auto, no target_output_format set and this model was
+      #       cif when read in, or
+      #  4. model does not fit in PDB format
+      if (format == 'cif') or (format is Auto and
+            model_str.input_model_format_cif()) or (
+          not model_str.get_hierarchy().fits_in_pdb_format()):
+        extension = '.cif'
+        format = 'cif'
+        model_str = model_str.model_as_mmcif(output_cs=output_cs)
+      else:
+        extension = '.pdb'
+        format = 'pdb'
+        model_str = model_str.model_as_pdb(output_cs=output_cs)
+
+    else:  # writing a string. Output format must be specified on input
+
+      if format == 'cif':
+        extension = '.cif'
+      elif format == 'pdb':
+        extension = '.pdb'
+      else:  # no extension
+        extension = Auto
+
+    # Get the filename and add extension if necessary
+    if filename is Auto:
+      filename = self.get_default_output_model_filename(extension=extension)
+    elif extension and (extension is not Auto) and (
+        not extension_matches_ending(filename, extension)):
+      other_extension = ".pdb" if extension == ".cif" else ".cif"
+      fn,ext = os.path.splitext(filename)
+      if ext == other_extension: # swap extension
+        filename = fn + extension
+      elif extension_matches_ending(filename, other_extension):
+        filename = fn + "%s_%s" %(extension, ext.split("_")[1])
+      else:
+        filename += extension
+    if model_str:
+      return self._write_text(ModelDataManager.datatype, model_str,
+                            filename=filename, overwrite=overwrite)
+    else:
+      return ''
+
+def extension_matches_ending(filename, extension):
+  if not extension:
+    return True
+  fn, ext = os.path.splitext(filename)
+  if ext == extension:
+    return True
+  if "_" in ext and ext.split("_")[0] == extension:
+    return True
+ # =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/ncs_spec.py
+from __future__ import absolute_import, division, print_function
+'''
+'''
+
+from iotbx.data_manager import DataManagerBase
+from libtbx import Auto
+
+# =============================================================================
+class NcsSpecDataManager(DataManagerBase):
+
+  datatype = 'ncs_spec'
+
+  # ---------------------------------------------------------------------------
+  # Ncs spec
+  def add_ncs_spec(self, filename, data):
+    return self._add(NcsSpecDataManager.datatype, filename, data)
+
+  def set_default_ncs_spec(self, filename):
+    return self._set_default(NcsSpecDataManager.datatype, filename)
+
+  def get_ncs_spec(self, filename=None):
+    return self._get(NcsSpecDataManager.datatype, filename)
+
+  def get_ncs_spec_names(self):
+    return self._get_names(NcsSpecDataManager.datatype)
+
+  def get_default_ncs_spec_name(self):
+    return self._get_default_name(NcsSpecDataManager.datatype)
+
+  def remove_ncs_spec(self, filename):
+    return self._remove(NcsSpecDataManager.datatype, filename)
+
+  def has_ncs_specs(self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(NcsSpecDataManager.datatype, expected_n=expected_n,
+                          exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_ncs_spec_file(self, filename):
+    return self._process_file(NcsSpecDataManager.datatype, filename)
+
+  def get_default_output_ncs_spec_filename(self):
+    filename = self.get_default_output_filename()
+    if not filename.endswith('.ncs_spec'):
+      filename += '.ncs_spec'
+    return filename
+
+  def write_ncs_spec_file(self, ncs_object, filename=Auto, overwrite=Auto,
+    format = 'ncs_spec'):
+
+    assert format in ['ncs_spec','phil']
+
+    # default options
+    if (filename is Auto):
+      filename = self.get_default_output_ncs_spec_filename()
+
+    # set output extension
+    import os
+    fn, ext = os.path.splitext(filename)
+    filename = "%s.%s" %(fn, format)
+    ncs_str = ncs_object.as_ncs_spec_string(format = format)
+    return self._write_text(NcsSpecDataManager.datatype, ncs_str,
+                            filename=filename, overwrite=overwrite)
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/phil.py
+from __future__ import absolute_import, division, print_function
+'''
+'''
+
+from iotbx.data_manager import DataManagerBase
+from libtbx import Auto
+
+# =============================================================================
+class PhilDataManager(DataManagerBase):
+
+  datatype = 'phil'
+
+  # ---------------------------------------------------------------------------
+  # Phils
+  def add_phil(self, filename, data):
+    return self._add(PhilDataManager.datatype, filename, data)
+
+  def set_default_phil(self, filename):
+    return self._set_default(PhilDataManager.datatype, filename)
+
+  def get_phil(self, filename=None):
+    return self._get(PhilDataManager.datatype, filename)
+
+  def get_phil_names(self):
+    return self._get_names(PhilDataManager.datatype)
+
+  def get_default_phil_name(self):
+    return self._get_default_name(PhilDataManager.datatype)
+
+  def remove_phil(self, filename):
+    return self._remove(PhilDataManager.datatype, filename)
+
+  def has_phils(self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(PhilDataManager.datatype, expected_n=expected_n,
+                          exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_phil_file(self, filename):
+    return self._process_file(PhilDataManager.datatype, filename)
+
+  def get_default_output_phil_filename(self):
+    filename = self.get_default_output_filename()
+    if not filename.endswith('.eff'):
+      filename += '.eff'
+    return filename
+
+  def write_phil_file(self, phil_str, filename=Auto, overwrite=Auto):
+    # use this instead of libtbx.phil.scope.show for consistent error messages
+    if filename is Auto:
+      filename = self.get_default_output_phil_filename()
+    return self._write_text(PhilDataManager.datatype, phil_str,
+                            filename=filename, overwrite=overwrite)
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/real_map.py
+from __future__ import absolute_import, division, print_function
+'''
+'''
+import os
+
+from iotbx.data_manager import DataManagerBase
+from libtbx import Auto
+from libtbx.utils import Sorry
+
+# =============================================================================
+class RealMapDataManager(DataManagerBase):
+
+  datatype = 'real_map'
+
+  # ---------------------------------------------------------------------------
+  # Real-space Maps
+  def add_real_map(self, filename, data):
+    return self._add(RealMapDataManager.datatype, filename, data)
+
+  def set_default_real_map(self, filename):
+    return self._set_default(RealMapDataManager.datatype, filename)
+
+  def get_real_map(self, filename=None):
+    return self._get(RealMapDataManager.datatype, filename)
+
+  def get_real_map_names(self):
+    return self._get_names(RealMapDataManager.datatype)
+
+  def get_default_real_map_name(self):
+    return self._get_default_name(RealMapDataManager.datatype)
+
+  def remove_real_map(self, filename):
+    return self._remove(RealMapDataManager.datatype, filename)
+
+  def has_real_maps(self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(RealMapDataManager.datatype, expected_n=expected_n,
+                          exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_real_map_file(self, filename):
+    return self._process_file(RealMapDataManager.datatype, filename)
+
+  def get_default_output_real_map_filename(self):
+    filename = self.get_default_output_filename()
+    if not filename.endswith('.mrc') and not filename.endswith('.ccp4'):
+      filename += '.ccp4'
+    return filename
+
+  def write_real_map_file(self, map_manager, filename=Auto, overwrite=Auto):
+
+    # default options
+    if (filename is Auto):
+      filename = self.get_default_output_real_map_filename()
+    if (overwrite is Auto):
+      overwrite = self._overwrite
+
+    # check arguments
+    if (os.path.isfile(filename) and (not overwrite)):
+      raise Sorry('%s already exists and overwrite is set to %s.' %
+                  (filename, overwrite))
+
+    try:
+      map_manager.write_map(
+        file_name = filename
+      )
+    except IOError as err:
+      raise Sorry('There was an error with writing %s.\n%s' %
+                  (filename, err))
+
+    self._output_files.append(filename)
+    self._output_types.append(RealMapDataManager.datatype)
+
+    return filename
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/restraint.py
+from __future__ import absolute_import, division, print_function
+'''
+'''
+
+from iotbx.file_reader import any_file
+from iotbx.data_manager import DataManagerBase
+from libtbx import Auto
+from libtbx.utils import Sorry
+
+# =============================================================================
+class RestraintDataManager(DataManagerBase):
+
+  datatype = 'restraint'
+
+  # ---------------------------------------------------------------------------
+  # Restraints
+  def add_restraint(self, filename, data):
+    return self._add(RestraintDataManager.datatype, filename, data)
+
+  def set_default_restraint(self, filename):
+    return self._set_default(RestraintDataManager.datatype, filename)
+
+  def get_restraint(self, filename=None):
+    return self._get(RestraintDataManager.datatype, filename)
+
+  def get_restraint_names(self):
+    return self._get_names(RestraintDataManager.datatype)
+
+  def get_default_restraint_name(self):
+    return self._get_default_name(RestraintDataManager.datatype)
+
+  def remove_restraint(self, filename):
+    return self._remove(RestraintDataManager.datatype, filename)
+
+  def has_restraints(self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(RestraintDataManager.datatype, expected_n=expected_n,
+                          exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_restraint_file(self, filename):
+    if (filename not in self.get_restraint_names()):
+      a = any_file(filename)
+      if (a.file_type != 'cif'):
+        raise Sorry('%s is not a recognized restraints file' % filename)
+      else:
+        self.add_restraint(filename, a.file_object.model())
+
+  def get_default_output_restraint_filename(self):
+    filename = self.get_default_output_filename()
+    if not filename.endswith('.cif'):
+      filename += '.cif'
+    return filename
+
+  def write_restraint_file(self, restraint_str, filename=Auto, overwrite=Auto):
+    if filename is Auto:
+      filename = self.get_default_output_restraint_filename()
+    return self._write_text(RestraintDataManager.datatype, restraint_str,
+                            filename=filename, overwrite=overwrite)
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/data_manager/sequence.py
+from __future__ import absolute_import, division, print_function
+'''
+'''
+
+from iotbx.data_manager import DataManagerBase
+from libtbx import Auto
+
+# =============================================================================
+class SequenceDataManager(DataManagerBase):
+
+  datatype = 'sequence'
+
+  # ---------------------------------------------------------------------------
+  # Sequences
+  def add_sequence(self, filename, data):
+    return self._add(SequenceDataManager.datatype, filename, data)
+
+  def set_default_sequence(self, filename):
+    return self._set_default(SequenceDataManager.datatype, filename)
+
+  def get_sequence(self, filename=None):
+    '''
+    Returns a list of sequence objects from a file
+    '''
+    return self._get(SequenceDataManager.datatype, filename)
+
+  def get_sequence_as_string(self, filename=None, width=80,
+      sequence_letters_only = False):
+    '''
+    Same as get_sequence, but returns a single string with all the sequences
+    separated by blank lines. If sequence_letters_only,remove
+    all lines starting with ">" removed and all spaces and line breaks
+    '''
+    sequences = self.get_sequence(filename=filename)
+    if sequence_letters_only:
+      output = '\n\n'.join([s.sequence for s in sequences])
+    else: # usual
+      output = '\n\n'.join([s.format(width) for s in sequences])
+    return output
+
+  def get_sequence_names(self):
+    return self._get_names(SequenceDataManager.datatype)
+
+  def get_default_sequence_name(self):
+    return self._get_default_name(SequenceDataManager.datatype)
+
+  def remove_sequence(self, filename):
+    return self._remove(SequenceDataManager.datatype, filename)
+
+  def has_sequences(self, expected_n=1, exact_count=False, raise_sorry=False):
+    return self._has_data(SequenceDataManager.datatype, expected_n=expected_n,
+                          exact_count=exact_count, raise_sorry=raise_sorry)
+
+  def process_sequence_file(self, filename):
+    return self._process_file(SequenceDataManager.datatype, filename)
+
+  def get_default_output_sequence_filename(self):
+    filename = self.get_default_output_filename()
+    if not filename.endswith('.seq'):
+      filename += '.seq'
+    return filename
+
+  def write_sequence_file(self, sequence_str, filename=Auto, overwrite=Auto):
+    if filename is Auto:
+      filename = self.get_default_output_sequence_filename()
+    return self._write_text(SequenceDataManager.datatype, sequence_str,
+                            filename=filename, overwrite=overwrite)
+
+# =============================================================================
+# end
+
+
+ *******************************************************************************

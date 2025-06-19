@@ -1,0 +1,1917 @@
+
+
+ *******************************************************************************
+iotbx/cns/__init__.py
+"""
+Tools for reading and writing CNS-formatted files
+"""
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/crystal_symmetry_from_inp.py
+"""Extracts crystal symmetry from CNS input file.
+
+For example, the input
+
+{===>} sg="P3(2)21";
+{===>} a=76.4;
+{===>} b=76.4;
+{===>} c=180.94;
+{===>} alpha=90;
+{===>} beta=90;
+{===>} gamma=120;
+
+is returned as:
+
+crystal.symmetry(
+  unit_cell=(76.4, 76.4, 180.94, 90, 90, 120),
+  space_group_symbol="P3(2)21")
+"""
+from __future__ import absolute_import, division, print_function
+
+from cctbx import crystal
+from six.moves import range
+
+def extract_from(file_name=None, file=None, max_characters=1000000):
+  assert [file_name, file].count(None) == 1
+  if (file is None):
+    file = open(file_name)
+  lines = file.readlines()
+  file.close()
+  unit_cell = [None for i in range(6)]
+  space_group_symbol = None
+  n_characters = 0
+  for line in lines:
+    if (max_characters != 0):
+      n_characters += len(line)
+      if (n_characters > max_characters): break
+    line = line.strip()
+    if (line.startswith('{===>} sg="')):
+      assert line[-2:] == '";'
+      assert space_group_symbol is None, "Duplicate space group symbol."
+      space_group_symbol = line[11:-2]
+    else:
+      i = -1
+      for label in ("a", "b", "c", "alpha", "beta", "gamma"):
+        i += 1
+        if (line.startswith('{===>} %s=' % label)):
+          assert line[-1] == ';'
+          assert unit_cell[i] is None, "Duplicate unit cell parameter %s." % label
+          unit_cell[i] = float(line[8+len(label):-1])
+  assert unit_cell.count(None) == 0
+  assert space_group_symbol is not None
+  return crystal.symmetry(
+    unit_cell=unit_cell,
+    space_group_symbol=space_group_symbol)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/crystal_symmetry_from_sdb.py
+from __future__ import absolute_import, division, print_function
+from iotbx.cns import sdb_reader
+
+def extract_from(file_name=None, file=None):
+  assert [file_name, file].count(None) == 1
+  if (file is None):
+    file = open(file_name)
+  lines = file.readlines()
+  file.close()
+  sdb_files = sdb_reader.multi_sdb_parser(lines)
+  assert len(sdb_files) > 0
+  crystal_symmetry = sdb_files[0].crystal_symmetry()
+  assert [crystal_symmetry.unit_cell(),
+          crystal_symmetry.space_group_info()].count(None) < 2
+  return crystal_symmetry
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/crystal_symmetry_utils.py
+from __future__ import absolute_import, division, print_function
+from iotbx.cns.space_group_symbols import cns_format
+from cctbx import crystal
+from six.moves import range
+from six.moves import zip
+
+uc_param_names = "a b c alpha beta gamma".split()
+
+re_sg_uc = r'sg=\s*(\S+)\s*a=\s*(\S+)\s*b=\s*(\S+)\s*c=\s*(\S+)' \
+         + r'\s*alpha=\s*(\S+)\s*beta=\s*(\S+)\s*gamma=\s*(\S+)'
+
+re_uc_sg = r'a=\s*(\S+)\s*b=\s*(\S+)\s*c=\s*(\S+)' \
+         + r'\s*alpha=\s*(\S+)\s*beta=\s*(\S+)\s*gamma=\s*(\S+)' \
+         + r'\s*sg=\s*(\S+)'
+
+def crystal_symmetry_from_re_match(m, i_sg=1, i_uc=2):
+  assert m is not None
+  try: unit_cell = [float(m.group(i+i_uc)) for i in range(6)]
+  except ValueError: return None
+  try:
+    return crystal.symmetry(
+      unit_cell=unit_cell,
+      space_group_symbol=m.group(i_sg))
+  except RuntimeError:
+    return None
+
+def crystal_symmetry_as_sg_uc_list(crystal_symmetry):
+  u = crystal_symmetry.unit_cell()
+  s = crystal_symmetry.space_group_info()
+  if (u is None): uc = ["None"]*6
+  else:           uc = ["%.6g" % v for v in u.parameters()]
+  sg = cns_format(space_group_info=s)
+  if (sg is None): sg = str(s).replace(" ","")
+  return sg, uc
+
+def crystal_symmetry_as_sg_uc(crystal_symmetry):
+  sg, uc = crystal_symmetry_as_sg_uc_list(crystal_symmetry=crystal_symmetry)
+  return "sg="+sg+" "+" ".join(["%s=%s" % kv
+    for kv in zip(uc_param_names, uc)])
+
+def crystal_symmetry_as_cns_inp_defines(crystal_symmetry):
+  sg, uc = crystal_symmetry_as_sg_uc_list(crystal_symmetry=crystal_symmetry)
+  result = ['{===>} sg="%s";' % sg]
+  for kv in zip(uc_param_names, uc):
+    result.append('{===>} %s=%s;' % kv)
+  return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/index_fobs_sigma_reader.py
+from __future__ import absolute_import, division, print_function
+from cctbx import miller
+from cctbx import crystal
+from cctbx.array_family import flex
+
+class index_fobs_sigma_line(object):
+
+  def __init__(self, raw_line):
+    self.is_complete = False
+    flds = raw_line.replace("="," ").split()
+    if (len(flds) != 8): return
+    if (flds[0].lower() not in ("inde", "index")): return
+    if (flds[4].lower() != "fobs"): return
+    if (flds[6].lower() != "sigma"): return
+    self.names = [flds[4], flds[6]]
+    try: self.index = tuple([int(i) for i in flds[1:4]])
+    except Exception: return
+    try: self.fobs = float(flds[5])
+    except Exception: return
+    try: self.sigma = float(flds[7])
+    except Exception: return
+    self.is_complete = True
+
+class reader(object):
+
+  def __init__(self, file_name=None, file_object=None, max_header_lines=30):
+    assert [file_name, file_object].count(None) == 1
+    if (file_object is None):
+      file_object = open(file_name)
+    lines = file_object.readlines()
+    file_object.close()
+    self._names = None
+    self._indices = flex.miller_index()
+    self._data = flex.double()
+    self._sigmas = flex.double()
+    have_data = False
+    self.n_lines = 0
+    for raw_line in lines:
+      self.n_lines += 1
+      ifs = index_fobs_sigma_line(raw_line)
+      if (not ifs.is_complete):
+        if (raw_line.strip().lower() == "end"):
+          break
+        if (self.n_lines == max_header_lines or have_data):
+          raise RuntimeError("Unkown file format.")
+      else:
+        if (self._names is None): self._names = ifs.names
+        self._indices.append(ifs.index)
+        self._data.append(ifs.fobs)
+        self._sigmas.append(ifs.sigma)
+        have_data = True
+    if (not have_data):
+      raise RuntimeError("No data found in file.")
+
+  def indices(self):
+    return self._indices
+
+  def data(self):
+    return self._data
+
+  def sigmas(self):
+    return self._sigmas
+
+  def as_miller_arrays(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=None):
+    if (crystal_symmetry is None):
+      crystal_symmetry = crystal.symmetry()
+    if (base_array_info is None):
+      base_array_info = miller.array_info(source_type="cns_index_fobs_sigma")
+    miller_set = miller.set(
+      crystal_symmetry=crystal_symmetry,
+      indices=self.indices(), anomalous_flag=anomalous)
+    if anomalous is None:
+      miller_set = miller_set.auto_anomalous()
+    return [miller.array(
+      miller_set=miller_set,
+      data=self.data(),
+      sigmas=self.sigmas())
+      .set_info(base_array_info.customized_copy(labels=self._names))
+      .set_observation_type_xray_amplitude()]
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/miller_array.py
+from __future__ import absolute_import, division, print_function
+from iotbx.cns.crystal_symmetry_utils import crystal_symmetry_as_sg_uc
+from cctbx.array_family import flex
+from six.moves import range
+from six.moves import zip
+
+def crystal_symmetry_as_cns_comments(crystal_symmetry, out):
+  if (   crystal_symmetry.unit_cell() is not None
+      or crystal_symmetry.space_group_info() is not None):
+    print("{ %s }" % crystal_symmetry_as_sg_uc(
+      crystal_symmetry=crystal_symmetry), file=out)
+
+def export_as_cns_hkl(self,
+      file_object,
+      file_name,
+      info,
+      array_names,
+      r_free_flags):
+  out = file_object
+  if (file_name): print("{ file:", file_name, "}", file=out)
+  if (self.info() is not None):
+    print("{", self.info(), "}", file=out)
+  crystal_symmetry_as_cns_comments(crystal_symmetry=self, out=out)
+  for line in info: print("{", line, "}", file=out)
+  print("NREFlections=%d" % self.indices().size(), file=out)
+  if (self.anomalous_flag()):
+    print("ANOMalous=TRUE", file=out)
+  else:
+    print("ANOMalous=FALSe", file=out)
+  if (self.sigmas() is not None):
+    if (array_names is None): array_names = ["FOBS", "SIGMA"]
+    else: assert len(array_names) == 2
+    assert isinstance(self.data(), flex.double)
+    assert isinstance(self.sigmas(), flex.double)
+    if (self.is_xray_intensity_array()):
+      f_obs = self.f_sq_as_f()
+    else:
+      f_obs = self
+    nf, ns = array_names
+    print("DECLare NAME=%s DOMAin=RECIprocal TYPE=REAL END" % nf, file=out)
+    print("DECLare NAME=%s DOMAin=RECIprocal TYPE=REAL END" % ns, file=out)
+    if (r_free_flags is None):
+      for h,f,s in zip(f_obs.indices(),f_obs.data(),f_obs.sigmas()):
+        print("INDEx %d %d %d" % h, "%s= %.6g %s= %.6g" % (nf,f,ns,s), file=out)
+    else:
+      assert r_free_flags.indices().all_eq(f_obs.indices())
+      print("DECLare NAME=TEST DOMAin=RECIprocal TYPE=INTE END", file=out)
+      for h,f,s,t in zip(f_obs.indices(),f_obs.data(),f_obs.sigmas(),
+                         r_free_flags.data()):
+        print("INDEx %d %d %d" % h, "%s= %.6g %s= %.6g" % (nf,f,ns,s),\
+          "TEST= %d" % int(t), file=out)
+  elif (self.is_complex_array()):
+    if (array_names is None): array_names = ["F"]
+    else: assert len(array_names) == 1
+    assert r_free_flags is None
+    n = array_names[0]
+    print("DECLare NAME=%s  DOMAin=RECIprocal TYPE=COMPLEX END" % n, file=out)
+    for h,a,p in zip(self.indices(),
+                     flex.abs(self.data()),
+                     flex.arg(self.data(), True)):
+      print("INDEx %d %d %d" % h, "%s= %.6g %.6g" % (n,a,p), file=out)
+  elif (self.is_hendrickson_lattman_array()):
+    if (array_names is None): array_names = ["PA", "PB", "PC", "PD"]
+    else: assert len(array_names) == 4
+    assert r_free_flags is None
+    for i in range(4):
+      print("DECLare NAME=%s  DOMAin=RECIprocal TYPE=REAL END" %(
+        array_names[i]), file=out)
+    print("GROUp  TYPE=HL", file=out)
+    for i in range(4):
+      print("     OBJEct=%s" %(array_names[i]), file=out)
+    print("END", file=out)
+    for h,hl in zip(self.indices(), self.data()):
+      print("INDEx %d %d %d" % h, end=' ', file=out)
+      print("%s= %.6g" % (array_names[0], hl[0]), end=' ', file=out)
+      print("%s= %.6g" % (array_names[1], hl[1]), end=' ', file=out)
+      print("%s= %.6g" % (array_names[2], hl[2]), end=' ', file=out)
+      print("%s= %.6g" % (array_names[3], hl[3]), file=out)
+  else:
+    if (array_names is None): array_names = ["DATA"]
+    else: assert len(array_names) == 1
+    assert r_free_flags is None
+    if (isinstance(self.data(), flex.double)):
+      print("DECLare NAME=%s  DOMAin=RECIprocal TYPE=REAL END" % array_names[0], file=out)
+      fmt = "%.6g"
+    elif (   isinstance(self.data(), flex.int)
+          or isinstance(self.data(), flex.bool)):
+      print("DECLare NAME=%s  DOMAin=RECIprocal TYPE=INTEger END" % array_names[0], file=out)
+      fmt = "%d"
+    else:
+      raise RuntimeError("Cannot write array type %s to CNS reflection file" % type(self.data()))
+    fmt = array_names[0] + "= " + fmt
+    for h,d in zip(self.indices(),self.data()):
+      print("INDEx %d %d %d" % h, fmt % d, file=out)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/pdb_remarks.py
+from __future__ import absolute_import, division, print_function
+from iotbx.cns.crystal_symmetry_utils import \
+  re_sg_uc, crystal_symmetry_from_re_match
+import re
+
+def extract_symmetry(pdb_record):
+  m = re.match(r'REMARK\s+' + re_sg_uc , pdb_record)
+  if (not m): return None
+  return crystal_symmetry_from_re_match(m=m)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/reflection_reader.py
+"Transfer of CNS reflection files to flex arrays."
+from __future__ import absolute_import, division, print_function
+
+from iotbx.cns.crystal_symmetry_utils import \
+  re_sg_uc, re_uc_sg, crystal_symmetry_from_re_match
+from cctbx import crystal
+from cctbx import miller
+from cctbx.array_family import flex
+from libtbx import complex_math
+from libtbx import easy_pickle
+import re
+import sys
+from six.moves import range
+
+# <xray-reflection-statement> :==
+#   nreflection=<integer>
+#   anomalous=<logical>
+#   declare <xray-declare-statement> end
+#   group <xray-group-statement> end
+#   index <integer> <integer> <integer>
+#   <word>={<real> <real>|<real>|<integer>}
+#
+#   <xray-declare-statement> :==
+#     name=<word>
+#     domain=reciprocal|real
+#     type=complex|real|integer
+#
+#   <xray-group-statement> :==
+#     type=hl
+#     object=<word>
+
+class CNS_input_Error(Exception):
+  pass
+
+class CNS_input(object):
+
+  def __init__(self, file):
+    self._readline = file.readline
+    self._buffer = []
+    self._LineNo = 0
+    self._LastWord = ""
+    self.level = 0
+    self.comments = []
+    self.remarks = []
+    self.cryst1s = []
+
+  def getNextWord(self, word_len = 0):
+    while (len(self._buffer) == 0):
+      line = self._readline()
+      if (line == ""): raise EOFError
+      self._LineNo += 1
+      if (line.lstrip().upper().startswith("REMARK ")):
+        self.remarks.append(line)
+        continue
+      if (line.startswith("CRYST1")
+            and len(line) >= 57
+              and " +-.0123456789".find(line[6]) >= 0):
+        self.cryst1s.append(line)
+        continue
+      # XXX take care of quotes
+      i = line.find("!")
+      if (i >= 0): line = line[:i]
+      while 1:
+        i = line.find("{")
+        if (i < 0): break
+        self.level = self.level + 1
+        while 1:
+          j = line.find("}", i+1)
+          if (j >= 0):
+            self.comments.append(line[i:j+1])
+            line = line[:i] + line[j + 1:]
+            break
+          next_line = self._readline()
+          if (next_line == ""): raise EOFError
+          line += next_line
+        self.level -= 1
+      line = line.replace("=", " ")
+      self._buffer = line.upper().split()
+      self._buffer.reverse()
+    self._LastWord = self._buffer.pop()
+    if (word_len): return self._LastWord[:word_len]
+    return self._LastWord
+
+  def getLastWord(self, word_len = 0):
+    if (word_len): return self._LastWord[:word_len]
+    return self._LastWord
+
+  def raiseError(self, message):
+    raise CNS_input_Error(
+      "line %d, word \"%s\": " % (self._LineNo, self._LastWord) + message)
+
+  def raiseError_floating_point(self, name):
+    self.raiseError("floating-point value expected for array " + name)
+
+class cns_reciprocal_space_object(object):
+
+  def __init__(self, name, type):
+    self.name = name
+    self.type = type
+    self.indices = flex.miller_index()
+    self.has_non_zero_phases = None
+    if   (type == "real"):
+      self.data = flex.double()
+    elif (type == "complex"):
+      self.data = flex.complex_double()
+      self.has_non_zero_phases = False
+    elif (type == "integer"):
+      self.data = flex.int()
+    else:
+      raise RuntimeError("Internal Error.")
+
+  def show_summary(self, f=None, prefix=""):
+    if (f is None): f = sys.stdout
+    print(prefix + "name=%s type=%s len(data)=%d" % (
+      self.name, self.type, self.data.size()), file=f)
+
+  def append(self, h, value):
+    self.indices.append(h)
+    self.data.append(value)
+
+  def is_real(self, use_name_as_hint=True):
+    if (self.type == "real"): return True
+    if (self.type != "complex"): return False
+    if (not self.has_non_zero_phases): return True
+    if (self.name.lower() in [
+      "fobs", "f_obs", "iobs", "i_obs", "obs"]): return True
+    return False
+
+  def real_data(self, use_name_as_hint=True):
+    assert self.is_real(use_name_as_hint=use_name_as_hint)
+    if (self.type == "real"): return self.data
+    return flex.abs(self.data)
+
+class CNS_xray_reflection_Reader(CNS_input):
+
+  def __init__(self, file):
+    CNS_input.__init__(self, file)
+
+  def _read_nreflections(self):
+    self.level = self.level + 1
+    word = self.getNextWord()
+    try:
+      nreflections = int(word)
+    except ValueError:
+      self.raiseError("integer value expected")
+    self.level = self.level - 1
+    return nreflections
+
+  def _read_anomalous(self):
+    self.level = self.level + 1
+    word = self.getNextWord(4)
+    if   (word == "TRUE"):
+      anomalous = True
+    elif (word == "FALS"):
+      anomalous = False
+    else:
+      self.raiseError("TRUE or FALSe expected")
+    self.level = self.level - 1
+    return anomalous
+
+  def _read_declare(self, xray_objects):
+    name = None
+    domain = None
+    type = None
+    self.level = self.level + 1
+    while 1:
+      word = self.getNextWord(4)
+      if   (word == "NAME"):
+        self.level = self.level + 1
+        name = self.getNextWord()
+        self.level = self.level - 1
+      elif (word == "DOMA"):
+        self.level = self.level + 1
+        word = self.getNextWord(4)
+        if   (word == "RECI"):
+          domain = "reciprocal"
+        elif (word == "REAL"):
+          domain = "real"
+        else:
+          self.raiseError("unrecognized keyword")
+        self.level = self.level - 1
+      elif (word == "TYPE"):
+        self.level = self.level + 1
+        word = self.getNextWord(4)
+        if   (word == "REAL"):
+          type = "real"
+        elif (word == "COMP"):
+          type = "complex"
+        elif (word == "INTE"):
+          type = "integer"
+        else:
+          self.raiseError("unrecognized keyword")
+        self.level = self.level - 1
+      elif (word == "END"):
+        if (name in xray_objects):
+          self.raiseError("duplicate declaration of NAME=" + name)
+        if (domain != "reciprocal"):
+          self.raiseError("real space objects are not supported")
+        xray_objects[name] = cns_reciprocal_space_object(name, type)
+        break
+      else:
+        self.raiseError("unrecognized keyword")
+    self.level = self.level - 1
+
+  def _read_group(self, xray_objects, groups):
+    self.level = self.level + 1
+    this_group = []
+    while 1:
+      word = self.getNextWord(4)
+      if   (word == "TYPE"):
+        self.level = self.level + 1
+        word = self.getNextWord(4)
+        if (word != "HL"):
+          self.raiseError("TYPE=HL expected")
+        self.level = self.level - 1
+      elif (word == "OBJE"):
+        self.level = self.level + 1
+        name = self.getNextWord()
+        if (name not in xray_objects):
+          self.raiseError("reciprocal space object " + name
+                          + " does not exist")
+        if (xray_objects[name].type != "real"):
+          self.raiseError(
+            "Hendrickson-Lattman coefficients must be of type real")
+        if (xray_objects[name].indices.size()):
+          self.raiseError(
+            "GROUp statement must appear before reflection data")
+        this_group.append(name)
+        self.level = self.level - 1
+      elif (word == "END"):
+        if (len(this_group) > 0):
+          if (len(this_group) != 4):
+            self.raiseError(
+              "there must be exactly four Hendrickson-Lattman coefficients")
+          groups.append(this_group)
+        break
+      else:
+        self.raiseError("unrecognized keyword")
+    self.level = self.level - 1
+
+  def load(self, to_obj):
+    gNW = self.getNextWord
+    gLW = self.getLastWord
+    to_obj.nreflections = None
+    to_obj.anomalous = None
+    to_obj.reciprocal_space_objects = {}
+    to_obj.groups = []
+    current_hkl = None
+    reuse_word = False
+    n_words_processed = 0
+    try:
+      while True:
+        if (not reuse_word):
+          word = gNW(4)
+          n_words_processed += 1
+        reuse_word = False
+        if (word == "INDE"):
+          self.level = self.level + 1
+          h = [None] * 3
+          for i in range(3):
+            word = gNW()
+            try:
+              h[i] = int(word)
+            except ValueError:
+              self.raiseError("integer values expected for hkl")
+          current_hkl = tuple(h)
+          self.level = self.level - 1
+        elif (word == "NREF"):
+          to_obj.nreflections = self._read_nreflections()
+        elif (word == "ANOM"):
+          to_obj.anomalous = self._read_anomalous()
+        elif (word == "DECL"):
+          self._read_declare(to_obj.reciprocal_space_objects)
+        elif (word == "GROU"):
+          self._read_group(to_obj.reciprocal_space_objects, to_obj.groups)
+        else:
+          word = gLW()
+          rso = to_obj.reciprocal_space_objects.get(word)
+          if (rso is None):
+            self.raiseError("unrecognized keyword")
+          type = rso.type
+          self.level = self.level + 1
+          name = word
+          n = 1
+          if (type == "complex"): n = 2
+          for i in range(n):
+            word = gNW()
+            if (type == "integer"):
+              try:
+                value = int(word)
+              except ValueError:
+                self.raiseError("integer value expected for array " + name)
+            else:
+              if (i == 0):
+                try:
+                  value = float(word)
+                except ValueError:
+                  self.raiseError_floating_point(name)
+              else:
+                try:
+                  phase = float(word)
+                except ValueError:
+                  reuse_word = True # declared complex but only real part given
+                else:
+                  value = complex_math.polar((value, phase), deg=True)
+                  if (phase != 0):
+                    rso.has_non_zero_phases = True
+          rso.append(current_hkl, value)
+          self.level = self.level - 1
+    except EOFError:
+      if (self.level != 0): raise CNS_input_Error("premature end-of-file")
+    if (n_words_processed == 0):
+      raise CNS_input_Error("empty file")
+
+class cns_reflection_file(object):
+
+  def __init__(self, file_handle):
+    reader = CNS_xray_reflection_Reader(file_handle)
+    reader.load(self)
+    self.optimize()
+    self.remarks = reader.remarks
+    self.cryst1s = reader.cryst1s
+    self.comments = reader.comments
+
+  def space_group_from_remark_symop(self):
+    from cctbx import sgtbx
+    result = None
+    for remark in self.remarks:
+      remark = remark.lstrip()[6:].strip().replace(" ", "").lower()
+      if (    remark.startswith("symop(")
+          and remark.endswith(")")):
+        s = remark[6:-1]
+        try:
+          s = sgtbx.rt_mx(s)
+        except RuntimeError:
+          pass
+        else:
+          if (result is None):
+            result = sgtbx.space_group()
+          result.expand_smx(s)
+    return result
+
+  def crystal_symmetry_from_remark_uc_sg(self):
+    sg = self.space_group_from_remark_symop()
+    for remark in self.remarks:
+      remark = remark.lstrip()[6:].strip()
+      m = re.match(re_uc_sg, remark)
+      if (m is None): continue
+      result = crystal_symmetry_from_re_match(m=m, i_uc=1, i_sg=7)
+      if (result is not None):
+        if (sg is not None):
+          result = crystal.symmetry(
+            unit_cell=result.unit_cell(),
+            space_group=sg)
+        return result
+    return None
+
+  def crystal_symmetry_from_cryst1(self):
+    for record in self.cryst1s:
+      from iotbx.pdb import cryst1_interpretation
+      result = cryst1_interpretation.crystal_symmetry(cryst1_record=record)
+      if (result is not None
+            and result.unit_cell() is not None
+            and result.space_group_info() is not None):
+        return result
+    return None
+
+  def crystal_symmetry_from_comments(self):
+    for comment in self.comments:
+      m = re.match(r'\{\s+' + re_sg_uc, comment)
+      if (m is None): continue
+      result = crystal_symmetry_from_re_match(m=m)
+      if (result is not None): return result
+    return None
+
+  def crystal_symmetry(self,
+        crystal_symmetry=None,
+        force_symmetry=False):
+    self_symmetry = self.crystal_symmetry_from_remark_uc_sg()
+    if (self_symmetry is None):
+      self_symmetry = self.crystal_symmetry_from_cryst1()
+    if (self_symmetry is None):
+      self_symmetry = self.crystal_symmetry_from_comments()
+    if (crystal_symmetry is None):
+      return self_symmetry
+    if (self_symmetry is None):
+      return crystal_symmetry
+    return self_symmetry.join_symmetry(
+      other_symmetry=crystal_symmetry,
+      force=force_symmetry)
+
+  def show_summary(self, f=None, prefix=""):
+    if (f is None): f = sys.stdout
+    print(prefix + "nreflections=%d" % self.nreflections, file=f)
+    print(prefix + "anomalous=" + str(self.anomalous), file=f)
+    for rso in self.reciprocal_space_objects.values():
+      rso.show_summary(f=f, prefix=prefix)
+    for g in self.groups:
+      print(prefix + "group: " + str(g), file=f)
+
+  def optimize(self):
+    rsos = list(self.reciprocal_space_objects.values())
+    for i in range(len(rsos)-1):
+      h_i = rsos[i].indices
+      for j in range(i+1, len(rsos)):
+        h_j = rsos[j].indices
+        if (flex.order(h_i, h_j) == 0):
+          rsos[j].indices = h_i
+
+  def join_hl_group(self, group_index=None):
+    if (group_index is None):
+      assert len(self.groups) == 1
+      group_index = 0
+    selected_group = self.groups[group_index]
+    assert len(selected_group) == 4
+    names = []
+    miller_indices = 0
+    rsos = []
+    matches = []
+    for name in selected_group:
+      names.append(name)
+      rso = self.reciprocal_space_objects[name]
+      assert rso.type == "real"
+      rsos.append(rso)
+      if (type(miller_indices) == type(0)): miller_indices = rso.indices
+      match = miller.match_indices(miller_indices, rso.indices)
+      assert not match.have_singles()
+      matches.append(match)
+    hl = flex.hendrickson_lattman()
+    for ih in range(miller_indices.size()):
+      coeff = []
+      for ic in range(4):
+        ih0, ih1 = matches[ic].pairs()[ih]
+        assert ih0 == ih
+        coeff.append(rsos[ic].data[ih1])
+      hl.append(coeff)
+    return names, miller_indices, hl
+
+  def _as_miller_array(self, crystal_symmetry, miller_indices,
+                             data, sigmas=None, obs_type=None):
+    result = miller.set(
+      crystal_symmetry=crystal_symmetry,
+      indices=miller_indices,
+      anomalous_flag=self.anomalous)
+    if (self.anomalous is None):
+      result = result.auto_anomalous()
+    result = result.array(data=data, sigmas=sigmas)
+    if (obs_type is not None):
+      assert obs_type in ("f", "i")
+      if (obs_type == "f"):
+        result.set_observation_type_xray_amplitude()
+      else:
+        result.set_observation_type_xray_intensity()
+    return result
+
+  def as_miller_arrays(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=None):
+    if anomalous is not None:
+      self.anomalous = anomalous
+    crystal_symmetry = self.crystal_symmetry(
+      crystal_symmetry=crystal_symmetry,
+      force_symmetry=force_symmetry)
+    if (crystal_symmetry is None):
+      crystal_symmetry = crystal.symmetry(
+        unit_cell=None,
+        space_group_info=None)
+    if (base_array_info is None):
+      base_array_info = miller.array_info(source_type="cns_reflection_file")
+    result = []
+    done = set()
+    for group_index in range(len(self.groups)):
+      names, miller_indices, hl = self.join_hl_group(group_index)
+      result.append(self._as_miller_array(
+        crystal_symmetry, miller_indices, hl).set_info(
+          base_array_info.customized_copy(labels=names)))
+      for name in names:
+        done.add(name)
+    real_arrays = {}
+    for rso in self.reciprocal_space_objects.values():
+      if (rso.name in done): continue
+      if (not rso.is_real()): continue
+      real_arrays[rso.name.lower()] = rso
+    for obs,sigma,obs_type in group_obs_sigma(real_arrays):
+      result.append(self._as_miller_array(
+        crystal_symmetry, obs.indices,
+        obs.real_data(), sigma.real_data(), obs_type).set_info(
+          base_array_info.customized_copy(labels=[obs.name, sigma.name])))
+      done.add(obs.name)
+      done.add(sigma.name)
+    for rso in self.reciprocal_space_objects.values():
+      if (rso.name in done): continue
+      result.append(self._as_miller_array(
+        crystal_symmetry, rso.indices, rso.data).set_info(
+          base_array_info.customized_copy(labels=[rso.name])))
+      done.add(rso.name)
+    return result
+
+def group_obs_sigma(real_arrays):
+  result = []
+  done = set()
+  i = real_arrays.get("iobs")
+  if (i is not None):
+    for name in ["sigi", "sigmai", "sigiobs"]:
+      s = real_arrays.get(name)
+      if (s is not None and i.indices.all_eq(s.indices)):
+        result.append((i,s,"i"))
+        done.add(i.name)
+        done.add(s.name)
+        break
+  for name,f in real_arrays.items():
+    if (f.name in done): continue
+    rest = None
+    for prefix in ("fobs", "f_obs", "f", ""):
+      if (name.startswith(prefix)):
+        rest = name[len(prefix):]
+        break
+    if (rest is None):
+      continue
+    for prefix in ("sigma", "sig", "s"):
+      s = real_arrays.get(prefix+rest)
+      if (s is not None):
+        break
+    if (s is None):
+      for prefix in ("sigma", "sig"):
+        s = real_arrays.get(prefix+name)
+        if (s is not None):
+          break
+    if (s is not None and f.indices.all_eq(s.indices)):
+      result.append((f,s,"f"))
+      done.add(f.name)
+      done.add(s.name)
+  return result
+
+def run(args):
+  import os
+  to_pickle = "--pickle" in args
+  for file_name in args:
+    if (file_name.startswith("--")): continue
+    print(file_name + ":")
+    f = open(file_name, "r")
+    t0 = os.times()
+    reflection_file = cns_reflection_file(f)
+    tn = os.times()
+    t_parse = tn[0]+tn[1]-t0[0]-t0[1]
+    f.close()
+    reflection_file.show_summary()
+    print()
+    crystal_symmetry = crystal.symmetry((), "P 1")
+    miller_arrays = reflection_file.as_miller_arrays(crystal_symmetry)
+    for miller_array in miller_arrays:
+      miller_array.show_summary()
+      print()
+    if (to_pickle):
+      pickle_file_name = os.path.split(file_name)[1] + ".pickle"
+      t0 = os.times()
+      easy_pickle.dump(pickle_file_name, reflection_file)
+      tn = os.times()
+      t_dump = tn[0]+tn[1]-t0[0]-t0[1]
+      t0 = os.times()
+      easy_pickle.load(pickle_file_name)
+      tn = os.times()
+      t_load = tn[0]+tn[1]-t0[0]-t0[1]
+      print("parse: %.2f, dump: %.2f, load: %.2f" % (t_parse, t_dump, t_load))
+    print()
+  t = os.times()
+  print("u+s,u,s: %.2f %.2f %.2f" % (t[0] + t[1], t[0], t[1]))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/sdb_reader.py
+from __future__ import absolute_import, division, print_function
+from iotbx.cns.crystal_symmetry_utils import \
+  re_sg_uc, crystal_symmetry_from_re_match
+from cctbx import crystal
+from cctbx import uctbx
+from cctbx import sgtbx
+from cctbx import adptbx
+from cctbx import xray
+import cctbx.eltbx.xray_scattering
+from cctbx import eltbx
+from libtbx import adopt_init_args
+from libtbx import easy_pickle
+import re
+import os
+from six.moves import range
+
+class sdb_site(object):
+
+  def __init__(self, action, segid, type, x, y, z, b, q, g):
+    adopt_init_args(self, locals())
+
+  def as_xray_scatterer(self, unit_cell=None):
+    scattering_type = eltbx.xray_scattering.get_standard_label(
+      label=self.type, exact=False, optional=True)
+    if (scattering_type is None):
+      scattering_type = eltbx.xray_scattering.get_standard_label(
+        label=self.segid, exact=False, optional=True)
+    if (scattering_type is None): scattering_type = "unknown"
+    site = (self.x, self.y, self.z)
+    if (unit_cell is not None): site = unit_cell.fractionalize(site)
+    return xray.scatterer(
+      label="_".join((self.segid, self.type)),
+      site=site,
+      u=adptbx.b_as_u(self.b),
+      occupancy=self.q,
+      scattering_type=scattering_type)
+
+class sdb_file(object):
+
+  def __init__(self, file_name, unit_cell, space_group_info, sites):
+    adopt_init_args(self, locals())
+
+  def crystal_symmetry(self):
+    return crystal.symmetry(
+      unit_cell=self.unit_cell,
+      space_group_info=self.space_group_info)
+
+  def as_xray_structure(self, crystal_symmetry=None, force_symmetry=False,
+                              min_distance_sym_equiv=0.5):
+    crystal_symmetry = self.crystal_symmetry().join_symmetry(
+      other_symmetry=crystal_symmetry,
+      force=force_symmetry)
+    assert crystal_symmetry.unit_cell() is not None
+    assert crystal_symmetry.space_group_info() is not None
+    structure = xray.structure(crystal.special_position_settings(
+      crystal_symmetry=crystal_symmetry,
+      min_distance_sym_equiv=min_distance_sym_equiv))
+    for site in self.sites:
+      structure.add_scatterer(site.as_xray_scatterer(structure.unit_cell()))
+    return structure
+
+def generic_add_str(m, buffer):
+  if (not m): return
+  seq_no = int(m.group(1))
+  assert seq_no == len(buffer) + 1
+  buffer.append(m.group(2))
+
+def generic_add_float(m, buffer):
+  if (not m): return
+  seq_no = int(m.group(1))
+  assert seq_no == len(buffer) + 1
+  buffer.append(float(m.group(2)))
+
+class raw_parameters(object):
+
+  def __init__(self, file_name):
+    self.file_name = file_name
+    self.unit_cell = None
+    self.space_group_info = None
+    self.action = []
+    self.segid = []
+    self.type = []
+    self.x = []
+    self.y = []
+    self.z = []
+    self.b = []
+    self.q = []
+    self.g = []
+
+  def add_action(self, m): generic_add_str(m, self.action)
+  def add_segid(self, m): generic_add_str(m, self.segid)
+  def add_type(self, m): generic_add_str(m, self.type)
+  def add_x(self, m): generic_add_float(m, self.x)
+  def add_y(self, m): generic_add_float(m, self.y)
+  def add_z(self, m): generic_add_float(m, self.z)
+  def add_b(self, m): generic_add_float(m, self.b)
+  def add_q(self, m): generic_add_float(m, self.q)
+  def add_g(self, m): generic_add_str(m, self.g)
+
+  def as_sdb_sites(self):
+    assert len(self.segid) == len(self.action)
+    assert len(self.type) == len(self.action)
+    assert len(self.x) == len(self.action)
+    assert len(self.y) == len(self.action)
+    assert len(self.z) == len(self.action)
+    assert len(self.b) == len(self.action)
+    assert len(self.q) == len(self.action)
+    assert len(self.g) == len(self.action)
+    sites = []
+    for i in range(len(self.x)):
+      sites.append(sdb_site(
+        self.action[i], self.segid[i], self.type[i],
+        self.x[i], self.y[i], self.z[i],
+        self.b[i], self.q[i],
+        self.g[i]))
+    return sdb_file(
+      self.file_name, self.unit_cell, self.space_group_info, sites)
+
+def multi_sdb_parser(lines, file_name=None, max_characters=1000000):
+  # Parser for one or more cns sdb files.
+  # Lines interpreted:
+  #   {+ file: heavy_search_1.sdb +}
+  #   sg= P6 a= 116.097 b= 116.097 c= 44.175 alpha= 90 beta= 90 gamma= 120
+  #   {===>} site.action_1="refine";
+  #   {===>} site.segid_1="SITE"; site.type_1="SE";
+  #   {===>} site.x_1=18.7869; site.y_1=12.1257; site.z_1=0.163635;
+  #   {===>} site.b_1=65.6408; site.q_1=1; site.g_1="";
+  # Sites must be sorted.
+  sdb_files = []
+  block_name = None
+  current_symmetry = None
+  n_characters = 0
+  p = 0
+  for line in lines:
+    if (max_characters != 0):
+      n_characters += len(line)
+      if (n_characters > max_characters): break
+    m = re.search(r'\{\+\s+file:\s*(\S*)', line)
+    if (m):
+      block_name = m.group(1)
+    m = re.match(re_sg_uc, line)
+    if (m):
+      current_symmetry = crystal_symmetry_from_re_match(m=m)
+    m = re.search(
+      r'\{\-\s+begin\s+block\s+parameter\s+definition\s+\-\}', line)
+    if (m):
+      if (block_name is None):
+        i = len(sdb_files) + 1
+        if (p): i += 1
+        if (file_name is None):
+          block_name = "block_%d" % i
+        else:
+          block_name = file_name + "_%d" % i
+      if (p): sdb_files.append(p.as_sdb_sites())
+      p = raw_parameters(block_name)
+      if (current_symmetry is None):
+        p.unit_cell = None
+        p.space_group_info = None
+      else:
+        p.unit_cell = current_symmetry.unit_cell()
+        p.space_group_info = current_symmetry.space_group_info()
+        current_symmetry = None
+      block_name = None
+    if (not p): continue
+    m = re.match(r'\{===>\}\s*sg=\s*"(\S+)"\s*;', line)
+    if (m):
+      p.space_group_info = sgtbx.space_group_info(m.group(1))
+    p.add_action(re.search(r'site\.action_(\d+)\s*=\s*"([^"]*)"', line))
+    p.add_segid(re.search(r'site\.segid_(\d+)\s*=\s*"([^"]*)"', line))
+    p.add_type(re.search(r'site\.type_(\d+)\s*=\s*"([^"]*)"', line))
+    p.add_x(re.search(r'site\.x_(\d+)\s*=\s*([^\s;]*)', line))
+    p.add_y(re.search(r'site\.y_(\d+)\s*=\s*([^\s;]*)', line))
+    p.add_z(re.search(r'site\.z_(\d+)\s*=\s*([^\s;]*)', line))
+    p.add_b(re.search(r'site\.b_(\d+)\s*=\s*([^\s;]*)', line))
+    p.add_q(re.search(r'site\.q_(\d+)\s*=\s*([^\s;]*)', line))
+    p.add_g(re.search(r'site\.g_(\d+)\s*=\s*"([^"]*)"', line))
+  if (p): sdb_files.append(p.as_sdb_sites())
+  return sdb_files
+
+def run(args):
+  show_raw = "--show_raw" in args
+  write_pickle = "--pickle" in args
+  unit_cell = None
+  space_group_info = None
+  for arg in args:
+    if (arg.startswith("--unit_cell=")):
+      params = arg.split("=", 1)[1]
+      unit_cell = uctbx.unit_cell(params)
+    elif (arg.startswith("--space_group=")):
+      symbol = arg.split("=", 1)[1]
+      space_group_info = sgtbx.space_group_info(symbol)
+  for file_name in args:
+    if (file_name.startswith("--")): continue
+    f = open(file_name, "r")
+    lines = f.readlines()
+    f.close()
+    sdb_files = multi_sdb_parser(lines, file_name)
+    for sdb in sdb_files:
+      if (unit_cell is not None): sdb.unit_cell = unit_cell
+      if (space_group_info is not None): sdb.space_group_info=space_group_info
+      print("file:", sdb.file_name)
+      if (sdb.unit_cell is not None):
+        print("unit cell:", sdb.unit_cell.parameters())
+      if (sdb.space_group_info is not None):
+        print("space group:", sdb.space_group_info)
+      if (show_raw):
+        for site in sdb.sites:
+          print(site.action, site.segid, site.type, site.g)
+          print(" ", site.x, site.y, site.z, site.b, site.q)
+      else:
+        xray_structure = sdb.as_xray_structure()
+        xray_structure.show_summary().show_scatterers()
+        if (write_pickle):
+          file_name_pickle = os.path.split(sdb.file_name)[1] + ".pickle"
+          print("Writing:", file_name_pickle)
+          easy_pickle.dump(file_name_pickle, xray_structure)
+      print()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/sdb_writer.py
+from __future__ import absolute_import, division, print_function
+from iotbx.cns import space_group_symbols
+from cctbx import adptbx
+from six.moves import cStringIO as StringIO
+
+def write_header(s, file=None, description=None, comment=None,
+                    space_group_info=None, n_rows=None):
+  assert n_rows is not None
+  if (file is not None):
+    print("{+ file: %s +}" % str(file), file=s)
+  if (description is not None):
+    print("{+ description: %s +}" % str(description), file=s)
+  if (comment is not None):
+    print("{+ comment:", file=s)
+    for line in comment: print(line, file=s)
+    print("+}", file=s)
+  print(file=s)
+  print("{- begin block parameter definition -} define(", file=s)
+  print(file=s)
+  if (space_group_info is not None):
+    print("""\
+{============================ space group ============================}
+
+{* space group *}
+{* use International Table conventions with subscripts substituted
+   by parenthesis *}
+{===>} sg="%s";
+""" % space_group_symbols.cns_format(space_group_info), file=s)
+  print("""\
+{==================== derivative/MAD coordinates =====================}
+
+{+ list: for each site define:
+         - whether the site is to be refined, fixed or ignored
+         - derivative name (must be the same for all sites in a derivative)
+         - chemical type (note: wavelength-dependent form factors
+                                are specified in mad_refine.inp)
+         - coordinates (x, y, z)
+         - B-value (b)
+         - occupancy (q)
+         - group name (g) +}
+
+{+ list: the optional group name (g) is a string of upto 4 characters.
+         If a group is left blank, each site is refined individually.
+         If a group is specified, all sites with the same group name
+         and the same derivative name are treated as a rigid body, and their
+         occupancies, B-values, and form factors are refined as a group. +}
+
+{+ table: rows=%d numbered
+          cols=9 "action" "derivative name" "chemical type"
+                 "x coordinate" "y coordinate" "z coordinate"
+                 "B-value" "occupancy" "group" +}
+""" % n_rows, file=s)
+
+def write_tail(s):
+  print("""\
+{* to appended new entries or merge this file with other
+   site database files use sdb_manipulate.inp *}
+
+{* to delete sites from this file either set the derivative
+   name to be blank or use delete_sites.inp *}
+
+{===========================================================================}
+{         things below this line do not normally need to be changed         }
+{===========================================================================}
+
+) {- end block parameter definition -}""", file=s)
+
+def write_scatterer(s, running_index, scatterer,
+                       action=None, segid=None, group=None):
+  if (action is None): action = "refine"
+  if (segid is None): segid = "SITE"
+  if (group is None): group = ""
+  assert running_index > 0
+  assert scatterer.flags.use_u_iso_only()
+  assert action in ("refine", "fix", "ignore")
+  i = running_index
+  print("""\
+{+ choice: "refine" "fix" "ignore" +}
+{===>} site.action_%d="%s";
+{===>} site.segid_%d="%s"; site.type_%d="%s";
+{===>} site.x_%d=%.6g; site.y_%d=%.6g; site.z_%d=%.6g;
+{===>} site.b_%d=%.6g; site.q_%d=%.6g; site.g_%d="%s";
+""" % (i,action,
+       i,segid, i,scatterer.scattering_type,
+       i,scatterer.site[0],
+       i,scatterer.site[1],
+       i,scatterer.site[2],
+       i,adptbx.u_as_b(scatterer.u_iso), i,scatterer.occupancy, i,group), file=s)
+
+def xray_structure_as_cns_sdb_file(self, file=None,
+                                         description=None,
+                                         comment=None,
+                                         action=None,
+                                         segid=None,
+                                         group=None):
+  s = StringIO()
+  write_header(s, file, description, comment,
+                  self.space_group_info(),
+                  self.scatterers().size())
+  for running_index,scatterer in enumerate(self.scatterers()):
+    write_scatterer(s,
+      running_index+1,
+      scatterer.customized_copy(
+        site=self.unit_cell().orthogonalize(scatterer.site)),
+      action=action,
+      segid=segid,
+      group=group)
+  write_tail(s)
+  return s.getvalue()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/space_group_symbols.py
+from __future__ import absolute_import, division, print_function
+# CNS 1.1 spacegroup.lib symbols
+sgtbx_lookup_symbol_as_cns_symbol = {
+"P1": "P1",
+"P-1": "P-1",
+"P121": "P2",
+"P1211": "P2(1)",
+"C121": "C2",
+"P1m1": "PM",
+"P1c1": "PC",
+"C1m1": "CM",
+"C1c1": "CC",
+"P12/m1": "P2/M",
+"P121/m1": "P2(1)/M",
+"C12/m1": "C2/M",
+"P12/c1": "P2/C",
+"P121/c1": "P2(1)/C",
+"C12/c1": "C2/C",
+"P222": "P222",
+"P2221": "P222(1)",
+"P21212": "P2(1)2(1)2",
+"P212121": "P2(1)2(1)2(1)",
+"C2221": "C222(1)",
+"C222": "C222",
+"F222": "F222",
+"I222": "I222",
+"I212121": "I2(1)2(1)2(1)",
+"Pmm2": "PMM2",
+"Pmc21": "PMC2(1)",
+"Pcc2": "PCC2",
+"Pma2": "PMA2",
+"Pca21": "PCA2(1)",
+"Pnc2": "PNC2",
+"Pmn21": "PMN2(1)",
+"Pba2": "PBA2",
+"Pna21": "PNA2(1)",
+"Pnn2": "PNN2",
+"Cmm2": "CMM2",
+"Cmc21": "CMC2(1)",
+"Ccc2": "CCC2",
+"Amm2": "AMM2",
+"Abm2": "ABM2",
+"Ama2": "AMA2",
+"Aba2": "ABA2",
+"Fmm2": "FMM2",
+"Fdd2": "FDD2",
+"Imm2": "IMM2",
+"Iba2": "IBA2",
+"Ima2": "IMA2",
+"Pmmm": "PMMM",
+"Pnnn:2": "PNNN",
+"Pccm": "PCCM",
+"Pban:2": "PBAN",
+"Pmma": "PMMA",
+"Pnna": "PNNA",
+"Pmna": "PMNA",
+"Pcca": "PCCA",
+"Pbam": "PBAM",
+"Pccn": "PCCN",
+"Pbcm": "PBCM",
+"Pnnm": "PNNM",
+"Pmmn:2": "PMMN",
+"Pbcn": "PBCN",
+"Pbca": "PBCA",
+"Pnma": "PNMA",
+"Cmcm": "CMCM",
+"Cmca": "CMCA",
+"Cmmm": "CMMM",
+"Ammm": "AMMM",
+"Cccm": "CCCM",
+"Cmma": "CMMA",
+"Ccca:2": "CCCA",
+"Fmmm": "FMMM",
+"Fddd:2": "FDDD",
+"Immm": "IMMM",
+"Ibam": "IBAM",
+"Ibca": "IBCA",
+"Imma": "IMMA",
+"P4": "P4",
+"P41": "P4(1)",
+"P42": "P4(2)",
+"P43": "P4(3)",
+"I4": "I4",
+"I41": "I4(1)",
+"P-4": "P-4",
+"I-4": "I-4",
+"P4/m": "P4/M",
+"P42/m": "P4(2)/M",
+"P4/n:2": "P4/N",
+"P42/n:2": "P4(2)/N",
+"I4/m": "I4/M",
+"I41/a:2": "I4(1)/A",
+"P422": "P422",
+"P4212": "P42(1)2",
+"P4122": "P4(1)22",
+"P41212": "P4(1)2(1)2",
+"P4222": "P4(2)22",
+"P42212": "P4(2)2(1)2",
+"P4322": "P4(3)22",
+"P43212": "P4(3)2(1)2",
+"I422": "I422",
+"I4122": "I4(1)22",
+"P4mm": "P4MM",
+"P4bm": "P4BM",
+"P42cm": "P4(2)CM",
+"P42nm": "P4(2)NM",
+"P4cc": "P4CC",
+"P4nc": "P4NC",
+"P42mc": "P4(2)MC",
+"P42bc": "P4(2)BC",
+"I4mm": "I4MM",
+"I4cm": "I4CM",
+"I41md": "I4(1)MD",
+"I41cd": "I4(1)CD",
+"P-42m": "P-42M",
+"P-42c": "P-42C",
+"P-421m": "P-42(1)M",
+"P-421c": "P-42(1)C",
+"P-4m2": "P-4M2",
+"P-4c2": "P-4C2",
+"P-4b2": "P-4B2",
+"P-4n2": "P-4N2",
+"I-4m2": "I-4M2",
+"I-4c2": "I-4C2",
+"I-42m": "I-42M",
+"I-42d": "I-42D",
+"P4/mmm": "P4/MMM",
+"P4/mcc": "P4/MCC",
+"P4/nbm:2": "P4/NBM",
+"P4/nnc:2": "P4/NNC",
+"P4/mbm": "P4/MBM",
+"P4/mnc": "P4/MNC",
+"P4/nmm:2": "P4/NMM",
+"P4/ncc:2": "P4/NCC",
+"P42/mmc": "P4(2)/MMC",
+"P42/mcm": "P4(2)/MCM",
+"P42/nbc:2": "P4(2)/NBC",
+"P42/nnm:2": "P4(2)/NNM",
+"P42/mbc": "P4(2)/MBC",
+"P42/mnm": "P4(2)/MNM",
+"P42/nmc:2": "P4(2)/NMC",
+"P42/ncm:2": "P4(2)/NCM",
+"I4/mmm": "I4/MMM",
+"I4/mcm": "I4/MCM",
+"I41/amd:2": "I4(1)/AMD",
+"I41/acd:2": "I4(1)/ACD",
+"P3": "P3",
+"P31": "P3(1)",
+"P32": "P3(2)",
+"R3:H": "R3",
+"R3:R": "R3R",
+"P-3": "P-3",
+"R-3:H": "R-3",
+"R-3:R": "R-3R",
+"P312": "P312",
+"P321": "P321",
+"P3112": "P3(1)12",
+"P3121": "P3(1)21",
+"P3212": "P3(2)12",
+"P3221": "P3(2)21",
+"R32:H": "R32",
+"R32:R": "R32R",
+"P3m1": "P3M1",
+"P31m": "P31M",
+"P3c1": "P3C1",
+"P31c": "P31C",
+"R3m:H": "R3M",
+"R3m:R": "R3MR",
+"R3c:H": "R3C",
+"R3c:R": "R3CR",
+"P-31m": "P-31M",
+"P-31c": "P-31C",
+"P-3m1": "P-3M1",
+"P-3c1": "P-3C1",
+"R-3m:H": "R-3M",
+"R-3m:R": "R-3MR",
+"R-3c:H": "R-3C",
+"R-3c:R": "R-3CR",
+"P6": "P6",
+"P61": "P6(1)",
+"P65": "P6(5)",
+"P62": "P6(2)",
+"P64": "P6(4)",
+"P63": "P6(3)",
+"P-6": "P-6",
+"P6/m": "P6/M",
+"P63/m": "P6(3)/M",
+"P622": "P622",
+"P6122": "P6(1)22",
+"P6522": "P6(5)22",
+"P6222": "P6(2)22",
+"P6422": "P6(4)22",
+"P6322": "P6(3)22",
+"P6mm": "P6MM",
+"P6cc": "P6CC",
+"P63cm": "P6(3)CM",
+"P63mc": "P6(3)MC",
+"P-6m2": "P-6M2",
+"P-6c2": "P-6C2",
+"P-62m": "P-62M",
+"P-62c": "P-62C",
+"P6/mmm": "P6/MMM",
+"P6/mcc": "P6/MCC",
+"P63/mcm": "P6(3)/MCM",
+"P63/mmc": "P6(3)/MMC",
+"P23": "P23",
+"F23": "F23",
+"I23": "I23",
+"P213": "P2(1)3",
+"I213": "I2(1)3",
+"Pm-3": "PM-3",
+"Pn-3:2": "PN-3",
+"Fm-3": "FM-3",
+"Fd-3:2": "FD-3",
+"Im-3": "IM-3",
+"Pa-3": "PA-3",
+"Ia-3": "IA-3",
+"P432": "P432",
+"P4232": "P4(2)32",
+"F432": "F432",
+"F4132": "F4(1)32",
+"I432": "I432",
+"P4332": "P4(3)32",
+"P4132": "P4(1)32",
+"I4132": "I4(1)32",
+"P-43m": "P-43M",
+"F-43m": "F-43M",
+"I-43m": "I-43M",
+"P-43n": "P-43N",
+"F-43c": "F-43C",
+"I-43d": "I-43D",
+"Pm-3m": "PM-3M",
+"Pn-3n:2": "PN-3N",
+"Pm-3n": "PM-3N",
+"Pn-3m:2": "PN-3M",
+"Fm-3m": "FM-3M",
+"Fm-3c": "FM-3C",
+"Fd-3m:2": "FD-3M",
+"Fd-3c:2": "FD-3C",
+"Im-3m": "IM-3M",
+"Ia-3d": "IA-3D"
+}
+
+def cns_format(space_group_info):
+  return sgtbx_lookup_symbol_as_cns_symbol.get(
+    str(space_group_info).replace(" ",""))
+
+def _regression_test():
+  from cctbx import sgtbx
+  for symbol in sgtbx_lookup_symbol_as_cns_symbol.values():
+    cns_symbol = cns_format(sgtbx.space_group_info(symbol))
+    assert cns_symbol == symbol, (cns_symbol, symbol)
+  print("OK")
+
+if (__name__ == "__main__"):
+  _regression_test()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/tst_cns.py
+from __future__ import absolute_import, division, print_function
+import iotbx.cns.xray_structure
+import iotbx.cns.miller_array
+import iotbx.cns.reflection_reader
+import iotbx.cns.crystal_symmetry_utils
+import iotbx.cns.crystal_symmetry_from_inp
+from iotbx.cns import sdb_reader
+from cctbx import miller
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx.development import random_structure
+from cctbx.array_family import flex
+from libtbx.test_utils import Exception_expected, approx_equal, show_diff
+from six.moves import cStringIO as StringIO
+import re
+import sys
+
+def exercise_crystal_symmetry_utils():
+  as_rem = iotbx.cns.crystal_symmetry_utils.crystal_symmetry_as_sg_uc
+  as_inp = iotbx.cns.crystal_symmetry_utils.crystal_symmetry_as_cns_inp_defines
+  crystal_symmetry = crystal.symmetry(unit_cell=None, space_group_info=None)
+  sg_uc = as_rem(crystal_symmetry=crystal_symmetry)
+  assert sg_uc == "sg=None a=None b=None c=None alpha=None beta=None gamma=None"
+  sg_uc = as_inp(crystal_symmetry=crystal_symmetry)
+  assert not show_diff("\n".join(sg_uc), """\
+{===>} sg="None";
+{===>} a=None;
+{===>} b=None;
+{===>} c=None;
+{===>} alpha=None;
+{===>} beta=None;
+{===>} gamma=None;""")
+  #
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=(3,4,5,89,87,93),
+    space_group_info=None)
+  sg_uc = as_rem(crystal_symmetry=crystal_symmetry)
+  assert sg_uc == "sg=None a=3 b=4 c=5 alpha=89 beta=87 gamma=93"
+  sg_uc = as_inp(crystal_symmetry=crystal_symmetry)
+  assert not show_diff("\n".join(sg_uc), """\
+{===>} sg="None";
+{===>} a=3;
+{===>} b=4;
+{===>} c=5;
+{===>} alpha=89;
+{===>} beta=87;
+{===>} gamma=93;""")
+  #
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=None,
+    space_group_symbol=19)
+  sg_uc = as_rem(crystal_symmetry=crystal_symmetry)
+  assert sg_uc == \
+    "sg=P2(1)2(1)2(1) a=None b=None c=None alpha=None beta=None gamma=None"
+  sg_uc = as_inp(crystal_symmetry=crystal_symmetry)
+  assert not show_diff("\n".join(sg_uc), """\
+{===>} sg="P2(1)2(1)2(1)";
+{===>} a=None;
+{===>} b=None;
+{===>} c=None;
+{===>} alpha=None;
+{===>} beta=None;
+{===>} gamma=None;""")
+  #
+  for symbols in sgtbx.space_group_symbol_iterator():
+    cs1 = sgtbx.space_group_info(
+      group=sgtbx.space_group(symbols)).any_compatible_crystal_symmetry(
+        volume=1000)
+    sg_uc = as_rem(crystal_symmetry=cs1)
+    m = re.match(iotbx.cns.crystal_symmetry_utils.re_sg_uc, sg_uc)
+    assert m is not None
+    cs2 = iotbx.cns.crystal_symmetry_utils.crystal_symmetry_from_re_match(m=m)
+    assert cs1.is_similar_symmetry(cs2)
+    #
+    sg_uc = as_inp(crystal_symmetry=cs1)
+    sio = StringIO()
+    print("\n".join(sg_uc), file=sio)
+    sio = StringIO(sio.getvalue())
+    cs2 = iotbx.cns.crystal_symmetry_from_inp.extract_from(file=sio)
+    assert cs1.is_similar_symmetry(cs2)
+  #
+  uc_sg = """\
+a= 82.901 b= 82.901 c= 364.175 alpha= 90 beta= 90 gamma= 120 sg= P6(5)22"""
+  m = re.match(iotbx.cns.crystal_symmetry_utils.re_uc_sg, uc_sg)
+  cs = iotbx.cns.crystal_symmetry_utils.crystal_symmetry_from_re_match(
+    m=m, i_uc=1, i_sg=7)
+  assert cs is not None
+  assert str(cs.unit_cell()) == "(82.901, 82.901, 364.175, 90, 90, 120)"
+  assert str(cs.space_group().info()) == "P 65 2 2"
+
+def exercise_sdb(verbose=0):
+  structure = random_structure.xray_structure(
+    space_group_info=sgtbx.space_group_info("P 31"),
+    elements=["N","C","C","O"]*2,
+    volume_per_atom=500,
+    min_distance=2.,
+    general_positions_only=False,
+    random_u_iso=True)
+  f_abs = abs(structure.structure_factors(
+    anomalous_flag=False, d_min=2, algorithm="direct").f_calc())
+  sdb_out = structure.as_cns_sdb_file(
+    file="foo.sdb",
+    description="random_structure",
+    comment=["any", "thing"],
+    group="best")
+  if (0 or verbose):
+    sys.stdout.write(sdb_out)
+  sdb_files = sdb_reader.multi_sdb_parser(StringIO(sdb_out))
+  assert len(sdb_files) == 1
+  structure_read = sdb_files[0].as_xray_structure(
+    crystal_symmetry=crystal.symmetry(
+      unit_cell=structure.unit_cell(),
+      space_group_info=None))
+  f_read = abs(f_abs.structure_factors_from_scatterers(
+    xray_structure=structure_read, algorithm="direct").f_calc())
+  regression = flex.linear_regression(f_abs.data(), f_read.data())
+  assert regression.is_well_defined()
+  if (0 or verbose):
+    regression.show_summary()
+  assert abs(regression.slope()-1) < 1.e-4
+  assert abs(regression.y_intercept()) < 1.e-3
+
+def exercise_reflection_reader():
+  crf = iotbx.cns.reflection_reader.cns_reflection_file
+  try:
+    # just to make sure a bug in handling {} doesn't get reintroduced
+    crf(file_handle=StringIO("}{"))
+  except iotbx.cns.reflection_reader.CNS_input_Error as e:
+    assert str(e) == "premature end-of-file"
+  else:
+    raise Exception_expected
+  #
+  def check(expected):
+    c = crf(file_handle=si)
+    so = StringIO()
+    c.crystal_symmetry().show_summary(f=so)
+    assert not show_diff(so.getvalue(), expected)
+  si = StringIO("""\
+remark a= 40.000 b= 50.000 c=  60.000 alpha= 90 beta= 90 gamma= 90 sg= P2
+ remark symop (X,Y,Z)
+remark symop (-X,-Y,Z)
+CRYST1   10.000   20.000   30.000  90.00  90.00  90.00 P 1 21 1
+DECLare NAME=FOBS                   DOMAin=RECIprocal   TYPE=REAL END
+INDE     1    2    3 FOBS=   380.500
+""")
+  check("""\
+Unit cell: (40, 50, 60, 90, 90, 90)
+Space group: P 1 1 2 (No. 3)
+""")
+  si = StringIO("""\
+ remark a= 40.000 b= 50.000 c=  60.000 alpha= 90 beta= 90 gamma= 90 sg= P2
+CRYST1   10.000   20.000   30.000  90.00  90.00  90.00 P 1 21 1
+DECLare NAME=FOBS                   DOMAin=RECIprocal   TYPE=REAL END
+INDE     1    2    3 FOBS=   380.500
+""")
+  check("""\
+Unit cell: (40, 50, 60, 90, 90, 90)
+Space group: P 1 2 1 (No. 3)
+""")
+  si = StringIO("""\
+CRYST1   10.000   20.000   30.000  90.00  90.00  90.00 P 1 21 1
+DECLare NAME=FOBS                   DOMAin=RECIprocal   TYPE=REAL END
+INDE     1    2    3 FOBS=   380.500
+""")
+  check("""\
+Unit cell: (10, 20, 30, 90, 90, 90)
+Space group: P 1 21 1 (No. 4)
+""")
+
+def exercise_miller_array_as_cns_hkl():
+  s = StringIO()
+  crystal_symmetry = crystal.symmetry()
+  for anomalous_flag in [False, True]:
+    miller_set = miller.set(
+      crystal_symmetry=crystal_symmetry,
+      indices=flex.miller_index([(1,2,3),(-3,5,-7)]),
+      anomalous_flag=anomalous_flag)
+    for data in [flex.bool((False,True)),
+                 flex.int((-3,4)),
+                 flex.double((10,13)),
+                 flex.complex_double((10,13)),
+                 flex.hendrickson_lattman(((0,1,2,3),(4,5,6,7)))]:
+      miller_array = miller_set.array(data=data)
+      miller_array.export_as_cns_hkl(file_object=s)
+      if (isinstance(data, flex.double)):
+        miller_array = miller_set.array(data=data, sigmas=data/10.)
+        miller_array.export_as_cns_hkl(file_object=s)
+  assert not show_diff(s.getvalue(), """\
+NREFlections=2
+ANOMalous=FALSe
+DECLare NAME=DATA  DOMAin=RECIprocal TYPE=INTEger END
+INDEx 1 2 3 DATA= 0
+INDEx -3 5 -7 DATA= 1
+NREFlections=2
+ANOMalous=FALSe
+DECLare NAME=DATA  DOMAin=RECIprocal TYPE=INTEger END
+INDEx 1 2 3 DATA= -3
+INDEx -3 5 -7 DATA= 4
+NREFlections=2
+ANOMalous=FALSe
+DECLare NAME=DATA  DOMAin=RECIprocal TYPE=REAL END
+INDEx 1 2 3 DATA= 10
+INDEx -3 5 -7 DATA= 13
+NREFlections=2
+ANOMalous=FALSe
+DECLare NAME=FOBS DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=SIGMA DOMAin=RECIprocal TYPE=REAL END
+INDEx 1 2 3 FOBS= 10 SIGMA= 1
+INDEx -3 5 -7 FOBS= 13 SIGMA= 1.3
+NREFlections=2
+ANOMalous=FALSe
+DECLare NAME=F  DOMAin=RECIprocal TYPE=COMPLEX END
+INDEx 1 2 3 F= 10 0
+INDEx -3 5 -7 F= 13 0
+NREFlections=2
+ANOMalous=FALSe
+DECLare NAME=PA  DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=PB  DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=PC  DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=PD  DOMAin=RECIprocal TYPE=REAL END
+GROUp  TYPE=HL
+     OBJEct=PA
+     OBJEct=PB
+     OBJEct=PC
+     OBJEct=PD
+END
+INDEx 1 2 3 PA= 0 PB= 1 PC= 2 PD= 3
+INDEx -3 5 -7 PA= 4 PB= 5 PC= 6 PD= 7
+NREFlections=2
+ANOMalous=TRUE
+DECLare NAME=DATA  DOMAin=RECIprocal TYPE=INTEger END
+INDEx 1 2 3 DATA= 0
+INDEx -3 5 -7 DATA= 1
+NREFlections=2
+ANOMalous=TRUE
+DECLare NAME=DATA  DOMAin=RECIprocal TYPE=INTEger END
+INDEx 1 2 3 DATA= -3
+INDEx -3 5 -7 DATA= 4
+NREFlections=2
+ANOMalous=TRUE
+DECLare NAME=DATA  DOMAin=RECIprocal TYPE=REAL END
+INDEx 1 2 3 DATA= 10
+INDEx -3 5 -7 DATA= 13
+NREFlections=2
+ANOMalous=TRUE
+DECLare NAME=FOBS DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=SIGMA DOMAin=RECIprocal TYPE=REAL END
+INDEx 1 2 3 FOBS= 10 SIGMA= 1
+INDEx -3 5 -7 FOBS= 13 SIGMA= 1.3
+NREFlections=2
+ANOMalous=TRUE
+DECLare NAME=F  DOMAin=RECIprocal TYPE=COMPLEX END
+INDEx 1 2 3 F= 10 0
+INDEx -3 5 -7 F= 13 0
+NREFlections=2
+ANOMalous=TRUE
+DECLare NAME=PA  DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=PB  DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=PC  DOMAin=RECIprocal TYPE=REAL END
+DECLare NAME=PD  DOMAin=RECIprocal TYPE=REAL END
+GROUp  TYPE=HL
+     OBJEct=PA
+     OBJEct=PB
+     OBJEct=PC
+     OBJEct=PD
+END
+INDEx 1 2 3 PA= 0 PB= 1 PC= 2 PD= 3
+INDEx -3 5 -7 PA= 4 PB= 5 PC= 6 PD= 7
+""")
+
+def exercise_reflection_file_as_miller_array():
+  refl_1 = """\
+ NREFlection=         3
+ ANOMalous=FALSe { equiv. to HERMitian=TRUE}
+ DECLare NAME=FOBS         DOMAin=RECIprocal   TYPE=COMP END
+ DECLare NAME=PHASE        DOMAin=RECIprocal   TYPE=REAL END
+ DECLare NAME=SIGMA        DOMAin=RECIprocal   TYPE=REAL END
+ DECLare NAME=TEST         DOMAin=RECIprocal   TYPE=INTE END
+ DECLare NAME=FOM          DOMAin=RECIprocal   TYPE=REAL END
+ INDE     1    1    2 FOBS=   713.650 PHASE=     0.000 SIGMA=     3.280
+                   TEST=  0 FOM=    -1.000
+ INDE    -2    0    3 FOBS=   539.520 PHASE=     0.000 SIGMA=     4.140
+                   TEST=  1 FOM=    -1.000
+ INDE     0    2    1 FOBS=   268.140 PHASE=     0.000 SIGMA=     1.690
+                   TEST=  0 FOM=    -1.000
+"""
+  refl_2 = """\
+ { sg=C2 a=97.37 b=46.64 c=65.47 alpha=90 beta=115.4 gamma=90 }
+ NREFlection=         3
+ ANOMalous=FALSe { equiv. to HERMitian=TRUE}
+ DECLare NAME=FOBS         DOMAin=RECIprocal   TYPE=COMP END
+ DECLare NAME=SIGMA        DOMAin=RECIprocal   TYPE=REAL END
+ DECLare NAME=TEST         DOMAin=RECIprocal   TYPE=INTE END
+ DECLare NAME=FOM          DOMAin=RECIprocal   TYPE=REAL END
+ DECLare NAME=PA           DOMAin=RECIprocal   TYPE=REAL END
+ DECLare NAME=PB           DOMAin=RECIprocal   TYPE=REAL END
+ DECLare NAME=PC           DOMAin=RECIprocal   TYPE=REAL END
+ DECLare NAME=PD           DOMAin=RECIprocal   TYPE=REAL END
+ GROUp TYPE=HL
+     OBJEct=PA
+     OBJEct=PB
+     OBJEct=PC
+     OBJEct=PD
+ END
+ INDE     1    1    2 FOBS=   713.650    44.854 SIGMA=     3.280 TEST=         0
+                   FOM=     0.044 PA=     0.066 PB=     0.065 PC=    -0.001
+                   PD=    -0.099
+ INDE    -2    0    3 FOBS=   539.520     0.000 SIGMA=     4.140 TEST=         1
+                   FOM=     0.994 PA=     2.893 PB=     0.000 PC=     0.000
+                   PD=     0.000
+ INDE     0    2    1 FOBS=   268.140   184.247 SIGMA=     1.690 TEST=         0
+                   FOM=     0.890 PA=   -46.660 PB=    -3.465 PC=   -12.988
+                   PD=    -1.940
+"""
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=(97.37, 46.64, 65.47, 90, 115.4, 90),
+    space_group_symbol="C 1 2 1")
+  all_arrays = [iotbx.cns.reflection_reader.cns_reflection_file(
+    file_handle=StringIO(refl)).as_miller_arrays(
+      crystal_symmetry=cs)
+        for refl,cs in [(refl_1,crystal_symmetry), (refl_2,None)]]
+  for miller_arrays in all_arrays:
+    for miller_array in miller_arrays:
+      assert miller_array.crystal_symmetry().is_similar_symmetry(
+        other=crystal_symmetry,
+        relative_length_tolerance=1.e-10,
+        absolute_angle_tolerance=1.e-10)
+      assert not miller_array.anomalous_flag()
+      assert list(miller_array.indices()) == [(1,1,2), (-2,0,3), (0,2,1)]
+      lbl = miller_array.info().label_string()
+      if (lbl == "FOBS,SIGMA"):
+        assert str(miller_array.observation_type()) == "xray.amplitude"
+        assert approx_equal(miller_array.data(), [713.65, 539.52, 268.14])
+        assert approx_equal(miller_array.sigmas(), [3.28, 4.14, 1.69])
+      else:
+        assert miller_array.observation_type() is None
+        if (lbl == "TEST"):
+          assert list(miller_array.data()) == [0, 1, 0]
+        elif (lbl == "PHASE"):
+          assert approx_equal(miller_array.data(), [0, 0, 0])
+        elif (lbl == "FOM"):
+          if (miller_array.data()[0] < 0):
+            assert approx_equal(miller_array.data(), [-1, -1, -1])
+          else:
+            assert approx_equal(miller_array.data(), [0.044, 0.994, 0.890])
+        elif (lbl == "PA,PB,PC,PD"):
+          assert approx_equal(miller_array.data(), [
+            (0.066, 0.065, -0.001, -0.099),
+            (2.893, 0.000, 0.000, 0.000),
+            (-46.660, -3.465, -12.988, -1.940)])
+        else:
+          raise RuntimeError
+
+def run():
+  verbose = "--Verbose" in sys.argv[1:]
+  exercise_crystal_symmetry_utils()
+  exercise_sdb(verbose)
+  exercise_reflection_reader()
+  exercise_reflection_file_as_miller_array()
+  exercise_miller_array_as_cns_hkl()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/cns/xray_structure.py
+from __future__ import absolute_import, division, print_function
+from iotbx.cns import sdb_writer
+from cctbx import xray
+xray.structure.as_cns_sdb_file = sdb_writer.xray_structure_as_cns_sdb_file
+
+
+ *******************************************************************************

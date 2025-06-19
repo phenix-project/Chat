@@ -1,0 +1,1735 @@
+
+
+ *******************************************************************************
+cctbx/regression/tst_xray_derivatives.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx.development import random_structure
+from cctbx.development import debug_utils
+from cctbx.array_family import flex
+import random
+import math
+import sys
+from cctbx import adptbx
+from six.moves import range
+from six.moves import zip
+
+def finite_differences_site(cartesian_flag, target_ftor, structure,
+                            delta=0.00001):
+  unit_cell = structure.unit_cell()
+  abc = unit_cell.parameters()[:3]
+  derivatives = flex.vec3_double()
+  for i_scatterer in range(structure.scatterers().size()):
+    d_target_d_site = [0,0,0]
+    for ix in range(3):
+      target_values = []
+      for d_sign in (-1, 1):
+        modified_structure = structure.deep_copy_scatterers()
+        ms = modified_structure.scatterers()[i_scatterer]
+        site = list(ms.site)
+        if (not cartesian_flag):
+          site[ix] += d_sign * delta / abc[ix]
+        else:
+          site_cart = list(unit_cell.orthogonalize(site))
+          site_cart[ix] += d_sign * delta
+          site = unit_cell.fractionalize(site_cart)
+        ms.site = site
+        f_calc = target_ftor.f_obs().structure_factors_from_scatterers(
+            xray_structure=modified_structure,
+            algorithm="direct").f_calc()
+        target_result = target_ftor(f_calc, compute_derivatives=False)
+        target_values.append(target_result.target())
+      derivative = (target_values[1] - target_values[0]) / (2 * delta)
+      if (not cartesian_flag): derivative *= abc[ix]
+      d_target_d_site[ix] = derivative
+    derivatives.append(d_target_d_site)
+  return derivatives
+
+def finite_differences_u_star(target_ftor, structure,
+                              delta=0.000001):
+  derivatives = flex.sym_mat3_double()
+  for i_scatterer in range(structure.scatterers().size()):
+    d_target_d_u_star = [0,0,0,0,0,0]
+    if(structure.scatterers()[i_scatterer].flags.use_u_aniso()):
+       for iu in range(6):
+         target_values = []
+         for d_sign in (-1, 1):
+           modified_structure = structure.deep_copy_scatterers()
+           ms = modified_structure.scatterers()[i_scatterer]
+           u_star = list(ms.u_star)
+           u_star[iu] += d_sign * delta
+           ms.u_star = u_star
+           f_calc = target_ftor.f_obs().structure_factors_from_scatterers(
+             xray_structure=modified_structure,
+             algorithm="direct").f_calc()
+           target_result = target_ftor(f_calc, compute_derivatives=False)
+           target_values.append(target_result.target())
+         derivative = (target_values[1] - target_values[0]) / (2 * delta)
+         d_target_d_u_star[iu] = derivative
+       derivatives.append(d_target_d_u_star)
+    else:
+       derivatives.append(d_target_d_u_star)
+  return derivatives
+
+def finite_differences_scalar(parameter_name, target_ftor, structure,
+                              delta=0.00001):
+  derivatives = flex.double()
+  for i_scatterer in range(structure.scatterers().size()):
+    target_values = []
+    for d_sign in (-1, 1):
+      modified_structure = structure.deep_copy_scatterers()
+      ms = modified_structure.scatterers()[i_scatterer]
+      if   (parameter_name == "u_iso" and ms.flags.use_u_iso()):
+        ms.u_iso += d_sign * delta
+      elif (parameter_name == "tan_u_iso" and ms.flags.use_u_iso()):
+        assert ms.u_iso >= 0
+        x = math.tan(ms.u_iso*math.pi/adptbx.b_as_u(ms.flags.param)-math.pi/2) + d_sign * delta
+        ms.u_iso = adptbx.b_as_u(ms.flags.param)/math.pi*(math.atan(x)+math.pi/2)
+      elif (parameter_name == "occupancy"):
+        ms.occupancy += d_sign * delta
+      elif (parameter_name == "fp"):
+        ms.fp = ms.fp + d_sign * delta
+      elif (parameter_name == "fdp"):
+        ms.fdp = ms.fdp + d_sign * delta
+      else:
+        raise RuntimeError
+      f_calc = target_ftor.f_obs().structure_factors_from_scatterers(
+        xray_structure=modified_structure,
+        algorithm="direct").f_calc()
+      target_result = target_ftor(f_calc, compute_derivatives=False)
+      target_values.append(target_result.target())
+    derivative = (target_values[1] - target_values[0]) / (2 * delta)
+    derivatives.append(derivative)
+  return derivatives
+
+def flex_tuple_as_flex_double(flex_tuple):
+  result = flex.double()
+  for t in flex_tuple:
+    result.extend(flex.double(tuple(t)))
+  return result
+
+def linear_regression_test(d_analytical, d_numerical, test_hard=True,
+                           slope_tolerance=1.e-3,
+                           correlation_min=0.999,
+                           verbose=0):
+  if (type(d_analytical) != type(flex.double())):
+    d_analytical = flex_tuple_as_flex_double(d_analytical)
+  if (type(d_numerical) != type(flex.double())):
+    d_numerical = flex_tuple_as_flex_double(d_numerical)
+  if (0 or verbose):
+    print("analytical:", tuple(d_analytical))
+    print("numerical: ", tuple(d_numerical))
+  if (    flex.max(flex.abs(d_analytical)) == 0
+      and flex.max(flex.abs(d_numerical)) == 0):
+    return
+  regr = flex.linear_regression(d_analytical, d_numerical)
+  corr = flex.linear_correlation(d_analytical, d_numerical).coefficient()
+  assert regr.is_well_defined()
+  if (abs(regr.slope() - 1) > slope_tolerance or corr < correlation_min):
+    print("Error: finite difference mismatch:")
+    print("slope:", regr.slope())
+    print("correlation:", corr)
+    if (0 or verbose):
+      for a, n in zip(d_analytical, d_numerical):
+        print(a, n)
+    assert not test_hard
+
+def exercise(target_functor, data_type, parameter_name, space_group_info,
+             anomalous_flag,
+             cartesian_flag,
+             n_elements=9,
+             d_min=2.5,
+             shake_sigma=0.25,
+             test_hard=True, verbose=0):
+  assert data_type == 'F' or data_type == 'F^2'
+  if (data_type == 'F^2'
+       and not target_functor == xray.unified_least_squares_residual): return
+  if (parameter_name != "site" and cartesian_flag == True): return
+  if (parameter_name == "fdp" and not anomalous_flag): return
+  structure_ideal = random_structure.xray_structure(
+    space_group_info,
+    elements=(("O","N","C")*(n_elements))[:n_elements],
+    volume_per_atom=100,
+    random_f_prime_d_min=d_min,
+    random_f_double_prime=anomalous_flag,
+    use_u_aniso = True,
+    use_u_iso = False,
+    random_u_cart_scale = 0.3,
+    random_u_iso = False,
+    random_occupancy=True)
+  if(parameter_name in ["u_star", "u_iso"]): shake_sigma = shake_sigma / 2.
+  random_structure.random_modify_adp_and_adp_flags(
+                             scatterers         = structure_ideal.scatterers(),
+                             random_u_iso_scale = 0.3,
+                             random_u_iso_min   = 0.0,
+                             parameter_name     = parameter_name)
+  rnd_f_calc = structure_ideal.structure_factors(
+    anomalous_flag=anomalous_flag, d_min=d_min, algorithm="direct").f_calc()
+  if data_type == 'F':
+    y_obs = abs(rnd_f_calc)
+  elif data_type == 'F^2':
+    y_obs = rnd_f_calc.norm()
+    y_obs.set_observation_type_xray_intensity()
+  structure_shake = structure_ideal.random_modify_parameters(
+        parameter_name, shake_sigma, vary_z_only=False)
+  assert tuple(structure_ideal.special_position_indices()) \
+      == tuple(structure_shake.special_position_indices())
+  target_ftor = target_functor(y_obs)
+  for structure in (structure_ideal, structure_shake)[:]: #SWITCH
+    f_calc = y_obs.structure_factors_from_scatterers(
+      xray_structure=structure,
+      algorithm="direct").f_calc()
+    target_result = target_ftor(f_calc, compute_derivatives=True)
+    if (structure == structure_ideal):
+      assert abs(target_result.target()) < 1.e-5
+
+  gradient_flags=xray.structure_factors.gradient_flags(
+     site=(parameter_name=="site" or random.choice((False,True))),
+     u_iso=(parameter_name=="u_iso" or random.choice((False,True))),
+     u_aniso=(parameter_name=="u_star" or random.choice((False,True))),
+     occupancy=(parameter_name=="occupancy" or random.choice((False,True))),
+     fp=(parameter_name=="fp" or random.choice((False,True))),
+     fdp=(parameter_name=="fdp" or (anomalous_flag
+                                    and random.choice((False,True)))))
+  xray.set_scatterer_grad_flags(scatterers = structure.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp)
+  grad_flags_counts = xray.scatterer_grad_flags_counts(structure.scatterers())
+  sf = xray.structure_factors.gradients_direct(
+    xray_structure=structure,
+    u_iso_refinable_params=None,
+    miller_set=y_obs,
+    d_target_d_f_calc=target_result.derivatives(),
+    n_parameters=0)
+  if (parameter_name == "site"):
+    d_analytical = sf.d_target_d_site_frac()
+    if (cartesian_flag): # average d_analytical or d_numerical, but not both
+      structure_ideal.apply_special_position_ops_d_target_d_site(d_analytical)
+    if (cartesian_flag):
+      d_analytical = sf.d_target_d_site_cart()
+    d_numerical = finite_differences_site(
+      cartesian_flag, target_ftor, structure)
+    if (not cartesian_flag): # aver. d_analytical or d_numerical, but not both
+      structure_ideal.apply_special_position_ops_d_target_d_site(d_numerical)
+  elif (parameter_name == "u_star" and grad_flags_counts.use_u_aniso > 0):
+    d_analytical = sf.d_target_d_u_star()
+    d_numerical = finite_differences_u_star(target_ftor, structure)
+  else:
+   if (parameter_name == "occupancy"):
+     d_analytical = sf.d_target_d_occupancy()
+   elif (parameter_name == "u_iso" and grad_flags_counts.use_u_iso > 0):
+     d_analytical = sf.d_target_d_u_iso()
+   elif (parameter_name == "fp"):
+     d_analytical = sf.d_target_d_fp()
+   elif (parameter_name == "fdp"):
+     d_analytical = sf.d_target_d_fdp()
+   else:
+     raise RuntimeError
+   d_numerical = finite_differences_scalar(
+     parameter_name, target_ftor, structure)
+  linear_regression_test(d_analytical, d_numerical, test_hard,
+                           verbose=verbose)
+  if (parameter_name == "u_iso" and grad_flags_counts.use_u_iso > 0):
+    u_iso_refinable_params = flex.double()
+    for scatterer in structure.scatterers():
+        scatterer.flags.set_tan_u_iso(True)
+        scatterer.flags.set_grad_u_iso(gradient_flags.u_iso)
+        param = random.randint(90,120)
+        scatterer.flags.param= param
+        value = math.tan(scatterer.u_iso*math.pi/adptbx.b_as_u(param)-math.pi/2)
+        u_iso_refinable_params.append(value)
+    sf = xray.structure_factors.gradients_direct(
+      xray_structure=structure,
+      u_iso_refinable_params = u_iso_refinable_params,
+      miller_set=y_obs,
+      d_target_d_f_calc=target_result.derivatives(),
+      n_parameters=0)
+    d_analytical = sf.d_target_d_u_iso()
+    d_numerical = finite_differences_scalar("tan_u_iso",target_ftor, structure)
+    linear_regression_test(d_analytical, d_numerical, test_hard,
+                           verbose=verbose)
+
+def run_call_back(flags, space_group_info):
+  coordinate_systems = []
+  if (flags.Frac): coordinate_systems.append(False)
+  if (flags.Cart): coordinate_systems.append(True)
+  if (len(coordinate_systems) == 0):
+    coordinate_systems = [False, True]
+  for parameter_name in ("site", "u_iso", "u_star", "occupancy",
+                         "fp", "fdp")[:]: #SWITCH
+    for anomalous_flag in (False, True)[:]: #SWITCH
+       for cartesian_flag in coordinate_systems:
+         for target_functor in xray.target_functors.registry().values():
+           if(parameter_name == "u_iso"):  use_u_iso = True
+           if(parameter_name == "u_star"): use_u_aniso = True
+           for data_type in ('F', 'F^2'):
+            exercise(target_functor,
+                     data_type,
+                     parameter_name,
+                     space_group_info,
+                     anomalous_flag,
+                     cartesian_flag,
+                     verbose=flags.Verbose)
+
+def run():
+  debug_utils.parse_options_loop_space_groups(sys.argv[1:], run_call_back, (
+    "Frac",
+    "Cart"))
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/regression/tst_xray_fast_gradients.py
+from __future__ import absolute_import, division, print_function
+from cctbx.array_family import flex
+from cctbx.development import random_structure
+from cctbx.development import debug_utils
+from cctbx import xray
+import cctbx.xray.structure_factors.global_counters
+from cctbx import maptbx
+from cctbx import miller
+from cctbx import crystal
+from cctbx import adptbx
+from cctbx.regression.tst_xray_derivatives import linear_regression_test
+from cctbx.regression.tst_sampled_model_density import assign_custom_gaussians
+from scitbx import fftpack
+from scitbx import matrix
+import omptbx
+from libtbx import adopt_init_args
+from libtbx.test_utils import approx_equal
+import libtbx.utils
+import libtbx.introspection
+import random
+import sys, math
+from six.moves import range
+from six.moves import zip
+
+if (1):
+  random.seed(0)
+  flex.set_random_seed(0)
+
+def randomize_gradient_flags(gradient_flags, anomalous_flag,
+                             thresholds=(2/3., 1/3.)):
+  r = random.random()
+  if (r >= thresholds[0]):
+    gradient_flags = xray.structure_factors.gradient_flags(default=True)
+  elif (r >= thresholds[1]):
+    gradient_flags = gradient_flags.copy()
+    if (random.random() > 0.5): gradient_flags.site = True
+    if (random.random() > 0.5): gradient_flags.u_iso = True
+    if (random.random() > 0.5): gradient_flags.u_aniso = True
+    if (random.random() > 0.5): gradient_flags.occupancy = True
+    if (random.random() > 0.5): gradient_flags.fp = True
+    if (anomalous_flag):
+      if (random.random() > 0.5): gradient_flags.fdp = True
+  return gradient_flags
+
+class resampling(crystal.symmetry):
+
+  def __init__(self, miller_set=None,
+                     crystal_symmetry=None,
+                     d_min=None,
+                     grid_resolution_factor=1/3.,
+                     symmetry_flags=maptbx.use_space_group_symmetry,
+                     mandatory_grid_factors=None,
+                     quality_factor=1000000, u_base=None, b_base=None,
+                     wing_cutoff=1.e-10,
+                     exp_table_one_over_step_size=-100,
+                     max_prime=5):
+    assert miller_set is None or crystal_symmetry is None
+    assert [quality_factor, u_base, b_base].count(None) == 2
+    if (miller_set is None):
+      assert crystal_symmetry is not None and d_min is not None
+    else:
+      crystal_symmetry = miller_set
+      if (d_min is None):
+        d_min = miller_set.d_min()
+      else:
+        assert d_min <= miller_set.d_min()
+    crystal.symmetry._copy_constructor(self, crystal_symmetry)
+    quality_factor = xray.structure_factors.quality_factor_from_any(
+      d_min, grid_resolution_factor, quality_factor, u_base, b_base)
+    del miller_set
+    del u_base
+    del b_base
+    adopt_init_args(self, locals(), hide=True)
+    self._crystal_gridding = None
+    self._crystal_gridding_tags = None
+    self._rfft = None
+    self._u_base = None
+
+  def d_min(self):
+    return self._d_min
+
+  def grid_resolution_factor(self):
+    return self._grid_resolution_factor
+
+  def symmetry_flags(self):
+    return self._symmetry_flags
+
+  def mandatory_grid_factors(self):
+    return self._mandatory_grid_factors
+
+  def quality_factor(self):
+    return self._quality_factor
+
+  def wing_cutoff(self):
+    return self._wing_cutoff
+
+  def exp_table_one_over_step_size(self):
+    return self._exp_table_one_over_step_size
+
+  def max_prime(self):
+    return self._max_prime
+
+  def crystal_gridding(self, assert_shannon_sampling=True):
+    if (self._crystal_gridding is None):
+      self._crystal_gridding = maptbx.crystal_gridding(
+        unit_cell=self.unit_cell(),
+        d_min=self.d_min(),
+        resolution_factor=self.grid_resolution_factor(),
+        symmetry_flags=self.symmetry_flags(),
+        space_group_info=self.space_group_info(),
+        mandatory_factors=self.mandatory_grid_factors(),
+        max_prime=self.max_prime(),
+        assert_shannon_sampling=assert_shannon_sampling)
+    return self._crystal_gridding
+
+  def crystal_gridding_tags(self, assert_shannon_sampling=True):
+    if (self._crystal_gridding_tags is None):
+      self._crystal_gridding_tags = self.crystal_gridding(
+        assert_shannon_sampling).tags()
+    return self._crystal_gridding_tags
+
+  def rfft(self):
+    if (self._rfft is None):
+      self._rfft = fftpack.real_to_complex_3d(self.crystal_gridding().n_real())
+    return self._rfft
+
+  def u_base(self):
+    if (self._u_base is None):
+      self._u_base = xray.calc_u_base(
+        self.d_min(),
+        self.grid_resolution_factor(),
+        self.quality_factor())
+    return self._u_base
+
+  def setup_fft(self):
+    self.crystal_gridding_tags()
+    self.rfft()
+    self.u_base()
+    return self
+
+  def ft_dp(self, dp, u_extra):
+    multiplier = (  self.unit_cell().volume()
+                  / matrix.row(self.rfft().n_real()).product()
+                  * self.space_group().order_z()
+                  / dp.multiplicities().data().as_double())
+    coeff = dp.deep_copy()
+    xray.apply_u_extra(
+      self.unit_cell(),
+      u_extra,
+      coeff.indices(),
+      coeff.data())
+    coeff_data = coeff.data()
+    coeff_data *= flex.polar(multiplier, 0)
+    return miller.fft_map(
+      crystal_gridding=self.crystal_gridding(),
+      fourier_coefficients=coeff)
+
+  def __call__(self, xray_structure,
+                     u_iso_refinable_params,
+                     dp,
+                     n_parameters,
+                     verbose=0):
+    omptbx.env.num_threads = libtbx.introspection.number_of_processors()
+    result = xray.fast_gradients(
+      unit_cell=xray_structure.unit_cell(),
+      scatterers=xray_structure.scatterers(),
+      scattering_type_registry=xray_structure.scattering_type_registry(),
+      u_base=self.u_base(),
+      wing_cutoff=self.wing_cutoff(),
+      exp_table_one_over_step_size=self.exp_table_one_over_step_size(),
+      tolerance_positive_definite=1.e-5)
+    if (0 or verbose):
+      print("u_base:", result.u_base())
+      print("u_extra:", result.u_extra())
+    gradient_map = self.ft_dp(dp, u_extra=result.u_extra())
+    if (not gradient_map.anomalous_flag()):
+      gradient_map = gradient_map.real_map()
+    else:
+      gradient_map = gradient_map.complex_map()
+      assert not gradient_map.is_padded()
+      if (0 or verbose):
+        print("grid:", gradient_map.focus())
+        print("ft_dt_map real: %.4g %.4g" % (
+          flex.min(flex.real(gradient_map)),
+          flex.max(flex.real(gradient_map))))
+        print("ft_dt_map imag: %.4g %.4g" % (
+          flex.min(flex.imag(gradient_map)),
+          flex.max(flex.imag(gradient_map))))
+        print()
+    result.sampling(
+      scatterers=xray_structure.scatterers(),
+      u_iso_refinable_params=u_iso_refinable_params,
+      scattering_type_registry=xray_structure.scattering_type_registry(),
+      site_symmetry_table=xray_structure.site_symmetry_table(),
+      ft_d_target_d_f_calc=gradient_map,
+      n_parameters=n_parameters,
+      sampled_density_must_be_positive=False)
+    if (0 or verbose):
+      print("max_sampling_box_edges:", result.max_sampling_box_edges())
+      print("exp_table_size:", result.exp_table_size())
+      print()
+    return result
+
+class judge(object):
+
+  def __init__(self, scatterer, label, reference, other, top):
+    if(scatterer.flags.use_u_iso()):   label += " iso "
+    if(scatterer.flags.use_u_aniso()): label += " aniso "
+    s = ""
+    r = (reference-other)/max(abs(top), min(abs(reference), abs(other)))
+    s += " %.5f " % r + label
+    self.is_bad = False
+    if (abs(r) > 0.03):
+      s += " very large mismatch"
+      self.is_bad = True
+    elif (abs(r) > 0.01):
+      s += " large mismatch"
+    self.s = s.lstrip()
+
+  def __str__(self):
+    return self.s
+
+class shifted_site(object):
+
+  def __init__(self, f_obs, structure, i_scatterer, i_xyz, shift):
+    self.structure_shifted = structure.deep_copy_scatterers()
+    site = list(self.structure_shifted.scatterers()[i_scatterer].site)
+    site[i_xyz] += shift
+    self.structure_shifted.scatterers()[i_scatterer].site = site
+    if (f_obs is not None):
+      self.f_calc = f_obs.structure_factors_from_scatterers(
+        xray_structure=self.structure_shifted, algorithm="direct").f_calc()
+
+def site(structure_ideal, d_min, f_obs, verbose=0):
+  sh = shifted_site(f_obs, structure_ideal, 0, 0, 0.01)
+  if (0 or verbose):
+    print("site")
+    sh.structure_shifted.show_summary().show_scatterers()
+    print()
+  ls = xray.targets_least_squares_residual(
+    f_obs.data(), sh.f_calc.data(), True, 1)
+  gradient_flags = randomize_gradient_flags(
+    xray.structure_factors.gradient_flags(site=True),
+    f_obs.anomalous_flag())
+  xray.set_scatterer_grad_flags(scatterers = sh.structure_shifted.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp)
+  sfd = xray.structure_factors.gradients_direct(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    miller_set=f_obs,
+    d_target_d_f_calc=ls.derivatives(),
+    n_parameters=0)
+  re = resampling(miller_set=f_obs)
+  map0 = re(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+    n_parameters=0,
+    verbose=verbose)
+  sfd_d_target_d_site_cart = sfd.d_target_d_site_cart()
+  top_gradient = None
+  for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+    for i_xyz in (0,1,2):
+      direct_summ = sfd_d_target_d_site_cart[i_scatterer][i_xyz]
+      if (top_gradient is None): top_gradient = direct_summ
+      fast_gradie = map0.d_target_d_site_cart()[i_scatterer][i_xyz]
+      match = judge(scatterer, "site", direct_summ, fast_gradie, top_gradient)
+      if (0 or verbose):
+        print("direct summ[%d][%d]: " % (i_scatterer,i_xyz), direct_summ)
+        print("fast gradie[%d][%d]: " % (i_scatterer,i_xyz), fast_gradie, match)
+        print()
+      assert not match.is_bad
+  sys.stdout.flush()
+
+class shifted_u_iso(object):
+
+  def __init__(self, f_obs, structure, i_scatterer, shift):
+    self.structure_shifted = structure.deep_copy_scatterers()
+    if (self.structure_shifted.scatterers()[i_scatterer].flags.use_u_iso()):
+      self.structure_shifted.scatterers()[i_scatterer].u_iso += shift
+      if (f_obs is not None):
+        self.f_calc = f_obs.structure_factors_from_scatterers(
+          xray_structure=self.structure_shifted).f_calc()
+
+def u_iso(structure_ideal, d_min, f_obs, tan_u_iso, verbose=0):
+  sh = shifted_u_iso(f_obs, structure_ideal, 0, 0.05)
+  if (0 or verbose):
+    print("u_iso")
+    sh.structure_shifted.show_summary().show_scatterers()
+    print()
+  ls = xray.targets_least_squares_residual(
+    f_obs.data(), sh.f_calc.data(), True, 1)
+  gradient_flags = randomize_gradient_flags(
+    xray.structure_factors.gradient_flags(u_iso=True),
+    f_obs.anomalous_flag())
+  if(tan_u_iso):
+     u_iso_refinable_params = flex.double()
+  else:
+     u_iso_refinable_params = None
+  for scatterer in sh.structure_shifted.scatterers():
+      scatterer.flags.set_grad_site(gradient_flags.site)
+      scatterer.flags.set_grad_u_iso(gradient_flags.u_iso)
+      scatterer.flags.set_grad_u_aniso(gradient_flags.u_aniso)
+      scatterer.flags.set_grad_occupancy(gradient_flags.occupancy)
+      scatterer.flags.set_grad_fp(gradient_flags.fp)
+      scatterer.flags.set_grad_fdp(gradient_flags.fdp)
+      if(tan_u_iso):
+         scatterer.flags.set_tan_u_iso(True)
+         param = random.randint(90,120)
+         scatterer.flags.param= param
+         value=math.tan(scatterer.u_iso*math.pi/adptbx.b_as_u(param)-math.pi/2)
+         u_iso_refinable_params.append(value)
+  if (0):
+    print("u_iso")
+    print("gradient_flags.site      ", gradient_flags.site)
+    print("gradient_flags.u_iso     ", gradient_flags.u_iso)
+    print("gradient_flags.u_aniso   ", gradient_flags.u_aniso)
+    print("gradient_flags.occupancy ", gradient_flags.occupancy)
+    print("gradient_flags.fp        ", gradient_flags.fp)
+    print("gradient_flags.fdp       ", gradient_flags.fdp)
+    cntr_use_u_iso = 0
+    cntr_use_u_aniso = 0
+    cntr_grad_u_iso = 0
+    cntr_grad_u_aniso = 0
+    for scatterer in sh.structure_shifted.scatterers():
+      if (scatterer.flags.use_u_iso()):  cntr_use_u_iso += 1
+      if (scatterer.flags.use_u_aniso()):  cntr_use_u_aniso += 1
+      if (scatterer.flags.grad_u_iso()):  cntr_grad_u_iso += 1
+      if (scatterer.flags.grad_u_aniso()):  cntr_grad_u_aniso += 1
+    print("use_u_iso                ", cntr_use_u_iso,cntr_grad_u_iso)
+    print("use_u_aniso              ", cntr_use_u_aniso,cntr_grad_u_aniso)
+  grad_flags_counts = \
+            xray.scatterer_grad_flags_counts(sh.structure_shifted.scatterers())
+  if(grad_flags_counts.n_parameters() > 0):
+     sfd = xray.structure_factors.gradients_direct(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=u_iso_refinable_params,
+       miller_set=f_obs,
+       d_target_d_f_calc=ls.derivatives(),
+       n_parameters=0)
+     re = resampling(miller_set=f_obs)
+     map0 = re(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=u_iso_refinable_params,
+       dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+       n_parameters=0,
+       verbose=verbose)
+     if(grad_flags_counts.u_aniso > 0):
+        sfd_d_target_d_u_cart = sfd.d_target_d_u_cart()
+        map0_d_target_d_u_cart = map0.d_target_d_u_cart()
+     top_gradient = None
+     gradients_1 = []
+     for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+       if(0):
+         print("i_scatterer= ", i_scatterer,scatterer.flags.use_u_iso(),\
+           scatterer.flags.grad_u_iso(), scatterer.flags.use_u_aniso(),\
+           scatterer.flags.grad_u_aniso(), scatterer.u_iso, scatterer.u_star)
+       if(scatterer.flags.use_u_iso()): parameter_name = "u_iso"
+       if(scatterer.flags.use_u_aniso()): parameter_name = "u_star"
+       if(parameter_name == "u_iso" and scatterer.flags.grad_u_iso() and
+                                                  scatterer.flags.use_u_iso()):
+          direct_summ = sfd.d_target_d_u_iso()[i_scatterer]
+          if (top_gradient is None): top_gradient = direct_summ
+          fast_gradie = map0.d_target_d_u_iso()[i_scatterer]
+          sys.stdout.flush()
+          gradients_1.append([direct_summ, fast_gradie])
+          match = judge(scatterer, parameter_name, direct_summ, fast_gradie,
+                                                                  top_gradient)
+          if (0 or verbose):
+            print("direct summ[%d]: " % i_scatterer, direct_summ)
+            print("fast gradie[%d]: " % i_scatterer, fast_gradie, match)
+            print()
+          assert not match.is_bad
+       if(parameter_name == "u_star" and scatterer.flags.grad_u_aniso() and
+                                                scatterer.flags.use_u_aniso()):
+        sfd_star = sfd.d_target_d_u_star()[i_scatterer]
+        sfd_cart = adptbx.grad_u_star_as_u_cart(
+          structure_ideal.unit_cell(), sfd_star)
+        assert approx_equal(
+          sfd_star,
+          adptbx.grad_u_cart_as_u_star(structure_ideal.unit_cell(), sfd_cart))
+        for ij in range(6):
+          direct_summ = sfd_d_target_d_u_cart[i_scatterer][ij]
+          if (top_gradient is None): top_gradient = direct_summ
+          fast_gradie = map0_d_target_d_u_cart[i_scatterer][ij]
+          gradients_1.append([direct_summ, fast_gradie])
+          match =judge(scatterer,"u_star",direct_summ,fast_gradie,top_gradient)
+          if (0 or verbose or match.is_bad):
+            print("direct summ[%d][%d]: " % (i_scatterer, ij), direct_summ)
+            print("fast gradie[%d][%d]: " % (i_scatterer, ij),fast_gradie,match)
+            print()
+          assert not match.is_bad
+     # Making sure that gradients_1 = gradients_2
+     for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+         if(not scatterer.flags.use_u_iso()):
+            scatterer.u_iso = -12345.0
+         if(not scatterer.flags.use_u_aniso()):
+            scatterer.u_star =(-999.,-999.,-999.,-999.,-999.,-999.)
+     sfd = xray.structure_factors.gradients_direct(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=u_iso_refinable_params,
+       miller_set=f_obs,
+       d_target_d_f_calc=ls.derivatives(),
+       n_parameters=0)
+     re = resampling(miller_set=f_obs)
+     map0 = re(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=u_iso_refinable_params,
+       dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+       n_parameters=0,
+       verbose=verbose)
+     grad_flags_counts = \
+            xray.scatterer_grad_flags_counts(sh.structure_shifted.scatterers())
+     if(grad_flags_counts.u_aniso):
+        sfd_d_target_d_u_cart = sfd.d_target_d_u_cart()
+        map0_d_target_d_u_cart = map0.d_target_d_u_cart()
+     gradients_2 = []
+     for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+       if(scatterer.flags.use_u_iso()):   parameter_name = "u_iso"
+       if(scatterer.flags.use_u_aniso()): parameter_name = "u_star"
+       if(parameter_name == "u_iso" and scatterer.flags.grad_u_iso() and
+                                                  scatterer.flags.use_u_iso()):
+          direct_summ = sfd.d_target_d_u_iso()[i_scatterer]
+          fast_gradie = map0.d_target_d_u_iso()[i_scatterer]
+          gradients_2.append([direct_summ, fast_gradie])
+       if(parameter_name == "u_star" and scatterer.flags.grad_u_aniso() and
+                                                scatterer.flags.use_u_aniso()):
+        sfd_star = sfd.d_target_d_u_star()[i_scatterer]
+        sfd_cart = adptbx.grad_u_star_as_u_cart(structure_ideal.unit_cell(),
+                                                                      sfd_star)
+        assert approx_equal(
+          sfd_star,
+          adptbx.grad_u_cart_as_u_star(structure_ideal.unit_cell(), sfd_cart))
+        for ij in range(6):
+          direct_summ = sfd_d_target_d_u_cart[i_scatterer][ij]
+          fast_gradie = map0_d_target_d_u_cart[i_scatterer][ij]
+          gradients_2.append([direct_summ, fast_gradie])
+     for g1,g2 in zip(gradients_1, gradients_2):
+       assert approx_equal(g1, g2)
+     sys.stdout.flush()
+
+class shifted_u_star(object):
+
+  def __init__(self, f_obs, structure, i_scatterer, ij, shift):
+    self.structure_shifted = structure.deep_copy_scatterers()
+    if (self.structure_shifted.scatterers()[i_scatterer].flags.use_u_aniso()):
+      scatterer = self.structure_shifted.scatterers()[i_scatterer]
+      u_star = list(scatterer.u_star)
+      u_star[ij] += shift
+      scatterer.u_star = u_star
+      if (f_obs is not None):
+        self.f_calc = f_obs.structure_factors_from_scatterers(
+          xray_structure=self.structure_shifted).f_calc()
+
+def u_star(structure_ideal, d_min, f_obs, verbose=0):
+  sh = shifted_u_star(f_obs, structure_ideal, 0, 0, 0.0001)
+  if (0 or verbose):
+    print("u_star")
+    sh.structure_shifted.show_summary().show_scatterers()
+    print()
+  ls = xray.targets_least_squares_residual(
+    f_obs.data(), sh.f_calc.data(), True, 1)
+  gradient_flags = randomize_gradient_flags(
+    xray.structure_factors.gradient_flags(u_aniso=True),
+    f_obs.anomalous_flag())
+  xray.set_scatterer_grad_flags(scatterers = sh.structure_shifted.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp)
+  grad_flags_counts = xray.scatterer_grad_flags_counts(sh.structure_shifted.scatterers())
+  if(grad_flags_counts.n_parameters() > 0):
+     if (0):
+       print("u_aniso")
+       print("gradient_flags.site      ", gradient_flags.site)
+       print("gradient_flags.u_iso     ", gradient_flags.u_iso)
+       print("gradient_flags.u_aniso   ", gradient_flags.u_aniso)
+       print("gradient_flags.occupancy ", gradient_flags.occupancy)
+       print("gradient_flags.fp        ", gradient_flags.fp)
+       print("gradient_flags.fdp       ", gradient_flags.fdp)
+       cntr_use_u_iso = 0
+       cntr_use_u_aniso = 0
+       cntr_grad_u_iso = 0
+       cntr_grad_u_aniso = 0
+       for scatterer in sh.structure_shifted.scatterers():
+         if (scatterer.flags.use_u_iso()):  cntr_use_u_iso += 1
+         if (scatterer.flags.use_u_aniso()):  cntr_use_u_aniso += 1
+         if (scatterer.flags.grad_u_iso()):  cntr_grad_u_iso += 1
+         if (scatterer.flags.grad_u_aniso()):  cntr_grad_u_aniso += 1
+       print("use_u_iso                ", cntr_use_u_iso,cntr_grad_u_iso)
+       print("use_u_aniso              ", cntr_use_u_aniso,cntr_grad_u_aniso)
+     sfd = xray.structure_factors.gradients_direct(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=None,
+       miller_set=f_obs,
+       d_target_d_f_calc=ls.derivatives(),
+       n_parameters= 0
+       )
+     re = resampling(miller_set=f_obs)
+     map0 = re(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=None,
+       dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+       n_parameters= 0,
+       verbose=verbose)
+
+     grad_flags_counts = xray.scatterer_grad_flags_counts(sh.structure_shifted.scatterers())
+     if(grad_flags_counts.u_aniso):
+        sfd_d_target_d_u_cart = sfd.d_target_d_u_cart()
+        map0_d_target_d_u_cart = map0.d_target_d_u_cart()
+     top_gradient = None
+     gradients_1 = []
+     for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+       if(scatterer.flags.use_u_iso()):   parameter_name = "u_iso"
+       if(scatterer.flags.use_u_aniso()): parameter_name = "u_star"
+       if(parameter_name == "u_iso" and scatterer.flags.grad_u_iso()):
+          direct_summ = sfd.d_target_d_u_iso()[i_scatterer]
+          if (top_gradient is None): top_gradient = direct_summ
+          fast_gradie = map0.d_target_d_u_iso()[i_scatterer]
+          sys.stdout.flush()
+          gradients_1.append([direct_summ, fast_gradie])
+          match = judge(scatterer, parameter_name, direct_summ, fast_gradie,
+                                                                  top_gradient)
+          if (0 or verbose):
+            print("direct summ[%d]: " % i_scatterer, direct_summ)
+            print("fast gradie[%d]: " % i_scatterer, fast_gradie, match)
+            print()
+          assert not match.is_bad
+       if parameter_name == "u_star" and scatterer.flags.grad_u_aniso():
+        sfd_star = sfd.d_target_d_u_star()[i_scatterer]
+        sfd_cart = adptbx.grad_u_star_as_u_cart(
+          structure_ideal.unit_cell(), sfd_star)
+        assert approx_equal(
+          sfd_star,
+          adptbx.grad_u_cart_as_u_star(structure_ideal.unit_cell(), sfd_cart))
+        for ij in range(6):
+          direct_summ = sfd_d_target_d_u_cart[i_scatterer][ij]
+          if (top_gradient is None): top_gradient = direct_summ
+          fast_gradie = map0_d_target_d_u_cart[i_scatterer][ij]
+          gradients_1.append([direct_summ, fast_gradie])
+          match =judge(scatterer,"u_star",direct_summ,fast_gradie,top_gradient)
+          if (0 or verbose or match.is_bad):
+            print("direct summ[%d][%d]: " % (i_scatterer, ij), direct_summ)
+            print("fast gradie[%d][%d]: " % (i_scatterer, ij),fast_gradie,match)
+            print()
+          assert not match.is_bad
+     # Making sure that gradients_1 = gradients_2
+     for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+         if(not scatterer.flags.use_u_iso()):
+            scatterer.u_iso = -12345.0
+         if(not scatterer.flags.use_u_aniso()):
+            scatterer.u_star =(-999.,-999.,-999.,-999.,-999.,-999.)
+     sfd = xray.structure_factors.gradients_direct(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=None,
+       miller_set=f_obs,
+       d_target_d_f_calc=ls.derivatives(),
+       n_parameters= 0
+       )
+     re = resampling(miller_set=f_obs)
+     map0 = re(
+       xray_structure=sh.structure_shifted,
+       u_iso_refinable_params=None,
+       dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+       n_parameters= 0,
+       verbose=verbose)
+
+     grad_flags_counts = \
+            xray.scatterer_grad_flags_counts(sh.structure_shifted.scatterers())
+     if(grad_flags_counts.u_aniso):
+        sfd_d_target_d_u_cart = sfd.d_target_d_u_cart()
+        map0_d_target_d_u_cart = map0.d_target_d_u_cart()
+     gradients_2 = []
+     for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+       if(scatterer.flags.use_u_iso()):   parameter_name = "u_iso"
+       if(scatterer.flags.use_u_aniso()): parameter_name = "u_star"
+       if(parameter_name == "u_iso" and scatterer.flags.grad_u_iso()):
+          direct_summ = sfd.d_target_d_u_iso()[i_scatterer]
+          fast_gradie = map0.d_target_d_u_iso()[i_scatterer]
+          gradients_2.append([direct_summ, fast_gradie])
+       if parameter_name == "u_star" and scatterer.flags.grad_u_aniso():
+        sfd_star = sfd.d_target_d_u_star()[i_scatterer]
+        sfd_cart = adptbx.grad_u_star_as_u_cart(
+          structure_ideal.unit_cell(), sfd_star)
+        assert approx_equal(
+          sfd_star,
+          adptbx.grad_u_cart_as_u_star(structure_ideal.unit_cell(), sfd_cart))
+        for ij in range(6):
+          direct_summ = sfd_d_target_d_u_cart[i_scatterer][ij]
+          fast_gradie = map0_d_target_d_u_cart[i_scatterer][ij]
+          gradients_2.append([direct_summ, fast_gradie])
+     for g1,g2 in zip(gradients_1, gradients_2):
+       assert approx_equal(g1, g2)
+     sys.stdout.flush()
+
+class shifted_occupancy(object):
+
+  def __init__(self, f_obs, structure, i_scatterer, shift):
+    self.structure_shifted = structure.deep_copy_scatterers()
+    self.structure_shifted.scatterers()[i_scatterer].occupancy += shift
+    if (f_obs is not None):
+      self.f_calc = f_obs.structure_factors_from_scatterers(
+        xray_structure=self.structure_shifted).f_calc()
+
+def occupancy(structure_ideal, d_min, f_obs, verbose=0):
+  sh = shifted_occupancy(f_obs, structure_ideal, 0, 0.2)
+  if (0 or verbose):
+    print("occupancy")
+    sh.structure_shifted.show_summary().show_scatterers()
+    print()
+  ls = xray.targets_least_squares_residual(
+    f_obs.data(), sh.f_calc.data(), True, 1)
+  gradient_flags = randomize_gradient_flags(
+    xray.structure_factors.gradient_flags(occupancy=True),
+    f_obs.anomalous_flag())
+  xray.set_scatterer_grad_flags(scatterers = sh.structure_shifted.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp)
+  sfd = xray.structure_factors.gradients_direct(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    miller_set=f_obs,
+    d_target_d_f_calc=ls.derivatives(),
+    n_parameters=0)
+  re = resampling(miller_set=f_obs)
+  map0 = re(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+    n_parameters=0,
+    verbose=verbose)
+  top_gradient = None
+  for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+    direct_summ = sfd.d_target_d_occupancy()[i_scatterer]
+    if (top_gradient is None): top_gradient = direct_summ
+    fast_gradie = map0.d_target_d_occupancy()[i_scatterer]
+    match = judge(scatterer, "occupancy", direct_summ,fast_gradie,top_gradient)
+    if (0 or verbose):
+      print("direct summ[%d]: " % i_scatterer, direct_summ)
+      print("fast gradie[%d]: " % i_scatterer, fast_gradie, match)
+      print()
+    assert not match.is_bad
+  sys.stdout.flush()
+
+class shifted_fp(object):
+
+  def __init__(self, f_obs, structure, i_scatterer, shift):
+    self.structure_shifted = structure.deep_copy_scatterers()
+    self.structure_shifted.scatterers()[i_scatterer].fp += shift
+    if (f_obs is not None):
+      self.f_calc = f_obs.structure_factors_from_scatterers(
+        xray_structure=self.structure_shifted).f_calc()
+
+def fp(structure_ideal, d_min, f_obs, verbose=0):
+  sh = shifted_fp(f_obs, structure_ideal, 0, -0.2)
+  if (0 or verbose):
+    print("fp")
+    sh.structure_shifted.show_summary().show_scatterers()
+    print()
+  ls = xray.targets_least_squares_residual(
+    f_obs.data(), sh.f_calc.data(), True, 1)
+  gradient_flags = randomize_gradient_flags(
+    xray.structure_factors.gradient_flags(fp=True),
+    f_obs.anomalous_flag())
+  xray.set_scatterer_grad_flags(scatterers = sh.structure_shifted.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp)
+  sfd = xray.structure_factors.gradients_direct(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    miller_set=f_obs,
+    d_target_d_f_calc=ls.derivatives(),
+    n_parameters=0)
+  re = resampling(miller_set=f_obs)
+  map0 = re(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+    n_parameters=0,
+    verbose=verbose)
+  top_gradient = None
+  for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+    direct_summ = sfd.d_target_d_fp()[i_scatterer]
+    if (top_gradient is None): top_gradient = direct_summ
+    fast_gradie = map0.d_target_d_fp()[i_scatterer]
+    match = judge(scatterer, "fp", direct_summ, fast_gradie, top_gradient)
+    if (0 or verbose):
+      print("direct summ[%d]: " % i_scatterer, direct_summ)
+      print("fast gradie[%d]: " % i_scatterer, fast_gradie, match)
+      print()
+    assert not match.is_bad
+  sys.stdout.flush()
+
+class shifted_fdp(object):
+
+  def __init__(self, f_obs, structure, i_scatterer, shift):
+    self.structure_shifted = structure.deep_copy_scatterers()
+    self.structure_shifted.scatterers()[i_scatterer].fdp += shift
+    if (f_obs is not None):
+      self.f_calc = f_obs.structure_factors_from_scatterers(
+        xray_structure=self.structure_shifted).f_calc()
+
+def fdp(structure_ideal, d_min, f_obs, verbose=0):
+  sh = shifted_fdp(f_obs, structure_ideal, 0, 2)
+  if (0 or verbose):
+    print("fdp")
+    sh.structure_shifted.show_summary().show_scatterers()
+    print()
+  ls = xray.targets_least_squares_residual(
+    f_obs.data(), sh.f_calc.data(), True, 1)
+  gradient_flags = randomize_gradient_flags(
+    xray.structure_factors.gradient_flags(fdp=True),
+    f_obs.anomalous_flag())
+  xray.set_scatterer_grad_flags(scatterers = sh.structure_shifted.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp)
+  sfd = xray.structure_factors.gradients_direct(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    miller_set=f_obs,
+    d_target_d_f_calc=ls.derivatives(),
+    n_parameters=0)
+  re = resampling(miller_set=f_obs)
+  map0 = re(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+    n_parameters=0,
+    verbose=verbose)
+  top_gradient = None
+  for i_scatterer,scatterer in enumerate(sh.structure_shifted.scatterers()):
+    direct_summ = sfd.d_target_d_fdp()[i_scatterer]
+    if (top_gradient is None): top_gradient = direct_summ
+    fast_gradie = map0.d_target_d_fdp()[i_scatterer]
+    match = judge(scatterer, "fdp", direct_summ, fast_gradie, top_gradient)
+    if (0 or verbose):
+      print("direct summ[%d]: " % i_scatterer, direct_summ)
+      print("fast gradie[%d]: " % i_scatterer, fast_gradie, match)
+      print()
+    assert not match.is_bad
+  sys.stdout.flush()
+
+def shift_all(structure_ideal, f_obs, anomalous_flag):
+  sh = shifted_site(None, structure_ideal, 0, 0, 0.01)
+  sh = shifted_u_iso(None, sh.structure_shifted, 0, 0.05)
+  sh = shifted_u_star(None, sh.structure_shifted, 0, 0, 0.0001)
+  sh = shifted_occupancy(None, sh.structure_shifted, 0, 0.2)
+  if (anomalous_flag):
+    sh = shifted_fdp(None, sh.structure_shifted, 0, 2)
+  sh = shifted_fp(f_obs, sh.structure_shifted, 0, -0.2)
+  ls = xray.targets_least_squares_residual(
+    f_obs.data(), sh.f_calc.data(), True, 1)
+  return sh, ls
+
+def exercise_packed(structure_ideal, f_obs,
+                    anomalous_flag,
+                    verbose=0):
+  sh, ls = shift_all(structure_ideal, f_obs, anomalous_flag)
+  flag = (random.random() > 0.5)
+  gradient_flags = randomize_gradient_flags(
+    xray.structure_factors.gradient_flags(site=flag, u=not flag),
+    f_obs.anomalous_flag(),
+    thresholds=(1/2.,0))
+  u_iso_refinable_params = flex.double()
+  for scatterer in sh.structure_shifted.scatterers():
+      scatterer.flags.set_grad_site(gradient_flags.site)
+      scatterer.flags.set_grad_u_iso(gradient_flags.u_iso)
+      scatterer.flags.set_grad_u_aniso(gradient_flags.u_aniso)
+      scatterer.flags.set_grad_occupancy(gradient_flags.occupancy)
+      scatterer.flags.set_grad_fp(gradient_flags.fp)
+      scatterer.flags.set_grad_fdp(gradient_flags.fdp)
+      scatterer.flags.set_tan_u_iso(True)
+      param = random.randint(90,120)
+      scatterer.flags.param= param
+      value = math.tan(scatterer.u_iso*math.pi/adptbx.b_as_u(param)-math.pi/2)
+      u_iso_refinable_params.append(value)
+  n_parameters = xray.scatterer_grad_flags_counts(
+                              sh.structure_shifted.scatterers()).n_parameters()
+  assert n_parameters == sh.structure_shifted.n_parameters()
+  if (n_parameters > 0):
+    sfd = xray.structure_factors.gradients_direct(
+      xray_structure=sh.structure_shifted,
+      u_iso_refinable_params=u_iso_refinable_params,
+      miller_set=f_obs,
+      d_target_d_f_calc=ls.derivatives(),
+      n_parameters=n_parameters)
+    assert sfd.packed().size() == n_parameters
+    re = resampling(miller_set=f_obs)
+    map0 = re(
+      xray_structure=sh.structure_shifted,
+      u_iso_refinable_params=u_iso_refinable_params,
+      dp=miller.array(miller_set=f_obs, data=ls.derivatives()),
+      n_parameters=n_parameters,
+      verbose=verbose)
+    assert map0.packed().size() == n_parameters
+    correlation = flex.linear_correlation(sfd.packed(), map0.packed())
+    assert correlation.is_well_defined()
+    assert correlation.coefficient() > 0.999
+
+def exercise_gradient_manager(structure_ideal, f_obs,
+                              anomalous_flag,
+                              verbose=0):
+  sh, ls = shift_all(structure_ideal, f_obs, anomalous_flag)
+  grad_manager = xray.structure_factors.gradients(
+    miller_set=f_obs,
+    quality_factor=100000,
+    wing_cutoff=1.e-10)
+  gradient_flags=xray.structure_factors.gradient_flags(default=True)
+  xray.set_scatterer_grad_flags(scatterers = sh.structure_shifted.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp)
+  if (0):
+    print("exercise_gradient_manager")
+    print("gradient_flags.site      ", gradient_flags.site)
+    print("gradient_flags.u_iso     ", gradient_flags.u_iso)
+    print("gradient_flags.u_aniso   ", gradient_flags.u_aniso)
+    print("gradient_flags.occupancy ", gradient_flags.occupancy)
+    print("gradient_flags.fp        ", gradient_flags.fp)
+    print("gradient_flags.fdp       ", gradient_flags.fdp)
+    cntr_use_u_iso = 0
+    cntr_use_u_aniso = 0
+    cntr_grad_u_iso = 0
+    cntr_grad_u_aniso = 0
+    for scatterer in sh.structure_shifted.scatterers():
+      if (scatterer.flags.use_u_iso()):  cntr_use_u_iso += 1
+      if (scatterer.flags.use_u_aniso()):  cntr_use_u_aniso += 1
+      if (scatterer.flags.grad_u_iso()):  cntr_grad_u_iso += 1
+      if (scatterer.flags.grad_u_aniso()):  cntr_grad_u_aniso += 1
+    print("use_u_iso                ", cntr_use_u_iso,cntr_grad_u_iso)
+    print("use_u_aniso              ", cntr_use_u_aniso,cntr_grad_u_aniso)
+  if (random.random() > 0.5):
+    n_parameters = 0
+  else:
+    n_parameters = xray.scatterer_grad_flags_counts(
+                              sh.structure_shifted.scatterers()).n_parameters()
+    assert n_parameters == sh.structure_shifted.n_parameters()
+  gd = grad_manager(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    miller_set=f_obs,
+    d_target_d_f_calc=ls.derivatives(),
+    n_parameters=n_parameters,
+    algorithm="direct")
+  gf = grad_manager(
+    xray_structure=sh.structure_shifted,
+    u_iso_refinable_params=None,
+    miller_set=f_obs,
+    d_target_d_f_calc=ls.derivatives(),
+    n_parameters=n_parameters,
+    algorithm="fft")
+  grad_flags_counts = \
+            xray.scatterer_grad_flags_counts(sh.structure_shifted.scatterers())
+  if (n_parameters == 0):
+    d = gd.d_target_d_site_frac()
+    f = gf.d_target_d_site_frac()
+    linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+    d = gd.d_target_d_site_cart()
+    f = gf.d_target_d_site_cart()
+    linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+    if(grad_flags_counts.u_iso > 0):
+       d = gd.d_target_d_u_iso()
+       f = gf.d_target_d_u_iso()
+       linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+    if(grad_flags_counts.u_aniso > 0):
+       linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+       d = gd.d_target_d_u_cart()
+       f = gf.d_target_d_u_cart()
+       linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+    d = gd.d_target_d_occupancy()
+    f = gf.d_target_d_occupancy()
+    linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+    d = gd.d_target_d_fp()
+    f = gf.d_target_d_fp()
+    linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+    if (anomalous_flag):
+      d = gd.d_target_d_fdp()
+      f = gf.d_target_d_fdp()
+      linear_regression_test(d, f, slope_tolerance=1.e-2, verbose=verbose)
+  else:
+    correlation = flex.linear_correlation(gd.packed(), gf.packed())
+    assert correlation.is_well_defined()
+    assert correlation.coefficient() > 0.995, correlation.coefficient()
+
+def run_one(space_group_info, n_elements= 9, volume_per_atom=1000, d_min = 2.0,
+            anomalous_flag=0,
+            verbose=0):
+  if (random.random() < 0.5):
+    random_f_prime_scale=0.6
+  else:
+    random_f_prime_scale=0
+  structure_ideal = random_structure.xray_structure(
+    space_group_info,
+    elements=(("O","N","C")*(n_elements))[:n_elements],#(("O","N","C")*(n_elements/3+1))[:n_elements],
+    volume_per_atom=volume_per_atom,
+    min_distance=5,
+    general_positions_only=True,
+    random_f_prime_d_min=d_min-1,
+    random_f_prime_scale=random_f_prime_scale,
+    random_f_double_prime=anomalous_flag,
+    use_u_aniso = True,
+    use_u_iso = False,
+    random_u_iso=True,
+    random_u_cart_scale=.3,
+    random_occupancy=True)
+  random_structure.random_modify_adp_and_adp_flags(
+                             scatterers         = structure_ideal.scatterers(),
+                             random_u_iso_scale = 0.3,
+                             random_u_iso_min   = 0.0)
+  if (random.random() < 0.5):
+    assign_custom_gaussians(structure_ideal, negative_a=random.random()<0.5)
+  if (0 or verbose):
+    structure_ideal.show_summary().show_scatterers()
+  f_obs = abs(structure_ideal.structure_factors(
+    d_min=d_min, anomalous_flag=anomalous_flag, algorithm="direct").f_calc())
+  if (1):
+    site(structure_ideal, d_min, f_obs, verbose=verbose)
+  if (1):
+    u_iso(structure_ideal,  d_min, f_obs, tan_u_iso=False, verbose=verbose)
+    u_iso(structure_ideal,  d_min, f_obs, tan_u_iso=True, verbose=verbose)
+    u_star(structure_ideal, d_min, f_obs, verbose=verbose)
+  if (1):
+    occupancy(structure_ideal, d_min, f_obs, verbose=verbose)
+  if (1):
+    fp(structure_ideal, d_min, f_obs, verbose=verbose)
+  if (1 and anomalous_flag):
+    fdp(structure_ideal, d_min, f_obs, verbose=verbose)
+  if (1):
+    exercise_gradient_manager(structure_ideal, f_obs, anomalous_flag)
+  if (1):
+    exercise_packed(structure_ideal, f_obs, anomalous_flag)
+
+def run_call_back(flags, space_group_info):
+  for anomalous_flag in [False,True]:
+    run_one(
+      space_group_info=space_group_info,
+      anomalous_flag=anomalous_flag,
+      verbose=flags.Verbose)
+
+def run():
+  show_times = libtbx.utils.show_times()
+  debug_utils.parse_options_loop_space_groups(
+    argv=sys.argv[1:],
+    call_back=run_call_back,
+    show_cpu_times=False)
+  xray.structure_factors.global_counters.show()
+  show_times()
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/regression/tst_xray_minimization.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx.development import random_structure
+from cctbx.development import debug_utils
+from cctbx.array_family import flex
+import sys, random
+from six.moves import range
+
+def shift_u_iso(structure, shift):
+  for sc in structure.scatterers():
+    if(sc.flags.use_u_iso() and sc.flags.grad_u_iso()):
+      sc.u_iso += (shift * random.random())
+
+def shift_u_aniso(structure, shift):
+  for sc in structure.scatterers():
+    if(sc.flags.use_u_aniso() and sc.flags.grad_u_aniso()):
+      u_star = list(sc.u_star)
+      for i in range(6):
+        u_star[i] += (shift * random.random())
+      sc.u_star = u_star
+
+def exercise(target_functor, data_type, space_group_info, anomalous_flag,
+             gradient_flags, occupancy_penalty,
+             n_elements=9, d_min=None, shake_sigma=0.1,
+             verbose=0,tan_u_iso=False, param = 0):
+  assert data_type == 'F' or data_type == 'F^2'
+  if (data_type == 'F^2'
+      and not target_functor == xray.unified_least_squares_residual): return
+  structure_ideal = random_structure.xray_structure(
+    space_group_info,
+    elements=(("O","N","C")*(n_elements))[:n_elements],#("Se",)*n_elements,
+    volume_per_atom=200,
+    random_u_iso=True,
+    random_u_cart_scale=.3,
+    random_occupancy=True,
+    use_u_aniso = True)
+  random_structure.random_modify_adp_and_adp_flags(
+    scatterers         = structure_ideal.scatterers(),
+    random_u_iso_scale = 0.3,
+    random_u_iso_min   = 0.0)
+  xray.set_scatterer_grad_flags(scatterers = structure_ideal.scatterers(),
+                                site       = gradient_flags.site,
+                                u_iso      = gradient_flags.u_iso,
+                                u_aniso    = gradient_flags.u_aniso,
+                                occupancy  = gradient_flags.occupancy,
+                                fp         = gradient_flags.fp,
+                                fdp        = gradient_flags.fdp,
+                                tan_u_iso  = tan_u_iso,
+                                param      = param)
+  if(0):
+    print()
+    for sc in structure_ideal.scatterers():
+      print(sc.flags.use_u_iso(),sc.flags.grad_u_iso(),sc.flags.use_u_aniso(),\
+            sc.flags.grad_u_aniso(),sc.u_iso, sc.u_star,sc.flags.tan_u_iso(),\
+            sc.flags.param, sc.occupancy)
+  rnd_f_calc = structure_ideal.structure_factors(
+    anomalous_flag=anomalous_flag,
+    d_min=d_min,
+    algorithm="direct",
+    cos_sin_table=True).f_calc()
+  if data_type == "F":
+    y_obs = abs(rnd_f_calc)
+  elif data_type == "F^2":
+    y_obs = rnd_f_calc.norm()
+    y_obs.set_observation_type_xray_intensity()
+  else:
+    raise "Error: invalid data type: %s" % data_type
+  if (0 or verbose):
+    print("structure_ideal:")
+    structure_ideal.show_summary().show_scatterers()
+    print("n_special_positions:", \
+          structure_ideal.special_position_indices().size())
+    print()
+  structure_ideal_cp = structure_ideal.deep_copy_scatterers()
+  structure_shake = structure_ideal
+  if (gradient_flags.site):
+    structure_shake = structure_shake.random_modify_parameters(
+      "site", shake_sigma)
+  if (gradient_flags.occupancy):
+    structure_shake = structure_shake.random_modify_parameters(
+      "occupancy", shake_sigma)
+    if (occupancy_penalty is not None):
+      structure_shake.scatterers()[-1].occupancy = 0
+  if (gradient_flags.u_aniso):
+    shift_u_aniso(structure_shake, 0.001)
+  if (gradient_flags.u_iso):
+    shift_u_iso(structure_shake, 0.1)
+  assert tuple(structure_ideal.special_position_indices()) \
+         == tuple(structure_shake.special_position_indices())
+  if (0 or verbose):
+    print("structure_shake:")
+    structure_shake.show_summary().show_scatterers()
+    print()
+  for i_trial in range(10):
+    try:
+      minimizer = xray.minimization.lbfgs(
+        target_functor=target_functor(y_obs),
+        xray_structure=structure_shake,
+        occupancy_penalty=occupancy_penalty,
+        structure_factor_algorithm="direct")
+    except RuntimeError as e:
+      if (str(e).find("debye_waller_factor_exp: arg_limit exceeded") < 0):
+        raise
+    else:
+      break
+  else:
+    raise RuntimeError("Too many xray.minimization.lbfgs failures.")
+  if (0 or verbose):
+    print("first:", minimizer.first_target_value)
+    print("final:", minimizer.final_target_value)
+    print()
+  assert minimizer.final_target_value < minimizer.first_target_value
+  if (0 or verbose):
+    print("minimized structure_shake:")
+    structure_shake.show_summary().show_scatterers()
+    print()
+  f_final = y_obs.structure_factors_from_scatterers(
+    xray_structure=structure_shake,
+    algorithm="direct",
+    cos_sin_table=True).f_calc()
+  if data_type == 'F':
+    f_final = abs(f_final)
+  elif data_type == 'F^2':
+    f_final = f_final.norm()
+  c = flex.linear_correlation(y_obs.data(), f_final.data())
+  assert c.is_well_defined()
+  if (0 or verbose):
+    label = gradient_flags.string_of_true()
+    if (anomalous_flag):
+      label += ",anomalous"
+    print("correlation: %10.8f" % c.coefficient(), label)
+    print()
+  c_coefficient = c.coefficient()
+  if(c_coefficient <= 0.999):
+    print(c_coefficient)
+  if data_type == 'F':
+    assert c_coefficient > 0.999
+  elif data_type == 'F^2':
+    assert c_coefficient > 0.9
+
+def run_call_back(flags, space_group_info):
+  data_type = ('F', 'F^2')[hasattr(flags, 'F_sq')]
+  options = (
+    ( True,False,False,False),
+    (False, True,False,False),
+    (False,False, True,False),
+    (False,False,False, True),
+    (False, True, True, True))
+  for target_functor in xray.target_functors.registry().values():
+    for (fsite, fu_iso, foccupancy, fu_aniso) in options:
+      gradient_flags = xray.structure_factors.gradient_flags(
+        site      = fsite,
+        u_iso     = fu_iso,
+        u_aniso   = fu_aniso,
+        occupancy = foccupancy)
+      for anomalous_flag in (False, True)[:]: #SWITCH
+        u_penalty_types = [None]
+        tan_u_isos = [False]
+        if (gradient_flags.u_iso):
+          tan_u_isos.append(True)
+        occupancy_penalty_types = [None]
+        if (gradient_flags.occupancy):
+          occupancy_penalty_types.append(
+            xray.minimization.occupancy_penalty_exp())
+        for tan_u_iso in tan_u_isos:
+          if(tan_u_iso):
+            param = 100
+          else:
+            param = 0
+          for occupancy_penalty in occupancy_penalty_types:
+            if(0):
+              print(fsite,fu_iso,foccupancy,fu_aniso,anomalous_flag,tan_u_iso)
+            do_exercise = lambda: exercise(
+              target_functor,
+              data_type,
+              space_group_info,
+              anomalous_flag,
+              gradient_flags,
+              occupancy_penalty=occupancy_penalty,
+              verbose=flags.Verbose,
+              tan_u_iso=tan_u_iso,
+              param = param,
+              d_min = 2.5)
+            try:
+              do_exercise()
+            except AssertionError:
+              print("Test did not pass: ruling out a random fluke...")
+              do_exercise()
+              do_exercise()
+              print("Ruled out!")
+
+def run():
+  cmd_args = ['--F', '--F_sq', '--debugging']
+  extra = []
+  args = []
+  for arg in sys.argv[1:]:
+    if arg in cmd_args:
+      extra.append(arg[2:])
+    else:
+      args.append(arg)
+  extra = tuple(extra)
+  debug = ()
+  if 'debugging' in extra:
+    extra = ()
+    if 0:
+      extra += ('F_sq',)
+  assert not('F' in extra and 'F_sq' in extra)
+  if 'F' in extra: print('Refinement against F')
+  if 'F_sq' in extra: print('Refinement against F^2')
+  debug_utils.parse_options_loop_space_groups(
+    args, run_call_back, keywords=extra+debug)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/regression/tst_xray_minimization_failure.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx.array_family import flex
+from cctbx.regression import tst_xray_minimization
+from cctbx import sgtbx
+
+
+def test1():
+  import libtbx.easy_pickle
+  import os.path
+  structure_ideal = libtbx.easy_pickle.load(
+    os.path.expanduser('structure_ideal.pickle'))
+  structure_start = libtbx.easy_pickle.load(
+    os.path.expanduser('structure_start.pickle'))
+  if 1:
+    structure_ideal.show_scatterers()
+    structure_start.show_scatterers()
+  rnd_f_calc = structure_ideal.structure_factors(
+    anomalous_flag=False,
+    d_min=2.5,
+    algorithm="direct",
+    cos_sin_table=True).f_calc()
+  y_obs = abs(rnd_f_calc)
+  structure_shake = structure_start.deep_copy_scatterers()
+  structure_shake_bis = structure_ideal.deep_copy_scatterers()
+  tst_xray_minimization.shift_u_aniso(structure_shake_bis, 0.001)
+  minimizer = xray.minimization.lbfgs(
+    target_functor=xray.target_functors.intensity_correlation(y_obs),
+    xray_structure=structure_shake,
+    use_special_position_constraints=False,
+    occupancy_penalty=None,
+    structure_factor_algorithm="direct")
+  assert minimizer.final_target_value < minimizer.first_target_value
+  if 1:
+    structure_shake.show_scatterers()
+  f_final = y_obs.structure_factors_from_scatterers(
+    xray_structure=structure_shake,
+    algorithm="direct",
+    cos_sin_table=True).f_calc()
+  f_final = abs(f_final)
+  c = flex.linear_correlation(y_obs.data(), f_final.data())
+  assert c.is_well_defined()
+  c_coefficient = c.coefficient()
+  assert c_coefficient > 0.999
+
+def test2():
+  import random
+  import libtbx.easy_pickle
+  random.setstate(libtbx.easy_pickle.load('random_generator_state.pickle'))
+  tst_xray_minimization.exercise(
+    target_functor=xray.target_functors.intensity_correlation,
+    data_type='F',
+    space_group_info= sgtbx.space_group_info('R -3 c :H'),
+    anomalous_flag=False,
+    gradient_flags=xray.structure_factors.gradient_flags(
+                                        site      = 0,
+                                        u_iso     = 0,
+                                        u_aniso   = 1,
+                                        occupancy = 0),
+    occupancy_penalty=None,
+    d_min=2.5 )
+
+def run():
+  test2()
+  test1()
+  print('OK')
+
+
+if __name__ == '__main__':
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/regression/tst_xray_target_functors.py
+from __future__ import absolute_import, division, print_function
+from cctbx import xray
+from cctbx import crystal
+from cctbx import miller
+from cctbx.array_family import flex
+from libtbx.test_utils import approx_equal
+import sys
+from six.moves import range
+
+def run(args):
+  assert args in [[], ["--verbose"]]
+  verbose = "--verbose" in args
+  exercise_least_squares_residual()
+  exercise_core_LS(xray.targets_least_squares_residual, verbose)
+  exercise_core_LS(xray.targets_least_squares_residual_for_intensity, verbose)
+
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=(10,11,12,85,95,100),
+    space_group_symbol="P 1")
+  miller_set = miller.build_set(
+    crystal_symmetry=crystal_symmetry,
+    anomalous_flag=False,
+    d_min=3)
+  f_calc = miller_set.array(
+    data=flex.polar(
+      flex.random_double(miller_set.size())*10-5,
+      flex.random_double(miller_set.size())*10-5))
+
+  obs = miller_set.array(
+    data=flex.abs(f_calc.data()) + (flex.random_double(miller_set.size())*2-1),
+    sigmas=flex.random_double(miller_set.size()))
+  obs.set_observation_type_xray_amplitude()
+  weighting = xray.weighting_schemes.amplitude_unit_weighting()
+  exercise_py_LS(obs, f_calc, weighting, verbose)
+
+  obs = miller_set.array(
+    data=flex.norm(f_calc.data()) + (flex.random_double(miller_set.size())*2-1),
+    sigmas=flex.random_double(miller_set.size()))
+  obs.set_observation_type_xray_intensity()
+
+  weighting = xray.weighting_schemes.intensity_quasi_unit_weighting()
+  exercise_py_LS(obs, f_calc, weighting, verbose)
+
+  weighting = xray.weighting_schemes.simple_shelx_weighting(a=100, b=150)
+  exercise_py_LS(obs, f_calc, weighting, verbose)
+
+  weighting = xray.weighting_schemes.shelx_weighting(a=100, b=150)
+  exercise_py_LS(obs, f_calc, weighting, verbose)
+
+  print("OK")
+
+
+def exercise_core_LS(target_class, verbose):
+  n_refl = 10
+  f_calc = flex.polar(
+    flex.random_double(n_refl)*10-5,
+    flex.random_double(n_refl)*10-5)
+  f_obs = flex.abs(f_calc) + (flex.random_double(n_refl)*2-1)
+  weights = flex.random_double(n_refl)
+  r = xray.targets_least_squares_residual(
+    f_obs, weights, f_calc, True, 0)
+  scale_factor = r.scale_factor()
+  gr_ana = r.derivatives()
+  gr_fin = flex.complex_double()
+  eps = 1.e-6
+  for i_refl in range(n_refl):
+    gc = []
+    for i_part in [0,1]:
+      fc0 = f_calc[i_refl]
+      ts = []
+      for signed_eps in [eps,-eps]:
+        if (i_part == 0):
+          f_calc[i_refl] = complex(fc0.real + signed_eps, fc0.imag)
+        else:
+          f_calc[i_refl] = complex(fc0.real, fc0.imag + signed_eps)
+        r = xray.targets_least_squares_residual(
+          f_obs, weights, f_calc, False, scale_factor)
+        ts.append(r.target())
+      f_calc[i_refl] = fc0
+      gc.append((ts[0]-ts[1])/(2*eps))
+    gr_fin.append(complex(*gc))
+  if (verbose):
+    print("ana:", list(gr_ana))
+    print("fin:", list(gr_fin))
+  assert approx_equal(gr_fin, gr_ana)
+
+def exercise_py_LS(obs, f_calc, weighting, verbose):
+  weighting.computing_derivatives_wrt_f_c = True
+  r = xray.unified_least_squares_residual(obs, weighting=weighting)
+  rt = r(f_calc, compute_derivatives=True)
+  if obs.is_xray_amplitude_array():
+    assert(isinstance(rt, xray.targets_least_squares_residual))
+  elif obs.is_xray_intensity_array():
+    assert(isinstance(rt, xray.targets_least_squares_residual_for_intensity))
+  scale_factor = rt.scale_factor()
+  gr_ana = rt.derivatives()
+  K = scale_factor
+  w = weighting.weights
+  if w is not None: w = w.deep_copy()
+  dw_dfc = weighting.derivatives_wrt_f_c
+  if dw_dfc is not None: dw_dfc = dw_dfc.deep_copy()
+
+  y_o = obs.data()
+  if w is None: w = flex.double(obs.size(), 1)
+  sum_w_y_o_sqr = flex.sum(w * y_o * y_o)
+  f_c = f_calc.data().deep_copy()
+  if obs.is_xray_amplitude_array():
+    y_c = flex.abs(f_c)
+    der = f_c * (1/y_c)
+  elif obs.is_xray_intensity_array():
+    y_c = flex.norm(f_c)
+    der = 2 * f_c
+  gr_explicit = w*2*K*(K*y_c - y_o) * der / sum_w_y_o_sqr
+  sum_w_squares = flex.sum(w*flex.pow2(K*y_c - y_o))
+  assert approx_equal(gr_ana, gr_explicit)
+
+  gr_fin = flex.complex_double()
+  eps = 1.e-6
+  for i_refl in range(obs.size()):
+    gc = []
+    for i_part in [0,1]:
+      fc0 = f_calc.data()[i_refl]
+      ts = []
+      for signed_eps in [eps,-eps]:
+        if (i_part == 0):
+          f_calc.data()[i_refl] = complex(fc0.real + signed_eps, fc0.imag)
+        else:
+          f_calc.data()[i_refl] = complex(fc0.real, fc0.imag + signed_eps)
+        rt = r(f_calc, compute_derivatives=False, scale_factor=scale_factor)
+        ts.append(rt.target())
+      f_calc.data()[i_refl] = fc0
+      gc.append((ts[0]-ts[1])/(2*eps))
+    gr_fin.append(complex(*gc))
+  if (verbose):
+    print("ana:", list(gr_ana))
+    print("fin:", list(gr_fin))
+  if dw_dfc is None:
+    assert approx_equal(gr_fin, gr_ana)
+  else:
+    gr_total_ana = ( gr_ana
+                     + dw_dfc*(flex.pow2(K*y_c - y_o)/sum_w_y_o_sqr
+                        - sum_w_squares*flex.pow2(y_o)/sum_w_y_o_sqr**2) )
+    assert approx_equal(gr_fin, gr_total_ana)
+
+def exercise_least_squares_residual():
+  crystal_symmetry = crystal.symmetry(
+    unit_cell=(6,3,8,90,90,90),
+    space_group_symbol="P222")
+  miller_set = miller.build_set(
+    crystal_symmetry=crystal_symmetry,
+    anomalous_flag=False,
+    d_min=0.7)
+  f_obs = miller_set.array(
+    data=flex.random_double(miller_set.size()),
+    sigmas=flex.random_double(miller_set.size())*0.05)
+  ls = xray.least_squares_residual(
+    f_obs,
+    use_sigmas_as_weights=True,
+  )
+
+
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************

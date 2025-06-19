@@ -1,0 +1,5598 @@
+
+
+ *******************************************************************************
+xfel/amo/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/fxs.py
+
+"""Class for processing Fluctuation X-ray Scattering data (FXS)
+
+"""
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from psana                              import *
+
+import numpy             as np
+import matplotlib.pyplot as plt
+import time
+import h5py
+
+from xfel.cxi.cspad_ana                 import cspad_tbx
+from xfel.amo.pnccd_ana                 import pnccd_tbx
+from psmon                              import publish
+from psmon.plots                        import Image, XYPlot, Hist, MultiPlot
+
+
+class fluctuation_scattering(object):
+  """Class for processing of 2D fluctuation scattering images.
+
+  """
+
+
+  def __init__(self,
+               dataset_name     = None,
+               detector_address = None,
+               data_type        = 'idx',
+               mask_path        = None,
+               mask_angles      = None,
+               mask_widths      = None,
+               backimg_path     = None,
+               backmsk_path     = None,
+               geom_path        = None,
+               det_dist         = None,
+               det_pix          = 0.075,
+               beam_l           = None,
+               mask_thr         = None,
+               nQ               = None,
+               nPhi             = None,
+               dQ               = 1,
+               dPhi             = 1,
+               cent0            = None,
+               r_max            = None,
+               dr               = None,
+               dx               = None,
+               dy               = None,
+               r_0              = None,
+               q_bound          = None,
+               peak             = None,
+               dpeak            = None):
+
+    """The fluctuation scattering class stores processing parameters,
+       initiates mask and background data and retrieves 2D images
+       from events. Processing options of the 2D images include:
+       * Transform from cartesian to polar coordinates
+       * Beam center refinement
+       * Dynamic masking
+       * Normalization % SAXS calculation
+       * Particle sizing
+       * Computation of in-frame 2-point angular auto-correlations using FFTs
+
+    @param dataset_name         Experiment name and run number
+    @param detector_address     Adress to back or front detector
+    @param data_type            Type of data file format (h5 or xtc in the formats: idx|idx_ffb|smd|smd_ffb|h5)
+    @param mask_path            Full path to static image mask
+    @param mask_angles          Center of angluar slices (deg) that should be masked out (due to jet streaks etc), [Ang1 Ang2 ...]
+    @param mask_widths          Width  of angular slices (deg) that should be masked out (due to jet streaks etc), [delta1 delta2 ...]
+    @param backimg_path         Full path to background image
+    @param backmsk_path         Full path to background mask
+    @param geom_path            Full path to geometry file (for h5 format)
+    @param det_dist             Override of detecor distance (in mm)
+    @param det_pix              Pixel size (in mm)
+    @param beam_l               Override of beam wavelength (in Angstrom)
+    @param mask_thr             Threshold for dynamic masking
+    @param nQ                   Number of Q-bins to consider   (in pixels)
+    @param nPhi                 Number of Phi-bins to consider (in pixels)
+    @param dQ                   Stepsize in Q   (in pixels)
+    @param dPhi                 Stepsize in Phi (in pixels)
+    @param cent0                Initial beam center coordinates [xc,yc]
+    @param r_max                Maximum radial value to use for beamcenter refinement (in pixels)
+    @param dr                   Stepsize in r (in pixels)
+    @param dx                   Gridsize for beam center refinement in x, i.e xc+/-dx (in pixels)
+    @param dy                   Gridsize for beam center refinement in y, i.e yc+/-dy (in pixles)
+    @param r_0                  Starting value for particle radius refinement [in Ang]
+    @param q_bound              Upper and Lower boundaries of q for Particle radius refinement [in Ang^-1]
+    @param peak                 Q-values for peak maxima [q_peak1 q_peak2 ...]
+    @param dpeak                Delta Q used for peak integration of peak maxima [delta_q1 delta_q2 ...]
+    """
+
+
+    # Initialize parameters and configuration files once
+
+    self.data_type          = data_type
+    self.dataset_name       = dataset_name
+    self.detector_address   = detector_address
+
+
+    if (self.data_type == 'idx') or (self.data_type == 'idx_ffb') or (self.data_type == 'smd')  or (self.data_type == 'smd_ffb') or (self.data_type == 'xtc') :
+
+
+       self.ds       = DataSource(self.dataset_name)
+       self.src      = Detector(self.detector_address, self.ds.env())
+
+
+       if mask_path is None :                   # Create a binary mask of ones, default mask only works for xtc/ffb
+
+          evt               = next(self.ds.events())
+          self.mask_address = self.src.mask(evt,calib=True,status=True)
+          self.msk          = self.src.image(evt,self.mask_address)
+          self.mask         = np.copy(self.msk)
+
+       else:
+
+          self.msk          = np.loadtxt(mask_path)
+          self.mask         = np.copy(self.msk)
+
+
+    if geom_path is not None :
+       geom          = np.genfromtxt(geom_path,skiprows=1)
+       self.gap      = geom[0]
+       self.shift    = geom[1]
+       self.orient   = geom[2
+]
+       self.comm     = geom[3]
+       self.param1   = geom[4]
+       self.param2   = geom[5]
+       self.param3   = geom[6]
+       self.param4   = geom[7]
+
+    if (self.data_type == 'h5'):
+
+       if mask_path is None :                      # Create a binary mask of ones
+
+         ## Add default binary mask here ## Default pnCCD dimensions
+         dim1      = 1024
+         dim2      = 1024
+         self.mask = np.ones((dim1,dim2))
+
+       else:
+
+          self.mask = np.loadtxt(mask_path)
+
+       # Apply geometry
+       self.msk   = pnccd_tbx.get_geometry(img    = self.mask,
+                                          gap    = self.gap,
+                                          shift  = self.shift,
+                                          orient = self.orient)
+
+
+    if self.detector_address == 'pnccdFront' :
+
+       evt          = next(self.ds.events())
+       gain         = self.src.gain(evt)
+       self.gain    = self.src.image(evt,gain)
+
+    self.cart = 0
+    self.flat = 0
+
+    if backimg_path is None :
+       self.backimg     = None
+    else :
+       self.backimg     = np.loadtxt(backimg_path).astype(np.float64)
+
+       # Check if background image in cartesian coordinates exists
+       if (self.backimg.shape == self.msk.shape):
+          self.cart     = 1                             # Remove bg before transform to polar coordinates
+
+
+    if backmsk_path is None :
+       self.backmsk     = None
+    else :
+       self.backmsk     = np.loadtxt(backmsk_path).astype(np.float64)
+
+    # Check if flat-field image exists
+    if (self.backmsk is None) and (self.backimg is not None) and (self.cart==0):
+       self.pcflat      = pnccd_tbx.dynamic_flatfield(self.backimg)
+       self.flat        = 1
+
+
+    if det_dist is None :                       # Get detector distance from events
+       for run in self.ds.runs():
+           self.det_dist = cspad_tbx.env_distance(self.detector_address, run.env(), 577)
+    else :
+       self.det_dist = det_dist
+
+    self.det_pix = det_pix
+
+    if beam_l is None :                        # Get wavelength from event, note it can change slightly between events. So in the future use average.
+       self.beam_l   = cspad_tbx.evt_wavelength(next(self.ds.events()))
+    else :
+       self.beam_l   = beam_l
+
+    if mask_thr is None :                      # No dynamic masking
+       self.thr      = None
+    else :
+       self.thr      = mask_thr
+
+    if nQ is None :                            # Use image dimensions as a guide, leave room for offset beamC
+       if self.msk.shape[0] > self.msk.shape[1] :  # nQ determined by smallest dimension
+          self.nQ   = int(self.msk.shape[1]/2)-20
+       else :
+          self.nQ   = int(self.msk.shape[0]/2)-20
+    else :
+       self.nQ       = nQ
+
+
+    if (self.nQ % 10):                        # Ascert even number, speeds things up massively for FFT
+        self.nQ  = np.floor(self.nQ/10)*10
+
+    if (self.nQ % dQ):                        # Ascert clean divisor
+        self.nQ  = np.floor(self.nQ/dQ)*dQ
+
+    if nPhi is None :                         # Estimate based on 2*pi*nQ
+       self.nPhi     = np.ceil(2*np.pi*self.nQ)
+    else :
+       self.nPhi     = nPhi
+
+    if (self.nPhi % 10):                      # Ascert even number, speeds things up massively for FFT
+        self.nPhi  = np.ceil(self.nPhi/10)*10
+
+    if (self.nPhi % dPhi):                    # Ascert clean divisor
+        self.nPhi  = np.ceil(self.nPhi/dPhi)*dPhi
+
+    self.dQ          = dQ
+    self.dPhi        = dPhi
+
+    self.mask_angles        = mask_angles
+    self.mask_widths        = mask_widths
+
+    # Compute slices that should be masked in static mask
+    if (self.mask_angles is not None) and (self.mask_widths is not None) :
+       self.mask_angles        = (self.mask_angles/360) * self.nPhi
+       self.mask_widths        = (self.mask_widths/360) * self.nPhi
+
+    # Check if nQ > smallest dimension/2 then we extend the image with zero values
+    if self.nQ > min(self.msk.shape[0]/2,self.msk.shape[1]/2) :
+       self.msk   = pnccd_tbx.extend_image(img = self.msk)
+       self.mask  = np.copy(self.msk)
+
+
+    if (cent0 is None) or (sum(cent0) == 0):  # Use center of gravity to estimate starting beamC
+       self.cent0    = [int(round(self.msk.shape[1]/2)) , int(round(self.msk.shape[0]/2))]
+    else :
+       self.cent0    = cent0
+
+    self.cent = self.cent0                    # Default center
+
+    if r_max is None :                        # Default, Use half of nQ
+       self.r_max    = int(self.nQ*(3/4))
+    else :
+       self.r_max    = r_max
+
+    if (self.r_max % dr):                     # Ascert clean divisor
+        self.r_max  = np.floor(self.r_max/dr)*dr
+
+    self.dr          = dr
+    self.dx          = dx
+    self.dy          = dy
+
+    if r_0 is None :
+       self.radius   = 0
+       self.score    = 0
+
+    self.r_0       = r_0
+
+    if q_bound is None or sum(q_bound)==0 :
+       self.q_bound    = [None,None]
+    else :
+       self.q_bound    = [None,self.q_bound]
+
+
+    # Compute q-spacing
+    self.q           = np.arange(0, self.nQ, self.dQ)
+    self.q           = self.q*self.det_pix/self.det_dist*4*np.pi/self.beam_l/2
+
+    # Compute Phi (Not accounting for curvature)
+    self.phi         = np.linspace(0, 2*np.pi, self.nPhi/self.dPhi,endpoint=False)
+
+
+    # Compute indices for Peak maxima
+    if (peak is not None) and (dpeak is not None) :
+       self.peak       = peak
+       self.dpeak      = dpeak
+       self.ind1       = (self.q >= (self.peak[0] - self.dpeak[0])) & (self.q <= (self.peak[0] + self.dpeak[0]) )
+       self.ind2       = (self.q >= (self.peak[1] - self.dpeak[1])) & (self.q <= (self.peak[1] + self.dpeak[1]) )
+    else:
+       self.peak       = None
+       self.dpeak      = None
+
+    ###################################################################################
+    # Define functions
+
+
+
+  def publish(self, image = None, saxs = None, c2 = None, ind = None, n_a = None, n_saxs = None, n_c2 = None, n_i = None, n_q = None, n_bin = None) :
+      """Publish Intermediate results:
+         @image    Average image
+         @saxs     Averaged saxs data
+         @c2       Averaged c2 data
+         @ind      Indexed data
+         @n_a      Nr of averaged images
+         @n_saxs   Nr of averaged saxs curves
+         @n_c2     Nr of averaged c2 data
+         @n_i      Nr of indexed images
+         @n_q      Nr of q-rings to plot
+         @n_bin    Nr of bins for size histogram
+
+
+         KEYWORDS FOR PLOTS
+
+         AVE        : Average image
+         C2_IMAGE   : Heat plot of C2
+         C2         : Individual C2 plots
+         SAXS       : Saxs curve
+         IND        : Index data
+
+         ex: psplot -s psanaXXXX AVE C2 SAXS IND C2_IMAGE
+
+      """
+
+      if n_q is None :
+         n_q   = min(15,len(self.q))
+
+      if n_q > len(self.q) :            # Ascert that there is enough q's
+         n_q   = len(self.q)
+
+      if n_bin is None :
+         n_bin = n_i / 10
+
+
+      if image is not None :
+
+         # Average Image
+         title    = 'AVERAGE  Run ' + str(self.run_nr)
+         AVEimg   = Image(n_a,title,image)
+         publish.send('AVE',AVEimg)
+
+
+      if saxs is not None :
+
+         # SAXS plot
+         title   = 'SAXS Run ' + str(self.run_nr)
+         SAXSimg = XYPlot(n_saxs,title,self.q,saxs,xlabel='q (1/A)', formats='b')
+         publish.send('SAXS',SAXSimg)
+
+      if c2 is not None :
+
+         # C2 plots
+         title  = 'C2  Run ' + str(self.run_nr)
+         # C2 heatmap plot
+         C2img   = Image(n_c2,title,c2)
+         publish.send('C2_IMAGE',C2img)
+         # Multiplot, plot C2 for 10 q-points
+         multi   = MultiPlot(n_c2,title,ncols=5)
+         step    = round(len(self.q) / (n_q + 1))
+         for p in range(n_q):
+             R    = XYPlot(n_c2,'q = '+ str(np.around(self.q[(p+1)*step],decimals=3)),self.phi,c2[(p+1)*step],xlabel='dPhi')
+             multi.add(R)
+         publish.send('C2',multi)
+
+      if ind is not None :
+         if n_bin is None :
+            n_bin = n_i / 10
+
+         # Last non-zero intensity
+         nz   = np.nonzero(ind[:,0])
+         last = nz[0][-1]
+         ind  = ind[0:last,:]
+
+         # Check if we manged to estimate sizes
+         sind    = ind[:,2] > 0.98
+         if sind.any() :
+            title   = 'INDEX Run ' + str(self.run_nr)
+            # INDEX plot
+            multi2  = MultiPlot(n_i,title,ncols=1)
+            # Intensity plot
+            title   = 'Intensity Run ' + str(self.run_nr)
+            I       = XYPlot(n_i,title,np.arange(last),ind[:,0],xlabel='N',formats='rs')
+            multi2.add(I)
+            # Size plot
+            title   = 'Size Run ' + str(self.run_nr)
+            diam      = ind[sind,1]*(2/10) # Diameter in nm
+            hist,bins = np.histogram(diam, n_bin)
+            S         = Hist(n_i,title,bins,hist,xlabel='Size [nm]')
+            multi2.add(S)
+            publish.send('IND',multi2)
+         else:
+            title   = 'Intensity Run ' + str(self.run_nr)
+            I       = XYPlot(n_i,title,np.arange(last),ind[:,0],xlabel='N',formats='rs')
+            publish.send('IND',I)
+
+
+  def store_index_h5(self, time, index,flag = 1) :
+      """Store information about:
+         * Time-stamp
+         * Total intensity
+         * Beam center
+         * Estimated Particle Size
+         * Estimated particle nr
+
+      """
+
+      self.tot_t[index]         = time.split('_')[1]
+
+      self.tot_int[index]       = float(self.img.sum())
+      self.tot_peak1_int[index] = self.peak1
+      self.tot_peak2_int[index] = self.peak2
+      self.tot_streak_m[index]  = self.streak_m
+      self.tot_streak_s[index]  = self.streak_s
+
+      self.tot_cx[index]        = self.cent[0]
+      self.tot_cy[index]        = self.cent[1]
+      self.tot_size[index]      = self.radius
+      self.tot_score[index]     = self.score
+
+      if flag :
+         self.ave                  += self.img
+
+
+  def store_index(self, time, index, flag = 1) :
+      """Store information about:
+         * Time-stamp
+         * Total intensity
+         * Beam center
+         * Estimated Particle Size
+         * Estimated particle nr
+
+      """
+
+      if not hasattr(self, 'streak_m'):
+         self.streak_m    = 0
+      if not hasattr(self, 'streak_s'):
+         self.streak_s    = 0
+
+
+      self.tot_t[index]         = time.time()
+      self.tot_s[index]         = time.seconds()
+      self.tot_ns[index]        = time.nanoseconds()
+      self.tot_fd[index]        = time.fiducial()
+
+      self.tot_int[index]       = float(self.img.sum())
+
+      if (self.peak is not None):
+          self.tot_peak1_int[index] = self.peak1
+          self.tot_peak2_int[index] = self.peak2
+
+      self.tot_streak_m[index]  = self.streak_m
+      self.tot_streak_s[index]  = self.streak_s
+
+      self.tot_cx[index]        = self.cent[0]
+      self.tot_cy[index]        = self.cent[1]
+      self.tot_size[index]      = self.radius
+      self.tot_score[index]     = self.score
+
+      if flag :
+         self.ave                  += self.img
+
+
+  def store_index2(self, time, index, flag = 1) :
+      """Store information about:
+         * Time-stamp
+         * Total intensity
+         * Beam center
+         * Estimated Particle Size
+         * Estimated particle nr
+
+      """
+
+      self.tot_t[index]         = time.time()
+      self.tot_s[index]         = time.seconds()
+      self.tot_ns[index]        = time.nanoseconds()
+      self.tot_fd[index]        = time.fiducial()
+
+      self.tot_int[index]       = float(self.image.sum())
+
+      self.tot_cx[index]        = self.cent[0]
+      self.tot_cy[index]        = self.cent[1]
+      self.tot_size[index]      = self.radius
+      self.tot_score[index]     = self.score
+
+      if flag :
+         self.ave                  += self.image
+
+
+
+  def store_image(self,index) :
+      """Store raw images
+
+      """
+
+      self.images[:,:,index]      = self.image
+      self.cnt                   += 1
+
+
+  def sum_c2(self,  flag = 0) :
+      """Sum up SAXS, C2 and other quantaties continusly
+
+         @flag    Flag as solvent [0] or signal [1]               [0/1]
+
+      """
+      # Initialize
+      if (self.cnt_0 == 0.0)  and (self.cnt_1 == 0.0) :
+
+
+         self.Isaxs_0     = np.zeros(self.saxs_m.shape)
+         self.Vsaxs_0     = np.zeros(self.saxs_m.shape)
+
+         self.C2_0        = np.zeros(self.c2.shape)
+         self.C2sqr_0     = np.zeros(self.c2.shape)
+
+         self.C2m_0       = np.zeros(self.c2.shape)
+         self.C2msqr_0    = np.zeros(self.c2.shape)
+
+
+         self.Isaxs_1     = np.zeros(self.saxs_m.shape)
+         self.Vsaxs_1     = np.zeros(self.saxs_m.shape)
+
+         self.C2_1        = np.zeros(self.c2.shape)
+         self.C2sqr_1     = np.zeros(self.c2.shape)
+
+         self.C2m_1       = np.zeros(self.c2.shape)
+         self.C2msqr_1    = np.zeros(self.c2.shape)
+
+
+      if flag == 0:
+
+         self.Isaxs_0    += self.saxs_m
+         self.Vsaxs_0    += (self.saxs_s)**2
+
+         self.C2_0       += self.c2
+         self.C2sqr_0    += (self.c2)**2
+
+         self.C2m_0      += self.c2msk
+         self.C2msqr_0   += (self.c2msk)**2
+
+         self.cnt_0 += 1
+
+      else :
+
+         self.Isaxs_1    += self.saxs_m
+         self.Vsaxs_1    += (self.saxs_s)**2
+
+         self.C2_1       += self.c2
+         self.C2sqr_1    += (self.c2)**2
+
+         self.C2m_1      += self.c2msk
+         self.C2msqr_1   += (self.c2msk)**2
+
+         self.cnt_1 += 1
+
+
+
+  def sum_bg2(self) :
+      """Sum up BG
+
+      """
+      # Initialize
+      if (self.cnt_0 == 0.0)  or (self.cnt_1 == 0.0) :
+
+         self.Back_img    = np.zeros(self.pcimg.shape)
+         self.Back_norm   = np.zeros(self.pcnorm.shape)
+         self.Back_msk    = np.zeros(self.pcmsk.shape)
+
+
+      self.Back_norm     +=  self.pcnorm
+      self.Back_img      +=  self.pcimg
+      self.Back_msk      +=  self.pcmsk
+
+
+
+  def sum_bg(self) :
+      """Sum up BG
+
+      """
+      # Initialize
+      if self.cnt == 0.0  :
+
+         self.Isaxs       = np.zeros(self.saxs_m.shape)
+         self.Vsaxs       = np.zeros(self.saxs_m.shape)
+
+
+         self.Back_img    = np.zeros(self.pcimg.shape)
+         self.Back_norm   = np.zeros(self.pcnorm.shape)
+         self.Back_msk    = np.zeros(self.pcmsk.shape)
+
+      else:
+
+         self.Isaxs       += self.saxs_m
+         self.Vsaxs       += (self.saxs_s)**2
+
+
+         self.Back_img    +=  self.pcimg
+         self.Back_norm   +=  self.pcnorm
+         self.Back_msk    +=  self.pcmsk
+
+
+
+  def get_index(self, nevents, flag = 0) :
+      """Generate array for storing indeces
+
+         @nevents    Total nr of events
+
+      """
+
+      # Time stamp identifiers
+      self.tot_t          = np.zeros(nevents)   # Time
+      self.tot_s          = np.zeros(nevents)   # Second
+      self.tot_ns         = np.zeros(nevents)   # Nanosecond
+      self.tot_fd         = np.zeros(nevents)   # Fiducial
+
+      # Image specific identifiers
+      self.tot_int        = np.zeros(nevents)   # Total image intensity
+      self.tot_peak1_int  = np.zeros(nevents)   # Radial peak 1 intensity
+      self.tot_peak2_int  = np.zeros(nevents)   # Radial peak 2 intensity
+      self.tot_streak_m   = np.zeros(nevents)   # Mean streak angle
+      self.tot_streak_s   = np.zeros(nevents)   # Std streak angle
+      self.tot_cx         = np.zeros(nevents)   # Beam x
+      self.tot_cy         = np.zeros(nevents)   # Beam y
+      self.tot_size       = np.zeros(nevents)   # Estimated size
+      self.tot_score      = np.zeros(nevents)   # Size score (best is 1.0)
+
+      if flag :
+         # Initialize image array
+         self.images      = np.zeros((self.mask.shape[0],self.mask.shape[1],nevents))
+      else:
+         # Initialize average image
+         self.ave         = np.zeros(self.msk.shape) # Zero Image
+
+
+  def get_index2(self, nevents) :
+      """Generate array for storing indeces
+
+         @nevents    Total nr of events
+
+      """
+
+      # Time stamp identifiers
+      self.tot_t      = np.zeros(nevents)       # Time
+      self.tot_s      = np.zeros(nevents)       # Second
+      self.tot_ns     = np.zeros(nevents)       # Nanosecond
+      self.tot_fd     = np.zeros(nevents)       # Fiducial
+
+      # Image specific identifiers
+      self.tot_int    = np.zeros(nevents)       # Total image intensity
+      self.tot_cx     = np.zeros(nevents)       # Beam x
+      self.tot_cy     = np.zeros(nevents)       # Beam y
+      self.tot_size   = np.zeros(nevents)       # Estimated size
+      self.tot_score  = np.zeros(nevents)       # Size score (best is 1.0)
+
+      # Initialize average image
+
+      self.ave        = np.zeros((4,512,512))   # Zero Image
+
+
+  def get_size(self, plot = 0) :
+      """Spherical Besselfit of SAXS data starting from radius, r_0
+         Returns optimized radius in Angstrom
+
+         @plot    Display fit between data & theory               [0/1]
+
+      """
+
+      self.radius, self.score    = pnccd_tbx.get_size(saxs              = self.saxs_m,
+                                                      q                 = self.q,
+                                                      r_i               = self.r_0,
+                                                      q_i               = self.q_bound[0],
+                                                      q_f               = self.q_bound[1],
+                                                      plot              = plot)
+
+
+
+  def get_c2(self, plot = 0) :
+      """Computes 2-point auto-correlation using FFTs
+      """
+
+      if (self.backimg is not None) and (self.backmsk is not None) :    # Ascerts that only pixles values are considered that are  defined in both image and background
+
+         self.pcmsk  = self.pcmsk*self.backmsk
+         self.pcnorm = (self.pcnorm - self.backimg)*self.pcmsk
+
+
+      self.F      = np.fft.rfft(self.pcnorm,axis=1)
+      self.c2     = np.fft.irfft(self.F * self.F.conjugate()) / self.nPhi
+
+      self.Fm     = np.fft.rfft(self.pcmsk,axis=1)
+      self.c2msk  = np.fft.irfft(self.Fm * self.Fm.conjugate()) / self.nPhi
+
+
+      if plot :
+
+         m1 = np.nanmean(self.pcnorm.reshape((-1)))
+         s1 = np.std(self.pcnorm.reshape((-1)))
+
+         c  = self.c2/self.c2msk
+         m2 = np.nanmean(c.reshape((-1)))
+         s2 = np.std(c.reshape((-1)))
+
+         plt.figure(5000)
+         plt.clf()
+         ax = plt.subplot(211)
+         plt.imshow(self.pcnorm)
+         plt.axis('tight')
+         plt.clim(m1-3*s1,m1+3*s1)
+         plt.colorbar()
+         ax.set_title("Polar norm")
+         ax = plt.subplot(212)
+         plt.imshow(self.c2/self.c2msk)
+         plt.axis('tight')
+         plt.clim(m2-3*s2,m2+3*s2)
+         plt.colorbar()
+         ax.set_title("Angular correlation (C2)")
+         plt.draw()
+
+         if (self.cnt_0 + self.cnt_1)> 0 :
+
+            k = np.arange(0, self.nQ, 50)
+
+            plt.figure(6000,figsize=(20,20))
+            plt.clf()
+            sfig = 331
+            for i in range(len(k)) :
+                ax = plt.subplot(int(sfig + i))
+                plt.plot(self.phi,self.c2[k[i],:]/self.c2msk[k[i],:],'b',self.phi,self.C2_0[k[i],:]/self.C2m_0[k[i],:],'r',self.phi,self.C2_1[k[i],:]/self.C2m_1[k[i],:],'g')
+                plt.xlim(self.phi[0],self.phi[-1])
+                m = np.median(self.C2_0[k[i],:]/self.C2m_0[k[i],:])
+                s = np.std(self.C2_0[k[i],:]/self.C2m_0[k[i],:])
+                plt.ylim(m-3*s,m+3*s)
+                ax.set_title("q = " + str(self.q[k[i]]))
+
+            plt.draw()
+
+            plt.figure(7000,figsize=(10,10))
+            plt.clf()
+            plt.semilogy(self.q,self.saxs_m,'b',self.q,self.Isaxs_0/self.cnt_0,'r',self.q,self.Isaxs_1/self.cnt_1,'g')
+
+
+
+  def get_norm(self,flag = 1, plot = 0) :
+      """Normalizes image and mask in polar coordinates by subtracting the
+         the azimuthal mean intensity. Stores the mean and std saxs intensity.
+
+         @flag     return image norm          [0/1]
+
+      """
+
+
+      self.saxs_m           = np.ndarray(self.pcimg.shape[0])
+      self.saxs_s           = np.ndarray(self.pcimg.shape[0])
+
+      for q in range(self.pcimg.shape[0]) :
+
+          ind               = np.nonzero(self.pcmsk[q,:])
+
+          if len(ind[0]) == 0 :
+             self.saxs_m[q]    = 0
+             self.saxs_s[q]    = 0
+          else:
+             self.saxs_m[q]    = np.nanmean(self.pcimg[q,ind],axis=1)
+             self.saxs_s[q]    = np.nanstd(self.pcimg[q,ind],axis=1)
+
+
+      if flag :
+          self.pcnorm         = self.pcimg - self.saxs_m[:,None]
+          self.pcnorm         = self.pcnorm*self.pcmsk
+
+      if (self.peak is not None):
+          # Get Peak maxima
+          self.peak1 = np.mean(self.saxs_m[self.ind1])
+          self.peak2 = np.mean(self.saxs_m[self.ind2])
+
+      if plot :
+
+         m1 = np.nanmean(self.pcimg.reshape((-1)))
+         s1 = np.std(self.pcimg.reshape((-1)))
+
+         m2 = np.nanmean(self.pcnorm.reshape((-1)))
+         s2 = np.std(self.pcnorm.reshape((-1)))
+
+         plt.figure(4000)
+         plt.clf()
+         ax = plt.subplot(211)
+         plt.imshow(self.pcimg)
+         plt.axis('tight')
+         plt.clim(0,m1+3*s1)
+         plt.colorbar()
+         ax.set_title("Polar image")
+         ax = plt.subplot(212)
+         plt.imshow(self.pcnorm)
+         plt.axis('tight')
+         plt.clim(m2-3*s2,m2+3*s2)
+         plt.colorbar()
+         ax.set_title("Polar norm")
+         plt.draw()
+
+
+  def get_streak_mask(self,thr = None, flag = 1, plot = 0):
+      """Compute dynamic streak mask based on
+         systematic intensity deviations along Phi
+
+         @thr     Threshold (thr * std)          [pos. integer]
+         @flag    Output streak angle            [0/1]
+         @plot    Plot result                    [0/1]
+
+      """
+
+      self.pcimg        =  self.pcimg * self.pcmsk
+
+
+      if thr is None :
+         thr = self.thr
+
+      if thr is not None :
+
+         s_p                   = np.ndarray(self.pcimg.shape[1])
+
+         self.get_norm()
+
+
+         for p in range(self.pcnorm.shape[1]):
+
+             ind               = np.nonzero(self.pcmsk[:,p])
+
+             if len(ind[0]) == 0 :
+                s_p[p]         = 0
+             else:
+                s_p[p]         = np.nanmean(self.pcnorm[ind,p],axis=1)
+
+         u                     = np.nanmean(s_p)
+         s                     = np.nanstd(s_p)
+
+         A                     = ( s_p - u ) <= thr*s
+         T                     = A.astype(int)
+
+         self.pcmsk            = self.pcmsk*T
+         self.pcimg            = self.pcimg * self.pcmsk
+
+
+         if flag :
+            # Get masked angles
+            ind      = np.where(T == 0)[0]*(360/self.nPhi)
+            # Select the angles for the first streak (Friedel symmetry at +180)
+            if ind.size == 0 :
+               self.streak_m = 0
+               self.streak_s = 0
+            else:
+               streaks  = ind[ind < (ind[0]+90)]
+               # Compute mean and std angle of the streak
+               self.streak_m = np.mean(streaks)
+               self.streak_s = np.std(streaks)
+
+
+         if plot :
+
+            m1 = np.nanmean(self.pcimg.reshape((-1)))
+            s1 = np.std(self.pcimg.reshape((-1)))
+
+            plt.figure(3000)
+            plt.clf()
+            ax = plt.subplot(211)
+            plt.imshow(self.pcimg)
+            plt.axis('tight')
+            plt.clim(0,m1+3*s1)
+            plt.colorbar()
+            ax.set_title("Polar image")
+            ax = plt.subplot(212)
+            plt.imshow(self.pcmsk)
+            plt.axis('tight')
+            plt.clim(0,1)
+            plt.colorbar()
+            ax.set_title("Polar mask")
+            plt.draw()
+
+
+  def get_pixel_mask(self,thr = None, split = None, plot = 0):
+      """Compute dynamic pixel mask based on
+         systematic intensity deviations along Q
+
+         @thr     Threshold (thr * std)                         [pos. integer]
+         @split   Angle for splitting detector in 2 halves      [pos. integer]
+         @plot    Plot output                                   [0/1]
+
+      """
+
+      self.pcimg        =  self.pcimg * self.pcmsk
+
+      if thr is None :
+         thr = self.thr
+
+      if thr is not None :
+         if split is not None:
+
+             # Get index for each half panel
+
+             i0     = int((split/360)*self.nPhi)
+             i1     = i0 + int((180/360)*self.nPhi)
+
+             pp     = np.arange(self.nPhi)
+             a      = pp[i0:i1]
+             b      = np.setdiff1d(pp,a)
+
+             msk_a  = self.pcmsk[:,a]
+             img_a  = self.pcimg[:,a]
+             msk_b  = self.pcmsk[:,b]
+             img_b  = self.pcimg[:,b]
+
+
+             for q in range(self.pcimg.shape[0]) :
+
+                 ind_a             = np.nonzero(msk_a[q,:])
+                 if len(ind_a[0]) == 0 :
+                    u_a            = 0
+                    s_a            = 0
+                 else:
+                    u_a            = np.nanmean(img_a[q,ind_a],axis=1)
+                    s_a            = np.nanstd(img_a[q,ind_a],axis=1)
+
+                 ind_b             = np.nonzero(msk_b[q,:])
+                 if len(ind_b[0]) == 0 :
+                     u_b           = 0
+                     s_b           = 0
+                 else:
+                     u_b           = np.nanmean(img_b[q,ind_b],axis=1)
+                     s_b           = np.nanstd(img_b[q,ind_b],axis=1)
+
+                 # Find out which panel has the smallest std, i.e which is the reference panel.
+
+                 if s_a > s_b :
+                    u   = u_b   # Use mean from panel B
+                    s   = s_b   # Use std from panel B
+                 else:
+                    u   = u_a   # Use mean from panel A
+                    s   = s_a   # Use std from panel A
+
+
+                 A                 = ( img_a[q,:] - u ) <= thr*s
+                 T                 = A.astype(int)
+                 self.pcmsk[q,a]   = self.pcmsk[q,a]*T
+
+                 A                 = ( img_b[q,:] - u ) <= thr*s
+                 T                 = A.astype(int)
+                 self.pcmsk[q,b]   = self.pcmsk[q,b]*T
+
+             self.pcimg        = self.pcimg * self.pcmsk
+
+         else:
+
+             for q in range(self.pcimg.shape[0]) :
+
+                 ind               = np.nonzero(self.pcmsk[q,:])
+
+                 if len(ind[0])   == 0 :
+                    u              = 0
+                    s              = 0
+                 else:
+                    u              = np.nanmean(self.pcimg[q,ind],axis=1)
+                    s              = np.nanstd(self.pcimg[q,ind],axis=1)
+
+                 A                 = ( self.pcimg[q,:] - u ) <= thr*s
+                 T                 = A.astype(int)
+                 self.pcmsk[q,:]   = self.pcmsk[q,:]*T
+
+             self.pcimg        = self.pcimg * self.pcmsk
+
+
+
+         if plot :
+
+            m1 = np.nanmean(self.pcimg.reshape((-1)))
+            s1 = np.std(self.pcimg.reshape((-1)))
+
+            plt.figure(3000)
+            plt.clf()
+            ax = plt.subplot(211)
+            plt.imshow(self.pcimg)
+            plt.axis('tight')
+            plt.clim(0,m1+3*s1)
+            plt.colorbar()
+            ax.set_title("Polar image")
+            ax = plt.subplot(212)
+            plt.imshow(self.pcmsk)
+            plt.axis('tight')
+            plt.clim(0,1)
+            plt.colorbar()
+            ax.set_title("Polar mask")
+            plt.draw()
+
+
+
+  def get_polar(self, plot = 0) :
+      """Returns cartesian images img & msk in polar coordinates pcimg[r,Phi] & pcmsk[r,Phi]
+
+         @plot    Display result of grid search                   [0/1]
+
+      """
+      self.pcimg,self.pcmsk = pnccd_tbx.get_polar(img                = self.img,
+                                                  msk                = self.msk,
+                                                  cent               = self.cent,
+                                                  r_max              = self.nQ,
+                                                  r_min              = 0,
+                                                  dr                 = self.dQ,
+                                                  nPhi               = self.nPhi,
+                                                  dPhi               = self.dPhi,
+                                                  msk_a              = self.mask_angles,
+                                                  msk_w              = self.mask_widths,
+                                                  plot               = plot)
+      # Get norm
+#      scale      = sum(sum(self.pcimg))/sum(sum(self.pcmsk))
+#      self.pcimg = self.pcimg/scale
+
+      # Apply Flat-field if available
+      if self.flat :
+         self.pcimg = self.pcimg * self.pcflat
+
+
+  def get_beam(self, angle = 45, dangle = 10, plot = 0 ) :
+      """Returns estimated beam center coordintes (cent) refined using
+         a grid search assuming Friedel symmetry in the image
+
+         @ang     Center of angular slice in degrees              [pos. integer]
+         @dang    Size of angular slice, ang+/-dang               [pos. integer]
+         @plot    Display result of grid search                   [0/1]
+
+      """
+
+      self.cent           = pnccd_tbx.get_beam(img              = self.img,
+                                               msk              = self.msk,
+                                               r_max            = self.r_max,
+                                               dr               = self.dr,
+                                               cent0            = self.cent0,
+                                               dx               = self.dx,
+                                               dy               = self.dy,
+                                               ang              = angle,
+                                               dang             = dangle,
+                                               plot             = plot)
+
+
+  def get_image(self,evt) :
+      """Retrives 2D image from event.
+
+         @run     run number from Psana
+         @time    time-stamp from Psana
+      """
+      self.run_nr         = int(evt.run())
+
+      self.evt            = evt
+      self.img            = self.src.image(self.evt)
+
+      # Check if nQ > smallest dimension/2 then we extend the image with zero values
+      if self.nQ > min(self.img.shape[0]/2,self.img.shape[1]/2) :
+         self.img   = pnccd_tbx.extend_image(img = self.img)
+
+      # Check if carttesian coord background image exists
+      if self.cart :
+         self.img = self.img - self.backimg
+
+      # CM correction, Make sure that no other CM is already implemented
+
+      self.img            = pnccd_tbx.common_mode(self.img, 150 , 100 , plot = 0)
+      self.img            = self.img*self.msk
+
+#      if self.detector_address == 'pnccdFront' :
+#           self.img            = self.img * self.gain
+
+  def get_calib(self,evt) :
+      """Retrives 2D image from event.
+
+         @run     run number from Psana
+         @time    time-stamp from Psana
+      """
+      self.run_nr         = int(evt.run())
+
+      self.evt            = evt
+
+      self.image          = self.src.calib(self.evt)
+
+
+  def get_h5(self,dfile,time) :
+      """Retrives 2D image from event.
+
+         @run     run number
+         @time    time-stamp
+      """
+
+      if dfile == 0 :
+         filename = self.dataset_name + '.h5'
+      else :
+         filename = self.dataset_name + '__' + str(dfile).zfill(4) + '.h5'
+
+      f         = h5py.File(filename,'r')
+
+      # Ascert that time-stamp exist in file
+      if time in f:
+         self.image  = f[time][self.detector_address]['HistData'].value
+      else:
+        self.image   = None
+        self.img     = None
+        return
+
+
+      # Apply common mode correction
+
+      if self.comm == 1:
+
+         self.image  = pnccd_tbx.common_mode(img     = self.image,
+                                             edge    = self.param1,
+                                             side    = self.param2,
+                                             plot    = self.param4)
+
+      elif self.comm == 2:
+
+         self.image = pnccd_tbx.common_mode_hart(img     = self.image,
+                                                 msk     = self.mask,
+                                                 max_int = self.param1,
+                                                 max_com = self.param2,
+                                                 length  = self.param3,
+                                                 orient  = self.orient,
+                                                 plot    = self.param4)
+
+      # Apply geometry
+      self.img  = pnccd_tbx.get_geometry(img    = self.image,
+                                         gap    = self.gap,
+                                         shift  = self.shift,
+                                         orient = self.orient)
+
+
+      # Check if nQ > smallest dimension/2 then we extend the image with zero values
+      if self.nQ > min(self.img.shape[0]/2,self.img.shape[1]/2) :
+         self.img   = pnccd_tbx.extend_image(img = self.img)
+
+      # Check if carttesian coord background image exists
+      if self.cart :
+         self.img = self.img - self.backimg
+
+    ###################################################################################
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/mpi_fxs_bg.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+from psana import *
+import sys
+import numpy as np
+from xfel.amo.pnccd_ana                 import pnccd_tbx
+from xfel.amo.pnccd_ana                 import pnccd_hit
+from xfel.amo.pnccd_ana                 import fxs
+import matplotlib.pyplot as plt
+from six.moves import zip
+
+plt.ion()
+########################################
+# Due to the mask sometimes having zero values
+# we're bound to get divisions with zeros at
+#times. Here ignoring those errors.
+np.seterr(divide='ignore', invalid='ignore')
+
+from libtbx.mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def h5gen(run,timestamps = None, first = None, last = None):
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps
+    nevents   = len(times)
+    mytimes,myevents  = list(zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0]))
+
+    for j in range(len(mytimes)):
+         yield myevents[j],mytimes[j]
+
+
+def idxgen(run,timestamps = None, first = None, last = None):
+    #print "idx mode"
+    #  Use timestamps from index file
+    if timestamps is  None:
+       timestamps      = run.times()
+
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = len(timestamps)
+    else:
+       last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps[first:last]
+    nevents   = len(times)
+    mytimes,myevents  = list(zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0]))
+
+    for j in range(len(mytimes)):
+         yield myevents[j],run.event(mytimes[j])
+
+
+
+def smdgen(run,timestamps = None, first = None, last = None):
+    #print "smd mode"
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = 1e20                           # We typically don't know what the last events is. So for now use a large number
+
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    if timestamps is None :
+
+       for nevent,evt in enumerate(run.events()):
+           if   nevent <  first : continue
+           elif nevent == last  : return
+           elif nevent%denom == nom:
+             yield nevent-first,evt
+
+    else :  # Only applicable for xtc format
+
+       ct = 0
+       for nevent,evt in enumerate(run.events()):
+            t = pnccd_tbx.get_psana_time(evt)
+            # Check if event exists in timestamps
+            if np.equal(t, timestamps).all(axis=1).any() :
+               if   ct <  first : continue
+               elif ct == last  : return
+               elif ct%denom == nom:
+                 yield ct,evt
+               ct += 1
+
+
+def compute_bg(argv=None) :
+
+  """Function to compute the average background images and mask from FXS images
+       extracted from xtc (smd,idx,xtc format) or h5 files.
+       Works for Single CPU, Multi-Processor interactive jobs and MPI batch jobs
+
+       For a definition of input arguments argv and batch processing instructions see  ***  mpi_fxs_launch.py ***
+
+       compute_bg produces the following output files:
+
+       * Index file : Information about the events processed including time-stamps, beam center, total intensity particle size etc
+       * I(q)       : Average Azimuthal intensities (SAXS)
+       * Bg_img     : Average image in polar coordinates
+       * Bg_norm    : Mean subtracted average image in polar coordinates
+       * Bg_msk     : Average mask image in polar coordinates
+       * Average    : Average image in cartesian coordinates
+
+  """
+
+
+  if argv == None:
+    argv = sys.argv[1:]
+
+  try:
+     from libtbx.mpi4py import MPI
+  except ImportError:
+     raise Sorry("MPI not found")
+
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+
+
+  if argv.hit is None :
+     hit        = -1.0e20                        # Process everything
+  else:
+     hit        = argv.hit      # Process everything > hit
+
+  ftype  = argv.ftype
+
+  if argv.param_path is not None :
+     if ftype == 'h5' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps,filestamps = pnccd_tbx.get_h5_event(param_file)
+     elif ftype == 'xtc' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps            = pnccd_tbx.get_time(param_file)
+     else :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1)
+        timestamps            = pnccd_tbx.get_psana_event(param_file)
+  else:
+     timestamps = None
+
+  # The first and last events to processed
+  first = argv.first
+  last  = argv.last
+
+
+  # Check data format
+
+  if ftype == 'h5' :
+       import h5py
+       run          = int(argv.run)
+
+       # Get time-stamps from all h5-files
+       if argv.param_path is None :
+          timestamps = []
+          filestamps = []
+          # Loop over all h5-files and store the time-stamps
+          for i in os.listdir(argv.xtc_dir):
+              if i.endswith(".h5"):
+                 f  = h5py.File(i,'r')
+                 filestamps.append(i[-7:-4])
+                 timestamps.append(list(f.keys()))
+                 continue
+              else:
+                 continue
+
+       dataset_name = "%s-r%s"%(argv.experiment, str(argv.run).zfill(4)) # Ascert 4 digit run number
+       exprun       = os.path.join(argv.xtc_dir,dataset_name)
+
+       if argv.first is None :
+          first   = 0
+
+       if argv.last is None :
+          last    = len(timestamps)
+       else:
+          last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+       timestamps = timestamps[first:last]
+       filestamps = filestamps[first:last]
+
+
+       evtgen       = h5gen
+
+  else :
+
+       exprun = "exp=%s:run=%d"%(argv.experiment, argv.run)
+       if (ftype == 'xtc') :
+           dataset_name = exprun+':xtc'
+       elif (ftype == 'idx') :
+           dataset_name = exprun+':idx'
+       elif(ftype == 'idx_ffb') :
+           dataset_name = exprun+':idx'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc"%(argv.experiment[0:3],argv.experiment)
+       elif(ftype == 'smd') :
+           dataset_name = exprun+':smd'
+       elif(ftype == 'smd_ffb') :
+           dataset_name = exprun+':smd'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here ADD live!
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc:live"%(argv.experiment[0:3],argv.experiment)
+           exprun = dataset_name
+
+       ds           = DataSource(dataset_name)
+       run          = next(ds.runs())
+
+       # Select event generator
+       if    (ftype=='smd') or (ftype == 'smd_ffb') or (ftype == 'xtc'):
+         evtgen = smdgen
+       elif  (ftype=='idx') or (ftype == 'idx_ffb'):
+         evtgen = idxgen
+
+  if size == 1:
+     plot = argv.plot
+  else:
+     plot = 0
+
+  FXS  = fxs.fluctuation_scattering(dataset_name                     = exprun,
+                                    detector_address                 = argv.address,
+                                    data_type                        = argv.ftype,
+                                    mask_path                        = argv.mask_path,
+                                    mask_angles                      = None, #np.array([88, 270]),    # static masking at 88 and 270 deg
+                                    mask_widths                      = None, #np.array([6,  10]),     # +/- degrees
+                                    backimg_path                     = argv.bg_img_path,
+                                    backmsk_path                     = argv.bg_msk_path,
+                                    geom_path                        = argv.geom_path,
+                                    det_dist                         = argv.det_distance,
+                                    det_pix                          = argv.det_pixel,
+                                    beam_l                           = argv.lambda_b,
+                                    mask_thr                         = argv.thr,
+                                    nQ                               = argv.nQ,
+                                    nPhi                             = argv.nPhi,
+                                    dQ                               = argv.dQ,
+                                    dPhi                             = argv.dP,
+                                    cent0                            = [argv.x,argv.y],
+                                    r_max                            = argv.r_max,
+                                    dr                               = argv.dr,
+                                    dx                               = argv.dx,
+                                    dy                               = argv.dy,
+                                    r_0                              = argv.r0,
+                                    q_bound                          = argv.q_bound)
+
+
+  # Initialize iterator
+  FXS.cnt       = np.array([0.])
+
+
+  # Initialize Index variables
+  if argv.param_path is None :
+     maxevents = 400000          # We don't always know the total nr of events. Therefore set to large value
+  else:
+     maxevents = min(len(timestamps),len(timestamps[first:last]))
+
+  FXS.get_index(maxevents)
+  # chop the list into pieces, depending on rank.  This assigns each process
+  # events such that the get every Nth event where N is the number of processes
+
+  if size > 1 :
+     if rank > 0 :
+
+        hd=pnccd_hit.hit()
+
+        # MPI process. Here we set rank 0 to work as a listening server only.
+        for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+            #print '***',rank,j,evt.get(EventId).fiducials()
+            if j%10==0: print('Rank',rank,'processing event',j)
+
+            if ftype == 'h5' :
+               FXS.get_h5(filestamps[j],evt)
+            else :
+               FXS.get_image(evt)
+
+            # Process hits
+            if (FXS.img is not None) and (float(FXS.img.sum()) > hit) :
+
+               FXS.get_beam(plot = plot)                                        # Beam center refinement
+               FXS.get_polar(plot = plot)                                       # Polar transform
+               FXS.get_streak_mask(plot = plot)                                 # Mask out streaks
+               FXS.get_pixel_mask(plot = plot)                                  # Mask out pixels
+               FXS.get_norm(plot = plot)                                        # Normalize image, get SAXS
+
+               if FXS.r_0 is not None :
+                  FXS.get_size()
+
+               if ftype == 'h5' :
+                  FXS.store_index_h5(evt, j)
+               else:
+                  ######################################
+                  # Ugly way to get the time-stamps. Fix!!
+                  time = evt.get(EventId).time()
+                  fid = evt.get(EventId).fiducials()
+                  sec  = time[0]
+                  nsec = time[1]
+                  et = EventTime(int((sec<<32)|nsec),fid)
+                  #######################################
+                  FXS.store_index(et, j)                                                # Store index
+               FXS.sum_bg()                                                     # Sum Background
+
+               if int(FXS.cnt)%10==0: print('Rank',rank,'processed events: ', int(FXS.cnt))
+
+
+               # Send partial results to master (rank 0)
+               if (int(FXS.cnt) > 0) and (int(FXS.cnt) % 100 == 0):             # Send every 100 events
+
+                  tmp_n    = int(FXS.cnt)
+
+                  # Average image
+                  tmp_im   = FXS.ave / tmp_n
+
+                  # Total intensity, Size and Score
+                  tmp_ind = np.column_stack((FXS.tot_int,FXS.tot_size,FXS.tot_score))
+
+                  hd.send(tmp_n, image = tmp_im, ind=tmp_ind)
+
+            FXS.cnt  += 1
+
+
+        hd.endrun()
+
+     else:
+
+        if ftype == 'h5' :
+           FXS.run_nr      = run
+        else:
+           FXS.run_nr      = int(run.run())
+
+        hd              = pnccd_hit.hit()
+        adim            = FXS.ave.shape
+        idim            = (maxevents,3)
+
+        hd.total_ave    = [np.zeros(adim)]*(size-1)
+        hd.total_ind    = [np.zeros(idim)]*(size-1)
+        hd.total_ev_a   = [0.0]*(size-1)
+        hd.total_ev_i   = [0.0]*(size-1)
+
+        nClients = size - 1
+
+        while nClients > 0:
+            # Remove client if the run ended
+            if hd.recv():
+               nClients -= 1
+            else:
+               na = sum(hd.total_ev_a)
+               ni = sum(hd.total_ev_i)
+
+               if  (na == ni) and  (na % 100 == 0) :                                            # Publish every 100 events
+
+
+                  AVE     = np.zeros(adim)
+                  IND     = np.zeros(idim)
+
+                  for i in range(size-1) :
+                      AVE     = AVE     + (hd.total_ave[i] * (hd.total_ev_a[i] /na))
+                      IND     = IND     + hd.total_ind[i]
+
+                  FXS.publish(image = AVE, ind=IND, n_a=na, n_i=ni)
+
+
+  else :
+
+
+     # Single CPU
+     for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+         #print '***',rank,j,evt.get(EventId).fiducials()
+         if j%10==0: print('Rank',rank,'processing event',j)
+
+         if ftype == 'h5' :
+            FXS.get_h5(filestamps[j],evt)
+         else :
+            FXS.get_image(evt)
+
+         # Process hits
+         if (FXS.img is not None) and (float(FXS.img.sum()) > hit) :
+
+             FXS.get_beam(plot = plot)                                      # Beam center refinement
+             FXS.get_polar(plot = plot)                                     # Polar transform
+             FXS.get_streak_mask(plot = plot)                               # Mask out streaks
+             FXS.get_pixel_mask(plot = plot)                                # Mask out pixels
+             FXS.get_norm(plot = plot)                                      # Normalize image, get SAXS
+
+             if FXS.r_0 is not None :
+                FXS.get_size()
+
+             if ftype == 'h5' :
+                FXS.store_index_h5(evt, j)
+             else:
+                ######################################
+                # Ugly way to get the time-stamps. Fix!!
+                time = evt.get(EventId).time()
+                fid = evt.get(EventId).fiducials()
+                sec  = time[0]
+                nsec = time[1]
+                et = EventTime(int((sec<<32)|nsec),fid)
+                #######################################
+                FXS.store_index(et, j)                                              # Store index
+             FXS.sum_bg()                                                   # Sum Background
+
+             FXS.cnt  += 1
+
+     print('Rank',rank,'total events:   ', int(FXS.cnt),' * ')
+
+
+  #sum the images across mpi cores
+  if size > 1:
+    print("Synchronizing rank", rank)
+
+  Tot         = np.zeros(FXS.cnt.shape)
+  comm.Reduce(FXS.cnt,Tot)
+
+
+
+  if rank == 0 and Tot[0] == 0 :
+    raise Sorry("No events found in the run")
+
+  # Collect Background variables
+
+  if not hasattr(FXS, 'ave'):
+     FXS.ave        = np.zeros(FXS.msk.shape)
+  if not hasattr(FXS, 'Isaxs'):
+     FXS.Isaxs      = np.zeros(FXS.q.shape)
+  if not hasattr(FXS, 'Vsaxs'):
+     FXS.Vsaxs      = np.zeros(FXS.q.shape)
+  if not hasattr(FXS, 'Back_img'):
+     FXS.Back_img   = np.zeros((len(FXS.q),len(FXS.phi)))
+  if not hasattr(FXS, 'Back_norm'):
+     FXS.Back_norm  = np.zeros((len(FXS.q),len(FXS.phi)))
+  if not hasattr(FXS, 'Back_msk_0'):
+     FXS.Back_msk   = np.zeros((len(FXS.q),len(FXS.phi)))
+
+
+  AVE_all           = np.zeros(FXS.ave.shape)
+  comm.Reduce(FXS.ave,AVE_all)
+
+  BG_img_all        = np.zeros(FXS.Back_img.shape)
+  comm.Reduce(FXS.Back_img,BG_img_all)
+
+  BG_msk_all        = np.zeros(FXS.Back_msk.shape)
+  comm.Reduce(FXS.Back_msk,BG_msk_all)
+
+  BG_norm_all       = np.zeros(FXS.Back_norm.shape)
+  comm.Reduce(FXS.Back_norm,BG_norm_all)
+
+  SAXS_all          = np.zeros(FXS.Isaxs.shape)
+  comm.Reduce(FXS.Isaxs,SAXS_all)
+
+  VAR_all           = np.zeros(FXS.Vsaxs.shape)
+  comm.Reduce(FXS.Vsaxs,VAR_all)
+
+
+  # Collect Indexing variables
+
+  Tot_t       = np.zeros(FXS.tot_t.shape)
+  comm.Reduce(FXS.tot_t,Tot_t)
+
+  Tot_s       = np.zeros(FXS.tot_s.shape)
+  comm.Reduce(FXS.tot_s,Tot_s)
+
+  Tot_ns      = np.zeros(FXS.tot_ns.shape)
+  comm.Reduce(FXS.tot_ns,Tot_ns)
+
+  Tot_fd      = np.zeros(FXS.tot_fd.shape)
+  comm.Reduce(FXS.tot_fd,Tot_fd)
+
+  Tot_int     = np.zeros(FXS.tot_int.shape)
+  comm.Reduce(FXS.tot_int,Tot_int)
+
+  Tot_cx     = np.zeros(FXS.tot_cx.shape)
+  comm.Reduce(FXS.tot_cx,Tot_cx)
+
+  Tot_cy     = np.zeros(FXS.tot_cy.shape)
+  comm.Reduce(FXS.tot_cy,Tot_cy)
+
+  Tot_size   = np.zeros(FXS.tot_size.shape)
+  comm.Reduce(FXS.tot_size,Tot_size)
+
+  Tot_score  = np.zeros(FXS.tot_score.shape)
+  comm.Reduce(FXS.tot_score,Tot_score)
+
+
+  # Reduce results
+
+  if rank==0:
+
+    if size > 1:
+      print("Synchronized")
+
+    # Write out data
+
+    if argv.outputdir is None:
+        opath = os.getcwd()
+    else:
+        opath = argv.outputdir
+
+    Tot         = int(Tot)
+
+    Isaxs_ave    = SAXS_all / Tot
+    Isaxs_std    = np.sqrt( VAR_all / Tot )
+
+    Ave          = AVE_all / Tot
+
+    tmp          = np.copy(BG_msk_all)
+    ind          = tmp == 0
+    tmp[ind]     = 1.0
+    Bg_img       = BG_img_all / tmp
+    Bg_norm      = BG_norm_all / tmp
+
+    Bg_msk       = np.ones(tmp.shape)
+    Bg_msk[ind]  = 0.0
+
+
+    f_index     = os.path.join(opath,'Index_run' + str(argv.run) + '.dat')
+    stamps      = ['Time','Seconds','Nanoseconds','Fiducial','Total Intensity','Beam X','Beam Y','Radius [Ang]','Score']
+    head        ="                 ".join(stamps)
+
+    f_ave       = os.path.join(opath,'Average_run' + str(argv.run) + '_'+ str(Tot) + '.dat')
+    f_saxs      = os.path.join(opath,'Saxs_run' + str(argv.run) + '_'+ str(Tot) + '.dat')
+    f_bg_im     = os.path.join(opath,'Bg_img_' + str(argv.run) + '_'+ str(Tot) + '.dat')
+    f_bg_norm   = os.path.join(opath,'Bg_norm_' + str(argv.run) + '_'+ str(Tot) + '.dat')
+    f_bg_ms     = os.path.join(opath,'Bg_msk_' + str(argv.run) + '_'+ str(Tot) + '.dat')
+    stamps_s    = ['q','Mean','Std']
+    head_s      ="                 ".join(stamps_s)
+
+
+    # Get rid of zero lines add the end
+    # Last non-zero intensity
+    nz   = np.nonzero(Tot_t)
+    fend = nz[0][-1]+1
+
+    f              = open(f_index,'w')
+    np.savetxt(f,np.c_[Tot_t[:fend],Tot_s[:fend],Tot_ns[:fend],Tot_fd[:fend],Tot_int[:fend],Tot_cx[:fend],Tot_cy[:fend],Tot_size[:fend],Tot_score[:fend]],header = head, comments='' )
+    f.close()
+
+    f              = open(f_ave,'w')
+    np.savetxt(f,Ave)
+    f.close()
+
+    f              = open(f_saxs,'w')
+    np.savetxt(f,np.c_[FXS.q,Isaxs_ave,Isaxs_std],header = head_s, comments='')
+    f.close()
+
+    f              = open(f_bg_im,'w')
+    np.savetxt(f,Bg_img)
+    f.close()
+
+    f              = open(f_bg_norm,'w')
+    np.savetxt(f,Bg_norm)
+    f.close()
+
+    f           = open(f_bg_ms,'w')
+    np.savetxt(f,Bg_msk)
+    f.close()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/mpi_fxs_c2.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+from psana import *
+import sys
+import numpy as np
+from xfel.amo.pnccd_ana             import pnccd_tbx
+from xfel.amo.pnccd_ana             import pnccd_hit
+from xfel.amo.pnccd_ana             import fxs
+import matplotlib.pyplot as plt
+from six.moves import zip
+
+
+plt.ion()
+########################################
+# Due to the mask sometimes having zero values
+# we're bound to get divisions with zeros at
+#times. Here ignoring those errors.
+np.seterr(divide='ignore', invalid='ignore')
+
+from libtbx.mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def h5gen(run,timestamps = None, first = None, last = None):
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],mytimes[j]
+
+
+def idxgen(run,timestamps = None, first = None, last = None):
+    #print "idx mode"
+    #  Use timestamps from index file
+    if timestamps is  None:
+       timestamps      = run.times()
+
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = len(timestamps)
+    else:
+       last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps[first:last]
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],run.event(mytimes[j])
+
+
+
+def smdgen(run,timestamps = None, first = None, last = None):
+    #print "smd mode"
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = 1e20                           # We typically don't know what the last events is. So for now use a large number
+
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    if timestamps is None :
+
+       for nevent,evt in enumerate(run.events()):
+           if   nevent <  first : continue
+           elif nevent == last  : return
+           elif nevent%denom == nom:
+             yield nevent-first,evt
+
+    else :  # Only applicable for xtc format
+
+       ct = 0
+       for nevent,evt in enumerate(run.events()):
+            t = pnccd_tbx.get_psana_time(evt)
+            # Check if event exists in timestamps
+            if np.equal(t, timestamps).all(axis=1).any() :
+               if   ct <  first : continue
+               elif ct == last  : return
+               elif ct%denom == nom:
+                 yield ct,evt
+               ct += 1
+
+
+
+def compute_c2(argv=None) :
+
+  """Function to compute the average angular intensity function, <C2(q,dPhi)>, from FXS images
+       extracted from xtc (smd,idx,xtc format) or h5 files.
+       Works for Single CPU, Multi-Processor interactive jobs and MPI batch jobs
+
+       For a definition of input arguments argv and batch processing instructions see  ***  mpi_fxs_launch.py ***
+
+       compute_c2 produces the following output files:
+
+       * Index file : Information about the events processed including time-stamps, beam center, total and peak intensities, streak locations, particle size etc
+       * I(q)       : Average Azimuthal intensities (SAXS)
+       * C2(q,dPhi) : Average 2-point correlation functions (FXS)
+       * Bg_img     : Average image in polar coordinates
+       * Bg_norm    : Mean subtracted average image in polar coordinates
+       * Bg_msk     : Average mask image in polar coordinates
+
+       The I and C2 output data are split in 2 ~equal bins [0 and 1] for statistical comparison to be made
+
+       example:
+                C2_run111_0_29793.dat  is the average C2(q,dPhi) from run111 bin 0 where 29,793 images have been processed
+                C2_run111_1_29718.dat  is the average C2(q,dPhi) from run111 bin 1 where 29,718 images have been processed
+
+  """
+
+  if argv == None:
+     argv = sys.argv[1:]
+
+  try:
+     from libtbx.mpi4py import MPI
+  except ImportError:
+     raise Sorry("MPI not found")
+
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+
+
+  if argv.hit is None :
+     hit        = -1.0e20       # Process everything
+  else:
+     hit        = argv.hit      # Process everything > hit
+
+  ftype  = argv.ftype
+
+  if argv.param_path is not None :
+     if ftype == 'h5' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps,filestamps = pnccd_tbx.get_h5_event(param_file)
+     elif ftype == 'xtc' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps            = pnccd_tbx.get_time(param_file)
+     else :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1)
+        timestamps            = pnccd_tbx.get_psana_event(param_file)
+  else:
+     timestamps = None
+
+  # The first and last events to processed
+  first = argv.first
+  last  = argv.last
+
+
+  # Check data format
+
+  if ftype == 'h5' :
+       import h5py
+       run          = int(argv.run)
+
+       # Get time-stamps from all h5-files
+       if argv.param_path is None :
+          timestamps = []
+          filestamps = []
+          # Loop over all h5-files and store the time-stamps
+          for i in os.listdir(argv.xtc_dir):
+              if i.endswith(".h5"):
+                 f  = h5py.File(i,'r')
+                 filestamps.append(i[-7:-4])
+                 timestamps.append(list(f.keys()))
+                 continue
+              else:
+                 continue
+
+       dataset_name = "%s-r%s"%(argv.experiment, str(argv.run).zfill(4)) # Ascert 4 digit run number
+       exprun       = os.path.join(argv.xtc_dir,dataset_name)
+
+       if argv.first is None :
+          first   = 0
+
+       if argv.last is None :
+          last    = len(timestamps)
+       else:
+          last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+       timestamps = timestamps[first:last]
+       filestamps = filestamps[first:last]
+
+
+       evtgen       = h5gen
+
+  else :
+
+       exprun = "exp=%s:run=%d"%(argv.experiment, argv.run)
+       if (ftype == 'xtc') :
+           dataset_name = exprun+':xtc'
+       elif (ftype == 'idx') :
+           dataset_name = exprun+':idx'
+       elif(ftype == 'idx_ffb') :
+           dataset_name = exprun+':idx'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc"%(argv.experiment[0:3],argv.experiment)
+       elif(ftype == 'smd') :
+           dataset_name = exprun+':smd'
+       elif(ftype == 'smd_ffb') :
+           dataset_name = exprun+':smd'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here ADD live!
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc:live"%(argv.experiment[0:3],argv.experiment)
+           exprun = dataset_name
+
+       ds           = DataSource(dataset_name)
+       run          = next(ds.runs())
+
+       # Select event generator
+       if    (ftype=='smd') or (ftype == 'smd_ffb') or (ftype == 'xtc'):
+         evtgen = smdgen
+       elif  (ftype=='idx') or (ftype == 'idx_ffb'):
+         evtgen = idxgen
+
+
+  if size == 1:
+     plot = argv.plot
+  else:
+     plot = 0
+
+
+  FXS  = fxs.fluctuation_scattering(dataset_name                     = exprun,
+                                    detector_address                 = argv.address,
+                                    data_type                        = argv.ftype,
+                                    mask_path                        = argv.mask_path,
+                                    mask_angles                      = None,#np.array([88, 270]),    # static masking at 88 and 270 deg
+                                    mask_widths                      = None,#np.array([6,  10]),     # +/- degrees
+                                    backimg_path                     = argv.bg_img_path,
+                                    backmsk_path                     = argv.bg_msk_path,
+                                    geom_path                        = argv.geom_path,
+                                    det_dist                         = argv.det_distance,
+                                    det_pix                          = argv.det_pixel,
+                                    beam_l                           = argv.lambda_b,
+                                    mask_thr                         = argv.thr,
+                                    nQ                               = argv.nQ,
+                                    nPhi                             = argv.nPhi,
+                                    dQ                               = argv.dQ,
+                                    dPhi                             = argv.dP,
+                                    cent0                            = [argv.x,argv.y],
+                                    r_max                            = argv.r_max,
+                                    dr                               = argv.dr,
+                                    dx                               = argv.dx,
+                                    dy                               = argv.dy,
+                                    r_0                              = argv.r0,
+                                    q_bound                          = argv.q_bound,
+                                    peak                             = [0.037, 0.064],              # Location in q for peaks to be integrated
+                                    dpeak                            = [0.002, 0.002])              # Width    in q for peaks to be integrated
+
+
+  # Initialize iterator
+  FXS.cnt_0 = np.array([0.])
+  FXS.cnt_1 = np.array([0.])
+
+  # Initialize Index variables
+  if argv.param_path is None :
+     maxevents = 400000          # We don't always know the total nr of events. Therefore set to large value
+  else:
+     maxevents = min(len(timestamps),len(timestamps[first:last]))
+
+
+  FXS.get_index(maxevents)
+  # chop the list into pieces, depending on rank.  This assigns each process
+  # events such that the get every Nth event where N is the number of processes
+
+  if size > 1 :
+     if rank > 0 :
+
+        hd=pnccd_hit.hit()
+
+        # MPI process. Here we set rank 0 to work as a listening server only.
+        for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+            #print '***',rank,j,evt.get(EventId).fiducials()
+            if j%10==0: print('Rank',rank,'processing event',j)
+
+            if ftype == 'h5' :
+               FXS.get_h5(filestamps[j],evt)
+            else :
+               FXS.get_image(evt)
+
+            # Process hits
+
+            if (FXS.img is not None) and (float(FXS.img.sum()) > hit)  :
+
+               FXS.get_beam(plot = plot)                                        # Beam center refinement
+               FXS.get_polar(plot = plot)                                       # Polar transform
+               FXS.get_streak_mask(plot = plot)                                 # Mask out streaks
+               FXS.get_pixel_mask(plot = plot)                                  # Mask out pixels
+               FXS.get_norm(plot = plot)                                        # Normalize image, get SAXS
+
+               FXS.get_c2(plot = plot)                                          # Compute C2
+
+               # Split upp into 2 half sets
+               if int(FXS.cnt_0 + FXS.cnt_1) % 2 == 0:
+                  FXS.sum_c2(flag = 0)                                          # Accumulate C2 for Half I
+               else:
+                  FXS.sum_c2(flag = 1)                                          # Accumulate C2 for Half II
+
+               if FXS.r_0 is not None :
+                  FXS.get_size()
+
+               FXS.sum_bg2()                                                    # Sum Background
+
+
+               if ftype == 'h5' :
+                  FXS.store_index_h5(evt, j)
+               else:
+                  ######################################
+                  # Ugly way to get the time-stamps. Fix!!
+                  time = evt.get(EventId).time()
+                  fid = evt.get(EventId).fiducials()
+                  sec  = time[0]
+                  nsec = time[1]
+                  et = EventTime(int((sec<<32)|nsec),fid)
+                  #######################################
+                  FXS.store_index(et, j)                                       # Store index
+
+               if int(FXS.cnt_0 + FXS.cnt_1)%10==0: print('Rank',rank,'processed events: ', int(FXS.cnt_0 + FXS.cnt_1))
+
+
+               # Send partial results to master (rank 0)
+               if int(FXS.cnt_0 + FXS.cnt_1) % 50 == 0:                        # Send every 50 events
+
+
+                  # C2 and Saxs data
+                  tmp_n    = int(FXS.cnt_0   +  FXS.cnt_1)
+                  tmp_saxs = (FXS.Isaxs_0 +  FXS.Isaxs_1) / tmp_n
+                  tmp_c2   = (FXS.C2_0    +  FXS.C2_1) / (FXS.C2m_0   +  FXS.C2m_1)
+
+
+                  # Average image
+                  tmp_im   = FXS.ave / tmp_n
+
+                  # Ascert no nan values
+                  tmp_saxs[np.isnan(tmp_saxs)] = 0
+                  tmp_c2[np.isnan(tmp_c2)]     = 0
+
+                  # Total intensity, Size and Score
+
+                  tmp_ind = np.column_stack((FXS.tot_int,FXS.tot_size,FXS.tot_score))
+
+                  hd.send(tmp_n,image = tmp_im, saxs=tmp_saxs,c2=tmp_c2,ind=tmp_ind)
+
+
+
+
+        hd.endrun()
+
+        print('Rank',rank,'total events:     ', int(FXS.cnt_0 + FXS.cnt_1),' * ')
+
+     else:
+
+        if ftype == 'h5' :
+           FXS.run_nr      = run
+        else:
+           FXS.run_nr      = int(run.run())
+
+
+        hd              = pnccd_hit.hit()
+
+        adim            = FXS.ave.shape
+        sdim            = len(FXS.q)
+        cdim            = (len(FXS.q),len(FXS.phi))
+        idim            = (maxevents,3)
+
+
+        hd.total_ave    = [np.zeros(adim)]*(size-1)
+        hd.total_c2     = [np.zeros(cdim)]*(size-1)
+        hd.total_ind    = [np.zeros(idim)]*(size-1)
+        hd.total_saxs   = [np.zeros(sdim)]*(size-1)
+        hd.total_ev_a   = [0.0]*(size-1)
+        hd.total_ev_c   = [0.0]*(size-1)
+        hd.total_ev_s   = [0.0]*(size-1)
+        hd.total_ev_i   = [0.0]*(size-1)
+
+        nClients = size - 1
+
+        while nClients > 0:
+            # Remove client if the run ended
+            if hd.recv():
+               nClients -= 1
+            else:
+               na = sum(hd.total_ev_a)
+               ns = sum(hd.total_ev_s)
+               nc = sum(hd.total_ev_c)
+               ni = sum(hd.total_ev_i)
+
+               if (na == ns ==  nc == ni) and (ns % 100 == 0) : # Publish every 100 events
+
+                  AVE     = np.zeros(adim)
+                  C2ave   = np.zeros(cdim)
+                  SAXSave = np.zeros(sdim)
+                  IND     = np.zeros(idim)
+
+                  for i in range(size-1) :
+                      AVE     = AVE     + (hd.total_ave[i] * (hd.total_ev_a[i] /na))
+                      C2ave   = C2ave   + (hd.total_c2[i] * (hd.total_ev_c[i] /nc))
+                      SAXSave = SAXSave + (hd.total_saxs[i] * (hd.total_ev_s[i] /ns))
+                      IND     = IND     + hd.total_ind[i]
+
+                  FXS.publish(image = AVE, saxs=SAXSave, c2=C2ave, ind=IND, n_a=na, n_saxs=ns, n_c2=nc, n_i=ni)
+
+
+  else :
+
+
+     # Single CPU
+
+
+     for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+         #print '***',rank,j,evt.get(EventId).fiducials()
+         if j%10==0: print('Rank',rank,'processing event',j)
+
+
+         if ftype == 'h5' :
+            FXS.get_h5(filestamps[j],evt)
+         else :
+            FXS.get_image(evt)
+
+
+         # Process hits
+         if (FXS.img is not None) and (float(FXS.img.sum()) > hit) :
+
+             FXS.get_beam(plot=plot)                                      # Beam center refinement
+             FXS.get_polar()                                              # Polar transform
+             FXS.get_streak_mask(plot=plot)                               # Mask out streaks
+             FXS.get_pixel_mask(plot=plot)                                # Mask out pixels
+             FXS.get_norm(plot=plot)                                      # Normalize image, get SAXS
+             FXS.get_c2(plot=plot)                                        # Compute C2
+
+
+             # Split upp into 2 half sets
+             if int(FXS.cnt_0 + FXS.cnt_1) % 2 == 0:
+                FXS.sum_c2(flag = 0)                                     # Accumulate C2 for Half I
+             else:
+                FXS.sum_c2(flag = 1)                                     # Accumulate C2 for Half II
+
+             if FXS.r_0 is not None :
+                FXS.get_size()
+
+
+             FXS.sum_bg2()                                              # Sum Background
+
+             if ftype == 'h5' :
+                FXS.store_index_h5(evt, j)
+             else:
+                ######################################
+                # Ugly way to get the time-stamps. Fix!!
+                time = evt.get(EventId).time()
+                fid = evt.get(EventId).fiducials()
+                sec  = time[0]
+                nsec = time[1]
+                et = EventTime(int((sec<<32)|nsec),fid)
+                #######################################
+                FXS.store_index(et, j)                                  # Store index
+
+     print('Rank',rank,'total events:   ', int(FXS.cnt_0 + FXS.cnt_1),' * ')
+
+
+  #sum the images across mpi cores
+  if size > 1:
+    print("Synchronizing rank", rank)
+
+  Tot_0          = np.zeros(FXS.cnt_0.shape)
+  Tot_1          = np.zeros(FXS.cnt_1.shape)
+
+  comm.Reduce(FXS.cnt_0,Tot_0)
+  comm.Reduce(FXS.cnt_1,Tot_1)
+
+
+  if rank == 0 and Tot_0[0] == 0 and Tot_1[0]:
+    raise Sorry("No events found in the run")
+
+
+  if not hasattr(FXS, 'Isaxs_0'):
+     FXS.Isaxs_0    = np.zeros(FXS.q.shape)
+  if not hasattr(FXS, 'Vsaxs_0'):
+     FXS.Vsaxs_0    = np.zeros(FXS.q.shape)
+  if not hasattr(FXS, 'C2_0'):
+     FXS.C2_0       = np.zeros((len(FXS.q),len(FXS.phi)))
+  if not hasattr(FXS, 'C2m_0'):
+     FXS.C2m_0      = np.zeros((len(FXS.q),len(FXS.phi)))
+
+  if not hasattr(FXS, 'Isaxs_1'):
+     FXS.Isaxs_1    = np.zeros(FXS.q.shape)
+  if not hasattr(FXS, 'Vsaxs_1'):
+     FXS.Vsaxs_1    = np.zeros(FXS.q.shape)
+  if not hasattr(FXS, 'C2_1'):
+     FXS.C2_1       = np.zeros((len(FXS.q),len(FXS.phi)))
+  if not hasattr(FXS, 'C2m_1'):
+     FXS.C2m_1      = np.zeros((len(FXS.q),len(FXS.phi)))
+
+  if not hasattr(FXS, 'Back_img'):
+     FXS.Back_img   = np.zeros((len(FXS.q),len(FXS.phi)))
+  if not hasattr(FXS, 'Back_norm'):
+     FXS.Back_norm  = np.zeros((len(FXS.q),len(FXS.phi)))
+  if not hasattr(FXS, 'Back_msk'):
+     FXS.Back_msk   = np.zeros((len(FXS.q),len(FXS.phi)))
+
+
+
+  # Collect  Variables
+
+  SAXS_0_all     = np.zeros(FXS.Isaxs_0.shape)
+  comm.Reduce(FXS.Isaxs_0,SAXS_0_all)
+
+  VAR_0_all      = np.zeros(FXS.Vsaxs_0.shape)
+  comm.Reduce(FXS.Vsaxs_0,VAR_0_all)
+
+  C2_0_all       = np.zeros(FXS.C2_0.shape)
+  comm.Reduce(FXS.C2_0,C2_0_all)
+
+  C2m_0_all      = np.zeros(FXS.C2m_0.shape)
+  comm.Reduce(FXS.C2m_0,C2m_0_all)
+
+  SAXS_1_all     = np.zeros(FXS.Isaxs_1.shape)
+  comm.Reduce(FXS.Isaxs_1,SAXS_1_all)
+
+  VAR_1_all     = np.zeros(FXS.Vsaxs_1.shape)
+  comm.Reduce(FXS.Vsaxs_1,VAR_1_all)
+
+  C2_1_all       = np.zeros(FXS.C2_1.shape)
+  comm.Reduce(FXS.C2_1,C2_1_all)
+
+  C2m_1_all      = np.zeros(FXS.C2m_1.shape)
+  comm.Reduce(FXS.C2m_1,C2m_1_all)
+
+
+  # Collect Indexing variables
+
+  Tot_t       = np.zeros(FXS.tot_t.shape)
+  comm.Reduce(FXS.tot_t,Tot_t)
+
+  Tot_s       = np.zeros(FXS.tot_s.shape)
+  comm.Reduce(FXS.tot_s,Tot_s)
+
+  Tot_ns      = np.zeros(FXS.tot_ns.shape)
+  comm.Reduce(FXS.tot_ns,Tot_ns)
+
+  Tot_fd      = np.zeros(FXS.tot_fd.shape)
+  comm.Reduce(FXS.tot_fd,Tot_fd)
+
+  Tot_int     = np.zeros(FXS.tot_int.shape)
+  comm.Reduce(FXS.tot_int,Tot_int)
+
+  Tot_peak1   = np.zeros(FXS.tot_peak1_int.shape)
+  comm.Reduce(FXS.tot_peak1_int,Tot_peak1)
+
+  Tot_peak2   = np.zeros(FXS.tot_peak2_int.shape)
+  comm.Reduce(FXS.tot_peak2_int,Tot_peak2)
+
+  Tot_s_m    = np.zeros(FXS.tot_streak_m.shape)
+  comm.Reduce(FXS.tot_streak_m,Tot_s_m)
+
+  Tot_s_s    = np.zeros(FXS.tot_streak_s.shape)
+  comm.Reduce(FXS.tot_streak_s,Tot_s_s)
+
+  Tot_cx     = np.zeros(FXS.tot_cx.shape)
+  comm.Reduce(FXS.tot_cx,Tot_cx)
+
+  Tot_cy     = np.zeros(FXS.tot_cy.shape)
+  comm.Reduce(FXS.tot_cy,Tot_cy)
+
+  Tot_size   = np.zeros(FXS.tot_size.shape)
+  comm.Reduce(FXS.tot_size,Tot_size)
+
+  Tot_score  = np.zeros(FXS.tot_score.shape)
+  comm.Reduce(FXS.tot_score,Tot_score)
+
+
+  # Collect background variables
+
+  BG_img_all        = np.zeros(FXS.Back_img.shape)
+  comm.Reduce(FXS.Back_img,BG_img_all)
+
+  BG_norm_all       = np.zeros(FXS.Back_norm.shape)
+  comm.Reduce(FXS.Back_norm,BG_norm_all)
+
+  BG_msk_all        = np.zeros(FXS.Back_msk.shape)
+  comm.Reduce(FXS.Back_msk,BG_msk_all)
+
+
+  # Reduce results
+
+  if rank==0:
+
+    if size > 1:
+      print("Synchronized")
+
+    # Write out data
+
+    if argv.outputdir is None:
+        opath = os.getcwd()
+    else:
+        opath = argv.outputdir
+
+    f_saxs0     = os.path.join(opath,'Saxs_run' + str(argv.run) + '_0_'+ str(int(Tot_0)) + '.dat')
+    f_saxs1     = os.path.join(opath,'Saxs_run' + str(argv.run) + '_1_'+ str(int(Tot_1)) + '.dat')
+    stamps_s    = ['q','Mean','Std']
+    head_s      ="                 ".join(stamps_s)
+
+    f_c0        = os.path.join(opath,'C2_run' + str(argv.run) + '_0_'+ str(int(Tot_0)) + '.dat')
+    f_c1        = os.path.join(opath,'C2_run' + str(argv.run) + '_1_'+ str(int(Tot_1)) + '.dat')
+    stamps_c    = ['C2']
+    head_c      ="                 ".join(stamps_c)
+
+    f_index     = os.path.join(opath,'Index_run' + str(argv.run) + '.dat')
+    stamps      = ['Time','Seconds','Nanoseconds','Fiducial','Total Intensity','Peak1, q='+str(FXS.peak[0])+'+/-'+str(FXS.dpeak[0]),'Peak2, q='+str(FXS.peak[1])+'+/-'+str(FXS.dpeak[1]),'Mean streak angle','Std streak angle','Beam X','Beam Y','Radius [Ang]','Score']
+    head        ="                 ".join(stamps)
+
+
+
+    Tot_0          = int(Tot_0)
+    Isaxs_ave_0    = SAXS_0_all / Tot_0
+    Isaxs_std_0    = np.sqrt( VAR_0_all / Tot_0 )
+    C2_ave_0       = ( C2_0_all / Tot_0 )   / ( C2m_0_all / Tot_0 )
+
+    Tot_1          = int(Tot_1)
+    Isaxs_ave_1    = SAXS_1_all / Tot_1
+    Isaxs_std_1    = np.sqrt( VAR_1_all / Tot_1 )
+    C2_ave_1       = ( C2_1_all / Tot_1 )   / ( C2m_1_all / Tot_1 )
+
+    # Prepare background
+    tmp2           = np.copy(BG_msk_all)
+    ind            = tmp2 == 0
+    tmp2[ind]      = 1.0
+    Bg_img         = BG_img_all / tmp2
+    Bg_norm        = BG_norm_all / tmp2
+
+    Bg_msk         = np.ones(tmp2.shape)
+    Bg_msk[ind]    = 0.0
+
+
+    f              = open(f_saxs0,'w')
+    np.savetxt(f,np.c_[FXS.q,Isaxs_ave_0,Isaxs_std_0],header = head_s, comments='')
+    f.close()
+
+    f              = open(f_c0,'w')
+    np.savetxt(f,C2_ave_0,header = head_c, comments='')
+    f.close()
+
+
+    f              = open(f_saxs1,'w')
+    np.savetxt(f,np.c_[FXS.q,Isaxs_ave_1,Isaxs_std_1],header = head_s, comments='')
+    f.close()
+
+    f              = open(f_c1,'w')
+    np.savetxt(f,C2_ave_1,header = head_c, comments='')
+    f.close()
+
+    f_bg_im     = os.path.join(opath,'Bg_img_' + str(argv.run) + '_'+ str(Tot_0+Tot_1) + '.dat')
+    f_bg_norm   = os.path.join(opath,'Bg_norm_' + str(argv.run) + '_'+ str(Tot_0+Tot_1) + '.dat')
+    f_bg_ms     = os.path.join(opath,'Bg_msk_' + str(argv.run) + '_'+ str(Tot_0+Tot_1) + '.dat')
+    stamps_s    = ['q','Mean','Std']
+    head_s      ="                 ".join(stamps_s)
+
+
+    # Get rid of zero lines at the end
+    # Last non-zero intensity
+    nz   = np.nonzero(Tot_t)
+    fend = nz[0][-1]+1
+
+    f              = open(f_index,'w')
+    np.savetxt(f,np.c_[Tot_t[:fend],Tot_s[:fend],Tot_ns[:fend],Tot_fd[:fend],Tot_int[:fend],Tot_peak1[:fend],Tot_peak2[:fend],Tot_s_m[:fend],Tot_s_s[:fend],Tot_cx[:fend],Tot_cy[:fend],Tot_size[:fend],Tot_score[:fend]],header = head, comments='' )
+    f.close()
+
+
+    f              = open(f_bg_im,'w')
+    np.savetxt(f,Bg_img)
+    f.close()
+
+    f              = open(f_bg_norm,'w')
+    np.savetxt(f,Bg_norm)
+    f.close()
+
+    f           = open(f_bg_ms,'w')
+    np.savetxt(f,Bg_msk)
+    f.close()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/mpi_fxs_calib.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+from psana import *
+import sys
+import numpy as np
+from xfel.amo.pnccd_ana                 import pnccd_tbx
+from xfel.amo.pnccd_ana                 import fxs
+import matplotlib.pyplot as plt
+from six.moves import zip
+
+plt.ion()
+########################################
+# Due to the mask sometimes having zero values
+# we're bound to get divisions with zeros at
+#times. Here ignoring those errors.
+np.seterr(divide='ignore', invalid='ignore')
+
+from libtbx.mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def h5gen(run,timestamps = None, first = None, last = None):
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],mytimes[j]
+
+
+def idxgen(run,timestamps = None, first = None, last = None):
+    #print "idx mode"
+    #  Use timestamps from index file
+    if timestamps is  None:
+       timestamps      = run.times()
+
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = len(timestamps)
+    else:
+       last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps[first:last]
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],run.event(mytimes[j])
+
+
+
+def smdgen(run,timestamps = None, first = None, last = None):
+    #print "smd mode"
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = 1e20                           # We typically don't know what the last events is. So for now use a large number
+
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    if timestamps is None :
+
+       for nevent,evt in enumerate(run.events()):
+           if   nevent <  first : continue
+           elif nevent == last  : return
+           elif nevent%denom == nom:
+             yield nevent-first,evt
+
+    else :  # Only applicable for xtc format
+
+       ct = 0
+       for nevent,evt in enumerate(run.events()):
+            t = pnccd_tbx.get_psana_time(evt)
+            # Check if event exists in timestamps
+            if np.equal(t, timestamps).all(axis=1).any() :
+               if   ct <  first : continue
+               elif ct == last  : return
+               elif ct%denom == nom:
+                 yield ct,evt
+               ct += 1
+
+
+def compute_calib(argv=None) :
+
+  """Function to compute the average image without applied geometry from FXS images
+       extracted from xtc (smd,idx,xtc format) or h5 files.
+       Works for Single CPU, Multi-Processor interactive jobs and MPI batch jobs
+
+       For a definition of input arguments argv and batch processing instructions see  ***  mpi_fxs_launch.py ***
+
+       compute_calib produces the following output files:
+
+       * Index file : Information about the events processed including time-stamps, beam center, total intensity, particle size etc
+       * Ave        : Average image, as 1D array, in cartesian coordinates without geometry applied
+
+  """
+
+  if argv == None:
+    argv = sys.argv[1:]
+
+  try:
+     from libtbx.mpi4py import MPI
+  except ImportError:
+     raise Sorry("MPI not found")
+
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+
+
+  if argv.hit is None :
+     hit        = -1.0e20       # Process everything
+  else:
+     hit        = argv.hit      # Process everything > hit
+
+  ftype  = argv.ftype
+
+  if argv.param_path is not None :
+     if ftype == 'h5' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps,filestamps = pnccd_tbx.get_h5_event(param_file)
+     elif ftype == 'xtc' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps            = pnccd_tbx.get_time(param_file)
+     else :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1)
+        timestamps            = pnccd_tbx.get_psana_event(param_file)
+  else:
+     timestamps = None
+
+  # The first and last events to processed
+  first = argv.first
+  last  = argv.last
+
+
+  # Check data format
+
+  if ftype == 'h5' :
+       import h5py
+       run          = int(argv.run)
+
+       # Get time-stamps from all h5-files
+       if argv.param_path is None :
+          timestamps = []
+          filestamps = []
+          # Loop over all h5-files and store the time-stamps
+          for i in os.listdir(argv.xtc_dir):
+              if i.endswith(".h5"):
+                 f  = h5py.File(i,'r')
+                 filestamps.append(i[-7:-4])
+                 timestamps.append(list(f.keys()))
+                 continue
+              else:
+                 continue
+
+       dataset_name = "%s-r%s"%(argv.experiment, str(argv.run).zfill(4)) # Ascert 4 digit run number
+       exprun       = os.path.join(argv.xtc_dir,dataset_name)
+
+       if argv.first is None :
+          first   = 0
+
+       if argv.last is None :
+          last    = len(timestamps)
+       else:
+          last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+       timestamps = timestamps[first:last]
+       filestamps = filestamps[first:last]
+
+
+       evtgen       = h5gen
+
+  else :
+
+       exprun = "exp=%s:run=%d"%(argv.experiment, argv.run)
+       if (ftype == 'xtc') :
+           dataset_name = exprun+':xtc'
+       elif  (ftype == 'idx') :
+           dataset_name = exprun+':idx'
+       elif(ftype == 'idx_ffb') :
+           dataset_name = exprun+':idx'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc"%(argv.experiment[0:3],argv.experiment)
+       elif(ftype == 'smd') :
+           dataset_name = exprun+':smd'
+       elif(ftype == 'smd_ffb') :
+           dataset_name = exprun+':smd'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here ADD live!
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc:live"%(argv.experiment[0:3],argv.experiment)
+           exprun = dataset_name
+
+       ds           = DataSource(dataset_name)
+       run          = next(ds.runs())
+
+       # Select event generator
+       if    (ftype=='smd') or (ftype == 'smd_ffb') or (ftype == 'xtc'):
+         evtgen = smdgen
+       elif  (ftype=='idx') or (ftype == 'idx_ffb'):
+         evtgen = idxgen
+
+
+  if size == 1:
+     plot = argv.plot
+  else:
+     plot = 0
+
+
+  FXS  = fxs.fluctuation_scattering(dataset_name                     = exprun,
+                                    detector_address                 = argv.address,
+                                    data_type                        = argv.ftype,
+                                    mask_path                        = argv.mask_path,
+                                    mask_angles                      = None, #np.array([88, 270]),    # static masking at 88 and 270 deg
+                                    mask_widths                      = None, #np.array([6,  10]),     # +/- degrees
+                                    backimg_path                     = argv.bg_img_path,
+                                    backmsk_path                     = argv.bg_msk_path,
+                                    geom_path                        = argv.geom_path,
+                                    det_dist                         = argv.det_distance,
+                                    det_pix                          = argv.det_pixel,
+                                    beam_l                           = argv.lambda_b,
+                                    mask_thr                         = argv.thr,
+                                    nQ                               = argv.nQ,
+                                    nPhi                             = argv.nPhi,
+                                    dQ                               = argv.dQ,
+                                    dPhi                             = argv.dP,
+                                    cent0                            = [argv.x,argv.y],
+                                    r_max                            = argv.r_max,
+                                    dr                               = argv.dr,
+                                    dx                               = argv.dx,
+                                    dy                               = argv.dy,
+                                    r_0                              = argv.r0,
+                                    q_bound                          = argv.q_bound)
+
+
+  # Initialize iterator
+  FXS.cnt       = np.array([0.])
+
+  # Initialize Index variables
+  if argv.param_path is None :
+     maxevents = 400000          # We don't always know the total nr of events. Therefore set to large value
+  else:
+     maxevents = min(len(timestamps),len(timestamps[first:last]))
+
+
+  FXS.get_index2(maxevents)
+  # chop the list into pieces, depending on rank.  This assigns each process
+  # events such that the get every Nth event where N is the number of processes
+
+  if size > 1 :
+     if rank > 0 :
+
+        # MPI process. Here we set rank 0 to work as a listening server only.
+        for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+            #print '***',rank,j,evt.get(EventId).fiducials()
+            if j%10==0: print('Rank',rank,'processing event',j)
+
+            if ftype == 'h5' :
+               FXS.get_h5(filestamps[j],evt)
+            else :
+               FXS.get_calib(evt)
+
+
+            # Process hits
+            if (FXS.image is not None) and (float(FXS.image.sum()) > hit)  :
+
+               if ftype == 'h5' :
+                  FXS.store_index_h5(evt, j)
+               else:
+                  ######################################
+                  # Ugly way to get the time-stamps. Fix!!
+                  time = evt.get(EventId).time()
+                  fid = evt.get(EventId).fiducials()
+                  sec  = time[0]
+                  nsec = time[1]
+                  et = EventTime(int((sec<<32)|nsec),fid)
+                  #######################################
+                  FXS.store_index2(et, j)                                         # Store index
+               FXS.cnt  += 1
+
+
+  else :
+
+
+     # Single CPU
+     for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+         #print '***',rank,j,evt.get(EventId).fiducials()
+         if j%10==0: print('Rank',rank,'processing event',j)
+
+
+         if ftype == 'h5' :
+            FXS.get_h5(filestamps[j],evt)
+         else :
+            FXS.get_calib(evt)
+
+         # Process hits
+         if (FXS.image is not None) and (float(FXS.image.sum()) > hit) :
+
+
+            if ftype == 'h5' :
+               FXS.store_index_h5(evt, j)
+            else:
+               ######################################
+               # Ugly way to get the time-stamps. Fix!!
+               time = evt.get(EventId).time()
+               fid = evt.get(EventId).fiducials()
+               sec  = time[0]
+               nsec = time[1]
+               et = EventTime(int((sec<<32)|nsec),fid)
+               #######################################
+               FXS.store_index2(et, j)                                         # Store index
+            FXS.cnt  += 1
+
+     print('Rank',rank,'total events:   ', int(FXS.cnt),' * ')
+
+
+
+  #sum the images across mpi cores
+  if size > 1:
+    print("Synchronizing rank", rank)
+
+  Tot         = np.zeros(FXS.cnt.shape)
+  comm.Reduce(FXS.cnt,Tot)
+
+
+  # Collect Indexing variables
+
+  AVE_all           = np.zeros(FXS.ave.shape)
+  comm.Reduce(FXS.ave,AVE_all)
+
+  Tot_t       = np.zeros(FXS.tot_t.shape)
+  comm.Reduce(FXS.tot_t,Tot_t)
+
+  Tot_s       = np.zeros(FXS.tot_s.shape)
+  comm.Reduce(FXS.tot_s,Tot_s)
+
+  Tot_ns      = np.zeros(FXS.tot_ns.shape)
+  comm.Reduce(FXS.tot_ns,Tot_ns)
+
+  Tot_fd      = np.zeros(FXS.tot_fd.shape)
+  comm.Reduce(FXS.tot_fd,Tot_fd)
+
+  Tot_int     = np.zeros(FXS.tot_int.shape)
+  comm.Reduce(FXS.tot_int,Tot_int)
+
+  Tot_cx     = np.zeros(FXS.tot_cx.shape)
+  comm.Reduce(FXS.tot_cx,Tot_cx)
+
+  Tot_cy     = np.zeros(FXS.tot_cy.shape)
+  comm.Reduce(FXS.tot_cy,Tot_cy)
+
+  Tot_size   = np.zeros(FXS.tot_size.shape)
+  comm.Reduce(FXS.tot_size,Tot_size)
+
+  Tot_score  = np.zeros(FXS.tot_score.shape)
+  comm.Reduce(FXS.tot_score,Tot_score)
+
+
+  # Reduce results
+
+  if rank==0:
+
+    if size > 1:
+      print("Synchronized")
+
+    # Write out data
+
+    if argv.outputdir is None:
+        opath = os.getcwd()
+    else:
+        opath = argv.outputdir
+
+    f_ave       = os.path.join(opath,'Average_run' + str(argv.run) + '_'+ str(int(Tot)) + '.dat')
+
+    f_index     = os.path.join(opath,'Index_run' + str(argv.run) + '.dat')
+    stamps      = ['Time','Seconds','Nanoseconds','Fiducial','Total Intensity','Beam X','Beam Y','Radius [Ang]','Score']
+    head        ="                 ".join(stamps)
+
+
+    Ave          = AVE_all / Tot
+
+
+    # Get rid of zero lines add the end
+    # Last non-zero intensity
+    nz   = np.nonzero(Tot_t)
+    fend = nz[0][-1]+1
+
+    f              = open(f_index,'w')
+    np.savetxt(f,np.c_[Tot_t[:fend],Tot_s[:fend],Tot_ns[:fend],Tot_fd[:fend],Tot_int[:fend],Tot_cx[:fend],Tot_cy[:fend],Tot_size[:fend],Tot_score[:fend]],header = head, comments='' )
+    f.close()
+
+
+    f              = open(f_ave,'w')
+    np.savetxt(f_ave,Ave.reshape((-1)))
+    f.close()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/mpi_fxs_index.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+from psana import *
+import sys
+import numpy as np
+from xfel.amo.pnccd_ana                 import pnccd_tbx
+from xfel.amo.pnccd_ana                 import pnccd_hit
+from xfel.amo.pnccd_ana                 import fxs
+import matplotlib.pyplot as plt
+from six.moves import zip
+
+plt.ion()
+########################################
+# Due to the mask sometimes having zero values
+# we're bound to get divisions with zeros at
+#times. Here ignoring those errors.
+np.seterr(divide='ignore', invalid='ignore')
+
+from libtbx.mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def h5gen(run,timestamps = None, first = None, last = None):
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],mytimes[j]
+
+
+def idxgen(run,timestamps = None, first = None, last = None):
+    #print "idx mode"
+    #  Use timestamps from index file
+    if timestamps is  None:
+       timestamps      = run.times()
+
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = len(timestamps)
+    else:
+       last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps[first:last]
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],run.event(mytimes[j])
+
+
+
+def smdgen(run,timestamps = None, first = None, last = None):
+    #print "smd mode"
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = 1e20                           # We typically don't know what the last events is. So for now use a large number
+
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    if timestamps is None :
+
+       for nevent,evt in enumerate(run.events()):
+           if   nevent <  first : continue
+           elif nevent == last  : return
+           elif nevent%denom == nom:
+             yield nevent-first,evt
+
+    else :  # Only applicable for xtc format
+
+       ct = 0
+       for nevent,evt in enumerate(run.events()):
+            t = pnccd_tbx.get_psana_time(evt)
+            # Check if event exists in timestamps
+            if np.equal(t, timestamps).all(axis=1).any() :
+               if   ct <  first : continue
+               elif ct == last  : return
+               elif ct%denom == nom:
+                 yield ct,evt
+               ct += 1
+
+
+def compute_index(argv=None) :
+
+  """Function to index  FXS images
+       extracted from xtc (smd,idx,xtc format) or h5 files.
+       Works for Single CPU, Multi-Processor interactive jobs and MPI batch jobs
+
+       For a definition of input arguments argv and batch processing instructions see  ***  mpi_fxs_launch.py ***
+
+       compute_index produces the following output file:
+
+       * Index file : Information about the events processed including time-stamps, beam center, total and peak intensities, streak locations, particle size etc
+
+  """
+
+
+  if argv == None:
+    argv = sys.argv[1:]
+
+  try:
+     from libtbx.mpi4py import MPI
+  except ImportError:
+     raise Sorry("MPI not found")
+
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+
+
+  if argv.hit is None :
+     hit        = -1.0e20                        # Process everything
+  else:
+     hit        = argv.hit      # Process everything > hit
+
+  ftype  = argv.ftype
+
+  if argv.param_path is not None :
+     if ftype == 'h5' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps,filestamps = pnccd_tbx.get_h5_event(param_file)
+     elif ftype == 'xtc' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps            = pnccd_tbx.get_time(param_file)
+     else :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1)
+        timestamps            = pnccd_tbx.get_psana_event(param_file)
+  else:
+     timestamps = None
+
+  # The first and last events to processed
+  first = argv.first
+  last  = argv.last
+
+
+  # Check data format
+
+  if ftype == 'h5' :
+       import h5py
+       run          = int(argv.run)
+
+       # Get time-stamps from all h5-files
+       if argv.param_path is None :
+          timestamps = []
+          filestamps = []
+          # Loop over all h5-files and store the time-stamps
+          for i in os.listdir(argv.xtc_dir):
+              if i.endswith(".h5"):
+                 f  = h5py.File(i,'r')
+                 filestamps.append(i[-7:-4])
+                 timestamps.append(list(f.keys()))
+                 continue
+              else:
+                 continue
+
+       dataset_name = "%s-r%s"%(argv.experiment, str(argv.run).zfill(4)) # Ascert 4 digit run number
+       exprun       = os.path.join(argv.xtc_dir,dataset_name)
+
+       if argv.first is None :
+          first   = 0
+
+       if argv.last is None :
+          last    = len(timestamps)
+       else:
+          last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+       timestamps = timestamps[first:last]
+       filestamps = filestamps[first:last]
+
+
+       evtgen       = h5gen
+
+  else :
+
+       exprun = "exp=%s:run=%d"%(argv.experiment, argv.run)
+       if (ftype == 'xtc') :
+           dataset_name = exprun+':xtc'
+       elif (ftype == 'idx') :
+           dataset_name = exprun+':idx'
+       elif(ftype == 'idx_ffb') :
+           dataset_name = exprun+':idx'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc"%(argv.experiment[0:3],argv.experiment)
+       elif(ftype == 'smd') :
+           dataset_name = exprun+':smd'
+       elif(ftype == 'smd_ffb') :
+           dataset_name = exprun+':smd'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here ADD live!
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc:live"%(argv.experiment[0:3],argv.experiment)
+           exprun = dataset_name
+
+       ds           = DataSource(dataset_name)
+       run          = next(ds.runs())
+
+       # Select event generator
+       if    (ftype=='smd') or (ftype == 'smd_ffb') or (ftype == 'xtc'):
+         evtgen = smdgen
+       elif  (ftype=='idx') or (ftype == 'idx_ffb'):
+         evtgen = idxgen
+
+
+  if size == 1:
+     plot = argv.plot
+  else:
+     plot = 0
+
+
+  FXS  = fxs.fluctuation_scattering(dataset_name                     = exprun,
+                                    detector_address                 = argv.address,
+                                    data_type                        = argv.ftype,
+                                    mask_path                        = argv.mask_path,
+                                    mask_angles                      = None,#np.array([88, 270]),    # static masking at 88 and 270
+                                    mask_widths                      = None,#np.array([6,  10]),    # +/- degrees
+                                    backimg_path                     = argv.bg_img_path,
+                                    backmsk_path                     = argv.bg_msk_path,
+                                    geom_path                        = argv.geom_path,
+                                    det_dist                         = argv.det_distance,
+                                    det_pix                          = argv.det_pixel,
+                                    beam_l                           = argv.lambda_b,
+                                    mask_thr                         = argv.thr,
+                                    nQ                               = argv.nQ,
+                                    nPhi                             = argv.nPhi,
+                                    dQ                               = argv.dQ,
+                                    dPhi                             = argv.dP,
+                                    cent0                            = [argv.x,argv.y],
+                                    r_max                            = argv.r_max,
+                                    dr                               = argv.dr,
+                                    dx                               = argv.dx,
+                                    dy                               = argv.dy,
+                                    r_0                              = argv.r0,
+                                    q_bound                          = argv.q_bound,
+                                    peak                             = [0.037, 0.064],
+                                    dpeak                            = [0.002, 0.002])
+
+
+  # Initialize iterator
+  FXS.cnt       = np.array([0.])
+
+
+  # Initialize Index variables
+  if argv.param_path is None :
+     maxevents = 400000          # We don't always know the total nr of events. Therefore set to large value
+  else:
+     maxevents = min(len(timestamps),len(timestamps[first:last]))
+
+
+  FXS.get_index(maxevents)
+  # chop the list into pieces, depending on rank.  This assigns each process
+  # events such that the get every Nth event where N is the number of processes
+
+  if size > 1 :
+     if rank > 0 :
+
+        hd=pnccd_hit.hit()
+
+        # MPI process. Here we set rank 0 to work as a listening server only.
+        for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+            #print '***',rank,j,evt.get(EventId).fiducials()
+            if j%10==0: print('Rank',rank,'processing event',j)
+
+            if ftype == 'h5' :
+               FXS.get_h5(filestamps[j],evt)
+            else :
+               FXS.get_image(evt)
+
+            # Process hits
+            if (FXS.img is not None) and (float(FXS.img.sum()) > hit) :
+
+               FXS.get_beam()                                        # Beam center refinement
+               FXS.get_polar()                                       # Polar transform
+               FXS.get_streak_mask(flag = 1)                         # Mask out streaks
+               FXS.get_norm(flag = 1)                                # Normalize image, get SAXS
+
+               if FXS.r_0 is not None :
+                  FXS.get_size()
+
+               if ftype == 'h5' :
+                  FXS.store_index_h5(evt, j)
+               else:
+                  ######################################
+                  # Ugly way to get the time-stamps. Fix!!
+                  time = evt.get(EventId).time()
+                  fid = evt.get(EventId).fiducials()
+                  sec  = time[0]
+                  nsec = time[1]
+                  et = EventTime(int((sec<<32)|nsec),fid)
+                  #######################################
+                  FXS.store_index(et, j)                                                # Store index
+
+               if int(FXS.cnt)%10==0: print('Rank',rank,'processed events: ', int(FXS.cnt))
+
+
+               # Send partial results to master (rank 0)
+               if (int(FXS.cnt) > 0) and (int(FXS.cnt) % 100 == 0):             # Send every 100 events
+
+                  tmp_n    = int(FXS.cnt)
+
+                  # Average image
+                  tmp_im   = FXS.ave / tmp_n
+
+                  # Total intensity, Size and Score
+                  tmp_ind = np.column_stack((FXS.tot_int,FXS.tot_size,FXS.tot_score))
+
+                  hd.send(tmp_n, image = tmp_im, ind=tmp_ind)
+
+            FXS.cnt  += 1
+
+
+        hd.endrun()
+
+     else:
+
+        if ftype == 'h5' :
+           FXS.run_nr      = run
+        else:
+           FXS.run_nr      = int(run.run())
+
+        hd              = pnccd_hit.hit()
+        adim            = FXS.ave.shape
+        idim            = (maxevents,3)
+
+        hd.total_ave    = [np.zeros(adim)]*(size-1)
+        hd.total_ind    = [np.zeros(idim)]*(size-1)
+        hd.total_ev_a   = [0.0]*(size-1)
+        hd.total_ev_i   = [0.0]*(size-1)
+
+        nClients = size - 1
+
+        while nClients > 0:
+            # Remove client if the run ended
+            if hd.recv():
+               nClients -= 1
+            else:
+               na = sum(hd.total_ev_a)
+               ni = sum(hd.total_ev_i)
+
+               if  (na == ni) and  (na % 100 == 0) :                                            # Publish every 100 events
+
+
+                  AVE     = np.zeros(adim)
+                  IND     = np.zeros(idim)
+
+                  for i in range(size-1) :
+                      AVE     = AVE     + (hd.total_ave[i] * (hd.total_ev_a[i] /na))
+                      IND     = IND     + hd.total_ind[i]
+
+                  FXS.publish(image = AVE, ind=IND, n_a=na, n_i=ni)
+
+
+  else :
+
+
+     # Single CPU
+     for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+         #print '***',rank,j,evt.get(EventId).fiducials()
+         if j%10==0: print('Rank',rank,'processing event',j)
+
+
+         if ftype == 'h5' :
+            FXS.get_h5(filestamps[j],evt)
+         else :
+            FXS.get_image(evt)
+
+         # Process hits
+         if (FXS.img is not None) and (float(FXS.img.sum()) > hit) :
+
+             FXS.get_beam(plot = plot)                                      # Beam center refinement
+             FXS.get_polar(plot = plot)                                     # Polar transform
+             FXS.get_streak_mask(flag = 1, plot = plot)                     # Mask out streaks
+             FXS.get_norm(flag = 0, plot = plot)                            # Normalize image, get SAXS
+
+             if FXS.r_0 is not None :
+                FXS.get_size()
+
+
+             if ftype == 'h5' :
+                FXS.store_index_h5(evt, j)
+             else:
+                ######################################
+                # Ugly way to get the time-stamps. Fix!!
+                time = evt.get(EventId).time()
+                fid = evt.get(EventId).fiducials()
+                sec  = time[0]
+                nsec = time[1]
+                et = EventTime(int((sec<<32)|nsec),fid)
+                #######################################
+                FXS.store_index(et, j)                                              # Store index
+
+             FXS.cnt  += 1
+
+     print('Rank',rank,'total events:   ', int(FXS.cnt),' * ')
+
+
+  #sum the images across mpi cores
+  if size > 1:
+    print("Synchronizing rank", rank)
+
+  Tot         = np.zeros(FXS.cnt.shape)
+  comm.Reduce(FXS.cnt,Tot)
+
+
+
+  if rank == 0 and Tot[0] == 0 :
+    raise Sorry("No events found in the run")
+
+
+  # Collect Indexing variables
+
+  Tot_t       = np.zeros(FXS.tot_t.shape)
+  comm.Reduce(FXS.tot_t,Tot_t)
+
+  Tot_s       = np.zeros(FXS.tot_s.shape)
+  comm.Reduce(FXS.tot_s,Tot_s)
+
+  Tot_ns      = np.zeros(FXS.tot_ns.shape)
+  comm.Reduce(FXS.tot_ns,Tot_ns)
+
+  Tot_fd      = np.zeros(FXS.tot_fd.shape)
+  comm.Reduce(FXS.tot_fd,Tot_fd)
+
+  Tot_int     = np.zeros(FXS.tot_int.shape)
+  comm.Reduce(FXS.tot_int,Tot_int)
+
+  Tot_peak1   = np.zeros(FXS.tot_peak1_int.shape)
+  comm.Reduce(FXS.tot_peak1_int,Tot_peak1)
+
+  Tot_peak2   = np.zeros(FXS.tot_peak2_int.shape)
+  comm.Reduce(FXS.tot_peak2_int,Tot_peak2)
+
+  Tot_s_m    = np.zeros(FXS.tot_streak_m.shape)
+  comm.Reduce(FXS.tot_streak_m,Tot_s_m)
+
+  Tot_s_s    = np.zeros(FXS.tot_streak_s.shape)
+  comm.Reduce(FXS.tot_streak_s,Tot_s_s)
+
+  Tot_cx     = np.zeros(FXS.tot_cx.shape)
+  comm.Reduce(FXS.tot_cx,Tot_cx)
+
+  Tot_cy     = np.zeros(FXS.tot_cy.shape)
+  comm.Reduce(FXS.tot_cy,Tot_cy)
+
+  Tot_size   = np.zeros(FXS.tot_size.shape)
+  comm.Reduce(FXS.tot_size,Tot_size)
+
+  Tot_score  = np.zeros(FXS.tot_score.shape)
+  comm.Reduce(FXS.tot_score,Tot_score)
+
+
+  # Reduce results
+
+  if rank==0:
+
+    if size > 1:
+      print("Synchronized")
+
+    # Write out data
+
+    if argv.outputdir is None:
+        opath = os.getcwd()
+    else:
+        opath = argv.outputdir
+
+    f_index     = os.path.join(opath,'Index_run' + str(argv.run) + '.dat')
+    stamps      = ['Time','Seconds','Nanoseconds','Fiducial','Total Intensity','Peak1, q='+str(FXS.peak[0])+'+/-'+str(FXS.dpeak[0]),'Peak2, q='+str(FXS.peak[1])+'+/-'+str(FXS.dpeak[1]),'Mean streak angle','Std streak angle','Beam X','Beam Y','Radius [Ang]','Score']
+    head        ="                 ".join(stamps)
+
+
+    # Get rid of zero lines at the end
+    # Last non-zero intensity
+    nz   = np.nonzero(Tot_t)
+    fend = nz[0][-1]+1
+
+    f              = open(f_index,'w')
+    np.savetxt(f,np.c_[Tot_t[:fend],Tot_s[:fend],Tot_ns[:fend],Tot_fd[:fend],Tot_int[:fend],Tot_peak1[:fend],Tot_peak2[:fend],Tot_s_m[:fend],Tot_s_s[:fend],Tot_cx[:fend],Tot_cy[:fend],Tot_size[:fend],Tot_score[:fend]],header = head, comments='' )
+    f.close()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/mpi_fxs_launch.py
+from __future__ import absolute_import, division, print_function
+import os
+import sys
+import glob
+import libtbx.option_parser
+from xfel.amo.pnccd_ana                 import mpi_fxs_index
+from xfel.amo.pnccd_ana                 import mpi_fxs_c2
+from xfel.amo.pnccd_ana                 import mpi_fxs_bg
+from xfel.amo.pnccd_ana                 import mpi_fxs_calib
+from xfel.amo.pnccd_ana                 import mpi_fxs_mask
+
+def launch(argv=None) :
+
+  """Function to launch: Single CPU, Multi-Processor interactive jobs or MPI batch jobs
+       for the purpose of:
+
+       1. Indexing                (mpi_fxs_index.py)
+       2. Masking                 (mpi_fxs_mask.py)
+       3. Background computation  (mpi_fxs_bg.py)
+       4. Calibration             (mpi_fxs_calib.py)
+       5. C2 computation          (mpi_fxs_c2.py)
+
+     Example tcsh-file for launching Single, Interactive or Batch jobs:
+
+     #################################################################
+     #!/bin/tcsh
+
+     # Provide Run number in input (eg ./run.csh 111)
+     #echo $1
+
+     # Batch parameters
+     set processing_q  = psanaq
+     set nr_cpu        = 120
+     set job_name      = run_$1
+
+     # Processing parameters
+     set file_type     = idx
+     set job_type      = correlation
+     set experiment    = amok5415
+     set detector      = pnccdFront
+     set distance      = 369.0
+     set mask_thr      = 2.0
+     set wavelength    = 7.094
+     set x             = 513
+     set y             = 662
+     set dx            = 5
+     set dy            = 5
+
+     set mask          = /reg/neh/home1/malmerbe/develop/amok5415_files/processing/masks/Mask_map_61_2.dat
+     set index         = /reg/neh/home1/malmerbe/develop/amok5415_files/index_files/Selected_run111_COM.dat
+
+     set first         = 0
+     set last          = 20
+
+     # Launch Batch Job
+
+     bsub -q ${processing_q} -a mympi -n ${nr_cpu} -o log_files/${job_name}_${detector}%J.log -J ${job_name}_${detector} mpi_fxs_launch -j ${job_type} -e ${experiment} -r $1 -a ${detector} -d ${distance} -t ${mask_thr} -f ${file_type} -w ${wavelength}  -x ${x} -y ${y} --dx ${dx} --dy ${dy} --index ${index} -m ${mask}
+
+     # Launch Interactive job
+
+     mpirun -n ${nr_cpu}   mpi_fxs_launch -j ${job_type} -e ${experiment} -r $1 -a ${detector} -d ${distance} -t ${mask_thr}  -f ${file_type} -w ${wavelength} -x ${x} -y ${y} --dx ${dx} --dy ${dy} --index ${index} --first ${first} --last ${last} -m ${mask}
+
+     # Launch single CPU
+
+     mpi_fxs_launch -j ${job_type} -e ${experiment} -r $1 -a ${detector} -d ${distance} -t ${mask_thr} -f ${file_type} -w ${wavelength}  -x ${x} -y ${y} --dx ${dx} --dy ${dy}  --first ${first} --last ${last} -m ${mask} --index ${index}
+
+     ######################################################################
+
+     Instructions for viewing intermediate results using psplot
+
+     1. In terminal type: bjobs -w                              (to get the id of the first analysis node (psanaXXXX))
+     2. In terminal type: psplot -s psanaXXXX IND AVE SAXS C2   (to select the type of results to view)
+
+  """
+
+  if argv == None:
+     argv = sys.argv[1:]
+
+  try:
+     from libtbx.mpi4py import MPI
+  except ImportError:
+     raise Sorry("MPI not found")
+
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+
+  command_line = (libtbx.option_parser.option_parser(
+    usage="""
+
+%s    -j job type -e  experiment  -r  run  -a  address -d  detector distance  [-o  outputdir]
+               [-I first frame] [-F last frame] [-H  hit intensity]   [-m  mask path]
+               [-B background image path]  [-M  background mask path]  [-i  index path] [-G geometry path]
+               [-u  pixel size]  [-w  wavelength override]  [-t  threshold for masking]  [-q  nr of q bins]
+               [-p  nr of phi bins]  [-Q  sampled stepsize q]  [-P  sampled stepsize phi]  [-x beam center x] [-y beam center y]
+               [-z rmax for beam c]  [-Z  sample step size in r]  [-x  bound in x for beam c ]  [-y  bound in y for beam c],
+               [-s  particle radius]  [-S  q-range for size]  [-g plot output] [-E path to external directory] [-f data file type]
+""" % libtbx.env.dispatcher_name)
+                .option(None, "--job", "-j",
+                        type="string",
+                        default=None,
+                        dest="job",
+                        help="job type: index | background |correlation |calibration |mask ")
+                .option(None, "--experiment", "-e",
+                        type="string",
+                        default=None,
+                        dest="experiment",
+                        help="experiment name: amo86615 ")
+                .option(None, "--run", "-r",
+                        type="int",
+                        default=None,
+                        dest="run",
+                        help="run number: eg 120")
+                .option(None, "--address", "-a",
+                        type="string",
+                        default="None",
+                        dest="address",
+                        help="detector address: pnccdBack | pnccdFront ")
+                .option(None, "--outputdir", "-o",
+                        type="string",
+                        default=None,
+                        dest="outputdir",
+                        metavar="PATH",
+                        help="Optional path to output directory for output files")
+                .option(None, "--first", "-I",
+                        type="int",
+                        default=None,
+                        dest="first",
+                        help="first frame to process")
+                .option(None, "--last", "-F",
+                        type="int",
+                        default=None,
+                        dest="last",
+                        help="last frame to process")
+                .option(None, "--hit", "-H",
+                        type="float",
+                        default=None,
+                        dest="hit",
+                        help="hit intensity")
+                .option(None, "--mask path", "-m",
+                        type="string",
+                        default=None,
+                        dest="mask_path",
+                        metavar="PATH",
+                        help="static mask file")
+                .option(None, "--background image path", "-B",
+                        type="string",
+                        default=None,
+                        dest="bg_img_path",
+                        metavar="PATH",
+                        help="background image file")
+                .option(None, "--background mask path", "-M",
+                        type="string",
+                        default=None,
+                        dest="bg_msk_path",
+                        metavar="PATH",
+                        help="background mask file")
+                .option(None, "--index", "-i",
+                        type="string",
+                        default=None,
+                        dest="param_path",
+                        metavar="PATH",
+                        help="index file")
+                .option(None, "--geometry", "-G",
+                        type="string",
+                        default=None,
+                        dest="geom_path",
+                        metavar="PATH",
+                        help="geometry file")
+                .option(None, "--distance", "-d",
+                        type="float",
+                        default=None,
+                        dest="det_distance",
+                        help="detector distance [mm]")
+                .option(None, "--pixel size", "-u",
+                        type="float",
+                        default=0.075,
+                        dest="det_pixel",
+                        help="pixels size [mm]")
+                .option(None, "--wavelength", "-w",
+                        type="float",
+                        default=None,
+                        dest="lambda_b",
+                        help="wavelength overwrite [ang]")
+                .option(None, "--mask threshold", "-t",
+                        type="float",
+                        default=None,
+                        dest="thr",
+                        help="masking threshold")
+                .option(None, "--nq", "-q",
+                        type="int",
+                        default=None,
+                        dest="nQ",
+                        help="nr of q bins")
+                .option(None, "--nPhi", "-p",
+                        type="int",
+                        default=None,
+                        dest="nPhi",
+                        help="nr of phi bins")
+                .option(None, "--dq", "-Q",
+                        type="int",
+                        default=1,
+                        dest="dQ",
+                        help="sampled step size in q")
+                .option(None, "--dphi", "-P",
+                        type="int",
+                        default=1,
+                        dest="dP",
+                        help="sampled step size in phi")
+                .option(None, "--x", "-x",
+                        type="int",
+                        default=0,
+                        dest="x",
+                        help="beam center in x")
+                .option(None, "--y", "-y",
+                        type="int",
+                        default=0,
+                        dest="y",
+                        help="beam center in y")
+                .option(None, "--r max", "-z",
+                        type="int",
+                        default=None,
+                        dest="r_max",
+                        help="r_max for beam center refinement")
+                .option(None, "--dr", "-Z",
+                        type="int",
+                        default=1,
+                        dest="dr",
+                        help="step size for beam center refinement")
+                .option(None, "--dx", "-X",
+                        type="int",
+                        default=5,
+                        dest="dx",
+                        help="grid size in x for for beam center refinement, x+/-dx")
+                .option(None, "--dy", "-Y",
+                        type="int",
+                        default=5,
+                        dest="dy",
+                        help="grid size in y for for beam center refinement, y+/-dy")
+                .option(None, "--particle radius", "-s",
+                        type="float",
+                        default=None,
+                        dest="r0",
+                        help="initial particle radius [ang]")
+                .option(None, "--q-range for sizing", "-S",
+                        type="float",
+                        default=None,
+                        dest="q_bound",
+                        help="q-max for sizing [ang^-1]")
+                .option(None, "--plot", "-g",
+                        type="int",
+                        default=0,
+                        dest="plot",
+                        help="plot output [0/1]")
+                .option(None, "--datadir", "-E",
+                        type="string",
+                        default=None,
+                        dest="xtc_dir",
+                        metavar="PATH",
+                        help="Alternative path to xtc or h5 directory")
+                .option(None, "--file type", "-f",
+                        type="string",
+                        default='idx',
+                        dest="ftype",
+                        help="Type of file (idx, smd, idx_ffb, smd_ffb, h5, xtc)")
+                ).process(args=argv)
+
+  # Check mandatory parameters
+  if len(command_line.args) > 0 or \
+     command_line.options.job is None or \
+     command_line.options.experiment is None or \
+     command_line.options.run is None or \
+     command_line.options.address is None or \
+     command_line.options.det_distance is None:
+   command_line.parser.show_help()
+   return
+
+  # Create output directory
+  if command_line.options.outputdir is None :
+     if rank == 0 :
+        cpath = os.getcwd()
+        rpath = os.path.join(cpath,'run_' + str(command_line.options.run) +'/')
+        if not os.path.exists(rpath) :
+           os.mkdir(rpath)
+        ppath = os.path.join(rpath, str(command_line.options.address) + '/' )
+        if not os.path.exists(ppath) :
+           os.mkdir(ppath)
+        jpath = os.path.join(ppath, str(command_line.options.job) + '/' )
+        if not os.path.exists(jpath) :
+           os.mkdir(jpath)
+        d=[]
+        for name in glob.glob(jpath + '*'):
+            d.append(name)
+        tpath = os.path.join(jpath,str(len(d)+1))
+        os.mkdir(tpath)
+
+        command_line.options.outputdir = tpath
+
+
+  cargs = command_line.options
+
+  if command_line.options.job   == 'index' :
+     mpi_fxs_index.compute_index(cargs)
+  elif command_line.options.job == 'background' :
+     mpi_fxs_bg.compute_bg(cargs)
+  elif command_line.options.job == 'correlation' :
+     mpi_fxs_c2.compute_c2(cargs)
+  elif command_line.options.job == 'calibration' :
+     mpi_fxs_calib.compute_calib(cargs)
+  elif command_line.options.job == 'mask' :
+     mpi_fxs_mask.compute_mask(cargs)
+  else:
+     print("*** No recognizable job type chose: index | background | correlation ***")
+     command_line.parser.show_help()
+     return
+
+
+  # Move launch and log file to directory
+
+  MPI.Finalize()
+
+if (__name__ == "__main__"):
+  sys.exit(launch(sys.argv[1:]))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/mpi_fxs_mask.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+
+from psana import *
+import sys
+import numpy as np
+from xfel.amo.pnccd_ana                 import pnccd_tbx
+from xfel.amo.pnccd_ana                 import pnccd_hit
+from xfel.amo.pnccd_ana                 import fxs
+import matplotlib.pyplot as plt
+from six.moves import zip
+
+
+plt.ion()
+########################################
+# Due to the mask sometimes having zero values
+# we're bound to get divisions with zeros at
+#times. Here ignoring those errors.
+np.seterr(divide='ignore', invalid='ignore')
+
+from libtbx.mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def h5gen(run,timestamps = None, first = None, last = None):
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],mytimes[j]
+
+
+def idxgen(run,timestamps = None, first = None, last = None):
+    #print "idx mode"
+    #  Use timestamps from index file
+    if timestamps is  None:
+       timestamps      = run.times()
+
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = len(timestamps)
+    else:
+       last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    times     = timestamps[first:last]
+    nevents   = len(times)
+    mytimes,myevents  = zip(*[(times[i],i) for i in range(nevents) if (i+nom)%denom == 0])
+
+    for j in range(len(mytimes)):
+         yield myevents[j],run.event(mytimes[j])
+
+
+
+def smdgen(run,timestamps = None, first = None, last = None):
+    #print "smd mode"
+    if first is None :
+       first   = 0
+
+    if last is None :
+       last    = 1e20                           # We typically don't know what the last events is. So for now use a large number
+
+
+    # Singel CPU
+    if size == 1:
+       nom   = rank
+       denom = size
+    # MPI
+    else:
+       nom   = rank - 1
+       denom = size - 1
+
+
+    if timestamps is None :
+
+       for nevent,evt in enumerate(run.events()):
+           if   nevent <  first : continue
+           elif nevent == last  : return
+           elif nevent%denom == nom:
+             yield nevent-first,evt
+
+    else :   # Only applicable for xtc format
+
+       ct = 0
+       for nevent,evt in enumerate(run.events()):
+            t = pnccd_tbx.get_psana_time(evt)
+            # Check if event exists in timestamps
+            if np.equal(t, timestamps).all(axis=1).any() :
+               if   ct <  first : continue
+               elif ct == last  : return
+               elif ct%denom == nom:
+                 yield ct,evt
+               ct += 1
+
+
+
+def compute_mask(argv=None) :
+
+  """Function to compute a mask of non-resposive pixels from FXS images
+       extracted from xtc (smd,idx,xtc format) or h5 files.
+       Works for Single CPU, Multi-Processor interactive jobs and MPI batch jobs
+
+       For a definition of input arguments argv and batch processing instructions see  ***  mpi_fxs_launch.py ***
+
+       compute_mask produces the following output files:
+
+       * Index file : Information about the events processed including time-stamps, beam center, total and peak intensities, streak locations, particle size etc
+       * Average    : Average image in cartesian coordinates
+       * Variance   : Variance map of intensities in cartesian coordinates
+       * Mask       : Mask image in cartesian coordinates
+
+  """
+
+  if argv == None:
+    argv = sys.argv[1:]
+
+  try:
+     from libtbx.mpi4py import MPI
+  except ImportError:
+     raise Sorry("MPI not found")
+
+  comm = MPI.COMM_WORLD
+  rank = comm.Get_rank()
+  size = comm.Get_size()
+
+
+  if argv.hit is None :
+     hit        = -1.0e20                        # Process everything
+  else:
+     hit        = argv.hit      # Process everything > hit
+
+  ftype  = argv.ftype
+
+  if argv.param_path is not None :
+     if ftype == 'h5' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps,filestamps = pnccd_tbx.get_h5_event(param_file)
+     elif ftype == 'xtc' :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1,dtype=None)
+        timestamps            = pnccd_tbx.get_time(param_file)
+     else :
+        param_file            = np.genfromtxt(argv.param_path,skiprows=1)
+        timestamps            = pnccd_tbx.get_psana_event(param_file)
+  else:
+     timestamps = None
+
+  # The first and last events to processed
+  first = argv.first
+  last  = argv.last
+
+
+  # Check data format
+
+  if ftype == 'h5' :
+       import h5py
+       run          = int(argv.run)
+
+       # Get time-stamps from all h5-files
+       if argv.param_path is None :
+          timestamps = []
+          filestamps = []
+          # Loop over all h5-files and store the time-stamps
+          for i in os.listdir(argv.xtc_dir):
+              if i.endswith(".h5"):
+                 f  = h5py.File(i,'r')
+                 filestamps.append(i[-7:-4])
+                 timestamps.append(list(f.keys()))
+                 continue
+              else:
+                 continue
+
+       dataset_name = "%s-r%s"%(argv.experiment, str(argv.run).zfill(4)) # Ascert 4 digit run number
+       exprun       = os.path.join(argv.xtc_dir,dataset_name)
+
+       if argv.first is None :
+          first   = 0
+
+       if argv.last is None :
+          last    = len(timestamps)
+       else:
+          last    = min(last,len(timestamps))      # Check that last time-stamp exists
+
+       timestamps = timestamps[first:last]
+       filestamps = filestamps[first:last]
+
+
+       evtgen       = h5gen
+
+  else :
+
+       exprun = "exp=%s:run=%d"%(argv.experiment, argv.run)
+       if (ftype == 'xtc') :
+           dataset_name = exprun+':xtc'
+       elif (ftype == 'idx') :
+           dataset_name = exprun+':idx'
+       elif(ftype == 'idx_ffb') :
+           dataset_name = exprun+':idx'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc"%(argv.experiment[0:3],argv.experiment)
+       elif(ftype == 'smd') :
+           dataset_name = exprun+':smd'
+       elif(ftype == 'smd_ffb') :
+           dataset_name = exprun+':smd'
+           # as ffb is only at SLAC, ok to hardcode /reg/d here ADD live!
+           dataset_name += ":dir=/reg/d/ffb/%s/%s/xtc:live"%(argv.experiment[0:3],argv.experiment)
+           exprun = dataset_name
+
+       ds           = DataSource(dataset_name)
+       run          = next(ds.runs())
+
+       # Select event generator
+       if    (ftype=='smd') or (ftype == 'smd_ffb') or (ftype == 'xtc'):
+         evtgen = smdgen
+       elif  (ftype=='idx') or (ftype == 'idx_ffb'):
+         evtgen = idxgen
+
+
+  if size == 1:
+     plot = argv.plot
+  else:
+     plot = 0
+
+
+  FXS  = fxs.fluctuation_scattering(dataset_name                     = exprun,
+                                    detector_address                 = argv.address,
+                                    data_type                        = argv.ftype,
+                                    mask_path                        = argv.mask_path,
+                                    mask_angles                      = None, #np.array([88, 270]),    # static masking at 88 and 270 deg
+                                    mask_widths                      = None, #np.array([6,  10]),     # +/- degree
+                                    backimg_path                     = argv.bg_img_path,
+                                    backmsk_path                     = argv.bg_msk_path,
+                                    geom_path                        = argv.geom_path,
+                                    det_dist                         = argv.det_distance,
+                                    det_pix                          = argv.det_pixel,
+                                    beam_l                           = argv.lambda_b,
+                                    mask_thr                         = argv.thr,
+                                    nQ                               = argv.nQ,
+                                    nPhi                             = argv.nPhi,
+                                    dQ                               = argv.dQ,
+                                    dPhi                             = argv.dP,
+                                    cent0                            = [argv.x,argv.y],
+                                    r_max                            = argv.r_max,
+                                    dr                               = argv.dr,
+                                    dx                               = argv.dx,
+                                    dy                               = argv.dy,
+                                    r_0                              = argv.r0,
+                                    q_bound                          = argv.q_bound,
+                                    peak                             = [0.037, 0.064],
+                                    dpeak                            = [0.002, 0.002])
+
+
+  # Initialize iterator
+  FXS.cnt = np.array([0.])
+
+  # Initialize Index variables
+  if argv.param_path is None :
+     maxevents = 400000          # We don't always know the total nr of events. Therefore set to large value
+  else:
+     maxevents = min(len(timestamps),len(timestamps[first:last]))
+
+
+  FXS.get_index(maxevents, flag = 1)
+
+  # chop the list into pieces, depending on rank.  This assigns each process
+  # events such that the get every Nth event where N is the number of processes
+
+  if size > 1 :
+     if rank > 0 :
+
+        hd=pnccd_hit.hit()
+
+        # MPI process. Here we set rank 0 to work as a listening server only.
+        for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+            #print '***',rank,j,evt.get(EventId).fiducials()
+            if j%10==0: print('Rank',rank,'processing event',j)
+
+            if ftype == 'h5' :
+               FXS.get_h5(filestamps[j],evt)
+            else :
+               FXS.get_image(evt)                  # Geometry applied image (FXS.img)
+               FXS.image = np.copy(FXS.img)
+
+            # Process hits
+
+            if (FXS.image is not None) and (float(FXS.image.sum()) > hit) :
+
+
+               FXS.get_beam(plot = plot)                                        # Beam center refinement
+               FXS.get_polar(plot = plot)                                       # Polar transform
+               FXS.get_streak_mask(plot = plot)                                 # Get info on streak
+               FXS.store_image(j)                                                # Store raw images
+
+               if ftype == 'h5' :
+                  FXS.store_index_h5(evt, j, flag = 0)
+               else:
+                  ######################################
+                  # Ugly way to get the time-stamps. Fix!!
+                  time = evt.get(EventId).time()
+                  fid = evt.get(EventId).fiducials()
+                  sec  = time[0]
+                  nsec = time[1]
+                  et = EventTime(int((sec<<32)|nsec),fid)
+                  #######################################
+                  FXS.store_index(et, j, flag = 0)                                     # Store index
+
+               if int(FXS.cnt)%10==0: print('Rank',rank,'processed events: ', int(FXS.cnt))
+
+
+               # Send partial results to master (rank 0)
+               if int(FXS.cnt) % 50 == 0:                                      # Send every 50 events
+
+
+                  # C2 and Saxs data
+                  tmp_n    = int(FXS.cnt)
+
+                  # Total intensity, Size and Score
+
+                  tmp_ind = np.column_stack((FXS.tot_int,FXS.tot_size,FXS.tot_score))
+
+                  hd.send(tmp_n,ind=tmp_ind)
+
+
+        hd.endrun()
+
+        print('Rank',rank,'total events:     ', int(FXS.cnt),' * ')
+
+     else:
+
+        if ftype == 'h5' :
+           FXS.run_nr      = run
+        else:
+           FXS.run_nr      = int(run.run())
+
+
+        hd              = pnccd_hit.hit()
+
+        idim            = (maxevents,3)
+
+
+        hd.total_ind    = [np.zeros(idim)]*(size-1)
+        hd.total_ev_i   = [0.0]*(size-1)
+
+        nClients = size - 1
+
+        while nClients > 0:
+            # Remove client if the run ended
+            if hd.recv():
+               nClients -= 1
+            else:
+               ns = sum(hd.total_ev_s)
+               ni = sum(hd.total_ev_i)
+
+               if (ns % 100 == 0) :     # Publish every 100 events
+
+                  IND     = np.zeros(idim)
+
+                  for i in range(size-1) :
+                      IND     = IND     + hd.total_ind[i]
+
+                  FXS.publish(ind=IND, n_i=ni)
+
+
+  else :
+
+
+     # Single CPU
+
+
+     for j,evt in evtgen(run,timestamps = timestamps, first = first, last = last):
+         #print '***',rank,j,evt.get(EventId).fiducials()
+         if j%10==0: print('Rank',rank,'processing event',j)
+
+
+         if ftype == 'h5' :
+            FXS.get_h5(filestamps[j],evt)
+         else :
+            FXS.get_image(evt)                  # Geometry applied image (FXS.img)
+            FXS.image = np.copy(FXS.img)
+
+
+         # Process hits
+         if (FXS.image is not None)and (float(FXS.image.sum()) > hit) :
+
+             FXS.get_beam(plot=plot)                                    # Beam center refinement
+             FXS.get_polar()                                            # Polar transform
+             FXS.get_streak_mask(plot=0)                                # Get info on streak
+             FXS.store_image(j)                                         # Store raw images
+
+             if ftype == 'h5' :
+                FXS.store_index_h5(evt, j, flag = 0)
+             else:
+                ######################################
+                # Ugly way to get the time-stamps. Fix!!
+                time = evt.get(EventId).time()
+                fid = evt.get(EventId).fiducials()
+                sec  = time[0]
+                nsec = time[1]
+                et = EventTime(int((sec<<32)|nsec),fid)
+                #######################################
+                FXS.store_index(et, j, flag = 0)                                            # Store index
+
+     print('Rank',rank,'total events:   ', int(FXS.cnt),' * ')
+
+
+  #sum the images across mpi cores
+  if size > 1:
+    print("Synchronizing rank", rank)
+
+  Tot            = np.zeros(FXS.cnt.shape)
+
+  comm.Reduce(FXS.cnt,Tot)
+
+
+  if rank == 0 and Tot[0] == 0:
+    raise Sorry("No events found in the run")
+
+
+  # Collect  Variables
+
+  Images      = np.zeros(FXS.images.shape)
+  comm.Reduce(FXS.images,Images)
+
+
+  # Collect Indexing variables
+
+  Tot_t       = np.zeros(FXS.tot_t.shape)
+  comm.Reduce(FXS.tot_t,Tot_t)
+
+  Tot_s       = np.zeros(FXS.tot_s.shape)
+  comm.Reduce(FXS.tot_s,Tot_s)
+
+  Tot_ns      = np.zeros(FXS.tot_ns.shape)
+  comm.Reduce(FXS.tot_ns,Tot_ns)
+
+  Tot_fd      = np.zeros(FXS.tot_fd.shape)
+  comm.Reduce(FXS.tot_fd,Tot_fd)
+
+  Tot_int     = np.zeros(FXS.tot_int.shape)
+  comm.Reduce(FXS.tot_int,Tot_int)
+
+  Tot_peak1   = np.zeros(FXS.tot_peak1_int.shape)
+  comm.Reduce(FXS.tot_peak1_int,Tot_peak1)
+
+  Tot_peak2   = np.zeros(FXS.tot_peak2_int.shape)
+  comm.Reduce(FXS.tot_peak2_int,Tot_peak2)
+
+  Tot_s_m    = np.zeros(FXS.tot_streak_m.shape)
+  comm.Reduce(FXS.tot_streak_m,Tot_s_m)
+
+  Tot_s_s    = np.zeros(FXS.tot_streak_s.shape)
+  comm.Reduce(FXS.tot_streak_s,Tot_s_s)
+
+  Tot_cx     = np.zeros(FXS.tot_cx.shape)
+  comm.Reduce(FXS.tot_cx,Tot_cx)
+
+  Tot_cy     = np.zeros(FXS.tot_cy.shape)
+  comm.Reduce(FXS.tot_cy,Tot_cy)
+
+  Tot_size   = np.zeros(FXS.tot_size.shape)
+  comm.Reduce(FXS.tot_size,Tot_size)
+
+  Tot_score  = np.zeros(FXS.tot_score.shape)
+  comm.Reduce(FXS.tot_score,Tot_score)
+
+
+  # Reduce results
+
+  if rank==0:
+
+    if size > 1:
+      print("Synchronized")
+
+    # Identify dead lines and pixels, get binary pixel mask
+
+    Ave,Var,Mask        = pnccd_tbx.pixel_mask(Images, thr = 0.12)
+
+    # Write out data
+
+    if argv.outputdir is None:
+        opath = os.getcwd()
+    else:
+        opath = argv.outputdir
+
+    f_index     = os.path.join(opath,'Index_run' + str(argv.run) + '.dat')
+    stamps      = ['Time','Seconds','Nanoseconds','Fiducial','Total Intensity','Peak1, q='+str(FXS.peak[0])+'+/-'+str(FXS.dpeak[0]),'Peak2, q='+str(FXS.peak[1])+'+/-'+str(FXS.dpeak[1]),'Mean streak angle','Std streak angle','Beam X','Beam Y','Radius [Ang]','Score']
+    head        ="                 ".join(stamps)
+
+    f_ave       = os.path.join(opath,'Average_map_' + str(argv.run) + '.dat')
+    f_var       = os.path.join(opath,'Variance_map_' + str(argv.run) + '.dat')
+    f_mask      = os.path.join(opath,'Mask_map_' + str(argv.run) + '.dat')
+
+    # Get rid of zero lines at the end
+    # Last non-zero intensity
+    nz   = np.nonzero(Tot_t)
+    fend = nz[0][-1]+1
+
+    f              = open(f_index,'w')
+    np.savetxt(f,np.c_[Tot_t[:fend],Tot_s[:fend],Tot_ns[:fend],Tot_fd[:fend],Tot_int[:fend],Tot_peak1[:fend],Tot_peak2[:fend],Tot_s_m[:fend],Tot_s_s[:fend],Tot_cx[:fend],Tot_cy[:fend],Tot_size[:fend],Tot_score[:fend]],header = head, comments='' )
+    f.close()
+
+
+    f              = open(f_ave,'w')
+    np.savetxt(f,Ave)
+    f.close()
+
+    f              = open(f_var,'w')
+    np.savetxt(f,Var)
+    f.close()
+
+    f              = open(f_mask,'w')
+    np.savetxt(f,Mask)
+    f.close()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/pnccd_hit.py
+from __future__ import absolute_import, division, print_function
+import numpy as np
+from libtbx.mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+class hit(object):
+
+
+    def __init__(self):
+        pass
+
+    def endrun(self):
+        obj={'endrun':True}
+        comm.send(obj,dest=0,tag=rank)
+
+
+    def send(self, nr, image = None, saxs = None, c2 = None, ind = None):
+
+
+        if image is not None :
+           obj_image={'nr':nr,'shape':image.shape,'endrun':False}
+           comm.send(obj_image,dest=0,tag=rank)
+           comm.Send(image,dest=0,tag=rank)
+
+
+        if saxs is not None :
+           obj_saxs={'nr':nr,'shape':saxs.shape,'endrun':False}
+           comm.send(obj_saxs,dest=0,tag=rank)
+           comm.Send(saxs,dest=0,tag=rank)
+
+
+        if c2 is not None :
+           obj_c2={'nr':nr,'shape':c2.shape,'endrun':False}
+           comm.send(obj_c2,dest=0,tag=rank)
+           comm.Send(c2,dest=0,tag=rank)
+
+
+        if ind is not None :
+           obj_ind={'nr':nr,'shape':ind.shape,'endrun':False}
+           comm.send(obj_ind,dest=0,tag=rank)
+           comm.Send(ind,dest=0,tag=rank)
+
+
+
+    def recv(self):
+
+
+        status     = MPI.Status()
+        self.myobj = comm.recv(source=MPI.ANY_SOURCE,tag=MPI.ANY_TAG,status=status)
+        recvRank   = status.Get_source()
+
+
+        if not hasattr(self, 'total_ave'):
+           adim  = None
+        else:
+           adim  = self.total_ave[0].shape
+
+        if not hasattr(self, 'total_c2'):
+           cdim  = None
+        else:
+           cdim  = self.total_c2[0].shape
+
+        if not hasattr(self, 'total_saxs'):
+           sdim  = None
+        else:
+           sdim  = self.total_saxs[0].shape
+
+        if not hasattr(self, 'total_ind'):
+           idim  = None
+        else:
+           idim  = self.total_ind[0].shape
+
+
+        if self.myobj['endrun'] == False :
+           # Average image
+           if self.myobj['shape'] == adim :
+               self.total_ev_a[recvRank-1]     = int(self.myobj['nr'])
+               self.total_ave[recvRank-1]      = np.empty(self.myobj['shape'])
+               comm.Recv(self.total_ave[recvRank-1],source=recvRank,tag=MPI.ANY_TAG)
+           # C2 data
+           elif self.myobj['shape'] == cdim :
+               self.total_ev_c[recvRank-1]     = int(self.myobj['nr'])
+               self.total_c2[recvRank-1]       = np.empty(self.myobj['shape'])
+               comm.Recv(self.total_c2[recvRank-1],source=recvRank,tag=MPI.ANY_TAG)
+           # SAXS data
+           elif self.myobj['shape'] == sdim :
+               self.total_ev_s[recvRank-1]     = int(self.myobj['nr'])
+               self.total_saxs[recvRank-1]     = np.empty(self.myobj['shape'])
+               comm.Recv(self.total_saxs[recvRank-1],source=recvRank,tag=MPI.ANY_TAG)
+           # Ind
+           elif self.myobj['shape'] == idim :
+               self.total_ev_i[recvRank-1]     = int(self.myobj['nr'])
+               self.total_ind[recvRank-1]      = np.empty(self.myobj['shape'])
+               comm.Recv(self.total_ind[recvRank-1],source=recvRank,tag=MPI.ANY_TAG)
+
+
+
+        return (self.myobj['endrun'])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+xfel/amo/pnccd_ana/pnccd_tbx.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+from psana import *
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy as sp
+from mpl_toolkits.mplot3d import Axes3D                 # implicit import
+from matplotlib import cm
+from matplotlib.ticker import LinearLocator, FormatStrFormatter
+
+def dynamic_flatfield(pcimg, pcmsk = None):
+
+    """Compute the dynamic flatfield image from an average image in polar coordinates
+    (see Hosseinizadeh et. al, Structural Dynamics, 2015)
+
+       @pcimg   Average Image in polar coordinates
+       @pcmsk   Average Mask  in polar coordinates
+
+    """
+
+    # Find non-gap indicices
+    if pcmsk is None :
+       pcmsk       = np.zeros(pcimg.shape)
+       ind         = pcimg != 0
+       pcmsk[ind]  = 1
+    else:
+       ind         = pcmsk == 1
+
+    # Comupte saxs data
+    s           = np.ma.average(pcimg,axis=1,weights=pcmsk)
+    S           = np.zeros(pcimg.shape)
+    for q in range(S.shape[0]) :
+        S[q,:]  = s[q]
+
+    # Compute Flatfield
+    pcflat      = np.zeros(pcimg.shape)
+    pcflat[ind] = S[ind]/pcimg[ind]
+
+    return pcflat
+
+
+def analyze_quadrants(pcimg, pcmsk, qrange = None, plot = 0):
+
+    """Analyze intensity distribution in each detector quadrant with the
+       purpose to identify outlier image quadrants.
+
+       @pcimg   Image in polar coordinates
+       @pcmsk   Mask in polar coordinates
+       @qrange  Q-range for analysis
+
+    """
+
+    # Nr of q and phi
+    nQ     = pcimg.shape[0]
+    nPhi   = pcimg.shape[1]
+
+    if qrange is None:
+       qrange[0] = 0
+       qrange[1] = nQ
+
+    # Quadrant angles
+    ang_1  = 0
+    ang_2  = int(nPhi/4)
+    ang_3  = int(nPhi*(2/4))
+    ang_4  = int(nPhi*(3/4))
+
+    # Compute saxs data for each quadrant
+    S1     = np.ma.average(pcimg[:,ang_1:ang_2],axis=1,weights=pcmsk[:,ang_1:ang_2])
+    S2     = np.ma.average(pcimg[:,ang_2:ang_3],axis=1,weights=pcmsk[:,ang_2:ang_3])
+    S3     = np.ma.average(pcimg[:,ang_3:ang_4],axis=1,weights=pcmsk[:,ang_3:ang_4])
+    S4     = np.ma.average(pcimg[:,ang_4:],axis=1,weights=pcmsk[:,ang_4:])
+
+    # Compute mean and std for each quadrant
+    Means  = []
+    Means.append(np.median(S1[qrange[0]:qrange[1]]))
+    Means.append(np.median(S2[qrange[0]:qrange[1]]))
+    Means.append(np.median(S3[qrange[0]:qrange[1]]))
+    Means.append(np.median(S4[qrange[0]:qrange[1]]))
+    Means  = np.array(Means)
+
+    # Estimate variation in % between quadrants
+    Var    = 100*(np.std(Means)/np.mean(Means))
+
+    if plot :
+
+       m1 = np.nanmean(pcimg.reshape((-1)))
+       s1 = np.std(pcimg.reshape((-1)))
+
+       q  = np.arange(nQ)
+       plt.figure(10000,figsize=(10,10))
+       plt.clf()
+       ax = plt.subplot(211)
+       plt.imshow(pcimg)
+       plt.axis('tight')
+       plt.clim(0,m1+3*s1)
+       plt.colorbar()
+       ax = plt.subplot(212)
+       plt.semilogy(q[qrange[0]:qrange[1]],S1[qrange[0]:qrange[1]],'b',label='I')
+       plt.semilogy(q[qrange[0]:qrange[1]],S2[qrange[0]:qrange[1]],'r',label='II')
+       plt.semilogy(q[qrange[0]:qrange[1]],S3[qrange[0]:qrange[1]],'g',label='III')
+       plt.semilogy(q[qrange[0]:qrange[1]],S4[qrange[0]:qrange[1]],'m',label='IV')
+       plt.legend()
+       plt.draw()
+
+    return Var
+
+
+def pixel_mask(imgs, thr = 1.0, plot = 1):
+
+    """Compute pixel mask by identifying non-responsive or overloaded pixels from a set of images
+       by assuming that the variance roughly follows Possion distribution
+
+       @imgs    Assmbled image set ex: on the format 1024 x 1024 x N elements for pnCCDs
+       @thr     Threshold for identifying non-changing pixels, default 1.0 * pixel std**2
+
+    """
+
+    # Compute average and std intensity for each pixel
+    mean_image  = np.mean(imgs,axis=2)
+    std_image   = np.std(imgs,axis=2)
+
+    # Set pixels with a mean larger then thr*variance to zeros, for Poisson mean = sigma**2
+    T           = abs(mean_image) < thr*(std_image**2)
+    mask        = T.astype(int)
+
+    if plot:
+
+       m1 = np.nanmean(mean_image.reshape((-1)))
+       s1 = np.std(mean_image.reshape((-1)))
+
+       plt.figure(1200,figsize=(10,20))
+       plt.clf()
+       ax = plt.subplot(211)
+       plt.imshow(mean_image)
+       plt.axis('image')
+       plt.clim(0,m1+3*s1)
+       ax.set_title("Average image")
+       ax = plt.subplot(212)
+       plt.imshow(mask)
+       plt.axis('image')
+       ax.set_title("Pixel mask")
+       plt.draw()
+
+       # Display image for secs
+       import time
+       secs = 60
+       time.sleep(secs)
+
+    return mean_image,std_image**2, mask
+
+
+
+
+def common_mode_hart(img, msk, max_int, max_com, length, orient = 0, plot = 0):
+
+    """Apply common mode correction according to Philip Hart on raw image
+
+       @img     Assmbled image ex: on the format 1024 x 1024 elements for pnCCDs
+       @msk     Assmbled mask ex: on the format 1024 x 1024 elements for pnCCDs
+       @max_int Max threshold for pixel intensity to be used in CM
+       @max_com Max CM value for correction to be made
+       @length  Length of consecutive pixel array, det. specific. For pnCCD 128 channel row
+
+    """
+    img2 = np.copy(img)
+
+    dim1 = img.shape[0]
+    dim2 = img.shape[1]
+
+    # Get pixel bin indices
+    bin_index = np.arange(0, dim2+length, length)
+
+    if orient :
+
+       # Loop over rows
+       for r in range(dim1):
+           # Loop over pixel bins
+           for b in range(len(bin_index)-1):
+               # Only use "live" pixels below max_int
+               m    = msk[r,bin_index[b]:bin_index[b+1]]
+               i    = img[r,bin_index[b]:bin_index[b+1]]
+               m_dx = m > 0
+               i_dx = i < max_int
+               idx  = m_dx*i_dx
+               cm   = np.median(i[idx])
+               if cm < max_com:
+                  img2[r,bin_index[b]:bin_index[b+1]] = img[r,bin_index[b]:bin_index[b+1]] - cm
+
+    else:
+
+       # Loop over rows
+       for r in range(dim1):
+           # Loop over pixel bins
+           for b in range(len(bin_index)-1):
+               # Only use "live" pixels below max_int
+               m    = msk[bin_index[b]:bin_index[b+1],r]
+               i    = img[bin_index[b]:bin_index[b+1],r]
+               m_dx = m > 0
+               i_dx = i < max_int
+               idx  = m_dx*i_dx
+               cm   = np.median(i[idx])
+               if cm < max_com:
+                  img2[bin_index[b]:bin_index[b+1],r] = img[bin_index[b]:bin_index[b+1],r] - cm
+
+
+    if plot:
+
+       m1 = np.nanmean(img.reshape((-1)))
+       s1 = np.std(img.reshape((-1)))
+
+       m2 = np.nanmean(img2.reshape((-1)))
+       s2 = np.std(img2.reshape((-1)))
+
+       plt.figure(1100,figsize=(10,20))
+       plt.clf()
+       ax = plt.subplot(311)
+       plt.imshow(img)
+       plt.axis('image')
+       plt.clim(0,m1+3*s1)
+       plt.colorbar()
+       ax.set_title("Raw")
+       ax = plt.subplot(312)
+       plt.imshow(img2)
+       plt.axis('image')
+       plt.clim(0,m2+3*s2)
+       plt.colorbar()
+       ax.set_title("CM corrected")
+       ax = plt.subplot(313)
+       plt.imshow(img-img2)
+       plt.axis('image')
+       plt.clim(m2-3*s2,m2+3*s2)
+       plt.colorbar()
+       ax.set_title("Raw - CM")
+       plt.draw()
+
+    return img2
+
+
+def common_mode(img, edge, side, plot = 0):
+    """Apply quasi-common mode correction to raw image
+
+       @img     Assmbled image ex: on the format 1024 x 1024 elements for pnCCDs
+       @edge    Distance of box from edge
+       @side    Box size for common mode probe area
+
+    """
+    img2 = np.copy(img)
+
+    dim1 = img.shape[0]
+    dim2 = img.shape[1]
+
+    # Upper Left Quadrant
+    Q1 = np.median(img[edge:(edge+side),edge:(edge+side)]);
+    # Lower Left Quadrant
+    Q2 = np.median(img[dim1-(edge+side):(dim1-edge),edge:(edge+side)]);
+    # Upper Right Quadrant
+    Q3 = np.median(img[edge:(edge+side),dim2-(edge+side):(dim2-edge)]);
+    # Lower Right Quadrant
+    Q4 = np.median(img[dim1-(edge+side):(dim1-edge),dim2-(edge+side):(dim2-edge)]);
+
+    # Implement common mode
+    img2[0:int(dim1/2),0:int(dim2/2)] = img[0:int(dim1/2),0:int(dim2/2)] - Q1
+    img2[int(dim1/2):,0:int(dim2/2)]  = img[int(dim1/2):,0:int(dim2/2)] -  Q2
+    img2[0:int(dim1/2),int(dim2/2):]  = img[0:int(dim1/2),int(dim2/2):] -  Q3
+    img2[int(dim1/2):,int(dim2/2):]   = img[int(dim1/2):,int(dim2/2):]  -  Q4
+
+    if plot:
+       img3 = np.copy(img)
+
+       # Display area used for cm estimate
+       img3[edge:(edge+side),edge:(edge+side)]                          = 1e6
+       img3[dim1-(edge+side):(dim1-edge),edge:(edge+side)]              = 1e6
+       img3[edge:(edge+side),dim2-(edge+side):(dim2-edge)]              = 1e6
+       img3[dim1-(edge+side):(dim1-edge),dim2-(edge+side):(dim2-edge)]  = 1e6
+
+
+       m1 = np.nanmean(img.reshape((-1)))
+       s1 = np.std(img.reshape((-1)))
+
+       m2 = np.nanmean(img2.reshape((-1)))
+       s2 = np.std(img2.reshape((-1)))
+
+       plt.figure(1100,figsize=(10,20))
+       plt.clf()
+       ax = plt.subplot(311)
+       plt.imshow(img3)
+       plt.axis('image')
+       plt.clim(0,m1+3*s1)
+       plt.colorbar()
+       ax.set_title("Raw")
+       ax = plt.subplot(312)
+       plt.imshow(img2)
+       plt.axis('image')
+       plt.clim(0,m2+3*s2)
+       plt.colorbar()
+       ax.set_title("CM corrected")
+       ax = plt.subplot(313)
+       plt.imshow(img-img2)
+       plt.axis('image')
+       plt.clim(m2-3*s2,m2+3*s2)
+       plt.colorbar()
+       ax.set_title("Raw - CM")
+       plt.draw()
+
+    return img2
+
+
+def extend_image(img) :
+
+    dim1  = img.shape[0]
+    dim2  = img.shape[1]
+    # Generate extended image and mask
+    if dim1 > dim2:
+       img2                     = np.zeros((dim1,dim1))
+       edge                     = int((dim1 - dim2)/2)
+       img2[:,edge:(edge+dim2)]  = img
+    else:
+       img2                     = np.zeros((dim2,dim2))
+       edge                     = int((dim2 - dim1)/2)
+       img2[edge:(edge+dim1),:]  = img
+
+    return img2
+
+
+def get_geometry(img, gap, shift, orient) :
+    """Apply geometry; gap and shift to image
+
+       @img     Assmbled image ex: on the format 1024 x 1024 elements for pnCCDs
+       @gap     Gap in pixels   [pos. int]
+       @shift   Shift in pixels [int]
+       @orient  Orientation of panel pairs [0/1]
+                0 : Gap/shift relative to upper panel pairs
+                1 : Gap/shift relative to left panel pairs
+    """
+
+    # Retrieve image dimensions
+    dim1      = img.shape[0]
+    dim2      = img.shape[1]
+
+    # Implement gap & shift between panel pairs
+    if orient == 0 :
+       # Upper-Lower orientation
+       image = np.zeros((dim1+gap,dim2+abs(shift)))
+
+       if shift >= 0 :
+          image[0:int(dim1/2),0:dim2]                       =  img[0:int(dim1/2),:]
+          image[int(dim1/2)+gap:,shift:(dim2+shift)]        =  img[int(dim1/2):,:]
+
+       else:
+          image[0:int(dim1/2),abs(shift):(dim2+abs(shift))] =  img[0:int(dim1/2),:]
+          image[int(dim1/2)+gap:,0:dim2]                    =  img[int(dim1/2):,:]
+
+    else :
+       # Left-Right orientation
+       image = np.zeros((dim1+abs(shift),dim2+gap))
+
+       if shift >= 0 :
+          image[0:dim1,0:int(dim2/2)]                       =  img[:,0:int(dim2/2)]
+          image[shift:(dim1+shift),int(dim2/2)+gap:]        =  img[:,int(dim2/2):]
+
+       else:
+          image[abs(shift):(dim1+abs(shift)),0:int(dim2/2)] =  img[:,0:int(dim2/2)]
+          image[0:dim1,int(dim2/2)+gap:]                    =  img[:,int(dim2/2):]
+
+    return image
+
+
+def assemble_image(img, msk = None) :
+    """Assemble raw or calib format pnCCD panels
+
+       @img     Un-assmbled image on the format 4 x 512 x 512 elements for pnCCDs
+       @msk     Un-assmbled mask on  the format 4 x 512 x 512 elements for pnCCDs
+    """
+
+    if msk is None:
+       msk = np.ones(img.shape)
+
+    image  = np.zeros((1024,1024))
+    mask   = np.zeros((1024,1024))
+
+    panA   = np.zeros((512,512))
+    panB   = np.zeros((512,512))
+    panC   = np.zeros((512,512))
+    panD   = np.zeros((512,512))
+
+    masA   = np.zeros((512,512))
+    masB   = np.zeros((512,512))
+    masC   = np.zeros((512,512))
+    masD   = np.zeros((512,512))
+
+    x=0;
+    for i in range(4) :
+        for j in range(512) :
+            for k in range(512) :
+                if i == 0:
+                   panA[j,k] = img[x]
+                   masA[j,k] = msk[x]
+                elif i == 1:
+                   panB[j,k] = img[x]
+                   masB[j,k] = msk[x]
+                elif i == 2:
+                   panC[j,k] = img[x]
+                   masC[j,k] = msk[x]
+                else:
+                   panD[j,k] = img[x]
+                   masD[j,k] = msk[x]
+                x += 1
+
+    # Assemble image, specifik to experiment
+    image[0:512,0:512] = np.transpose(panC)
+    image[0:512,512:]  = np.rot90(np.transpose(panD),k=2) # Rot 180
+    image[512:,0:512]  = np.transpose(panB)
+    image[512:,512:]   = np.rot90(np.transpose(panA),k=2) # Rot 180
+
+    # Assemble mask, specifik to experiment
+    mask[0:512,0:512] = np.transpose(masC)
+    mask[0:512,512:]  = np.rot90(np.transpose(masD),k=2) # Rot 180
+    mask[512:,0:512]  = np.transpose(masB)
+    mask[512:,512:]   = np.rot90(np.transpose(masA),k=2) # Rot 180
+
+    return image, mask
+
+
+def circles(r, cent, dim, dr = 2):
+
+    circ        = np.zeros(dim).astype(np.float64)
+    y, x        = np.ogrid[0:dim[0], 0:dim[1]]
+    index       = ((x-cent[0])**2 + (y-cent[1])**2 >= (r-dr)**2)&((x-cent[0])**2 + (y-cent[1])**2 <= (r+dr)**2)
+    circ[index] = 1e6
+
+    return circ
+
+def polar2cart(r, theta, center):
+
+    x = r  * np.cos(theta) + center[0]
+    y = r  * np.sin(theta) + center[1]
+
+    return x, y
+
+
+def get_static_mask(msk,cent,r_max,msk_a,msk_w):
+    """Returns static mask with specified angular sectors masked out
+
+       @msk     Mask in cartesian coordinates                  [nx,ny]
+       @cent    Beam center coordinates                        [pos.integer,pos.integer]
+       @r_max   Max radial value (in pixels)                   [pos. integer]
+       @mask_a  Centers of angular slice to mask               [pos.integer1 pos.integer2,...]
+       @msk_w  Width of angular slice to mask                  [pos.integer1 pos.integer2,...]
+    """
+
+    dim = msk.shape
+    x,y = np.ogrid[:dim[0],:dim[1]]
+    cx,cy = cent
+
+    for i in range(len(msk_a)) :
+
+        tmin,tmax = np.deg2rad((int(msk_a[i])-int(msk_w[i]),int(msk_a[i])+int(msk_w[i])))
+
+        # ensure stop angle > start angle
+        if tmax < tmin:
+                tmax += 2*np.pi
+
+        # convert cartesian --> polar coordinates
+        r2 = (x-cx)*(x-cx) + (y-cy)*(y-cy)
+        theta = np.arctan2(x-cx,y-cy) - tmin
+
+        # wrap angles between 0 and 2*pi
+        theta %= (2*np.pi)
+
+        # circular mask
+        circmask = r2 <= r_max*r_max
+
+        # angular mask
+        anglemask = theta <= (tmax-tmin)
+
+        ind = circmask * anglemask
+
+#        msk[ind] = 0
+        msk[ind] = 1
+
+    return msk
+
+
+def get_polar(img, msk, cent, r_max, r_min = 0, dr = 1, nPhi = None, dPhi = 1, msk_a = None, msk_w = None, plot = 0):
+    """Returns cartesian images img & msk in polar coordinates pcimg[r,Phi] & pcmsk[r,Phi]
+
+       @img     Image in cartesian coordinates                  [nx,ny]
+       @msk     Mask in cartesian coordinates                   [nx,ny]
+       @cent    Beam center coordinates                         [pos.integer,pos.integer]
+       @r_max   Max radial value (in pixels)                    [pos. integer]
+       @r_min   Min radial value (in pixels)                    [pos. integer]
+       @dr      Stepsize in radius                              [pos.integer]
+       @nPhi    Number of Phi points                            [pos.integer]
+       @dPhi    Stepsize in Phi                                 [pos.integer]
+       @mask_a  Centers of angular slice to mask                [pos.integer1 pos.integer2,...]
+       @msk_w  Width of angular slice to mask                  [pos.integer1 pos.integer2,...]
+       @plot    Display result of grid search                   [0/1]
+
+    """
+
+    if msk is None:
+       msk = np.ones((img.shape))
+
+    if nPhi is None :
+       nPhi  = np.ceil(2*np.pi*r_max)
+
+    theta , R = np.meshgrid(np.linspace(0, 2*np.pi, nPhi/dPhi,endpoint=False),np.arange(r_min, r_max, dr))
+
+    Xcart, Ycart = polar2cart(R, theta, cent)
+
+    Xcart = Xcart.round().astype(int)
+    Ycart = Ycart.round().astype(int)
+
+    pcimg = img[Ycart,Xcart]
+    pcimg = np.reshape(pcimg,((r_max-r_min)/dr,nPhi/dPhi))
+
+    pcmsk = msk[Ycart,Xcart]
+    pcmsk = np.reshape(pcmsk,((r_max-r_min)/dr,nPhi/dPhi))
+
+    if (msk_a is not None) and (msk_w is not None) :
+       # Mask out selected angles
+       for i in range(len(msk_a)) :
+           pcmsk[:,(int(msk_a[i])-int(msk_w[i])):(int(msk_a[i])+int(msk_w[i]))] = 0
+
+
+    if plot :
+
+       m1 = np.nanmean(img.reshape((-1)))
+       s1 = np.std(img.reshape((-1)))
+
+       m2 = np.nanmean(pcimg.reshape((-1)))
+       s2 = np.std(pcimg.reshape((-1)))
+
+       plt.figure(2000)
+       plt.clf()
+       ax = plt.subplot(221)
+       plt.imshow(img)
+       plt.axis('image')
+       plt.clim(0,m1+3*s1)
+       plt.colorbar()
+       ax.set_title("Cartesian image")
+       ax = plt.subplot(222)
+       plt.imshow(msk)
+       plt.axis('image')
+       plt.clim(0,1)
+       plt.colorbar()
+       ax.set_title("Cartesian mask")
+       ax = plt.subplot(223)
+       plt.imshow(pcimg)
+       plt.axis('tight')
+       plt.clim(0,m2+3*s2)
+       plt.colorbar()
+       plt.ylabel('r')
+       plt.xlabel('Phi')
+       ax.set_title("Polar image")
+       ax = plt.subplot(224)
+       plt.imshow(pcmsk)
+       plt.axis('tight')
+       plt.clim(0,1)
+       plt.colorbar()
+       plt.ylabel('r')
+       plt.xlabel('Phi')
+       ax.set_title("Polar mask")
+       plt.draw()
+
+    return pcimg, pcmsk
+
+
+
+def variance_norm(pcimg,pcmsk) :
+    """Compute the variance normalized image in polar coordinates
+
+       @pcimg   Image in polar coordinates
+       @pcmsk   Mask in polar  coordinates
+
+    """
+
+    saxs_m           = np.zeros(pcimg.shape[0])
+    saxs_s           = np.zeros(pcimg.shape[0])
+    pcnorm           = np.zeros(pcimg.shape)
+
+    for q in range(pcimg.shape[0]) :
+
+        ind               = np.nonzero(pcmsk[q,:])
+
+        if len(ind[0]) == 0 :
+           saxs_m[q]     = 0
+           saxs_s[q]     = 0
+        else:
+           saxs_m[q]     = np.nanmean(pcimg[q,ind],axis=1)
+           saxs_s[q]     = np.nanstd(pcimg[q,ind],axis=1)
+
+        if saxs_s[q] != 0 :
+
+           pcnorm[q,ind] = (pcimg[q,ind] - saxs_m[q]) / saxs_s[q]
+
+    pcnorm         = pcnorm*pcmsk
+
+    return pcnorm,saxs_m,saxs_s
+
+
+
+def get_beam(img, msk, r_max, dr = 1, cent0 = None, dx = 0, dy = 0, ang = 45, dang = 10, plot = 0 ) :
+    """Returns estimated beam center coordintes (cent) refined using
+       a grid search assuming Friedel symmetry in the image
+
+       @img     Image in cartesian coordinates                  [nx,ny]
+       @msk     Mask in cartesian coordinates                   [nx,ny]
+       @r_max   Max radial value (in pixels) used in refinement [pos. integer]
+       @dr      Stepsize in radius                              [pos.integer]
+       @cent0   Initial guess of beam center coordinates        [pos.integer,pos.integer]
+       @dx      Search in x-direction, x+/-dx                   [pos. integer]
+       @dy      Search in y-direction, y+/-dy                   [pos. integer]
+       @ang     Center of angular slice in degrees              [pos. integer]
+       @dang    Size of angular slice, ang+/-dang               [pos. integer]
+       @plot    Display result of grid search                   [0/1]
+
+    """
+
+    # Default start from center of gravity of the image
+    if cent0 is None:
+       cent0 = [int(round(img.shape[0]/2)) , int(round(img.shape[1]/2))]
+
+
+    if (dx + dy) == 0:
+
+       cent = cent0
+
+    else:
+
+       na  = np.ceil(2*np.pi*r_max)                     # Get the necessay number of phi slices
+
+       if (na % (360/ang)):
+          na  = np.ceil(na/(360/ang))*(360/ang)
+
+       da     = round((dang/360)*na)                    # Get dang in phi slices
+
+       # Get indices for the 4 slices
+       ind_q  = np.arange(0, r_max/dr, 1).astype(int)
+       ind_a1 = np.arange(((ang/360)*na-da),       ((ang/360)*na+da)+1, 1).astype(int)
+       ind_a2 = np.arange((((ang+180)/360)*na-da), (((ang+180)/360)*na+da)+1, 1).astype(int)
+       ind_a3 = np.arange((((ang+90)/360)*na-da),  (((ang+90)/360)*na+da)+1, 1).astype(int)
+       ind_a4 = np.arange((((ang+270)/360)*na-da), (((ang+270)/360)*na+da)+1, 1).astype(int)
+
+       C1     = np.ndarray([(2*dx+1),(2*dy+1)])
+       C2     = np.ndarray([(2*dx+1),(2*dy+1)])
+
+       x      = 0
+
+       # Step through grid and score correlation between slices seperated by 180 deg
+       for xx in range(cent0[0]-dx,cent0[0]+dx+1) :
+           y = 0
+           for yy in range(cent0[1]-dy,cent0[1]+dy+1) :
+
+                  pcimg, pcmsk = get_polar(img, msk, [xx, yy], r_max, r_min = 0, dr = dr, nPhi = na, dPhi = 1 )
+
+                  ind1 = pcmsk[np.ix_(ind_q,ind_a1)].astype(int)
+                  ind2 = pcmsk[np.ix_(ind_q,ind_a2)].astype(int)
+                  ind3 = pcmsk[np.ix_(ind_q,ind_a3)].astype(int)
+                  ind4 = pcmsk[np.ix_(ind_q,ind_a4)].astype(int)
+
+                  S1   = np.ma.average(pcimg[np.ix_(ind_q,ind_a1)],axis=1,weights=ind1)
+                  S2   = np.ma.average(pcimg[np.ix_(ind_q,ind_a2)],axis=1,weights=ind2)
+                  S3   = np.ma.average(pcimg[np.ix_(ind_q,ind_a3)],axis=1,weights=ind3)
+                  S4   = np.ma.average(pcimg[np.ix_(ind_q,ind_a4)],axis=1,weights=ind4)
+
+
+                  # Ascert that only non-zero intensities are compared
+                  ind1 = (S1!=0)*(S2!=0)
+                  ind2 = (S3!=0)*(S4!=0)
+
+                  C1[x,y]   = np.corrcoef(S1[ind1],S2[ind1])[0,1]
+                  C2[x,y]   = np.corrcoef(S3[ind2],S4[ind2])[0,1]
+
+                  y += 1
+           x += 1
+
+       Ctot     = (C1/C1.max() + C2/C2.max())/2         # Equal weights for the 2 pairs for now,
+
+       xcoord   = np.arange(cent0[0]-dx,cent0[0]+dx+1,1)
+       ycoord   = np.arange(cent0[1]-dy,cent0[1]+dy+1,1)
+
+       index    = np.unravel_index(Ctot.argmax(), Ctot.shape)
+       cent     = [xcoord[index[0]] , ycoord[index[1]] ]
+
+       if plot :
+
+          print(cent)
+
+          # Generate rings from beam center
+
+          img2 = img.copy()
+          img2 = img2*msk
+
+
+          # Switch x,y for display purpose only since imshow() displays the transpose
+          img2[(cent[1]-10):(cent[1]+10),cent[0]] = 1e6
+          img2[cent[1],(cent[0]-10):(cent[0]+10)] = 1e6
+
+          for rr in range(50,int(img2.shape[0]/2),50) :
+              circ = circles(rr,cent,img2.shape)
+              img2  = img2 + circ
+
+          Y, X = np.meshgrid(ycoord, xcoord)
+
+
+          m1 = np.nanmean(img.reshape((-1)))
+          s1 = np.std(img.reshape((-1)))
+
+          fig=plt.figure(1000,figsize=(5,20))
+          plt.clf()
+          ax = plt.subplot(211)
+          plt.imshow(img2)
+          plt.axis('tight')
+          plt.clim(0,m1+3*s1)
+          plt.colorbar()
+          plt.xlabel('x')
+          plt.ylabel('y')
+          ax.set_title("Cartesian image")
+          ax = fig.add_subplot(2,1,2,projection='3d')
+          surf = ax.plot_surface(X, Y, Ctot, rstride=1, cstride=1, cmap=cm.coolwarm,linewidth=0, antialiased=False)
+          ax.set_zlim(0, 1.01)
+          ax.zaxis.set_major_locator(LinearLocator(10))
+          ax.zaxis.set_major_formatter(FormatStrFormatter('%.02f'))
+          fig.colorbar(surf, shrink=0.5, aspect=5)
+          plt.xlabel('x')
+          plt.ylabel('y')
+          plt.axis('tight')
+          ax.set_title("Coordinate Surface")
+          plt.draw()
+
+    return cent
+
+
+def get_bessel(Q, R) :
+
+    B    = 3*((np.sin(Q*R) - (Q*R*np.cos(Q*R)))/((Q*R)**3))
+
+    return B
+
+
+def bessel_fit(k, *args) :
+    """Spherical Bessel fit by refining I0 and Particle Radius
+   """
+
+    data = args[0]
+    qs   = args[1]
+
+    bessel = get_bessel(qs,k[1])
+    theory = k[0]*(bessel**2)
+
+    T      = np.corrcoef(data,theory)[0,1]
+    T      = 1/T
+
+    return T
+
+
+def bessel_fit2(k, *args) :
+    """Spherical Bessel fit by refining I0 and Detector distance
+   """
+
+    data      = args[0]
+    radius    = args[1]
+    det_pix   = args[2]
+    beam_l    = args[3]
+    r_i       = args[4]
+
+    # Compute q-spacing
+    qs        = r_i*det_pix/k[1]*4*np.pi/beam_l/2
+
+    bessel = get_bessel(qs,radius)
+    theory = k[0]*(bessel**2)
+
+    T      = np.corrcoef(data,theory)[0,1]
+    T      = 1/T
+
+    return T
+
+def saxs_fit(k, *args) :
+    """Saxs fit by refining I0 and Detector distance
+   """
+
+    data      = args[0]
+    theory    = args[1]
+    det_pix   = args[2]
+    beam_l    = args[3]
+    r_i       = args[4]
+    q_i       = args[5]
+
+    # Compute q-spacing
+    q_s       = r_i*det_pix/k*4*np.pi/beam_l/2
+
+    # Interpolate theory to match the experimental q-range
+    theory = np.interp(q_s,q_i,theory)
+
+    T      = np.corrcoef(data,theory)[0,1]
+    T      = 1/T
+
+    return T
+
+
+
+def get_size(saxs, q, r_i, q_i = None, q_f = None, plot = 0) :
+    """Spherical Besselfit of SAXS data starting from radius, r_i
+       Returns optimized radius r_f in Angstrom
+
+       @saxs    Saxs data                                       [nQ]
+       @q       Q-vector                                        [nQ]
+       @r_i     Initial guess for radius (in Ang)               [float]
+       @q_i     Lower q-bound (Ang-1)                           [float]
+       @q_f     Upper q-bound (Ang-1)                           [float]
+       @plot    Display fit between data & theory               [0/1]
+
+    """
+
+    if q_i is None:
+       q_i = q[int(np.argmax(saxs>0))]
+
+
+    if q_f is None:
+       q_f = q.max()
+
+    # Get data for q-range
+    ind  = (q >= q_i) & (q <= q_f)
+    data = saxs[ind]
+    qs   = q[ind]
+
+    # Simplex optimization
+    i_f,r_f  = sp.optimize.fmin(bessel_fit, x0=[data[0],r_i],args=(data,qs),disp=0)
+
+    # Optimal solution
+    theory   = i_f*(((3*((np.sin(qs*r_f) - (qs*r_f*np.cos(qs*r_f)))/((qs*r_f)**3))))**2);
+    score    = np.corrcoef(data,theory)[0,1]
+
+    if plot :
+
+       scale = np.nanmean(data)/np.nanmean(theory)
+
+       fig   = plt.figure(3000)
+       plt.semilogy(qs,data,'b-',qs,scale*theory,'r-',linewidth=1)
+       plt.xlabel('q (A^-1)')
+
+    return r_f, score
+
+
+def mc_fit(data, q, R, npart) :
+    """Monte carlo based Bessel fit to experimental SAXS data
+
+       @data    Saxs data                                       [nQ]
+       @q       Q-vector                                        [nQ]
+       @R       Pool of radius sizes
+       @npart   Estimated number of particles                   [int]
+
+    """
+    # Compute Saxs Intensity for all sizes
+    Iall = np.zeros((len(data),len(R)))
+    dR   = R[1]-R[0]
+    for r in range(len(R)) :
+        Btmp      = get_bessel(q,R[r])
+        Iall[:,r] = ((R[r]**6)/dR)*(Btmp**2)
+
+    # Initialize Score
+    rint  = np.random.randint(len(R))
+    I0    = Iall[:,rint]
+
+    C        = np.corrcoef(data,I0)[0,1]
+    Dn       = np.zeros(len(R))
+    Dn[rint] = 1
+    I        = I0
+
+    Dtmp  = np.zeros(len(R))
+    # Loop over nr of particles
+    for i in range(npart):
+        rint        = np.random.randint(len(R))
+        Dtmp[rint] += 1
+
+        Itmp        = np.zeros(len(q))
+        # Loop over nr of particle bins
+        for b in range(len(Dtmp)):
+            Itmp += Dtmp[b]*Iall[:,b]
+
+        Ctmp        = np.corrcoef(data,Itmp)[0,1]
+
+        if Ctmp > C :
+
+           C    = Ctmp
+           Dn   = Dtmp
+           I    = Itmp
+
+        elif Ctmp == C :                # if no added contribution
+
+           C    = Ctmp
+           Dn   = Dtmp
+           I    = Itmp
+           break
+
+
+    return I,Dn,C
+
+
+
+def get_size_distribution(saxs, q, q_i = None, q_f = None, dr = 10, npart = 100, ntrial = 5, plot = 0) :
+    """Spherical Besselfit of SAXS data based on a distribution of spheres of different sizes
+       Returns optimized distribution of radii r_f in Angstrom
+
+       @saxs    Saxs data                                       [nQ]
+       @q       Q-vector                                        [nQ]
+       @dr      Size of radius bin                              [float, Ang]
+       @npart   Estimated nr of particles                       [integer]
+       @q_i     Lower q-bound (Ang-1)                           [float]
+       @q_f     Upper q-bound (Ang-1)                           [float]
+       @ntrial  Number of MC trials                             [int]
+       @plot    Display fit between data & theory               [0/1]
+
+    """
+
+    if q_i is None:
+       q_i = q[int(np.argmax(saxs>0))]
+
+
+    if q_f is None:
+       q_f = q.max()
+
+    # Get data for q-range
+    ind  = (q >= q_i) & (q <= q_f)
+    data = saxs[ind]
+    qs   = q[ind]
+
+    # Determine radius range
+    rmin = np.pi/qs[-1]
+    rmax = np.pi/qs[0]
+    R    = np.arange(rmin,rmax,dr)
+
+    theory = np.zeros((len(qs),ntrial))
+    Dn     = np.zeros((len(R),ntrial))
+    score  = np.zeros(ntrial)
+
+    # Monte-Carlo refinement
+    for t in range(ntrial) :
+        theory[:,t],Dn[:,t],score[t] = mc_fit(data,qs,R,npart)
+
+    # Find Optimal solution
+    index       = np.unravel_index(score.argmax(), score.shape)
+    theory_opt  = theory[:,index]
+    n           = int(sum(Dn[:,index]))                 # Nr of refined particles
+    Dn_opt      = Dn[:,index]/n                         # Normalize
+    score_opt   = score[index]
+
+    return Dn_opt,R,n,score_opt
+
+
+def get_detdistance(saxs_data, det_0, det_pix, beam_l, saxs_r = None, radius = None, q_theory = None, saxs_theory = None, plot = 0) :
+    """Saxs based refinement of the detector distance using knowledge about either:
+       1. The size of the calibrant (Spherical calibrants, ex: Polystyrene Latex Spheres)
+       2. The theoretical scattering of the particle (Non-spherical calibrants)
+
+       @saxs_data       Saxs data
+       @saxs_r          Saxs radius in integer pixels from center to edge of image
+       @det_0           Estimated detector distance (mm)
+       @det_pix         Pixel size of detector (mm)
+       @beam_l          Wavelength of beam (Ang)
+       @radius          Radius of calibrant (Ang)
+       @q_theory        Q-range of theoretical Saxs data
+       @saxs_theory     Theoretical Saxs data
+       @plot            Plot fit [0/1]
+
+    """
+
+    if (radius is None) and (saxs_theory is None):
+       print("Need to provide calibrant radius or scattering curve")
+       return
+
+    if saxs_r is None:
+       saxs_r = np.arange(0,len(saxs_data))
+
+    if radius is not None:
+       i0_f,det_f  = sp.optimize.fmin(bessel_fit2, x0=[saxs_data[0],det_0],args=(saxs_data,radius,det_pix,beam_l,saxs_r))
+
+       if plot:
+          qs       = saxs_r*det_pix/det_f*4*np.pi/beam_l/2
+          bessel   = get_bessel(qs,radius)
+          theory   = i0_f*(bessel**2)
+          score    = np.corrcoef(saxs_data,theory)[0,1]
+          scale    = np.nanmean(saxs_data)/np.nanmean(theory)
+          fig      = plt.figure(9000)
+          plt.semilogy(qs,saxs_data,'b-',qs,scale*theory,'r-',linewidth=1)
+          plt.xlabel('q (A^-1)')
+          plt.title("Distance= " + str(det_f) + "mm, Score=  " + str(score))
+
+    if saxs_theory is not None:
+       det_f       = sp.optimize.fmin(saxs_fit, x0=det_0,args=(saxs_data,saxs_theory,det_pix,beam_l,saxs_r,q_theory))
+
+       if plot:
+          qs       = saxs_r*det_pix/det_f*4*np.pi/beam_l/2
+          theory   = np.interp(qs,q_theory,saxs_theory)
+          score    = np.corrcoef(saxs_data,theory)[0,1]
+          scale    = np.nanmean(saxs_data)/np.nanmean(theory)
+          fig      = plt.figure(9000)
+          plt.semilogy(qs,saxs_data,'b-',qs,scale*theory,'r-',linewidth=1)
+          plt.xlabel('q (A^-1)')
+          plt.title("Distance= " + str(det_f) + "mm, Score=  " + str(score))
+
+
+    return det_f
+
+
+def get_symmetry(c2, phi_lim = None, plot = 0) :
+    """Compute pi/2 symmetry for s
+       @c2      C2                                              [nPhi]
+       @phi_lim Truncate edge                                   [int]
+
+    """
+
+    n    = round(len(c2)/4)
+    a    = c2[0:n]
+    b    = c2[(n+1):2*n]
+    brev = b[::-1]
+
+    if phi_lim is none:
+       p1 = 0
+       p2 = len(brev)
+    else:
+       p1 = 0 + phi_lim
+       p2 = len(brev)-phi_lim
+
+    sym  =  np.corrcoef(a[p1:p2],brev[p1:p2])[0,1]
+
+    if plot :
+
+       plt.figure(6000)
+       plt.clf()
+       plt.plot(a,'bx-',brev,'rx-')
+       plt.axis('tight')
+
+    return sym
+
+
+def get_bl(q, phi, saxs, c2, lambd, q_lim = None , phi_lim = None, l_max = 40) :
+    """Determine Bl coeffecients by Legendre Polynomial
+       decomposition of the angular autocorrelations (C2) after
+       correcting for the curvature of the Ewald sphere.
+       B0 comes from the square of the SAXS data.
+       Returns even and odd coeffs and the fitted C2's.
+
+       @q       Q-vector (Ang^-1)                               [nQ]
+       @phi     Phi-vector (rad)                                [nPhi]
+       @saxs    Mean intensity                                  [nQ]
+       @c2      Mean normalized c2's                            [nQ x nPhi]
+       @lambd   Wavelength (Ang)                                [float]
+       @q_lim   Q-lim (pixels)                                  [int,int]
+       @phi_lim Phi-lim (pixels)                                [int,int]
+       @l_max   Maximum nr of Leg components to use             [int]
+
+    """
+    # Set q-limits
+    if q_lim is None:
+       q_lim    = [0,len(q)]
+
+    # Set phi-limits
+    if phi_lim is None:
+       phi_lim   =[0,len(phi)]
+
+    B       = np.zeros((l_max,len(q)))
+    P       = np.zeros((len(phi),l_max))
+    c2recon = np.zeros(c2.shape)
+
+    # Loop over all q
+    for qq in range(q_lim[0],q_lim[1]) :
+        # Compute theta
+        theta = np.pi/2 - np.arcsin((q[qq]*lambd)/(4*np.pi))
+        x     = np.cos(theta)**2 + np.sin(theta)**2 * np.cos(phi[phi_lim[0]:phi_lim[1]])
+#        x     = min(x,1)
+#        x     = max(x,-1)
+        y     = 0
+        # Loop over all l
+        for ll in range(0,l_max):
+            Plm    = np.polynomial.legendre.legval(x,ll)
+            P[:,y] = (1/(4*np.pi))*Plm
+            y     += 1
+        # Use SVD for lsq-fitting to c2
+        [U,S,V]       = np.linalg.svd(P)
+        S             = np.eye(len(S),len(S))*S
+        from IPython import embed; embed()
+        B[:,qq]       = V*np.linalg.inv(S)*np.transpose(U[phi_lim[0]:phi_lim[1],:])*c2[phi_lim[0]:phi_lim[1],qq]
+
+        c2recon[:,qq] = np.transpose(np.transpose(B[:,qq]) * np.transpose((U*S*np.transpose(V))))
+
+    return B , c2recon
+
+   ### NOT FINISHED  ###
+
+
+
+
+def get_h5_event(file_stamps) :
+    """Generate h5 timestamps from time-stamps
+
+       @file_stamps  Parameter file containing  Time-stamp and h5-path to image
+                      ex: /2012-07-29T01:01:13_23690/FrontPnCCDIsHit/HistData
+
+    """
+
+    timestamps = []
+    filenr     = []
+
+    for i in range(len(file_stamps)) :
+
+        temp = file_stamps['f0'][i].split('/')
+        timestamps.append(temp[1])
+        filenr.append(file_stamps['f1'][i])
+
+    return timestamps,filenr
+
+
+def get_psana_time(evt) :
+    """Generate psana timestamp from psana event (only works for xtc structures)
+
+       @evt  Psana event
+
+    """
+
+    time     = np.zeros((3,))
+
+    id       = evt.get(EventId)
+    time[0]  = id.time()[0]     # Seconds
+    time[1]  = id.time()[1]     # Nanon seconds
+    time[2]  = id.fiducials()   # Fiducial
+
+    return time
+
+def get_time(file_stamps) :
+    """Generate list of timestamps from parameter files (only works for xtc structures)
+
+       @file_stamps  Time-stamp list
+
+    """
+
+    times    = []
+
+    for i in range(len(file_stamps)) :
+        t       = file_stamps[i]
+        time    = np.zeros((3,))
+        time[0] = t[1]
+        time[1] = t[2]
+        time[2] = t[3]
+        times.append(time)
+
+    return times
+
+
+
+def get_psana_event(file_stamps) :
+    """Generate psana timestamps from time-stamps
+
+       @file_stamps  Parameter file containing  Time, Seconds, Nanoseconds,Fiducials
+
+    """
+
+
+    timestamps = []
+
+    for i in range(len(file_stamps)) :
+
+
+        sec   = int(file_stamps[i][1])
+        nsec  = int(file_stamps[i][2])
+        fid   = int(file_stamps[i][3])
+
+        et   = EventTime(int((sec<<32)|nsec),fid)
+
+        timestamps.append(et)
+
+    return timestamps
+
+
+def get_psana_event2(file_stamp,run = None) :
+    """Generate psana timestamp from time-stamps
+
+       @file_stamps  Parameter file containing  Time, Seconds, Nanoseconds,Fiducials
+
+    """
+
+    sec         = int(file_stamp[1])
+    nsec        = int(file_stamp[2])
+    fid         = int(file_stamp[3])
+
+    et          = EventTime(int((sec<<32)|nsec),fid)
+    timestamp   = run.event(et)
+
+
+    return timestamp
+
+
+ *******************************************************************************

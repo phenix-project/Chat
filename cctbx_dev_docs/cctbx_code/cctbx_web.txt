@@ -1,0 +1,3209 @@
+
+
+ *******************************************************************************
+cctbx/web/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/all_axes.py
+from __future__ import absolute_import, division, print_function
+from cctbx.examples import all_axes
+from cctbx import sgtbx
+from cctbx.web import cgi_utils
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("sgsymbol", "P1"),
+     ("convention", "")))
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  space_group_info = sgtbx.space_group_info(
+    symbol=inp.sgsymbol,
+    table_id=inp.convention)
+  all_axes.list_all_axes(space_group_info=space_group_info)
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/asu_gallery/__init__.py
+from __future__ import absolute_import, division, print_function
+def html_head_title(title):
+  return '''\
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+<title>%s</title>
+</head>
+''' % title
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/asu_gallery/guide_to_notation.py
+from __future__ import absolute_import, division, print_function
+from cctbx.web.asu_gallery import web_links
+from cctbx.web.asu_gallery import html_head_title
+import sys
+
+def write_html(f=None):
+  if (f is None): f = sys.stdout
+  iucrcompcomm_jul2003 = web_links.iucrcompcomm_jul2003
+  title = "ASU Gallery - Guide to notation"
+  print(html_head_title(title=title), file=f)
+  print("""\
+<body>
+
+<hr>
+<h1>%(title)s</h1>
+<hr>
+Reference:
+<a href="%(iucrcompcomm_jul2003)s"
+>IUCr Computing Commission Newsletter No. 2, July 2003</a>
+<hr>
+
+Each cut plane of an asymmetric unit is defined by a condition of
+the form
+<pre>
+  h*x+k*y+l*z+c>=0
+</pre>
+<tt>h</tt>,<tt>k</tt>,<tt>l</tt> are Miller indices and define the
+normal vector of the cut plane, <tt>c</tt> is a constant which determines
+the distance from the origin. <tt>x</tt>,<tt>y</tt>,<tt>z</tt> are
+fractional coordinates in direct space. The expression
+<tt>h*x+k*y+l*z+c</tt> is
+
+<ul>
+<li>exactly zero for points in the cut plane.
+<li>greater than zero for points inside the asymmetric unit.
+<li>less than zero for points outside the asymmetric unit.
+</ul>
+
+If all points that are exactly in a cut plane are not inside the
+asymmetric unit, the condition changes from <tt>h*x+k*y+l*z+c&gt;=0</tt>
+to <tt>h*x+k*y+l*z+c&gt;0</tt>.
+
+<p>
+
+To enhance readability the asymmetric unit conditions (shown under the pictures
+in the gallery) are simplified by omitting terms with zeros (e.g.
+<tt>0*x</tt>) and unit factors (e.g. <tt>x</tt> instead of
+<tt>1*x</tt>). The constant term <tt>c</tt> is moved to the right-hand
+side. For example:
+
+<pre>
+  x>=0
+  y<=1/4
+  z<1
+  x-y<=1/2
+</pre>
+
+A point <tt>x</tt>,<tt>y</tt>,<tt>z</tt> is inside the asymmetric unit
+only if all conditions are simultaneously true.
+
+<p>
+
+Often a face or edge on the surface of the asymmetric unit is only partially
+inside. The dividing lines are defined by face- or edge-specific
+sub-conditions. For example:
+
+<pre>
+  y<=1/4 [z<=1/2]
+</pre>
+
+The first condition defines the face as before. The second condition
+in square brackets only applies if <tt>y=1/4</tt>.
+This notation is recursive. For example:
+
+<pre>
+  y<=1/4 [z<=1/2 [x<=1/4]]
+</pre>
+
+The third condition only applies if <tt>y=1/4</tt> and <tt>z=1/2</tt>.
+
+<p>
+Some asymmetric units require the combination of conditions with
+the boolean operators <i>and</i> or <i>or</i>. For example:
+
+<pre>
+  y>=0 [x<=0 | x>=1/4]
+  y<=1/4 [z>=1/8 & z<=5/8]
+</pre>
+
+In words:
+
+<ul>
+<li>If <tt>y</tt> is exactly zero, a point is inside the asymmetric
+    unit only if <tt>x</tt> is less than or equal to zero or
+    greater than or equal to <tt>1/4</tt>.
+<li>If <tt>y</tt> is exactly <tt>1/4</tt>, a point is inside the
+    asymmetric unit only if <tt>z</tt> is greater than or equal to
+    <tt>1/8</tt> and at the same time less than or equal to <tt>5/8</tt>.
+</ul>
+
+The boolean operators may occur at any level in the recursive
+hierarchy defined by nested square brackets. An example is the
+asymmetric unit of <a href="asu_088.html">space group
+I&nbsp;41/a&nbsp;(No.&nbsp;88)</a>.
+
+<hr>
+<a href="index.html">Gallery of direct-space asymmetric units</a>
+
+<hr>
+</body>
+</html>""" % vars(), file=f)
+
+if (__name__ == "__main__"):
+  write_html()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/asu_gallery/jv_asu.py
+from __future__ import absolute_import, division, print_function
+from cctbx.web.asu_gallery import jvx
+from cctbx.web.asu_gallery import jv_index
+from cctbx.web.asu_gallery import guide_to_notation
+from cctbx.web.asu_gallery import web_links
+from cctbx.sgtbx.direct_space_asu import reference_table
+from cctbx.sgtbx.direct_space_asu import facet_analysis
+from cctbx import sgtbx
+from scitbx import matrix
+from libtbx.option_parser import OptionParser
+from six.moves import urllib
+import math
+import os
+from six.moves import range
+
+def select_color(inclusive_flag):
+  if (inclusive_flag): return (0,255,0)
+  return (255,0,0)
+
+class orthogonalizer(object):
+
+  def __init__(self, unit_cell):
+    self.unit_cell = unit_cell
+
+  def __call__(self, vertex):
+    return self.unit_cell.orthogonalize([float(x) for x in vertex])
+
+def unit_cell_geometry(ortho, xy_plane_only=False):
+  g = jvx.geometry("unit_cell")
+  points_int = jvx.pointSet()
+  points_cart = g.points
+  points_cart.hide_points()
+  for i in (0,1):
+    for j in (0,1):
+      for k in (0,1):
+        if (xy_plane_only and k != 0): continue
+        v = (i,j,k)
+        points_int.append(v)
+        points_cart.append(ortho(v))
+  lines = g.lines
+  for i in range(0,len(points_int.points)-1):
+    for j in range(i+1,len(points_int.points)):
+      v1 = points_int.points[i].vertex
+      v2 = points_int.points[j].vertex
+      n = 0
+      for k in range(3):
+        if (v1[k] != v2[k]): n += 1
+      if (n == 1):
+        lines.append(jvx.line((i,j)))
+  return g
+
+def basis_vector_geometry(ortho, min_fractional):
+  g = jvx.geometry("basis_vectors")
+  g.points.hide_points()
+  g.lines = jvx.lineSet(thickness=3)
+  for i in range(3):
+    v = [float(x) - 0.15 for x in min_fractional]
+    if (i == 0):
+      g.points.append(ortho(v))
+    v[i] += 0.25
+    g.points.append(ortho(v))
+  for i in range(3):
+    color=[0,0,0]
+    color[i] = 255
+    g.lines.append(jvx.line(vertices=(0,i+1), color=color))
+  return g
+
+def cartesian_polygon(ortho, polygon):
+  result = []
+  for vertex in polygon:
+    result.append(ortho(vertex[0]))
+  return result
+
+def get_diagonal_extend(ortho, all_vertices):
+  min_coor = list(ortho((2,2,2)))
+  max_coor = list(ortho((-2,-2,-2)))
+  for vertex in all_vertices.keys():
+    vertex_cart = ortho(vertex)
+    for i in range(3):
+      min_coor[i] = min(min_coor[i], vertex_cart[i])
+      max_coor[i] = max(max_coor[i], vertex_cart[i])
+  return abs(matrix.col(max_coor) - matrix.col(min_coor))
+
+def get_min_fractional(all_vertices):
+  result = [0,0,0]
+  for vertex in all_vertices.keys():
+    for i in range(3):
+      result[i] = min(result[i], vertex[i])
+  return result
+
+def get_edge_vectors(vertices):
+  col = matrix.col
+  n = len(vertices)
+  result = []
+  for i in range(n):
+    j = (i+1) % n
+    result.append(col(vertices[j]) - col(vertices[i]))
+  return result
+
+def shrink_polygon(vertices, shrink_length):
+  n = len(vertices)
+  edge_vectors = get_edge_vectors(vertices)
+  normal_vector = edge_vectors[0].cross(edge_vectors[1])
+  result = []
+  for i in range(n):
+    j = (i-1) % n
+    ei = edge_vectors[i]
+    ej = edge_vectors[j]
+    phi = math.acos(-ei.dot(ej) / math.sqrt(ei.norm_sq() * ej.norm_sq()))
+    assert 0 < phi < math.pi
+    f = shrink_length / math.tan(phi/2)
+    shift_para = ei * (f / abs(ei))
+    shift_perp = normal_vector.cross(ei)
+    l = abs(shift_perp)
+    assert l > 0
+    shift_perp *= shrink_length / l
+    vertex_inside = matrix.col(vertices[i]) + shift_para + shift_perp
+    result.append(vertex_inside.elems)
+  return result
+
+def shrink_edge(cart_a, cart_b, shrink_length):
+  a = matrix.col(cart_a)
+  b = matrix.col(cart_b)
+  d = (b-a) * (shrink_length / abs(b-a))
+  return ((a+d).elems, (b-d).elems)
+
+def edge_geometry(ortho, all_edge_segments, shrink_length, xy_plane_only=False):
+  g = jvx.geometry("edges")
+  g.points.hide_points()
+  g.lines = jvx.lineSet(thickness=3)
+  for edge_segments in all_edge_segments:
+    for i_segment in range(len(edge_segments)-1):
+      v1, v2 = [edge_segments[i_segment+_].vertex for _ in [0,1]]
+      if (xy_plane_only and (v1[2] != 0 or v2[2] != 0)):
+        continue
+      i = g.points.size()
+      g.points.extend(shrink_edge(ortho(v1), ortho(v2), shrink_length))
+      g.lines.append(jvx.line(
+        (i,i+1),
+        color=select_color(edge_segments[i_segment].edge_inclusive_flag)))
+  return g
+
+def vertex_geometry(ortho, all_vertices, xy_plane_only=False):
+  g = jvx.geometry("vertices")
+  for vertex,inclusive_flag in all_vertices.items():
+    if (xy_plane_only and vertex[2] != 0):
+      continue
+    g.points.append(jvx.point(
+      ortho(vertex), color=select_color(inclusive_flag)))
+  return g
+
+def asu_as_jvx(group_type_number, asu, colored_grid_points=None,
+               http_server_name=None,
+               html_subdir="asu_gallery",
+               jars_url="http://%s/jv395/jars",
+               explore_symmetry_url=
+                 "http://%s/cctbx/cctbx_web.cgi" \
+                +"?target_module=explore_symmetry&amp;sgsymbol="):
+  if (http_server_name is None):
+    http_server_name = web_links.default_http_server_name
+  xy_plane_only = (group_type_number < 0)
+  space_group_info = sgtbx.space_group(asu.hall_symbol).info()
+  if (not xy_plane_only):
+    assert space_group_info.type().number() == group_type_number
+  list_of_polygons = facet_analysis.asu_polygons(asu)
+  all_edge_segments = facet_analysis.get_all_edge_segments(
+    asu, list_of_polygons)
+  all_vertices = facet_analysis.get_all_vertices(all_edge_segments)
+  unit_cell = space_group_info.any_compatible_unit_cell(volume=100)
+  ortho = orthogonalizer(unit_cell)
+  shrink_length = get_diagonal_extend(ortho, all_vertices) * 0.02
+  geometries = []
+  if (colored_grid_points is None):
+    for polygons in list_of_polygons:
+      for polygon,inclusive_flag in polygons:
+        def exclude():
+          for vertex in polygon:
+            if (vertex[0][2] != 0):
+              return True
+          return False
+        if (xy_plane_only and exclude()):
+          continue
+        vertices_cart = cartesian_polygon(ortho, polygon)
+        vertices_inside_cart = shrink_polygon(vertices_cart, shrink_length)
+        points_int = jvx.pointSet()
+        g = jvx.geometry("facet", backface=["hide", "show"][int(xy_plane_only)])
+        points_cart = g.points
+        points_cart.hide_points()
+        i = -1
+        for vertex in polygon:
+          i += 1
+          points_int.append(vertex[0])
+          points_cart.append(vertices_inside_cart[i])
+        faces = g.faces
+        point_indices = []
+        for vertex in polygon:
+          point_indices.append(points_int.index(vertex[0]))
+        faces.append(jvx.face(point_indices, select_color(inclusive_flag)))
+        geometries.append(g)
+    geometries.append(edge_geometry(
+      ortho, all_edge_segments, shrink_length, xy_plane_only=xy_plane_only))
+    geometries.append(vertex_geometry(
+      ortho, all_vertices, xy_plane_only=xy_plane_only))
+  else:
+    g = jvx.geometry("grid")
+    for frac in colored_grid_points:
+      if (xy_plane_only and frac.site[2] != 0): continue
+      g.points.append(jvx.point(ortho(frac.site), color=frac.color))
+    geometries.append(g)
+  if (colored_grid_points is None):
+    grid_label = ""
+    alternative_html_infix = "_grid"
+    alternative_label = "Grid view"
+  else:
+    grid_label = "_grid"
+    alternative_html_infix = ""
+    alternative_label = "Polygon view"
+  if (xy_plane_only): fmt = "asu_%02d%s"
+  else:               fmt = "asu_%03d%s"
+  base_file_name = fmt % (abs(group_type_number), grid_label)
+  jvx_file_name = os.path.join(html_subdir, base_file_name+".jvx")
+  jvx_in_html = base_file_name+".jvx"
+  html_file_name = os.path.join(html_subdir, base_file_name+".html")
+  prev_html = None
+  next_html = None
+  if (xy_plane_only):
+    fmt = "asu_%02d%s.html"
+    last_group_type_number = 17
+  else:
+    fmt = "asu_%03d%s.html"
+    last_group_type_number = 230
+  if (abs(group_type_number) > 1):
+    prev_html = fmt % (abs(group_type_number)-1, grid_label)
+  else:
+    prev_html = fmt % (last_group_type_number, grid_label)
+  if (abs(group_type_number) < last_group_type_number):
+    next_html = fmt % (abs(group_type_number)+1, grid_label)
+  else:
+    next_html = fmt % (1, grid_label)
+  alternative_html = fmt % (abs(group_type_number), alternative_html_infix)
+  if (colored_grid_points is None or len(colored_grid_points) > 0):
+    f = open(jvx_file_name, "w")
+    jvx.head(f)
+    unit_cell_geometry(ortho, xy_plane_only=xy_plane_only).jvx(f)
+    basis_vector_geometry(ortho, get_min_fractional(all_vertices)).jvx(f)
+    for g in geometries:
+      g.jvx(f)
+    jvx.tail(f)
+    f.close()
+  legend = []
+  l = legend.append
+  l("Surface area: green = inside the asymmetric unit, red = outside")
+  l("<br>")
+  l("Basis vectors: a = red, b = green, c = blue")
+  l("<p>")
+  shape_vertices = facet_analysis.shape_vertices(asu)
+  l("<table border=2 cellpadding=8>")
+  l("<tr valign=top>")
+  l("<td>")
+  remaining = []
+  for vertex in shape_vertices:
+    if (xy_plane_only and vertex[2] != 0): continue
+    remaining.append(vertex)
+  remaining.sort()
+  l("<pre>Number of vertices: %d" % len(remaining))
+  if (xy_plane_only):
+    j = -4
+  else:
+    j = -1
+  for vertex in remaining:
+    l("  "+str(vertex)[1:j])
+  l("</pre>")
+  l("</td>")
+  l("<td>")
+  remaining = []
+  for cut in asu.cuts:
+    if (xy_plane_only and cut.as_xyz() in ["z>=0", "z<1"]): continue
+    remaining.append(cut)
+  l("<pre>Number of faces: %d" % len(remaining))
+  for cut in remaining:
+    l("  "+cut.as_xyz())
+  l("</pre>")
+  l('<a href="guide_to_notation.html">[Guide to notation]</a>')
+  l("</td>")
+  l("<td>")
+  l("<pre>Geometric notation:")
+  for cut in remaining:
+    l("  "+str(cut))
+  l("</pre>")
+  l('<a href="http://scripts.iucr.org/cgi-bin/paper?pz5088" target="external">'
+    '[Acta Cryst. article]</a>')
+  l("</td>")
+  l("</tr>")
+  l("</table>")
+  if (not xy_plane_only):
+    title = "ASU " + str(space_group_info)
+    header = 'Space group: <a href="%s">%s</a> (No. %d)' % (
+      explore_symmetry_url % http_server_name
+        + urllib.parse.quote_plus(str(space_group_info)),
+      str(space_group_info),
+      group_type_number)
+    sub_header = None
+  else:
+    from cctbx.sgtbx import plane_groups
+    pg_symbol = plane_groups.hermann_mauguin_hall_table[
+      -group_type_number-1][0].replace("_", " ")
+    title = "ASU " + pg_symbol
+    header = 'Plane group: %s (No. %d)' % (pg_symbol, -group_type_number)
+    sub_header = 'Corresponding space group: <a href="%s">%s</a> (No. %d)' % (
+      explore_symmetry_url % http_server_name
+        + urllib.parse.quote_plus(str(space_group_info)),
+      str(space_group_info),
+      space_group_info.type().number())
+  f = open(html_file_name, "w")
+  jvx.html_loader(
+    jvx_in_html,
+    title=title,
+    header=header,
+    sub_header=sub_header,
+    index_html="index.html",
+    prev_html=prev_html,
+    next_html=next_html,
+    alternative_label=alternative_label,
+    alternative_html=alternative_html,
+    legend=legend,
+    jars_url=jars_url%http_server_name,
+    f=f)
+  f.close()
+
+def run(http_server_name=None, html_subdir="asu_gallery"):
+  parser = OptionParser(usage="usage: python jv_asu.py [options] [numbers...]")
+  parser.add_option("-s", "--server",
+    action="store",
+    type="string",
+    help="network name of http server",
+    metavar="NAME")
+  parser.add_option("-p", "--plane_group",
+    action="store_true")
+  options, args = parser.parse_args()
+  if (options.server is not None):
+    http_server_name = options.server
+  if (not os.path.isdir(html_subdir)):
+    os.makedirs(html_subdir)
+  jv_index.write_html(open("%s/index.html" % html_subdir, "w"))
+  guide_to_notation.write_html(
+    open("%s/guide_to_notation.html" % html_subdir, "w"))
+  if (len(args) == 0):
+    if (options.plane_group):
+      args = ["1-17"]
+    else:
+      args = ["1-230"]
+  for arg in args:
+    numbers = [int(n) for n in arg.split('-')]
+    assert len(numbers) in (1,2)
+    if (len(numbers) == 1): numbers *= 2
+    for group_type_number in range(numbers[0], numbers[1]+1):
+      if (options.plane_group):
+        print("Plane group number:", group_type_number)
+        from cctbx.sgtbx.direct_space_asu import plane_group_reference_table
+        asu = plane_group_reference_table.get_asu(group_type_number)
+        group_type_number *= -1
+      else:
+        print("Space group number:", group_type_number)
+        asu = reference_table.get_asu(group_type_number)
+      for colored_grid_points in [None, []]:
+        asu_as_jvx(
+          group_type_number=group_type_number,
+          asu=asu,
+          colored_grid_points=colored_grid_points,
+          http_server_name=http_server_name,
+          html_subdir=html_subdir)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/asu_gallery/jv_index.py
+from __future__ import absolute_import, division, print_function
+from cctbx.web.asu_gallery import web_links
+from cctbx.web.asu_gallery import html_head_title
+from cctbx import sgtbx
+import sys
+from six.moves import range
+
+def table_format_html(table, f, n_columns, serial_fmt="%03d"):
+  print("<table border=2 cellpadding=2>", file=f)
+  n_symbols = len(table)
+  n_rows = n_symbols // n_columns
+  if (n_rows * n_columns < n_symbols): n_rows += 1
+  for i_row in range(n_rows):
+    print("<tr>", file=f)
+    for i_column in range(n_columns):
+      i = i_column * n_rows + i_row
+      if (i < len(table)):
+        symbols = table[i]
+        print((
+          '<td><a href="asu_'+serial_fmt+'.html">%s (%d)</a></td>') % (
+            symbols.number(),
+            symbols.hermann_mauguin().replace(" ", ""),
+            symbols.number()), file=f)
+    print("</tr>", file=f)
+  print("</table>", file=f)
+  print("<p>", file=f)
+
+class point_group_symbols(object):
+
+  def __init__(O, number, hermann_mauguin):
+    O._number = number
+    O._hermann_mauguin = hermann_mauguin
+
+  def number(O): return O._number
+
+  def hermann_mauguin(O): return O._hermann_mauguin
+
+class plane_group_table(object):
+
+  def __init__(O):
+    O.table = []
+    from cctbx.sgtbx import plane_groups
+    for i,(hm,_) in enumerate(plane_groups.hermann_mauguin_hall_table):
+      O.table.append(point_group_symbols(i+1, hm.replace("_"," ")))
+
+  def format_html(O, f, n_columns):
+    print("<h3>Plane groups</h3>", file=f)
+    table_format_html(O.table, f, n_columns, serial_fmt="%02d")
+
+class symbol_table(object):
+
+  def __init__(self, point_group_type):
+    self.point_group_type = point_group_type
+    self.table = []
+
+  def add(self, group_symbols):
+    self.table.append(group_symbols)
+
+  def format_html(self, f, n_columns):
+    table_format_html(self.table, f, n_columns)
+
+class point_group_table(object):
+
+  def __init__(self, crystal_system):
+    self.crystal_system = crystal_system
+    self.symbol_table = []
+
+  def add_point_group_type(self, point_group_type):
+    self.current_symbol_table = symbol_table(point_group_type)
+    self.symbol_table.append(self.current_symbol_table)
+
+  def add(self, space_group_symbols):
+    self.current_symbol_table.add(space_group_symbols)
+
+  def format_html(self, f, n_columns):
+    print("<h3>%s</h3>" % self.crystal_system, file=f)
+    for symbols in self.symbol_table:
+      symbols.format_html(f, n_columns)
+
+class crystal_system_table(object):
+
+  def __init__(self):
+    self.point_group_tables = []
+    previous_crystal_system = None
+    previous_point_group_type = None
+    for space_group_number in range(1,231):
+      space_group_symbols = sgtbx.space_group_symbols(space_group_number)
+      space_group = sgtbx.space_group(space_group_symbols)
+      crystal_system = space_group.crystal_system()
+      point_group_type = space_group.point_group_type()
+      if (point_group_type != previous_point_group_type):
+        if (crystal_system != previous_crystal_system):
+          current_crystal_system = point_group_table(crystal_system)
+          self.point_group_tables.append(current_crystal_system)
+        current_crystal_system.add_point_group_type(point_group_type)
+      current_crystal_system.add(space_group_symbols)
+      previous_point_group_type = point_group_type
+      previous_crystal_system = crystal_system
+
+  def format_html(self, f=None, n_columns=6):
+    if (f is None): f = sys.stdout
+    title = "Gallery of direct-space asymmetric units"
+    iucrcompcomm_jul2003 = web_links.iucrcompcomm_jul2003
+    print(html_head_title(title=title), file=f)
+    print("""\
+<body>
+<hr>
+<h2>%(title)s</h2>
+<hr>
+References:
+<ul>
+<li><a href="http://scripts.iucr.org/cgi-bin/paper?pz5088" target="external"
+    >Acta Cryst. (2011). A67, 269-275</a>
+<p>
+<li><a href="%(iucrcompcomm_jul2003)s" target="external"
+    >IUCr Computing Commission Newsletter No. 2, July 2003</a>
+</ul>
+<hr>""" % vars(), file=f)
+    plane_group_table().format_html(f,n_columns)
+    for point_group in self.point_group_tables:
+      point_group.format_html(f, n_columns)
+    print("""\
+<hr>
+<a href="http://cctbx.sourceforge.net/">[cctbx home]</a>
+</body>
+</html>""", file=f)
+
+def write_html(f=None, n_columns=6):
+  cs_table = crystal_system_table()
+  cs_table.format_html(f, n_columns)
+
+if (__name__ == "__main__"):
+  write_html()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/asu_gallery/jvx.py
+from __future__ import absolute_import, division, print_function
+import sys
+from six.moves import range
+
+def head(f=None):
+  if (f is None): f = sys.stdout
+  print('''\
+<?xml version="1.0" encoding="ISO-8859-1" standalone="yes"?>
+<!DOCTYPE jvx-model SYSTEM "http://www.javaview.de/rsrc/jvx.dtd">
+<jvx-model>
+<geometries>''', file=f)
+
+def tail(f=None):
+  if (f is None): f = sys.stdout
+  print('''\
+</geometries>
+</jvx-model>''', file=f)
+
+def jvx_item_colors(f, indent, items):
+  print(indent + '<colors>', file=f)
+  for item in items:
+    print(indent + '  <c>%d %d %d</c>' % item.color, file=f)
+  print(indent + '</colors>', file=f)
+
+class point(object):
+
+  def __init__(self, vertex, color=(255,0,0)):
+    self.vertex = tuple(vertex)
+    self.color = tuple(color)
+
+def make_point(vertex):
+  return point(vertex)
+
+class pointSet(object):
+
+  def __init__(self, thickness=4):
+    self.thickness = thickness
+    self.points = []
+    self.point_dict = {}
+    self.show_points = "show"
+
+  def size(self):
+    return len(self.points)
+
+  def append(self, point):
+    if (not hasattr(point, "vertex")):
+      point = make_point(point)
+    if (not point.vertex in self.point_dict):
+      self.point_dict[point.vertex] = len(self.points)
+      self.points.append(point)
+
+  def extend(self, points):
+    for point in points:
+      self.append(point)
+
+  def index(self, point):
+    if (hasattr(point, "vertex")):
+      return self.point_dict[point.vertex]
+    return self.point_dict[tuple(point)]
+
+  def hide_points(self):
+    self.show_points = "hide"
+    return self
+
+  def jvx(self, f=None):
+    if (f is None): f = sys.stdout
+    if (self.size() == 0): return
+    print('<pointSet dim="3" point="%s" color="show">' % self.show_points, file=f)
+    print('  <points>', file=f)
+    for point in self.points:
+      print('    <p>%g %g %g</p>' % point.vertex, file=f)
+    jvx_item_colors(f, "    ", self.points)
+    print('    <thickness>%g</thickness>' % self.thickness, file=f)
+    print('  </points>', file=f)
+    print('</pointSet>', file=f)
+
+class line(object):
+
+  def __init__(self, vertices, color=(0,0,0)):
+    self.vertices = tuple(vertices)
+    self.color = tuple(color)
+
+class lineSet(object):
+
+  def __init__(self, thickness=1):
+    self.thickness = thickness
+    self.lines = []
+
+  def size(self):
+    return len(self.lines)
+
+  def append(self, line):
+    self.lines.append(line)
+
+  def jvx(self, f=None):
+    if (f is None): f = sys.stdout
+    print('<lineSet line="show" color="show">', file=f)
+    print('  <lines>', file=f)
+    for line in self.lines:
+      print('    <l>', end=' ', file=f)
+      for v in line.vertices: print(v, end=' ', file=f)
+      print('</l>', file=f)
+    jvx_item_colors(f, "    ", self.lines)
+    print('    <thickness>%g</thickness>' % self.thickness, file=f)
+    print('  </lines>', file=f)
+    print('</lineSet>', file=f)
+
+class face(object):
+
+  def __init__(self, vertices, color=(255,0,255)):
+    self.vertices = tuple(vertices)
+    self.color = tuple(color)
+
+class faceSet(object):
+
+  def __init__(self, backface="hide"):
+    self.backface = backface
+    self.faces = []
+
+  def size(self):
+    return len(self.faces)
+
+  def append(self, face):
+    self.faces.append(face)
+
+  def jvx(self, f=None):
+    if (f is None): f = sys.stdout
+    print('<faceSet face="show" edge="hide" backface="%s" color="show">' % \
+        self.backface, file=f)
+    print('  <faces>', file=f)
+    for face in self.faces:
+      print('    <f>', end=' ', file=f)
+      for v in face.vertices: print(v, end=' ', file=f)
+      print('</f>', file=f)
+    jvx_item_colors(f, "    ", self.faces)
+    print('  </faces>', file=f)
+    print('</faceSet>', file=f)
+
+class geometry(object):
+
+  def __init__(self, name, backface="hide"):
+    self.name = name
+    self.points = pointSet()
+    self.lines = lineSet()
+    self.faces = faceSet(backface=backface)
+
+  def jvx(self, f=None):
+    if (f is None): f = sys.stdout
+    print('<geometry name="%s">' % self.name, file=f)
+    if (self.points.size() > 0): self.points.jvx(f)
+    if (self.lines.size() > 0): self.lines.jvx(f)
+    if (self.faces.size() > 0): self.faces.jvx(f)
+    print('</geometry>', file=f)
+
+def bracketed_link(text, html, f=None):
+  if (f is None): f = sys.stdout
+  if (html is not None):
+    print('[<a href="%s">' % html, end=' ', file=f)
+  print('%s' % text, file=f)
+  if (html is not None):
+    print('</a>]', end=' ', file=f)
+  print(file=f)
+
+def html_loader(jvx_file_name,
+                title="JavaView",
+                header=None,
+                sub_header=None,
+                index_html=None,
+                prev_html=None,
+                next_html=None,
+                alternative_label=None,
+                alternative_html=None,
+                legend=None,
+                f=None,
+                jars_url=None):
+  if (f is None): f = sys.stdout
+  from cctbx.web.asu_gallery import html_head_title
+  print(html_head_title(title=title), file=f)
+  print('''\
+<body>
+''', file=f)
+  if (header is not None):
+    print('<h2>%s</h2>' % header, file=f)
+  if (sub_header is not None):
+    print('%s' % sub_header, file=f)
+    print('<p>', file=f)
+  print('''\
+<APPLET alt="JavaView applet"
+        archive="%(jars_url)s/javaview.jar,%(jars_url)s/jvx.jar"
+        name="javaview"
+        code="javaview.class"
+        width="400"
+        height="400">
+  <PARAM NAME="Model" VALUE="%(jvx_file_name)s">
+</APPLET>
+<p>
+''' % vars(), file=f)
+  if (index_html is not None):
+    bracketed_link("Index", index_html, f=f)
+  if (prev_html is not None or next_html is not None):
+    bracketed_link("Previous", prev_html, f=f)
+    bracketed_link("Next", next_html, f=f)
+  if (alternative_html is not None):
+    bracketed_link(alternative_label, alternative_html, f=f)
+  if (legend is not None):
+    print('<p>', file=f)
+    for line in legend:
+      print(line, file=f)
+  print('<hr>', file=f)
+  print('''\
+This visualisation is using
+<a href="http://www.javaview.de">JavaView</a>.
+
+</body>
+</html>''', file=f)
+
+def run():
+  from cctbx import sgtbx
+  head()
+  g = geometry("domino")
+  p = g.points
+  for i in range(-1,2):
+    for j in range(-1,2):
+      for k in range(-1,2):
+        if ((i,j,k) != (0,0,0)):
+          p.append(point((i,j,k)))
+  point_group = sgtbx.space_group_info("P 2 3").group()
+  f = g.faces
+  for s in point_group:
+    f.append(face((p.index(s*(-1,-1,-1)),
+                   p.index(s*(-1,0,-1)),
+                   p.index(s*(0,0,-1)),
+                   p.index(s*(0,-1,-1))), (255,0,0)))
+    f.append(face((p.index(s*(0,-1,-1)),
+                   p.index(s*(0,0,-1)),
+                   p.index(s*(1,0,-1)),
+                   p.index(s*(1,-1,-1))), (0,0,255)))
+  g.jvx()
+  tail()
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/asu_gallery/web_links.py
+from __future__ import absolute_import, division, print_function
+default_http_server_name="cci.lbl.gov"
+iucrcompcomm_jul2003 = \
+  "http://cci.lbl.gov/publications/download/iucrcompcomm_jul2003.pdf"
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/browse_settings.py
+from __future__ import absolute_import, division, print_function
+# This example uses an internal table, with 530 space group settings,
+# that is based on Table 4.3.1 in the International Tables for
+# Crystallography, Volume A (1983). Via the web interface the user
+# specifies a space group symbol. This script determines the space
+# group number corresponding to the given symbol, and then lists all
+# tabulated settings for that space group number. If no space group
+# symbol is given, all 530 entries in the internal table are listed.
+
+from cctbx import sgtbx
+from six.moves import urllib
+from cctbx.web import cgi_utils
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("sgsymbol", ""),
+     ("convention", "")))
+  return inp
+
+def run(server_info, inp, status):
+  sg_number = 0
+  if (len(inp.sgsymbol.strip()) != 0):
+    sg_number = sgtbx.space_group_info(
+      symbol=inp.sgsymbol,
+      table_id=inp.convention).type().number()
+  n_settings = 0
+  print("<table border=2 cellpadding=2>")
+  print("<tr>")
+  print("<th>Space group<br>No.")
+  print("<th>Schoenflies<br>symbol")
+  print("<th>Hermann-Mauguin<br>symbol")
+  print("<th>Hall<br>symbol")
+  for symbols in sgtbx.space_group_symbol_iterator():
+    if (sg_number == 0 or symbols.number() == sg_number):
+      print("<tr>")
+      print("<td>(%d)<td>%s" % (
+        symbols.number(), symbols.schoenflies()))
+      query = "target_module=explore_symmetry&sgsymbol=" \
+            + urllib.parse.quote_plus(symbols.universal_hermann_mauguin())
+      print(("<td><a href=\"%s\">%s</a>") % (
+        server_info.script(query),
+        symbols.universal_hermann_mauguin()))
+      print("<td>%s" % (symbols.hall(),))
+      n_settings += 1
+  print("</table>")
+  if (sg_number == 0):
+    print("<p>")
+    print("Number of settings listed:", n_settings)
+  print("<p>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/cgi_utils.py
+from __future__ import absolute_import, division, print_function
+import os,sys,cgi
+
+if sys.version_info.major >= 3:
+    from urllib.parse import urlunsplit
+if sys.version_info.major < 3:
+    from urlparse import urlunsplit
+
+class FormatError(Exception): pass
+
+class empty: pass
+
+class server_info:
+
+  def __init__(self):
+    server_name = os.environ["SERVER_NAME"]
+    server_port = os.environ["SERVER_PORT"]
+    script_name = os.environ["SCRIPT_NAME"]
+    self._script = [
+      'http',
+      '%s:%s' % (server_name, server_port),
+      script_name,
+      '',
+      '']
+    self._base = [
+      'http',
+      '%s:%s' % (server_name, server_port),
+      "/".join(script_name.split("/")[:-1]) + "/",
+      '',
+      '']
+
+  def script(self, query=''):
+    return urlunsplit(
+      self._script[:3] + [query] + self._script[4:])
+
+  def base(self):
+    return urlunsplit(self._base)
+
+  def file(self, target):
+    return urlunsplit(
+      self._base[:2] + [self._base[2] + target] + self._base[3:])
+
+def inp_from_form(form, keys):
+  inp = empty()
+  for key in keys:
+    if (key[0] in form):
+      #v = cgi.escape(form[key[0]].value,True).strip()
+      v = form[key[0]].value.strip()
+      if (v == ""): v = key[1]
+      inp.__dict__[key[0]] = v
+    else:
+      inp.__dict__[key[0]] = key[1]
+  return inp
+
+def coordinates_from_form(form, suffix=None):
+  coordinates = []
+  for key_root in ("coordinates", "coor_file"):
+    if (suffix is None): key = key_root
+    else:                key = key_root + "_" + suffix
+    if (key in form):
+      lines = cgi.escape(form[key].value,True).replace("\015", "\012").split("\012")
+      for l in lines:
+        s = l.strip()
+        if (len(s) != 0): coordinates.append(s)
+  return coordinates
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/change_basis.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+def number_from_string(s):
+  flds = s.split("/")
+  if (len(flds) == 2):
+    from boost_adaptbx.boost.rational import int as rint
+    return rint(int(flds[0]), int(flds[1]))
+  return (eval(s)+0)*1
+
+def nums_from_string(string):
+  for c in ",;|{}()[]":
+    string = string.replace(c, " ")
+  flds = string.split()
+  nums = []
+  for fld in flds:
+    try:
+      num = number_from_string(fld)
+    except Exception:
+      return None
+    nums.append(num)
+  return nums
+
+def rt_from_string(string, default_r_identity=False, r_den=12**2, t_den=12**3):
+  from cctbx import sgtbx
+  from scitbx import matrix
+  result = None
+  s = string.strip()
+  if (len(s) == 0):
+    s = "a,b,c"
+  try:
+    cb_op = sgtbx.change_of_basis_op(
+      symbol=s, stop_chars="", r_den=r_den, t_den=t_den)
+  except ValueError as e:
+    pass
+  except RuntimeError as e :
+    pass
+  else:
+    return cb_op.c_inv().as_rational()
+  nums = nums_from_string(s)
+  if (nums is not None):
+    if (len(nums) == 12):
+      if (string.find("|") < 0):
+        result = matrix.rt((nums[:9], nums[9:]))
+      else:
+        result = matrix.rt(
+          (nums[:3]+nums[4:7]+nums[8:11],
+          (nums[3], nums[7], nums[11])))
+    elif (len(nums) == 9):
+      result = matrix.rt((nums[:9], (0,0,0)))
+    elif (len(nums) == 3):
+      if (default_r_identity):
+        r = (1,0,0,0,1,0,0,0,1)
+      else:
+        r = (0,0,0,0,0,0,0,0,0)
+      result = matrix.rt((r, nums))
+  return result
+
+def raise_uninterpretable(what, expression):
+  from libtbx.utils import Sorry
+  raise Sorry('Uninterpretable expression for %s' % (what))
+
+def p_from_string(string):
+  p = rt_from_string(string, default_r_identity=True)
+  if (p is None):
+    raise_uninterpretable("change-of-basis matrix", string)
+  return p
+
+def w_from_string(string):
+  w = rt_from_string(string)
+  if (w is None):
+    raise_uninterpretable("symmetry matrix", string)
+  return w
+
+def xyz_from_string(string):
+  nums = nums_from_string(string)
+  if (nums is None or len(nums) != 3):
+    raise_uninterpretable("coordinates", string)
+  return tuple(nums)
+
+def fmt_nums(nums):
+  result = []
+  for num in nums:
+    if (float(num) < 1e-10): num = 0
+    result.append("%.6g" % num)
+  return tuple(result)
+
+def display_r(r):
+  for ir in range(3):
+    print("  (%9s %9s %9s)" % fmt_nums((r(ir,0), r(ir,1), r(ir,2))))
+
+def display_rt(rt):
+  r, t = rt.r, rt.t.elems
+  for ir in range(3):
+    print("  (%9s %9s %9s | %9s)" % fmt_nums((r(ir,0), r(ir,1), r(ir,2), t[ir])))
+
+def interpret_form_data(form):
+  from cctbx.web import cgi_utils
+  inp = cgi_utils.inp_from_form(form,
+    (("p_or_q", "P"),
+     ("p_transpose", "off"),
+     ("cb_expr", ""),
+     ("obj_type", "xyz"),
+     ("obj_expr", "")))
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  from scitbx import matrix
+  p = p_from_string(string=inp.cb_expr)
+  assert inp.p_or_q in ["P", "Q"]
+  if (inp.p_or_q == "Q"):
+    p = p.inverse()
+  assert inp.p_transpose in ["off", "on"]
+  if (inp.p_transpose == "on"):
+    p = matrix.rt((p.r.transpose(), p.t))
+  print("P:")
+  display_rt(p)
+  print()
+  q = p.inverse()
+  print("Q:")
+  display_rt(q)
+  print()
+  if (len(inp.obj_expr.strip()) != 0):
+    if (inp.obj_type in ["xyz", "hkl"]):
+      triple = xyz_from_string(string=inp.obj_expr)
+      if (inp.obj_type == "xyz"):
+        print("Transformation law: (Q,q) xyz")
+        print()
+        print("  xyz:", triple)
+        print()
+        print("  xyz':", (
+          q.r * matrix.col(triple) + q.t).elems)
+        print()
+      else:
+        print("Transformation law: hkl P")
+        print()
+        print("  hkl:", triple)
+        print()
+        print("  hkl':", (matrix.row(triple) * p.r).elems)
+        print()
+    elif (inp.obj_type == "unit_cell"):
+      from cctbx import uctbx
+      uc = uctbx.unit_cell(inp.obj_expr)
+      print("Transformation law: Pt G P")
+      print()
+      print("unit cell:", uc)
+      print()
+      g = matrix.sym(sym_mat3=uc.metrical_matrix())
+      print("metrical matrix:")
+      display_r(g)
+      print()
+      gp = p.r.transpose() * g * p.r
+      print("metrical matrix':")
+      display_r(gp)
+      print()
+      ucp = uctbx.unit_cell(metrical_matrix=gp.as_sym_mat3())
+      print("unit cell':", ucp)
+      print()
+    elif (inp.obj_type == "Ww"):
+      w = w_from_string(string=inp.obj_expr)
+      print("Transformation law: (Q,q) (W,w) (P,p)")
+      print()
+      print("(W, w):")
+      display_rt(w)
+      print()
+      wp = q * w * p
+      print("(W, w)':")
+      display_rt(wp)
+      print()
+    else:
+      raise RuntimeError("Unknown obj_type: %s" % inp.obj_type)
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/change_hand.py
+from __future__ import absolute_import, division, print_function
+# Change the hand of a set of coordinates (useful in heavy atom location).
+
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams", "1 1 1 90 90 90"),
+     ("sgsymbol", "P1"),
+     ("convention", ""),
+     ("coor_type", None),
+     ("skip_columns", "0")))
+  inp.coordinates = cgi_utils.coordinates_from_form(form)
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  # check input to prevent XSS
+  try:
+    unit_cell = uctbx.unit_cell(inp.ucparams)
+    space_group_info = sgtbx.space_group_info(
+      symbol=inp.sgsymbol,
+      table_id=inp.convention)
+  except Exception:
+    print("Please check your inputs.")
+    print("</pre>")
+    return
+
+  io_utils.show_input_symbol(inp.sgsymbol, inp.convention)
+  crystal_symmetry = crystal.symmetry(
+      unit_cell=uctbx.unit_cell(inp.ucparams),
+      space_group_info=sgtbx.space_group_info(
+        symbol=inp.sgsymbol,
+        table_id=inp.convention))
+  crystal_symmetry.show_summary()
+  print()
+
+  change_of_hand_op \
+    = crystal_symmetry.space_group_info().type().change_of_hand_op()
+  print("Change-of-hand matrix:", change_of_hand_op.c())
+  print("              Inverse:", change_of_hand_op.c_inv())
+  print()
+
+  print(inp.coor_type, "coordinates:")
+  print()
+
+  skip_columns = io_utils.interpret_skip_columns(inp.skip_columns)
+
+  for line in inp.coordinates:
+    skipped, coordinates = io_utils.interpret_coordinate_line(line,skip_columns)
+    if (inp.coor_type != "Fractional"):
+      coordinates = crystal_symmetry.unit_cell().fractionalize(coordinates)
+    flipped_coordinates = change_of_hand_op(coordinates)
+    if (inp.coor_type != "Fractional"):
+      flipped_coordinates \
+        = crystal_symmetry.unit_cell().orthogonalize(flipped_coordinates)
+    print(skipped, "%.6g %.6g %.6g" % tuple(flipped_coordinates))
+
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/change_setting.py
+from __future__ import absolute_import, division, print_function
+# It is common that a certain crystal structure is published in the
+# literature in two or more different settings of the same space group. A
+# typical example is that of a rhombohedral space group (e.g. R 3) where
+# either a hexagonal basis system or a rhombohedral basis system is used.
+# Other examples are space groups with two origin choices (e.g. P n n n),
+# or orthorhombic space groups where the basis vectors are permuted (e.g.
+# P 2 2 21, P 2 21 2, P 21 2 2). Unusual settings can also arise from
+# group-subgroup or relations (e.g. the monoclinic subgroup of space
+# group P 3 1 2 which is generated by the two-fold axis parallel [-1,1,0]).
+# This script can be used to determine the change-of-basis matrix
+# between two settings of the same space group. Optionally, this
+# change-of-basis matrix is used to transform unit cell parameters and
+# atomic coordinates.
+
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams_old", "1 1 1 90 90 90"),
+     ("sgsymbol_old", "P1"),
+     ("convention_old", ""),
+     ("sgsymbol_new", ""),
+     ("convention_new", ""),
+     ("coor_type", None),
+     ("skip_columns", "0")))
+  inp.coordinates = cgi_utils.coordinates_from_form(form)
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+
+  unit_cell_old = uctbx.unit_cell(inp.ucparams_old)
+  print("Old symmetry:")
+  print(" ", end=' ')
+  unit_cell_old.show_parameters()
+  space_group_info_old = sgtbx.space_group_info(
+    symbol=inp.sgsymbol_old,
+    table_id=inp.convention_old)
+  print(" ", end=' ')
+  space_group_info_old.show_summary()
+  print()
+
+  if (len(inp.sgsymbol_new.strip()) == 0):
+    space_group_info_new = space_group_info_old.reference_setting()
+    inp.convention_new = ""
+  else:
+    space_group_info_new = sgtbx.space_group_info(
+      symbol=inp.sgsymbol_new,
+      table_id=inp.convention_new)
+  print("New space group symbol:")
+  print(" ", end=' ')
+  space_group_info_new.show_summary()
+  print()
+
+  if (   space_group_info_new.type().number()
+      != space_group_info_old.type().number()):
+    print("Space group numbers are not equal!")
+  else:
+    c = space_group_info_new.type().cb_op().c_inv().multiply(
+        space_group_info_old.type().cb_op().c()).new_denominators(
+          sgtbx.cb_r_den, sgtbx.cb_t_den)
+    cb_op = sgtbx.change_of_basis_op(c)
+    print("Change-of-basis matrix:", cb_op.c())
+    print("               Inverse:", cb_op.c_inv())
+    print()
+
+    assert space_group_info_old.group().is_compatible_unit_cell(unit_cell_old)
+    unit_cell_new = unit_cell_old.change_basis(cb_op=cb_op)
+    print("New unit cell parameters:")
+    print(" ", end=' ')
+    unit_cell_new.show_parameters()
+    assert space_group_info_new.group().is_compatible_unit_cell(unit_cell_new)
+    print()
+
+    print(inp.coor_type, "coordinates:")
+    print()
+
+    skip_columns = io_utils.interpret_skip_columns(inp.skip_columns)
+
+    for line in inp.coordinates:
+      skipped, coordinates = io_utils.interpret_coordinate_line(line,skip_columns)
+      if (inp.coor_type != "Fractional"):
+        coordinates = unit_cell_old.fractionalize(coordinates)
+      new_coordinates = cb_op(coordinates)
+      if (inp.coor_type != "Fractional"):
+        new_coordinates = unit_cell_new.orthogonalize(new_coordinates)
+      print(skipped, "%.6g %.6g %.6g" % tuple(new_coordinates))
+
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/dispatcher.py
+from __future__ import absolute_import, division, print_function
+import sys
+sys.stderr = sys.stdout
+
+import cgitb
+if (__name__ == "__main__"):
+  cgitb.enable()
+
+from cctbx.web import cgi_utils
+import os, cgi
+
+if (0):
+  cgi.test()
+  sys.exit(0)
+
+def run():
+  print("Content-type: text/html")
+  print()
+
+  server_info = cgi_utils.server_info()
+
+  form = cgi.FieldStorage()
+  target_module = form["target_module"].value
+
+  exec("import " + target_module + " as target")
+  inp = target.interpret_form_data(form)
+
+  # optionally capture input to facilitate debugging
+  capture_input_dir = "/var/tmp/cctbx_web"
+  if (capture_input_dir is not None and os.path.isdir(capture_input_dir)):
+    import time, pickle
+    time_stamp = "%d_%02d_%02d_%02d_%02d_%02d" % (
+      time.localtime(time.time())[:6])
+    f = open(capture_input_dir+"/"+target_module+"_"+time_stamp, "wb")
+    pickle.dump([server_info, target_module, inp], f)
+    f.close()
+
+  print('[<a href="'+server_info.base()+'">Index of services</a>]')
+  print('[<a href="'+server_info.file(target_module+".html")+'">New input</a>]')
+  print("<hr>")
+
+  import traceback
+  class empty: pass
+  status = empty()
+  status.in_table = False
+  try:
+    target.run(server_info, inp, status)
+  except ValueError as ve:
+    print(ve.__class__.__name__) # guard against XSS attack
+  except RuntimeError as re:
+    print(re.__class__.__name__)
+  except Exception:
+    if (status.in_table): print("</table><pre>")
+    ei = sys.exc_info()
+    print(traceback.format_exception_only(ei[0], ei[1])[0])
+    print()
+    print()
+    print("Details:")
+    print()
+    traceback.print_exc()
+  else:
+    print("<hr>")
+    print('[<a href="'+server_info.base()+'">Index of services</a>]')
+    print('[<a href="'+server_info.file(target_module+".html")+'">New input</a>]')
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/emma.py
+from __future__ import absolute_import, division, print_function
+from cctbx import euclidean_model_matching as emma
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+from itertools import count
+import sys
+from six.moves import zip
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams_1", ""),
+     ("sgsymbol_1", ""),
+     ("convention_1", ""),
+     ("format_1", None),
+     ("coor_type_1", None),
+     ("skip_columns_1", 0),
+     ("ucparams_2", ""),
+     ("sgsymbol_2", ""),
+     ("convention_2", ""),
+     ("format_2", None),
+     ("coor_type_2", None),
+     ("skip_columns_2", 0),
+     ("tolerance", "3.0"),
+     ("diffraction_index_equivalent", None)))
+  inp.coordinates = []
+  for suffix in ("1", "2"):
+    inp.coordinates.append(cgi_utils.coordinates_from_form(form, suffix))
+  return inp
+
+def interpret_generic_coordinate_line(line, skip_columns):
+  flds = line.replace(",", " ").split()
+  try: site = [float(x) for x in flds[skip_columns: skip_columns+3]]
+  except Exception: raise RuntimeError("FormatError: " + line)
+  if (len(site) != 3):
+    raise RuntimeError("FormatError: " + line)
+  return " ".join(flds[:skip_columns]), site
+
+def pdb_file_to_emma_model(crystal_symmetry, pdb_inp, other_symmetry):
+  crystal_symmetry = pdb_inp.crystal_symmetry(
+    crystal_symmetry=crystal_symmetry,
+    weak_symmetry=False)
+  if (other_symmetry is not None):
+    crystal_symmetry = crystal_symmetry.join_symmetry(
+      other_symmetry=other_symmetry,
+      force=False)
+  positions = []
+  for atom in pdb_inp.atoms_with_labels():
+    if (crystal_symmetry.unit_cell() is None):
+      raise RuntimeError("Unit cell parameters unknown.")
+    positions.append(emma.position(
+      ":".join([str(len(positions)+1),
+                atom.name, atom.resname, atom.chain_id]),
+      crystal_symmetry.unit_cell().fractionalize(atom.xyz)))
+  m = emma.model(
+    crystal_symmetry.special_position_settings(),
+    positions)
+  m.label = "Other model"
+  return m
+
+def sdb_file_to_emma_model(crystal_symmetry, sdb_file):
+  positions = []
+  for i,site in zip(count(1),sdb_file.sites):
+    if (crystal_symmetry.unit_cell() is None):
+      raise RuntimeError("Unit cell parameters unknown.")
+    positions.append(emma.position(
+      ":".join((str(i), site.segid, site.type)),
+      crystal_symmetry.unit_cell().fractionalize((site.x, site.y, site.z))))
+  m = emma.model(
+    crystal_symmetry.special_position_settings(),
+    positions)
+  m.label = sdb_file.file_name
+  return m
+
+class web_to_models(object):
+
+  def __init__(self, ucparams, sgsymbol, convention,
+               format, coor_type, skip_columns, coordinates,
+               other_symmetry=None):
+    self.ucparams = ucparams
+    self.sgsymbol = sgsymbol
+    self.convention = convention
+    self.other_symmetry = other_symmetry
+    self.coordinate_format = None
+    if (format == "generic"):
+      skip_columns = io_utils.interpret_skip_columns(skip_columns)
+      self.positions = []
+      for line in coordinates:
+        label, site = interpret_generic_coordinate_line(line, skip_columns)
+        if (label == ""): label = "Site" + str(len(self.positions)+1)
+        if (coor_type != "Fractional"):
+          site = self.get_unit_cell().fractionalize(site)
+        self.positions.append(emma.position(label, site))
+      self.coordinate_format = "generic"
+    else:
+      if (self.coordinate_format is None):
+        try:
+          import iotbx.pdb
+          pdb_inp = iotbx.pdb.input(source_info=None, lines=coordinates)
+        except KeyboardInterrupt: raise
+        except Exception:
+          pass
+        else:
+          self.pdb_model = pdb_file_to_emma_model(
+            self.crystal_symmetry(), pdb_inp, other_symmetry)
+          if (len(self.pdb_model.positions()) > 0):
+            self.coordinate_format = "pdb"
+      if (self.coordinate_format is None):
+        try:
+          from iotbx.cns import sdb_reader
+          self.sdb_files = sdb_reader.multi_sdb_parser(coordinates)
+        except KeyboardInterrupt: raise
+        except Exception:
+          pass
+        else:
+          self.coordinate_format = "sdb"
+      if (self.coordinate_format is None):
+        raise RuntimeError("Coordinate format unknown.")
+    self.i_next_model = 0
+
+  def get_unit_cell(self, other_unit_cell=None):
+    if (self.ucparams): return uctbx.unit_cell(self.ucparams)
+    assert other_unit_cell is not None, "Unit cell parameters unknown."
+    return other_unit_cell
+
+  def get_space_group_info(self, other_space_group_info=None):
+    if (self.sgsymbol):
+      return sgtbx.space_group_info(
+        symbol=self.sgsymbol,
+        table_id=self.convention)
+    assert other_space_group_info is not None, "Space group symbol unknown."
+    return other_space_group_info
+
+  def crystal_symmetry(self):
+    unit_cell = None
+    space_group_symbol = None
+    if (self.ucparams): unit_cell = uctbx.unit_cell(self.ucparams)
+    if (self.sgsymbol): space_group_symbol = self.sgsymbol
+    return crystal.symmetry(
+      unit_cell=unit_cell,
+      space_group_symbol=space_group_symbol)
+
+  def get_next(self):
+    if (self.coordinate_format == "generic"):
+      if (self.i_next_model): return None
+      crystal_symmetry = crystal.symmetry(
+        unit_cell=self.get_unit_cell(),
+        space_group_info=self.get_space_group_info())
+      m = emma.model(
+        crystal.special_position_settings(crystal_symmetry),
+        self.positions)
+      m.label = "Model 2"
+      self.i_next_model += 1
+      return m
+    if (self.coordinate_format == "pdb"):
+      if (self.i_next_model): return None
+      self.i_next_model += 1
+      return self.pdb_model
+    if (self.coordinate_format == "sdb"):
+      if (self.i_next_model >= len(self.sdb_files)): return None
+      sdb = self.sdb_files[self.i_next_model]
+      crystal_symmetry = crystal.symmetry(
+        unit_cell=self.get_unit_cell(sdb.unit_cell),
+        space_group_info=self.get_space_group_info(sdb.space_group_info))
+      if (self.other_symmetry is not None):
+        crystal_symmetry = crystal_symmetry.join_symmetry(
+          other_symmetry=self.other_symmetry,
+          force=False)
+      m = sdb_file_to_emma_model(crystal_symmetry, sdb)
+      self.i_next_model += 1
+      return m
+    raise RuntimeError("Internal error.")
+
+def model_is_too_large(model, max_number_of_positions=200):
+  if (len(model.positions()) <= max_number_of_positions):
+    return False
+  print("*"*79)
+  print("ERROR: too many sites in this model (given %d, limit is %d)" % (
+    len(model.positions()), max_number_of_positions))
+  print("Note: EMMA is designed to work with heavy-atom substructures,")
+  print("      NOT complete macromolecular structures.")
+  print("Hint: install cctbx on your computer and use the command")
+  print("    phenix.emma")
+  print("which has no limit on the number of sites.")
+  print("cctbx downloads:")
+  print("    http://cci.lbl.gov/cctbx_build/")
+  print("*"*79)
+  print()
+  return True
+
+def run_implementation(server_info, inp, status):
+  if (inp.ucparams_2 == ""):
+      inp.ucparams_2 = inp.ucparams_1
+  if (inp.sgsymbol_2 == ""):
+      inp.sgsymbol_2 = inp.sgsymbol_1
+      inp.convention_2 = inp.convention_1
+
+  tolerance = float(inp.tolerance)
+  print("Tolerance:", tolerance)
+  if (tolerance <= 0.):
+    raise ValueError("Tolerance must be greater than zero.")
+  print()
+
+  diffraction_index_equivalent = int(inp.diffraction_index_equivalent)
+  if (diffraction_index_equivalent):
+    print("Models are diffraction index equivalent.")
+    print()
+
+  models1 = web_to_models(
+    inp.ucparams_1,
+    inp.sgsymbol_1, inp.convention_1,
+    inp.format_1, inp.coor_type_1, inp.skip_columns_1,
+    inp.coordinates[0])
+  model1 = models1.get_next()
+  assert model1, "Problems reading reference model."
+  model1.show("Reference model")
+  if (model_is_too_large(model=model1)):
+    return
+  assert not models1.get_next()
+  if (model1.unit_cell() is None):
+    raise RuntimeError("Unit cell parameters unknown (reference model).")
+  if (model1.space_group_info() is None):
+    raise RuntimeError("Space group unknown (reference model).")
+
+  models2 = web_to_models(
+    inp.ucparams_2,
+    inp.sgsymbol_2, inp.convention_2,
+    inp.format_2, inp.coor_type_2, inp.skip_columns_2,
+    inp.coordinates[1],
+    other_symmetry=model1)
+  while 1:
+    print("#" * 79)
+    print()
+    model2 = models2.get_next()
+    if (not model2): break
+    model2.show(model2.label)
+    assert model2.unit_cell() is not None
+    assert model2.space_group_info() is not None
+    if (model_is_too_large(model=model2)):
+      continue
+    sys.stdout.flush()
+    model_matches = emma.model_matches(
+      model1=model1,
+      model2=model2,
+      tolerance=tolerance,
+      models_are_diffraction_index_equivalent=diffraction_index_equivalent)
+    if (model_matches.n_matches() == 0):
+      print("No matches.")
+      print()
+    else:
+      for match in model_matches.refined_matches:
+        print("." * 79)
+        print()
+        match.show()
+
+def run(server_info, inp, status):
+  print("<pre>")
+  run_implementation(server_info=server_info, inp=inp, status=status)
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/explore_symmetry.py
+from __future__ import absolute_import, division, print_function
+# This script reports a number of space group properties given a space
+# group symbol or symmetry matrices, or a combination of the two.
+
+from cctbx import sgtbx
+from cctbx.sgtbx import harker
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+from six.moves import range
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("sgsymbol", ""),
+     ("convention", "")))
+  inp.shelx_latt = []
+  inp.symxyz = []
+  if ("symxyz" in form):
+    lines = form["symxyz"].value.split("\015\012")
+    for l in lines:
+      # Treat SHELX LATT & SYMM cards
+      s = l.strip()
+      CARD = s[:4].upper()
+      if   (CARD == "LATT"):
+        inp.shelx_latt.append(s[4:])
+      elif (CARD == "SYMM"):
+        inp.symxyz.append(s[4:].strip())
+      else:
+        # Plain symmetry operations
+        for s in l.split(";"):
+          s = s.strip()
+          if (s != ""): inp.symxyz.append(s)
+  return inp
+
+def str_ev(ev):
+  return "[%d,%d,%d]" % ev
+
+def rt_mx_analysis_header():
+  print("<tr>")
+  print("<th>Matrix")
+  print("<th>Rotation-part type")
+  print("<th>Axis direction")
+  print("<th>Screw/glide component")
+  print("<th>Origin shift")
+  print("</tr>")
+
+def rt_mx_analysis(s):
+  print("<tr>")
+  print("<td><tt>" + str(s) + "</tt>")
+  r_info = sgtbx.rot_mx_info(s.r())
+  t_info = sgtbx.translation_part_info(s)
+  if (r_info.type() == 1):
+    print("<td>1<td>-<td>-<td>-")
+  elif (r_info.type() == -1):
+    print("<td>%d<td>-<td>-<td>%s" % (
+      r_info.type(),
+      str(t_info.origin_shift())))
+  elif (abs(r_info.type()) == 2):
+    print("<td>%d<td>%s<td>%s<td>%s" % (
+      r_info.type(),
+      str_ev(r_info.ev()),
+      str(t_info.intrinsic_part()),
+      str(t_info.origin_shift())))
+  else:
+    print("<td>%d^%d<td>%s<td>%s<td>%s" % (
+       r_info.type(),
+       r_info.sense(),
+       str_ev(r_info.ev()),
+       str(t_info.intrinsic_part()),
+       str(t_info.origin_shift())))
+  print("</tr>")
+
+def show_group_generic(sg_type, status):
+  sg = sg_type.group()
+  print("Number of lattice translations:", sg.n_ltr())
+  if (sg.is_centric()):
+    print("Space group is centric.")
+  else:
+    print("Space group is acentric.")
+  if (sg.is_chiral()):
+    print("Space group is chiral.")
+  if (sg_type.is_enantiomorphic()):
+    print("Space group is enantiomorphic.")
+  print("Number of representative symmetry operations:", sg.n_smx())
+  print("Total number of symmetry operations:", sg.order_z())
+  print()
+  print("Parallelepiped containing an asymmetric unit:")
+  try: brick = sgtbx.brick(sg_type)
+  except RuntimeError as e:
+    print(" ", e)
+  else:
+    print(" ", str(brick).replace("<", "&lt;").replace(">", "&gt;"))
+  print()
+  print("List of symmetry operations:")
+  print("</pre><table border=2 cellpadding=2>")
+  status.in_table = True
+  rt_mx_analysis_header()
+  for s in sg: rt_mx_analysis(s)
+  print("</table><pre>")
+  status.in_table = False
+  print()
+
+def show_symbols(symbols):
+  print("  Space group number:", symbols.number())
+  print("  Schoenflies symbol:", symbols.schoenflies())
+  print("  Hermann-Mauguin symbol:", symbols.hermann_mauguin())
+  e = symbols.extension()
+  if (e != "\0"):
+    if (e in "12"):
+      print("  Origin choice:", e)
+    elif (e == "H"):
+      print("  Trigonal using hexagonal axes")
+    elif (e == "R"):
+      print("  Trigonal using rhombohedral axes")
+    else:
+      raise RuntimeError("Internal error")
+  q = symbols.qualifier()
+  if (q != ""):
+    if (symbols.number() < 16):
+      if (q[-1] in "123"):
+        unique_axis = q[:-1]
+        cell_choice = q[-1]
+      else:
+        unique_axis = q
+        cell_choice = ""
+      print("  Unique axis:", unique_axis)
+      if (cell_choice != ""):
+        print("  Cell choice:", cell_choice)
+    else:
+      print("  Relation to standard setting:", q)
+  print("  Hall symbol:", symbols.hall().strip())
+
+def expand_shelx_latt(sg, n_fld):
+  z_dict = {
+    "P": 1,
+    "I": 2,
+    "R": 3,
+    "F": 4,
+    "A": 5,
+    "B": 6,
+    "C": 7,
+  }
+  n_dict = {}
+  for z in z_dict.keys(): n_dict[z_dict[z]] = z
+  try:
+    n = int(n_fld)
+    z = n_dict[abs(n)]
+  except Exception:
+    raise RuntimeError("Format Error: LATT " + str(n_fld))
+  print("Addition of SHELX LATT " + str(n) + ":")
+  if (n > 0):
+    print("  Addition of centre of inversion at the origin.")
+    sg.expand_smx(sgtbx.rt_mx("-x,-y,-z"))
+  print("  Addition of lattice translations for centring type " + str(z) + ".")
+  sg.expand_conventional_centring_type(z)
+  print()
+
+def run(server_info, inp, status):
+  print("<pre>")
+
+  symbols_inp = None
+  lookup_symbol = inp.sgsymbol
+  if (lookup_symbol == ""): lookup_symbol = "P 1"
+  if (inp.convention == "Hall"):
+    hall_symbol = lookup_symbol
+  else:
+    symbols_inp = sgtbx.space_group_symbols(lookup_symbol, inp.convention)
+    hall_symbol = symbols_inp.hall()
+    if (symbols_inp.number() == 0):
+      symbols_inp = None
+      inp.convention = "Hall"
+    else:
+      print("Result of symbol lookup:")
+      show_symbols(symbols_inp)
+      print()
+
+  try:
+    ps = sgtbx.parse_string(hall_symbol)
+    sg = sgtbx.space_group(ps)
+  except RuntimeError as e:
+    print("--&gt;" + ps.string() + "&lt;--")
+    print(("-" * (ps.where() + 3)) + "^")
+    raise
+
+  io_utils.show_input_symbol(inp.sgsymbol, inp.convention)
+  if (len(inp.shelx_latt) != 0):
+    for n_fld in inp.shelx_latt:
+      expand_shelx_latt(sg, n_fld)
+
+  if (len(inp.symxyz) != 0):
+    print("Addition of symmetry operations:")
+    print("</pre><table border=2 cellpadding=2>")
+    status.in_table = True
+    rt_mx_analysis_header()
+    for s in inp.symxyz:
+      ps = sgtbx.parse_string(s)
+      try:
+        s = sgtbx.rt_mx(ps)
+      except RuntimeError as e:
+        print("</table><pre>")
+        status.in_table = False
+        print("--&gt;" + ps.string() + "&lt;--")
+        print(("-" * (ps.where() + 3)) + "^")
+        raise
+      rt_mx_analysis(s)
+      sg.expand_smx(s)
+    print("</table><pre>")
+    status.in_table = False
+    print()
+
+  sg_type = sg.type()
+  show_group_generic(sg_type, status)
+
+  if (   inp.convention == "Hall"
+      or len(inp.shelx_latt) != 0
+      or len(inp.symxyz) != 0):
+    symbols_match = sg.match_tabulated_settings()
+    if (symbols_match.number() != 0):
+      if (   symbols_inp is None
+          or    symbols_inp.universal_hermann_mauguin()
+             != symbols_match.universal_hermann_mauguin()):
+        print("Symmetry operations match:")
+        show_symbols(symbols_match)
+        print()
+      else:
+        print("Additional symmetry operations are redundant.")
+        print()
+    else:
+      print("Space group number:", sg_type.number())
+      print("Conventional Hermann-Mauguin symbol:", \
+        sgtbx.space_group_symbols(sg_type.number()) \
+        .universal_hermann_mauguin())
+      print("Universal    Hermann-Mauguin symbol:", \
+        sg_type.universal_hermann_mauguin_symbol())
+      print("Hall symbol:", sg_type.hall_symbol())
+      print("Change-of-basis matrix:", sg_type.cb_op().c())
+      print("               Inverse:", sg_type.cb_op().c_inv())
+      print()
+
+  wyckoff_table = sgtbx.wyckoff_table(sg_type)
+  print("List of Wyckoff positions:")
+  print("</pre><table border=2 cellpadding=2>")
+  status.in_table = True
+  print("<tr>")
+  print("<th>Wyckoff letter")
+  print("<th>Multiplicity")
+  print("<th>Site symmetry<br>point group type")
+  print("<th>Representative special position operator")
+  print("</tr>")
+  for i_position in range(wyckoff_table.size()):
+    position = wyckoff_table.position(i_position)
+    print("<tr>")
+    print("<td>%s<td>%d<td>%s<td><tt>%s</tt>" % (
+      position.letter(),
+      position.multiplicity(),
+      position.point_group_type(),
+      str(position.special_op_simplified())))
+    print("</tr>")
+  print("</table><pre>")
+  status.in_table = False
+  print()
+
+  print("Harker planes:")
+  print("</pre><table border=2 cellpadding=2>")
+  status.in_table = True
+  print("<tr>")
+  print("<th>Algebraic")
+  print("<th>Normal vector")
+  print("<th>A point in the plane")
+  print("</tr>")
+  planes = harker.planes_fractional(sg)
+  for plane in planes.list:
+    print("<tr>")
+    print("<td><tt>%s</tt><td>%s<td>%s" % (
+      plane.algebraic(), str_ev(plane.n), str(plane.p)))
+    print("</tr>")
+  print("</table><pre>")
+  status.in_table = False
+  print()
+
+  print("Additional generators of Euclidean normalizer:")
+  ss = sgtbx.structure_seminvariants(sg)
+  ss_vm = ss.vectors_and_moduli()
+  print("  Number of structure-seminvariant vectors and moduli:", len(ss_vm))
+  if (len(ss_vm)):
+    print("    Vector    Modulus")
+    for vm in ss_vm: print("   ", vm.v, vm.m)
+  k2l = sg_type.addl_generators_of_euclidean_normalizer(True, False)
+  l2n = sg_type.addl_generators_of_euclidean_normalizer(False, True)
+  if (len(k2l)):
+    print("  Inversion through a centre at:", end=' ')
+    assert len(k2l) == 1
+    print(sgtbx.translation_part_info(k2l[0]).origin_shift())
+  if (len(l2n)):
+    print("  Further generators:")
+    print("</pre><table border=2 cellpadding=2>")
+    status.in_table = True
+    rt_mx_analysis_header()
+    for s in l2n: rt_mx_analysis(s)
+    print("</table><pre>")
+    status.in_table = False
+  print()
+
+  print("Grid factors implied by symmetries:")
+  grid_sg = sg.gridding()
+  grid_ss = ss.gridding()
+  eucl_sg = sg_type.expand_addl_generators_of_euclidean_normalizer(True,True)
+  grid_eucl = eucl_sg.refine_gridding(grid_ss)
+  print("  Space group:", grid_sg)
+  print("  Structure-seminvariant vectors and moduli:", grid_ss)
+  print("  Euclidean normalizer:", grid_eucl)
+  print()
+  print("  All points of a grid over the unit cell are mapped")
+  print("  exactly onto other grid points only if the factors")
+  print("  shown above are factors of the grid.")
+  print()
+
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/frac_cart.py
+from __future__ import absolute_import, division, print_function
+# Convert coordinates from/to Fractional or Orthogonal.
+
+from cctbx import uctbx
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams", "1 1 1 90 90 90"),
+     ("coor_type", None),
+     ("skip_columns", "0")))
+  inp.coordinates = cgi_utils.coordinates_from_form(form)
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  unit_cell = uctbx.unit_cell(inp.ucparams)
+  unit_cell.show_parameters()
+  print()
+
+  if (inp.coor_type == "Fractional"):
+    print("Cartesian coordinates:")
+  else:
+    print("Fractional coordinates:")
+  print()
+
+  skip_columns = io_utils.interpret_skip_columns(inp.skip_columns)
+
+  for line in inp.coordinates:
+    skipped, coordinates = io_utils.interpret_coordinate_line(line,skip_columns)
+    if (inp.coor_type == "Fractional"):
+      c = unit_cell.orthogonalize(coordinates)
+    else:
+      c = unit_cell.fractionalize(coordinates)
+    print(skipped, "%.6g %.6g %.6g" % tuple(c))
+
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/io_utils.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+from cctbx import xray
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import uctbx
+import cctbx.eltbx.xray_scattering
+from cctbx import eltbx
+from cctbx import adptbx
+from cctbx.web import cgi_utils
+from six.moves import range
+from six.moves import zip
+
+def show_input_symbol(sgsymbol, convention, label="Input"):
+  if (sgsymbol != ""):
+    print(label, "space group symbol:", sgsymbol)
+    print("Convention:", end=' ')
+    if   (convention == "A1983"):
+      print("International Tables for Crystallography, Volume A 1983")
+    elif (convention == "I1952"):
+      print("International Tables for Crystallography, Volume I 1952")
+    elif (convention == "Hall"):
+      print("Hall symbol")
+    else:
+      print("Default")
+    print()
+
+def interpret_skip_columns(skip_columns):
+  result = int(skip_columns)
+  if (result < 0):
+    raise ValueError("Negative number for columns to skip.")
+  return result
+
+def interpret_coordinate_line(line, skip_columns):
+  flds = line.split()
+  if (len(flds) < skip_columns + 3): raise FormatError(line)
+  coordinates = [0,0,0]
+  for i in range(3):
+    try: coordinates[i] = float(flds[skip_columns + i])
+    except Exception: raise cgi_utils.FormatError
+  return " ".join(flds[:skip_columns]), coordinates
+
+def read_scatterer(flds, default_b_iso=3.0):
+  scatterer = xray.scatterer(scattering_type="const")
+  # Label [ScatFact] x y z [Occ [Biso]]
+  try:
+    scatterer.label = flds[0]
+    try:
+      float(flds[1])
+    except Exception:
+      offs = 2
+      scatterer.scattering_type = eltbx.xray_scattering.get_standard_label(
+        label=flds[1], exact=True)
+    else:
+      offs = 1
+      scatterer.scattering_type = eltbx.xray_scattering.get_standard_label(
+        label=flds[0], exact=False)
+    site = flds[offs : offs + 3]
+    for i in range(3):
+      site[i] = float(site[i])
+    scatterer.site = site
+    scatterer.occupancy = 1.
+    scatterer.set_use_u_iso_only()
+    scatterer.u_iso = adptbx.b_as_u(default_b_iso)
+    if (len(flds) >= offs + 4):
+      scatterer.occupancy = float(flds[offs + 3])
+      if (len(flds) == offs + 5):
+        scatterer.u_iso = adptbx.b_as_u(float(flds[offs + 4]))
+      else:
+        assert (len(flds) < offs + 5)
+  except Exception:
+    print("Please check your formatting.")
+    raise cgi_utils.FormatError
+  return scatterer
+
+def special_position_settings_from_inp(inp):
+  return crystal.special_position_settings(
+    crystal.symmetry(
+      unit_cell=uctbx.unit_cell(inp.ucparams),
+      space_group_info=sgtbx.space_group_info(
+        symbol=inp.sgsymbol,
+        table_id=inp.convention)),
+    min_distance_sym_equiv=float(inp.min_distance_sym_equiv))
+
+def structure_from_inp(inp, status, special_position_settings):
+  wyckoff_table=special_position_settings.space_group_info().wyckoff_table()
+  print("</pre><table border=2 cellpadding=2>")
+  status.in_table = True
+  print("<tr>")
+  print("<th>Label")
+  print("<th>Scattering<br>factor<br>label")
+  print("<th>Multiplicty")
+  print("<th>Wyckoff<br>position")
+  print("<th>Site<br>symmetry")
+  print("<th colspan=3>Fractional coordinates")
+  print("<th>Occupancy<br>factor")
+  print("<th>Biso")
+  print("<tr>")
+  structure = xray.structure(special_position_settings)
+  print()
+  for line in inp.coordinates:
+    scatterer = read_scatterer(line.split())
+    if (inp.coor_type != "Fractional"):
+      scatterer.site = structure.unit_cell().fractionalize(scatterer.site)
+    structure.add_scatterer(scatterer)
+    site_symmetry = structure.site_symmetry(scatterer.site)
+    wyckoff_mapping = wyckoff_table.mapping(site_symmetry)
+    wyckoff_position = wyckoff_mapping.position()
+    print("<tr>")
+    print((  "<td>%s<td>%s"
+           + "<td align=center>%d<td align=center>%s<td align=center>%s"
+           + "<td><tt>%.6g</tt><td><tt>%.6g</tt><td><tt>%.6g</tt>"
+           + "<td align=center><tt>%.6g</tt>"
+           + "<td align=center><tt>%.6g</tt>") % (
+      (scatterer.label, scatterer.scattering_type,
+       wyckoff_position.multiplicity(), wyckoff_position.letter(),
+       site_symmetry.point_group_type())
+     + scatterer.site
+     + (scatterer.occupancy, adptbx.u_as_b(scatterer.u_iso))))
+  print("</table><pre>")
+  status.in_table = False
+  print()
+  return structure
+
+def structure_from_inp_pdb(inp, status):
+  pdb_file = inp.coordinates
+  print("Input PDB file content:\n")
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_file)
+  print(pdb_inp.as_pdb_string())  # avoid XSS
+  xray_structure = pdb_inp.xray_structure_simple(
+    enable_scattering_type_unknown=True)
+  u_tidy = xray_structure.scatterers().extract_u_cart(
+    xray_structure.unit_cell())
+  have_header = False
+  for ut, atom in zip(u_tidy, pdb_inp.atoms_with_labels()):
+    ui = atom.uij
+    sui, sut = [(" %7.4f" * 6) % u for u in [ui, ut]]
+    if (sui != sut):
+      if (not have_header):
+        print("Anisotropic displacement parameters (ANISOU) of the following")
+        print("atoms were modified:")
+        have_header = True
+      print(" ", atom.quote())
+      print("    Ucart(input) =" + sui)
+      print("    Ucart(tidy)  =" + sut)
+  if (have_header):
+    print()
+  return xray_structure
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/iotbx_cif_validate.py
+from __future__ import absolute_import, division, print_function
+from cctbx.web import cgi_utils
+import iotbx.cif
+from iotbx.cif import validation
+import iotbx.pdb.mmcif
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("cif_file", None),
+     ("cif_text", None),
+     ("cif_dic", None),
+     ("extract_miller_arrays", False),
+     ("extract_crystal_structures", False),
+     ("extract_pdb_hierarchy", False),
+     ("diffraction_index_equivalent", None)))
+
+  inp.extract_miller_arrays = inp.extract_miller_arrays == "True"
+  inp.extract_crystal_structures = inp.extract_crystal_structures == "True"
+  inp.extract_pdb_hierarchy = inp.extract_pdb_hierarchy == "True"
+  return inp
+
+
+def run_implementation(server_info, inp, status):
+  cif_text = inp.cif_text
+  if cif_text is None:
+    cif_text = inp.cif_file
+
+  reader = iotbx.cif.reader(input_string=cif_text, raise_if_errors=False)
+  if reader.error_count():
+    print("Errors encountered during parsing")
+    return
+  else:
+    print("No parsing errors.")
+
+  if inp.cif_dic is not None:
+    cif_dic = validation.smart_load_dictionary(name=inp.cif_dic)
+    print()
+    print("Validating CIF against %s:" %inp.cif_dic)
+    cif_model = reader.model()
+    error_handler = cif_model.validate(cif_dic, show_warnings=True)
+    if len(error_handler.warnings) + len(error_handler.errors) == 0:
+      print("No validation errors found.")
+    print()
+
+  if inp.extract_miller_arrays:
+    print("Extracting Miller arrays:")
+    try:
+      miller_arrays = reader.as_miller_arrays()
+    except iotbx.cif.builders.CifBuilderError as e:
+      print("CifBuilderError: %s" %str(e))
+    else:
+      for ma in miller_arrays:
+        print(ma)
+        ma.show_comprehensive_summary()
+      if len(miller_arrays) == 0:
+        print("No Miller arrays found.")
+      print()
+
+  if inp.extract_crystal_structures:
+    print("Extracting crystal structures:")
+    try:
+      crystal_structures = reader.build_crystal_structures()
+    except iotbx.cif.builders.CifBuilderError as e:
+      print("CifBuilderError: %s" %str(e))
+    else:
+      for xs in crystal_structures.values():
+        xs.show_summary().show_scatterers()
+        print()
+      if len(crystal_structures) == 0:
+        print("No crystal structures found.")
+    print()
+
+  if inp.extract_pdb_hierarchy:
+    print("Extracting pdb.hierarchy:")
+    # TODO am I a dictionary ?- if so change me accordingly..
+    hierarchy = iotbx.pdb.mmcif.pdb_hierarchy_builder(
+      cif_model.blocks.values()[0]).hierarchy
+    hierarchy.show()
+    print()
+
+
+def run(server_info, inp, status):
+  print("<pre>")
+  run_implementation(server_info=server_info, inp=inp, status=status)
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/lattice_symmetry.py
+from __future__ import absolute_import, division, print_function
+from cctbx import crystal
+from cctbx import sgtbx
+import iotbx.command_line.lattice_symmetry
+from cctbx.web import cgi_utils
+import sys
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams", "1 1 1 90 90 90"),
+     ("sgsymbol", "P1"),
+     ("convention", ""),
+     ("max_delta", "5")))
+  return inp
+
+def run(server_info, inp, status):
+  sys.stdout.write("<pre>")
+  z = inp.sgsymbol.strip().upper()
+  if (z in ("P","A","B","C","I","R","F")):
+    inp.sgsymbol = "Hall: %s 1" % z
+    inp.convention = ""
+  input_symmetry = crystal.symmetry(
+    unit_cell=inp.ucparams,
+    space_group_info=sgtbx.space_group_info(
+      symbol=inp.sgsymbol,
+      table_id=inp.convention))
+  max_delta = float(inp.max_delta)
+  Groups = iotbx.command_line.lattice_symmetry.metric_subgroups(
+    input_symmetry=input_symmetry,
+    max_delta=max_delta)
+  Groups.show()
+  sys.stdout.write("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/libtbx_help.py
+from __future__ import absolute_import, division, print_function
+from cctbx.web import cgi_utils
+import pydoc
+import cgi
+from six.moves import cStringIO as StringIO
+import sys
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+     (("query", ""),))
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  sys.argv = ["libtbx.help"] + inp.query.split()
+  s = StringIO()
+  sys.stdout = s
+  pydoc.cli()
+  sys.stdout = sys.__stdout__
+  s = s.getvalue()
+  if sys.version_info.major >= 3:
+    import html
+    sys.stdout.write(html.escape(s))
+  else:
+    sys.stdout.write(cgi.escape(s))
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/multiple_cell.py
+from __future__ import absolute_import, division, print_function
+URL_cctbx_web = "cctbx_web.cgi"
+URL_target_module = "explore_symmetry"
+
+# this list was generated with generate_multiple_cell_stage2.py
+multiple_cell_list = (
+("C 4", (" C 4", " C 4")),
+("C 41", (" C 4w", " C 4w")),
+("C 42", (" C 4c", " C 4c")),
+("C 43", (" C 4cw", " C 4cw")),
+("F 4", (" F 4", " F 4")),
+("F 41", (" F 4ad", " F 4d")),
+("C -4", (" C -4", " C -4")),
+("F -4", (" F -4", " F -4")),
+("C 4/m", ("-C 4", "-C 4")),
+("C 42/m", ("-C 4c", "-C 4c")),
+("C 4/a :1", (" C 4a -1a", " C 4a -1a")),
+("C 4/a :2", ("-C 4uv", "-C 4auv")),
+("C 42/a :1", (" C 4ac -1ac", " C 4ac -1ac")),
+("C 42/a :2", ("-C 4acuv", "-C 4wd")),
+("F 4/m", ("-F 4", "-F 4")),
+("F 41/d :1", (" F 4ad -1ad", " F 4d -1d")),
+("F 41/d :2", ("-F 4auw", "-F 4vw")),
+("C 4 2 2", (" C 4 2", " C 4 2")),
+("C 4 2 21", (" C 4a 2", " C 4a 2")),
+("C 41 2 2", (" C 4w 2w", " C 4w 2cw")),
+("C 41 2 21", (" C 4aw 2c", " C 4aw 2")),
+("C 42 2 2", (" C 4c 2c", " C 4c 2c")),
+("C 42 2 21", (" C 4ac 2", " C 4ac 2")),
+("C 43 2 2", (" C 4cw 2cw", " C 4cw 2w")),
+("C 43 2 21", (" C 4acw 2c", " C 4acw 2")),
+("F 4 2 2", (" F 4 2", " F 4 2")),
+("F 41 2 2", (" F 4ad 2", " F 4d 2")),
+("C 4 m m", (" C 4 -2", " C 4 -2")),
+("C 4 m g1", (" C 4 -2a", " C 4 -2a")),
+("C 42 m c", (" C 4c -2", " C 4c -2")),
+("C 42 m g2", (" C 4ac -2", " C 4ac -2")),
+("C 4 c c", (" C 4 -2c", " C 4 -2c")),
+("C 4 c g2", (" C 4 -2ac", " C 4 -2ac")),
+("C 42 c m", (" C 4c -2c", " C 4c -2c")),
+("C 42 c g1", (" C 4c -2ac", " C 4c -2ac")),
+("F 4 m m", (" F 4 -2", " F 4 -2")),
+("F 4 m c", (" F 4 -2a", " F 4 -2a")),
+("F 41 d m", (" F 4ad -2ad", " F 4d -2d")),
+("F 41 d c", (" F 4ad -2d", " F 4d -2ad")),
+("C -4 m 2", (" C -4 -2", " C -4 -2")),
+("C -4 c 2", (" C -4 -2c", " C -4 -2c")),
+("C -4 m 21", (" C -4 -2a", " C -4 -2a")),
+("C -4 c 21", (" C -4 -2ac", " C -4 -2ac")),
+("C -4 2 m", (" C -4 2", " C -4 2")),
+("C -4 2 c", (" C -4 2c", " C -4 2c")),
+("C -4 2 g1", (" C -4 2a", " C -4 2a")),
+("C -4 2 g2", (" C -4 2ac", " C -4 2ac")),
+("F -4 2 m", (" F -4 2", " F -4 2")),
+("F -4 2 c", (" F -4 2a", " F -4 2a")),
+("F -4 m 2", (" F -4 -2", " F -4 -2")),
+("F -4 d 2", (" F -4 -2ad", " F -4 -2d")),
+("C 4/m m m", ("-C 4 2", "-C 4 2")),
+("C 4/m c c", ("-C 4 2c", "-C 4 2c")),
+("C 4/a m g1 :1", (" C 4 2 -1a", " C 4 2 -1a")),
+("C 4/a m g1 :2", ("-C 4uv 2a", "-C 4auv 2")),
+("C 4/a c g2 :1", (" C 4 2 -1ac", " C 4 2 -1ac")),
+("C 4/a c g2 :2", ("-C 4uv 2ac", "-C 4auv 2c")),
+("C 4/m m g1", ("-C 4 2a", "-C 4 2a")),
+("C 4/m c g2", ("-C 4 2ac", "-C 4 2ac")),
+("C 4/a m m :1", (" C 4a 2 -1a", " C 4a 2 -1a")),
+("C 4/a m m :2", ("-C 4uv 2", "-C 4auv 2a")),
+("C 4/a c c :1", (" C 4a 2c -1a", " C 4a 2c -1a")),
+("C 4/a c c :2", ("-C 4uv 2c", "-C 4auv 2ac")),
+("C 42/m c m", ("-C 4c 2c", "-C 4c 2c")),
+("C 42/m m c", ("-C 4c 2", "-C 4c 2")),
+("C 42/a c g1 :1", (" C 4ac 2a -1ac", " C 4ac 2a -1ac")),
+("C 42/a c g1 :2", ("-C 4wd 2ac", "-C 4acuv 2c")),
+("C 42/a m g2 :1", (" C 4ac 2ac -1ac", " C 4ac 2ac -1ac")),
+("C 42/a m g2 :2", ("-C 4wd 2a", "-C 4acuv 2")),
+("C 42/m c g1", ("-C 4c 2ac", "-C 4c 2ac")),
+("C 42/m m g2", ("-C 4ac 2", "-C 4ac 2")),
+("C 42/a c m :1", (" C 4ac 2 -1ac", " C 4ac 2 -1ac")),
+("C 42/a c m :2", ("-C 4wd 2c", "-C 4acuv 2ac")),
+("C 42/a m c :1", (" C 4ac 2c -1ac", " C 4ac 2c -1ac")),
+("C 42/a m c :2", ("-C 4wd 2", "-C 4acuv 2a")),
+("F 4/m m m", ("-F 4 2", "-F 4 2")),
+("F 4/m m c", ("-F 4 2a", "-F 4 2a")),
+("F 41/d d m :1", (" F 4ad 2 -1ad", " F 4d 2 -1d")),
+("F 41/d d m :2", ("-F 4uw 2ud", "-F 4ud 2ud")),
+("F 41/d d c :1", (" F 4ad 2a -1ad", " F 4d 2a -1d")),
+("F 41/d d c :2", ("-F 4uw 2vw", "-F 4ud 2vw")),
+("H 3", (" H 3", " H 3", " H 3")),
+("H 31", (" H 31", " H 31", " H 31")),
+("H 32", (" H 32", " H 32", " H 32")),
+("H -3", ("-H 3", "-H 3", "-H 3")),
+("H 3 2 1", (" H 3 2\"", " H 3 2\"", " H 3 2\"")),
+("H 3 1 2", (" H 3 2", " H 3 2", " H 3 2")),
+("H 31 2 1", (" H 31 2\"", " H 31 2\" (0 0 2)", " H 31 2\" (0 0 4)")),
+("H 31 1 2", (" H 31 2 (0 0 2)", " H 31 2 (0 0 4)", " H 31 2")),
+("H 32 2 1", (" H 32 2\"", " H 32 2\" (0 0 4)", " H 32 2\" (0 0 2)")),
+("H 32 1 2", (" H 32 2 (0 0 4)", " H 32 2 (0 0 2)", " H 32 2")),
+("H 3 1 m", (" H 3 -2", " H 3 -2", " H 3 -2")),
+("H 3 m 1", (" H 3 -2\"", " H 3 -2\"", " H 3 -2\"")),
+("H 3 1 c", (" H 3 -2c", " H 3 -2c", " H 3 -2c")),
+("H 3 c 1", (" H 3 -2\"c", " H 3 -2\"c", " H 3 -2\"c")),
+("H -3 m 1", ("-H 3 2\"", "-H 3 2\"", "-H 3 2\"")),
+("H -3 c 1", ("-H 3 2\"c", "-H 3 2\"c", "-H 3 2\"c")),
+("H -3 1 m", ("-H 3 2", "-H 3 2", "-H 3 2")),
+("H -3 1 c", ("-H 3 2c", "-H 3 2c", "-H 3 2c")),
+("H 6", (" H 6", " H 6", " H 6")),
+("H 61", (" H 61", " H 61", " H 61")),
+("H 65", (" H 65", " H 65", " H 65")),
+("H 62", (" H 62", " H 62", " H 62")),
+("H 64", (" H 64", " H 64", " H 64")),
+("H 63", (" H 6c", " H 6c", " H 6c")),
+("H -6", (" H -6", " H -6", " H -6")),
+("H 6/m", ("-H 6", "-H 6", "-H 6")),
+("H 63/m", ("-H 6c", "-H 6c", "-H 6c")),
+("H 6 2 2", (" H 6 2", " H 6 2", " H 6 2")),
+("H 61 2 2", (" H 61 2 (0 0 4)", " H 61 2", " H 61 2 (0 0 2)")),
+("H 65 2 2", (" H 65 2 (0 0 2)", " H 65 2", " H 65 2 (0 0 4)")),
+("H 62 2 2", (" H 62 2 (0 0 2)", " H 62 2", " H 62 2 (0 0 4)")),
+("H 64 2 2", (" H 64 2 (0 0 4)", " H 64 2", " H 64 2 (0 0 2)")),
+("H 63 2 2", (" H 6c 2", " H 6c 2", " H 6c 2")),
+("H 6 m m", (" H 6 -2", " H 6 -2", " H 6 -2")),
+("H 6 c c", (" H 6 -2c", " H 6 -2c", " H 6 -2c")),
+("H 63 m c", (" H 6c -2c", " H 6c -2c", " H 6c -2c")),
+("H 63 c m", (" H 6c -2", " H 6c -2", " H 6c -2")),
+("H -6 2 m", (" H -6 -2", " H -6 -2", " H -6 -2")),
+("H -6 2 c", (" H -6c -2c", " H -6c -2c", " H -6c -2c")),
+("H -6 m 2", (" H -6 2", " H -6 2", " H -6 2")),
+("H -6 c 2", (" H -6c 2", " H -6c 2", " H -6c 2")),
+("H 6/m m m", ("-H 6 2", "-H 6 2", "-H 6 2")),
+("H 6/m c c", ("-H 6 2c", "-H 6 2c", "-H 6 2c")),
+("H 63/m m c", ("-H 6c 2c", "-H 6c 2c", "-H 6c 2c")),
+("H 63/m c m", ("-H 6c 2", "-H 6c 2", "-H 6c 2")),
+)
+
+import cgi
+from six.moves import urllib
+
+def escape(s):
+  return cgi.escape(s, 1)
+
+def LinkExploreSymmetry(Hall):
+  return \
+    "<a href=\"%s?target_module=%s&convention=Hall;sgsymbol=%s\">%s</a>" % (
+     URL_cctbx_web,
+     URL_target_module,
+     urllib.parse.quote_plus(Hall),
+     Hall)
+
+def run():
+  tetragonal_list = []
+  trigonal_list = []
+  hexagonal_list = []
+  for HM, HallSymbols in multiple_cell_list:
+    if (HM[0] != "H"):
+      tetragonal_list.append((HM, HallSymbols))
+    elif (not "6" in HM):
+      trigonal_list.append((HM, HallSymbols))
+    else:
+      hexagonal_list.append((HM, HallSymbols))
+  print(r"""<html>
+<head>
+<title>cctbx - Multiple cell C or F and triple cell H settings</title>
+</head>
+<body bgcolor=#ffffff>
+<hr>
+<h1>cctbx - Multiple cell C or F and triple cell H settings</h1>
+<hr>
+The Hermann-Mauguin symbols listed in the tables below are
+not recognized by the class sgtbx::space_group_symbols,
+but you may click on the Hall symbols in the right
+columns to explore the symmetries.
+<p>
+The multiple cell and triple cell symbols were first
+introduced in "Internationale Tabellen zur Bestimmung von
+Kristallstrukturen" in 1935 (IT-1935). They were dropped in
+the International Tables for Crystallography, Volume I from
+1952 (IT-I1952) but kept in the comparative tables. In the
+International Tables for Crystallography, Volume A from
+1983 (IT-A1983), the multiple cell and triple cell symbols
+reappear in the sub- and supergroup data, and are also
+included in the <i>Synoptic Tables of Space-Group Symbols</i>
+(Table 4.3.1).
+<p>
+IT-A1983 defines two transformation matrices for
+transforming from a P- or I-representation in the
+tetragonal system to C or F respectively. The matrices are
+shown in the table headers below. For most settings the
+choice of the transformation matrix does not effect the
+result of the transformation. However, there are a number
+of settings where the result of the transformation depends
+on the choice of the matrix. For these settings IT-A1983
+does not unambiguously define a specific space group
+representation for the given Hermann-Mauguin symbol (see
+e.g. F41 below). The situation is similar for the
+transformation from a primitive trigonal or hexagonal
+setting to a triple cell H setting. Unfortunately there is
+no established notation for resolving these ambigous
+definitions of IT-1983.
+<p>
+IT-1935 defines unambigous transformations for the multiple
+cell and triple cell settings (p. 30):
+<p>
+<i>The equation for transforming from a P- or I-representation
+(in the tetragonal system) to C or F respectively are:</i>
+<ul>
+<li><b>a</b>(C,F) = <b>a</b>(P,I) + <b>b</b>(P,I);
+    <b>b</b>(C,F) = -<b>a</b>(P,I) + <b>b</b>(P,I)
+</ul>
+<p>
+<i>For the change from C to H in the hexagonal system we have:</i>
+<ul>
+<li><b>a</b>(H) = <b>a</b>(C) + 2<b>b</b>(C);
+    <b>b</b>(H) = -2<b>a</b>(C) - <b>b</b>(C)
+</ul>
+<p>
+<b>c</b>(C,F) = <b>c</b>(P,I) and <b>c</b>(H) = <b>c</b>(C) are implied.<br>
+<b>Note that IT-1935 uses the symbol C for the <i>primitive</i>
+settings in the trigonal and hexagonal systems.</b>
+<p>
+Unfortunately, some primitive C settings in IT-1935 are
+different from the primitive settings in IT-I1952 and
+IT-A1983 (Schoenflies symbols D3^3 and D3^5). Therefore it
+is not possible to derive all triple cell H settings of
+IT-1935 by applying a consistent transformation to the
+primitive settings in IT-A1983. It is currently not known
+to me (rwgk) if a similar problem exists for the tetragonal
+space groups.
+<p>
+It is beyond the scope of the sgtbx to provide a table of
+historic space group symbols that are only referred to in
+very old papers. A related problem is that the Protein Data
+Bank (PDB) sometimes uses the symbol H to distinguish
+between the hexagonal and the rhombohedral setting of
+trigonal space groups (e.g. the symbol <i>H 3</i> in the
+PDB corresponds to <i>R 3 with hexagonal axes</i> in
+IT-A1983). It could therefore cause significant confusion
+if the sgtbx interprets the PDB symbols according to the
+IT-1935 conventions.
+<p>
+Considering the ambiguities and conflicting definitions, a
+direct support for multiple cell and triple cell settings
+is not included in the sgtbx. The tables below are
+provided for the rare cases where information about these
+symbols is required.
+""")
+  print("<hr>")
+  print("<h2>Tetragonal multiple cell C or F</h2>")
+  print("See section 4.3.4 in the International Tables for Crystallography,")
+  print("Volume A, 1983 or later.")
+  print("<p>")
+  print("The Hall symbols in this table were generated with the program")
+  print('<a href="http://xtal.crystal.uwa.edu.au/">Xtal 3.7.0</a>.')
+  print("<p>")
+  print("<table border=2 cellpadding=2>")
+  print("<tr>")
+  print("<th>Hermann-Mauguin<br>symbol")
+  print("<th>Hall symbol<br>a-b,a+b,c")
+  print("<th>Hall symbol<br>a+b,-a+b,c")
+  for HM, HallSymbols in tetragonal_list:
+    print("<tr>")
+    print("<td>" + escape(HM))
+    if (HallSymbols[0] == HallSymbols[1]):
+      print("<td align=center colspan=2>" + LinkExploreSymmetry(HallSymbols[0]))
+    else:
+      for Hall in HallSymbols:
+        print("<td align=center>" + LinkExploreSymmetry(Hall))
+  print("</table>")
+  for system, section, list in (
+    ("Trigonal", "4.3.5", trigonal_list),
+    ("Hexagonal", "4.3.5", hexagonal_list)):
+    print("<hr>")
+    print("<h2>%s triple cell H</h2>" % system)
+    print("See section %s" % section)
+    print("in the International Tables for Crystallography,")
+    print("Volume A, 1983 or later.")
+    print("<p>")
+    print("The Hall symbols in this table were generated manually.")
+    print("<p>")
+    print("<table border=2 cellpadding=2>")
+    print("<tr>")
+    print("<th>Hermann-Mauguin<br>symbol")
+    print("<th>Hall symbol<br>a-b,a+2b,c")
+    print("<th>Hall symbol<br>2a+b,-a+b,c")
+    print("<th>Hall symbol<br>a+2b,-2a-b,c")
+    for HM, HallSymbols in list:
+      print("<tr>")
+      print("<td>" + escape(HM))
+      if (    HallSymbols[0] == HallSymbols[1]
+          and HallSymbols[0] == HallSymbols[2]):
+        print("<td align=center colspan=3>" + LinkExploreSymmetry(
+          HallSymbols[0]))
+      else:
+        for Hall in HallSymbols:
+          print("<td align=center>" + LinkExploreSymmetry(Hall))
+    print("</table>")
+  print("""
+<hr>
+R.W. Grosse-Kunstleve, October 2001
+<hr>
+</body>
+</html>""")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/phase_o_phrenia.py
+from __future__ import absolute_import, division, print_function
+from cctbx.examples import phase_o_phrenia
+from iotbx.cns import sdb_reader
+from cctbx import uctbx
+from cctbx import sgtbx
+from cctbx.array_family import flex
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+from six.moves import range
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams", None),
+     ("sgsymbol", None),
+     ("convention", ""),
+     ("format", None),
+     ("coor_type", None),
+     ("coor_file", None),
+     ("coordinates", None),
+     ("min_distance_sym_equiv", "0.5"),
+     ("d_min", "3"),
+     ("min_peak_distance", "4.0"),
+     ("max_reduced_peaks", "60")))
+  inp.coordinates = cgi_utils.coordinates_from_form(form)
+  return inp
+
+def sdb_files_as_xray_structures(lines, unit_cell, space_group_info, min_distance_sym_equiv):
+  sdb_files = sdb_reader.multi_sdb_parser(lines)
+  xray_structures = []
+  for sdb in sdb_files:
+    if (unit_cell is not None): sdb.unit_cell = unit_cell
+    if (space_group_info is not None): sdb.space_group_info = space_group_info
+    xray_structure = sdb.as_xray_structure(min_distance_sym_equiv=min_distance_sym_equiv)
+    xray_structures.append(xray_structure)
+  return xray_structures
+
+def inp_as_xray_structures(inp):
+  unit_cell = inp.ucparams
+  if (unit_cell is not None): unit_cell = uctbx.unit_cell(unit_cell)
+  space_group_info = inp.sgsymbol
+  if (space_group_info is not None):
+    space_group_info = sgtbx.space_group_info(symbol=space_group_info, table_id=inp.convention)
+  min_distance_sym_equiv=float(inp.min_distance_sym_equiv)
+  return sdb_files_as_xray_structures(
+    inp.coordinates,
+    unit_cell,
+    space_group_info,
+    min_distance_sym_equiv)
+
+def run(server_info, inp, status):
+  print("<pre>")
+
+  if (inp.format == "cns_sdb"):
+    print("Minimum distance between symmetrically equivalent sites:", end=' ')
+    print(float(inp.min_distance_sym_equiv))
+    print()
+    structures = inp_as_xray_structures(inp)
+    if (len(structures) == 0):
+      print("No CNS sdb files found!")
+      print()
+      print("Note that each file must start with {+ file: some_file_name +}")
+      print("in order to be recognized.")
+      print()
+  else:
+    if (inp.ucparams is None): inp.ucparams = ""
+    if (inp.sgsymbol is None): inp.sgsymbol = "P1"
+    special_position_settings = io_utils.special_position_settings_from_inp(inp)
+    special_position_settings.show_summary()
+    print("Minimum distance between symmetrically equivalent sites:", end=' ')
+    print(special_position_settings.min_distance_sym_equiv())
+    print()
+    structures = [io_utils.structure_from_inp(inp, status, special_position_settings)]
+
+  d_min = float(inp.d_min)
+  print("Minimum d-spacing:", d_min)
+  if (d_min <= 0.):
+    raise ValueError("d-spacing must be greater than zero.")
+  print()
+
+  min_peak_distance = float(inp.min_peak_distance)
+  print("Minimum peak distance:", min_peak_distance)
+  if (min_peak_distance <= 0.):
+    raise ValueError("min_peak_distance must be greater than zero.")
+  print()
+
+  max_reduced_peaks = int(inp.max_reduced_peaks)
+  print("Maximum number of peaks:", max_reduced_peaks)
+  if (max_reduced_peaks <= 0):
+    raise ValueError("max_reduced_peaks must be greater than zero.")
+  print()
+
+  for structure in structures:
+    if (inp.format == "cns_sdb"):
+      structure.show_summary().show_scatterers()
+      print()
+    if (structure.scatterers().size() == 0): continue
+    reduced_peaks = phase_o_phrenia.calculate_exp_i_two_phi_peaks(
+      xray_structure=structure,
+      d_min=d_min,
+      min_peak_distance=min_peak_distance,
+      max_reduced_peaks=max_reduced_peaks)
+
+    print("Actual number of peaks:", len(reduced_peaks))
+    print()
+
+    plot_nx = min(len(reduced_peaks), 60)
+    if (plot_nx > 0):
+      plot_ny = max(10, plot_nx//3)
+      if (plot_nx != max_reduced_peaks):
+        print("Number of peaks used for plot:", plot_nx)
+        print()
+      print("Plot of relative peak heights:")
+      print()
+      plot = flex.bool(flex.grid(plot_nx, plot_ny))
+      for i in range(plot_nx):
+        height = reduced_peaks[i].height
+        h = int(round(height * plot_ny))
+        h = max(0, min(plot_ny, h))
+        for j in range(h): plot[(i,j)] = True
+      for j in range(plot_ny-1,-1,-1):
+        line = ""
+        for i in range(plot_nx):
+          if (plot[(i,j)]): line += "*"
+          else:                  line += " "
+        print("    |" + line.rstrip())
+      print("    -" + "-" * plot_nx)
+      print()
+
+      print("Peak list:")
+      print("  Relative")
+      print("   height   Fractional coordinates")
+      for peak in reduced_peaks:
+        print("    %5.1f" % (peak.height*100), " %8.5f %8.5f %8.5f" % peak.site)
+      print()
+
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/replay.py
+from __future__ import absolute_import, division, print_function
+import sys, pickle
+import importlib
+
+class empty: pass
+
+def run(file_names):
+  for file_name in file_names:
+    print("Replaying:", file_name)
+    f = open(file_name, "rb")
+    server_info, target_module, inp = pickle.load(f)
+    f.close()
+    target = importlib.import_module(target_module)
+    status = empty()
+    status.in_table = False
+    target.run(server_info, inp, status)
+    print()
+
+if (__name__ == "__main__"):
+  run(sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/shelx.py
+from __future__ import absolute_import, division, print_function
+# Generate SHELX LATT and SYMM cards for a given space group.
+
+from cctbx import sgtbx
+from cctbx.web import cgi_utils
+from iotbx.shelx.write_ins import LATT_SYMM
+import sys
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("sgsymbol", "P1"),
+     ("convention", "")))
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  space_group_info = sgtbx.space_group_info(
+    symbol=inp.sgsymbol,
+    table_id=inp.convention)
+  space_group_info.show_summary()
+  print()
+  LATT_SYMM(sys.stdout, space_group_info.group())
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/structure_factors.py
+from __future__ import absolute_import, division, print_function
+from libtbx import complex_math
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams", "1 1 1 90 90 90"),
+     ("sgsymbol", "P1"),
+     ("convention", ""),
+     ("d_min", "1"),
+     ("min_distance_sym_equiv", "0.5"),
+     ("algorithm", "automatic"),
+     ("coor_type", None)))
+  inp.coordinates = cgi_utils.coordinates_from_form(form)
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  special_position_settings = io_utils.special_position_settings_from_inp(inp)
+  special_position_settings.show_summary()
+  print("Minimum distance between symmetrically equivalent sites:", end=' ')
+  print(special_position_settings.min_distance_sym_equiv())
+  print()
+
+  d_min = float(inp.d_min)
+  print("Minimum d-spacing:", d_min)
+  if (d_min <= 0.):
+    raise ValueError("d-spacing must be greater than zero.")
+  print()
+
+  structure = io_utils.structure_from_inp(
+    inp, status, special_position_settings)
+  algorithm = inp.algorithm
+  if (algorithm == "automatic"):
+    if (structure.scatterers().size() <= 100):
+      algorithm = "direct"
+    else:
+      algorithm = None
+  elif (algorithm not in ["direct", "fft"]):
+    algorithm = None
+  f_calc_manager = structure.structure_factors(
+    anomalous_flag=False, d_min=d_min, algorithm=algorithm)
+  f_calc = f_calc_manager.f_calc()
+  structure.scattering_type_registry().show()
+  print()
+  print("Number of Miller indices:", f_calc.indices().size())
+  print()
+  print("Structure factor algorithm:", f_calc_manager.algorithm(verbose=True))
+  print()
+  print("</pre><table border=2 cellpadding=2>")
+  status.in_table = True
+  print("<tr>")
+  print("<th>hkl<th>Amplitude<th>Phase")
+  for i,h in enumerate(f_calc.indices()):
+    print("<tr>")
+    print("<td>%3d %3d %3d<td>%.6g<td align=right>%.3f" % (
+      h + complex_math.abs_arg(f_calc.data()[i], deg=True)))
+  print("</table><pre>")
+  status.in_table = False
+  print()
+
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/structure_factors_pdb.py
+from __future__ import absolute_import, division, print_function
+from libtbx import complex_math
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+from six.moves import zip
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("algorithm", ""),
+     ("form_factors", ""),
+     ("d_min", "")))
+  inp.coordinates = cgi_utils.coordinates_from_form(form)
+  return inp
+
+def run(server_info, inp, status):
+
+  # check input to avoid XSS
+  # ---------------------------------------------------------------------------
+  try:
+    d_min = float(inp.d_min)
+  except Exception:
+    print('Please provide a number for Minimum d-spacing.')
+    raise
+
+  print("Minimum d-spacing (highest resolution): %s" % inp.d_min)
+  if (float(inp.d_min) <= 0.):
+    raise ValueError("d-spacing must be greater than zero.")
+  print()
+
+  if (inp.form_factors not in ['wk1995', 'it1992', 'n_gaussian']):
+    print('Atomic form factors not correct. Using default value.')
+    inp.form_factors = 'wk1995'
+
+  # ---------------------------------------------------------------------------
+
+  print("<h2>Structure factor calculation</h2>")
+  print("<pre>")
+  print("Atomic form factors: %s" % inp.form_factors)
+  print()
+
+  structure = io_utils.structure_from_inp_pdb(inp, status)
+
+  structure.scattering_type_registry(
+    table=inp.form_factors,
+    d_min=float(inp.d_min))
+  print("Input model summary:")
+  print()
+  structure.show_summary()
+  print()
+  structure.scattering_type_registry().show()
+  print()
+  algorithm = inp.algorithm
+  if (algorithm == "automatic"):
+    if (structure.scatterers().size() <= 100):
+      algorithm = "direct"
+    else:
+      algorithm = None
+  elif (algorithm not in ["direct", "fft"]):
+    algorithm = None
+  f_calc_manager = structure.structure_factors(
+    anomalous_flag = False,
+    algorithm      = algorithm,
+    d_min          = float(inp.d_min))
+  f_calc = f_calc_manager.f_calc()
+  print("Number of Miller indices:", f_calc.indices().size())
+  print()
+  print("Structure factor algorithm:", f_calc_manager.algorithm(verbose=True))
+  print()
+  print("    h     k     l           Fcalc      Pcalc")
+  for h,f in zip(f_calc.indices(), f_calc.data()):
+    print("%5d %5d %5d %15.6f %8.2f" % (h + complex_math.abs_arg(f, deg=True)))
+  print()
+
+  print("</pre>")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cctbx/web/wyckoff.py
+from __future__ import absolute_import, division, print_function
+# When studying a crystal structure it can be helpful to know the Wyckoff
+# positions of the atoms in the structure. This script can be used to
+# assign Wyckoff letters.
+
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx.web import io_utils
+from cctbx.web import cgi_utils
+
+def interpret_form_data(form):
+  inp = cgi_utils.inp_from_form(form,
+    (("ucparams", "1 1 1 90 90 90"),
+     ("sgsymbol", "P1"),
+     ("convention", ""),
+     ("min_distance_sym_equiv", "0.5"),
+     ("coor_type", None),
+     ("skip_columns", "0")))
+  inp.coordinates = cgi_utils.coordinates_from_form(form)
+  return inp
+
+def run(server_info, inp, status):
+  print("<pre>")
+  # check input to prevent XSS
+  try:
+    unit_cell = uctbx.unit_cell(inp.ucparams)
+    space_group_info = sgtbx.space_group_info(
+      symbol=inp.sgsymbol,
+      table_id=inp.convention)
+  except Exception:
+    print("Please check your inputs.")
+    print("</pre>")
+    return
+  io_utils.show_input_symbol(inp.sgsymbol, inp.convention)
+  special_position_settings = crystal.special_position_settings(
+    crystal.symmetry(
+      unit_cell=uctbx.unit_cell(inp.ucparams),
+      space_group_info=sgtbx.space_group_info(
+        symbol=inp.sgsymbol,
+        table_id=inp.convention)),
+    min_distance_sym_equiv=float(inp.min_distance_sym_equiv))
+  special_position_settings.show_summary()
+  print("Minimum distance between symmetrically equivalent sites:", end=' ')
+  print(special_position_settings.min_distance_sym_equiv())
+  print()
+
+  skip_columns = io_utils.interpret_skip_columns(inp.skip_columns)
+
+  wyckoff_table=special_position_settings.space_group_info().wyckoff_table()
+  unit_cell = special_position_settings.unit_cell()
+  print("</pre><table border=2 cellpadding=2>")
+  status.in_table = True
+  print("<tr>")
+  if (skip_columns): print("<th>")
+  print("<th colspan=3>" + inp.coor_type + " coordinates")
+  print("<th>Multiplicity")
+  print("<th>Wyckoff letter")
+  print("<th>Site symmetry<br>point group type")
+  print("<th>Special position operator")
+  print("</tr>")
+  for line in inp.coordinates:
+    skipped, coordinates = io_utils.interpret_coordinate_line(line,skip_columns)
+    if (inp.coor_type != "Fractional"):
+      coordinates = unit_cell.fractionalize(coordinates)
+    site_symmetry = special_position_settings.site_symmetry(coordinates)
+    exact_site = site_symmetry.exact_site()
+    if (inp.coor_type != "Fractional"):
+      exact_site = unit_cell.orthogonalize(exact_site)
+    wyckoff_mapping = wyckoff_table.mapping(site_symmetry)
+    print("<tr>")
+    if (skip_columns): print("<td>", skipped)
+    for x in exact_site: print("<td><tt>%.6g</tt>" % (x,))
+    print("<td align=center>", wyckoff_mapping.position().multiplicity())
+    print("<td align=center>", wyckoff_mapping.position().letter())
+    print("<td align=center>", site_symmetry.point_group_type())
+    print("<td><tt>" + str(site_symmetry.special_op_simplified()) + "</tt>")
+    print("</tr>")
+  print("</table><pre>")
+  status.in_table = False
+
+  print("</pre>")
+
+
+ *******************************************************************************

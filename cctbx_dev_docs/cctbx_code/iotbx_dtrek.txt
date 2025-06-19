@@ -1,0 +1,320 @@
+
+
+ *******************************************************************************
+iotbx/dtrek/__init__.py
+"""Tools to work with dtrek data files
+"""
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/dtrek/crystal_symmetry_from_ref.py
+from __future__ import absolute_import, division, print_function
+from iotbx.dtrek import reflnlist_reader
+
+def extract_from(file_name):
+  with open(file_name) as f:
+    cs = reflnlist_reader.reflnlist(f, header_only=True).crystal_symmetry()
+  return cs
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/dtrek/dtrek_symmetry_dict.py
+"""Creates d*trek <-> cctbx space group symbol dictionary based on
+   d*trek symmetry file (DTREK_SPACEGROUP_FILE, DTREK73 distribution)
+
+   usage: python dtrek_symmetry_dict.py DTREK_SPACEGROUP_FILE
+"""
+from __future__ import absolute_import, division, print_function
+
+from libtbx.str_utils import line_feeder
+from cctbx import sgtbx
+import sys
+import pprint
+from six.moves import range
+
+class dtrek_symmetry_entry(object):
+
+  def __init__(self, lf):
+    self.symbol = None
+    l = next(lf)
+    print(l.strip())
+    if (lf.eof): return
+    no, number, symbol, m = l.split()
+    assert no == "NO."
+    number = int(number)
+    assert int(float(m)) == float(m)
+    m = int(float(m))
+    space_group = sgtbx.space_group()
+    if (m < 0):
+      space_group.expand_inv(sgtbx.tr_vec((0,0,0)))
+    space_group.expand_conventional_centring_type(symbol[0])
+    t_den = space_group.t_den()
+    matrices = []
+    for i in range(abs(m)):
+      l = next(lf)
+      assert not lf.eof
+      flds = l.split()
+      assert len(flds) == 12
+      r = [int(e) for e in flds[1:4] + flds[5:8] + flds[9:12]]
+      t = [int(round(float(e)*t_den)) for e in (flds[0],flds[4],flds[8])]
+      try:
+        s = sgtbx.rt_mx(sgtbx.rot_mx(r), sgtbx.tr_vec(t))
+      except RuntimeError as e:
+        print(e)
+        print(l)
+      else:
+        try:
+          matrices.append(s)
+          space_group.expand_smx(s)
+        except RuntimeError as e:
+          print(e)
+          print(l)
+          print(s)
+    space_group_info = sgtbx.space_group_info(group=space_group)
+    if (space_group_info.type().number() != number):
+      print("Space group number mismatch:")
+      print("   from file:", number)
+      print("  operations:", space_group_info.type().number())
+      for s in matrices:
+        space_group = sgtbx.space_group_info(symbol=number).group()
+        order_z = space_group.order_z()
+        space_group.expand_smx(s)
+        if (space_group.order_z() != order_z):
+          print("  misfit:", s)
+      space_group = sgtbx.space_group_info(symbol=number).group()
+      for i_smx in range(space_group.n_smx()):
+        OK = False
+        for i_inv in range(space_group.f_inv()):
+          for i_ltr in range(space_group.n_ltr()):
+            sg = space_group(i_ltr, i_inv, i_smx).mod_positive()
+            for sm in matrices:
+              sm = sm.mod_positive()
+              if (sm == sg):
+                OK = True
+                break
+            if (OK): break
+          if (OK): break
+        if (not OK):
+          print("  missing:", sg)
+    self.number = number
+    self.symbol = symbol
+    self.space_group_info = space_group_info
+
+def run():
+  assert len(sys.argv) == 2
+  f = open(sys.argv[1], "r")
+  lf = line_feeder(f)
+  lookup_dict = {}
+  while 1:
+    entry = dtrek_symmetry_entry(lf)
+    if (entry.symbol is None):
+      break
+    cctbx_lookup_symbol = str(entry.space_group_info).replace(" ", "")
+    if (cctbx_lookup_symbol != entry.symbol):
+      lookup_dict[entry.symbol] = cctbx_lookup_symbol
+  pprint.pprint(lookup_dict)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+iotbx/dtrek/reflnlist_reader.py
+from __future__ import absolute_import, division, print_function
+from cctbx import miller
+from cctbx import crystal
+from cctbx import sgtbx
+from cctbx import uctbx
+from cctbx.array_family import flex
+import sys
+
+import boost_adaptbx.boost.python as bp
+from six.moves import range
+dtrek_ext = bp.import_ext("iotbx_dtrek_ext")
+
+class reflnlist(object):
+
+  def __init__(self, file, header_only=False):
+    self.file = file
+    self.line_no = 0
+    line_1 = self.next_line().split()
+    assert len(line_1) in (3,4)
+    line_1 = [int(field) for field in line_1]
+    if (len(line_1) == 3):
+      line_1.append(0)
+    self.NumInts = line_1[0]
+    assert self.NumInts >= 3
+    self.NumFloats = line_1[1]
+    self.NumStrings = line_1[2]
+    self.NumInfoLines = line_1[3]
+    self.InfoLines = []
+    for i in range(self.NumInfoLines):
+      self.InfoLines.append(self.next_line().strip())
+    self.column_info = []
+    num_columns = self.NumInts + self.NumFloats + self.NumStrings
+    self.column_names = []
+    for i in range(num_columns):
+      column_name = self.next_line().strip()
+      assert len(column_name) > 1
+      assert column_name[0] in "nfs"
+      if (i < self.NumInts):
+        assert column_name[0] == "n"
+      elif (i < self.NumInts + self.NumFloats):
+        assert column_name[0] == "f"
+      else:
+        assert column_name[0] == "s"
+      self.column_names.append(column_name)
+    assert "fIntensity" in self.column_names
+    assert "fSigmaI" in self.column_names
+    assert self.column_names[:3] == ["nH", "nK", "nL"]
+    if (header_only):
+      self.miller_indices = None
+      self.column_dict = None
+    else:
+      self.miller_indices = flex.miller_index()
+      self.column_dict = {}
+      column_list = [None, None, None]
+      for i in range(3, num_columns):
+        if (i < self.NumInts):
+          column_list.append(flex.int())
+        elif (i < self.NumInts + self.NumFloats):
+          column_list.append(flex.double())
+        else:
+          column_list.append(flex.std_string())
+        self.column_dict[self.column_names[i]] = column_list[-1]
+      while 1:
+        line = self.next_line()
+        if (line is None):
+          break
+        data_values = line.split()
+        assert len(data_values) == num_columns, "Line no. %d" % self.line_no
+        h = [int(v) for v in data_values[:3]]
+        self.miller_indices.append(h)
+        offset = 3
+        for i in range(offset, self.NumInts):
+          v = int(data_values[i])
+          column_list[i].append(v)
+        offset = self.NumInts
+        for i in range(offset, offset+self.NumFloats):
+          v = float(data_values[i])
+          column_list[i].append(v)
+        offset += self.NumFloats
+        for i in range(offset, num_columns):
+          column_list[i].append(data_values[i])
+    del self.file
+    del self.line_no
+
+  def next_line(self):
+    line = self.file.readline()
+    if (line == ""): return None
+    self.line_no += 1
+    return line
+
+  def space_group_info(self):
+    for info_line in self.InfoLines:
+      if (info_line.upper().startswith("CRYSTAL_SPACEGROUP=")):
+        assert info_line[-1] == ";"
+        space_group_number = info_line[:-1].split("=", 1)[1]
+        return sgtbx.space_group_info(symbol=space_group_number)
+    return None
+
+  def unit_cell(self):
+    for info_line in self.InfoLines:
+      if (info_line.upper().startswith("CRYSTAL_UNIT_CELL=")):
+        assert info_line[-1] == ";"
+        unit_cell = info_line[:-1].split("=", 1)[1]
+        return uctbx.unit_cell(unit_cell)
+    return None
+
+  def crystal_symmetry(self):
+    return crystal.symmetry(
+      unit_cell=self.unit_cell(),
+      space_group_info=self.space_group_info())
+
+  def show_summary(self, out=None, prefix=""):
+    if (out is None): out = sys.stdout
+    self.crystal_symmetry().show_summary(f=out, prefix=prefix)
+    print(prefix + "Column names:", " ".join(self.column_names[3:]), file=out)
+    print(prefix + "Number of reflections:", self.miller_indices.size(), file=out)
+
+  def as_miller_arrays(self,
+        crystal_symmetry=None,
+        force_symmetry=False,
+        merge_equivalents=True,
+        base_array_info=None,
+        anomalous=None):
+    crystal_symmetry_from_file = self.crystal_symmetry()
+    crystal_symmetry = crystal_symmetry_from_file.join_symmetry(
+      other_symmetry=crystal_symmetry,
+      force=force_symmetry)
+    if (base_array_info is None):
+      base_array_info = miller.array_info(source_type="dtrek_reflnlist")
+    miller_arrays = []
+    sigmas=self.column_dict["fSigmaI"]
+    miller_arrays.append(miller.array(
+      miller_set=miller.set(
+        crystal_symmetry=crystal_symmetry,
+        indices=self.miller_indices,
+        anomalous_flag=False),
+      data=self.column_dict["fIntensity"],
+      sigmas=sigmas)
+      .select(sigmas > 0)
+      .set_info(base_array_info.customized_copy(
+        labels=["Intensity", "SigmaI"],
+        crystal_symmetry_from_file=crystal_symmetry_from_file))
+      .set_observation_type_xray_intensity())
+    if ("fIntensity+" in self.column_dict):
+      assert "fSigmaI+" in self.column_dict
+      assert "fIntensity-" in self.column_dict
+      assert "fSigmaI-" in self.column_dict
+      if (crystal_symmetry.space_group_info() is None):
+        space_group = sgtbx.space_group() # P 1
+      else:
+        space_group = crystal_symmetry.space_group()
+      ac = dtrek_ext.anomalous_combined(
+        space_group,
+        self.miller_indices,
+        self.column_dict["fIntensity+"],
+        self.column_dict["fSigmaI+"],
+        self.column_dict["fIntensity-"],
+        self.column_dict["fSigmaI-"])
+      miller_arrays.append(miller.array(
+        miller_set=miller.set(
+          crystal_symmetry=crystal_symmetry,
+          indices=ac.miller_indices(),
+          anomalous_flag=True),
+        data=ac.data(),
+        sigmas=ac.sigmas())
+        .set_info(base_array_info.customized_copy(
+          labels=["Intensity+-", "SigmaI+-"],
+          crystal_symmetry_from_file=crystal_symmetry_from_file))
+        .set_observation_type_xray_intensity())
+    for column_name in self.column_names:
+      if (column_name in ("nH", "nK", "nL",
+                          "fSigmaI", "fIntensity",
+                          "fIntensity+", "fSigmaI+",
+                          "fIntensity-", "fSigmaI-")):
+        continue
+      miller_arrays.append(miller.array(
+        miller_set=miller.set(
+          crystal_symmetry=crystal_symmetry,
+          indices=self.miller_indices,
+          anomalous_flag=False),
+        data=self.column_dict[column_name])
+        .set_info(base_array_info.customized_copy(
+          labels=[column_name[1:]],
+          crystal_symmetry_from_file=crystal_symmetry_from_file)))
+    return miller_arrays
+
+
+ *******************************************************************************

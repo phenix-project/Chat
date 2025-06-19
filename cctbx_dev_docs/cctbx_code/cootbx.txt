@@ -1,0 +1,1057 @@
+
+
+ *******************************************************************************
+cootbx/__init__.py
+
+from __future__ import absolute_import, division, print_function
+import os.path
+
+def write_disable_nomenclature_errors(f):
+  f.write("try :\n")
+  f.write("  set_nomenclature_errors_on_read(\"ignore\")\n")
+  f.write("except Exception :\n")
+  f.write("  pass\n")
+
+def create_refinement_view_script(
+    mtz_file_name,
+    pdb_file_name,
+    coot_script_name="view_in_coot.py",
+    work_dir=None,
+    show_symmetry=True,
+    peaks_file_name=None,
+    bad_ligand_list=None,
+    placed_ligand_list=None):
+  from iotbx.file_reader import any_file
+  from libtbx.utils import concatenate_python_script
+  import libtbx.load_env
+  have_anom_map = False
+  have_anom_residual_map = False
+  mtz_in = any_file(mtz_file_name).assert_file_type("hkl")
+  have_anom_map = have_residual_map = False
+  for array in mtz_in.file_server.miller_arrays :
+    labels = array.info().labels
+    if ("ANOM" in labels):
+      have_anom_map = True
+    elif ("ANOMDIFF" in labels):
+      have_anom_residual_map = True
+  f = open(coot_script_name, "w")
+  print("import coot", file=f)
+  print("import os", file=f)
+  write_disable_nomenclature_errors(f)
+  load_script = libtbx.env.under_dist("cootbx", "view_refinement.py",
+    test=os.path.isfile)
+  assert (load_script is not None)
+  concatenate_python_script(out=f, file_name=load_script)
+  zoom_ligand_script = libtbx.env.under_dist("cootbx", "simple_zoom_list.py",
+    test=os.path.isfile)
+  concatenate_python_script(out=f, file_name=zoom_ligand_script)
+  if (work_dir is not None):
+    pdb_file_name = os.path.basename(pdb_file_name)
+    mtz_file_name = os.path.basename(mtz_file_name)
+  f.write("""load_refinement(\n""")
+  f.write("""pdb_file="%s",\n""" % pdb_file_name)
+  f.write("""map_file="%s",\n""" % mtz_file_name)
+  f.write("""show_symmetry=%s,\n""" % show_symmetry)
+  f.write("""have_anom_map=%s,\n""" % have_anom_map)
+  f.write("""have_residual_map=%s,\n""" % have_residual_map)
+  if (work_dir is not None):
+    f.write("""work_dir="%s",\n""" % work_dir)
+  if (peaks_file_name is not None):
+    f.write("""peaks_file="%s",\n""" % peaks_file_name)
+  f.write(")\n")
+  if (bad_ligand_list is not None) and (len(bad_ligand_list) > 0):
+    print("""draw_simple_zoom_list(""", file=f)
+    print("""  title="Residues in suspicious density",""", file=f)
+    print("""  items=%s)""" % str(bad_ligand_list), file=f)
+  if (placed_ligand_list is not None):
+    print("""draw_simple_zoom_list(""", file=f)
+    print("""  title="Placed ligands",""", file=f)
+    print("""  items=%s)""" % str(placed_ligand_list), file=f)
+  f.close()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/hydrogens_button.py
+from __future__ import absolute_import, division, print_function
+
+class hydrogen_toggle(object):
+  def __init__(self, separator=False):
+    import coot # import dependency
+    import coot_python
+    import gtk
+    toolbar = coot_python.main_toolbar()
+    assert (toolbar is not None)
+    if (separator):
+      toolbar.insert(gtk.SeparatorToolItem(), -1)
+    self.h_button = gtk.ToggleToolButton()
+    self.h_button.set_label("Hydrogens off")
+    self.h_button.set_is_important(True)
+    toolbar.insert(self.h_button, -1)
+    self.h_button.connect("clicked", self.OnToggleHydrogens)
+    self.h_button.set_active(True)
+    self.h_button.show()
+
+  def OnToggleHydrogens(self, *args):
+    import coot # import dependency
+    if self.h_button.get_active():
+      self.h_button.set_label("Hydrogens on")
+      for imol in model_molecule_list():
+        set_draw_hydrogens(imol, True)
+    else :
+      self.h_button.set_label("Hydrogens off")
+      for imol in model_molecule_list():
+        set_draw_hydrogens(imol, False)
+
+if (__name__ == "__main__"):
+  hydrogen_toggle(separator=True)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/interactive_edit.py
+
+from __future__ import absolute_import, division, print_function
+import shutil
+import time
+import os
+import sys
+
+t_wait = 250 # in milliseconds
+
+#-----------------------------------------------------------------------
+# This file is run with Coot's python, so no access to CCTBX modules
+if sys.hexversion >= 0x03000000:
+  unicode = str
+
+def to_bytes(text, codec=None, errors='replace'):
+  '''
+  Function for handling text when it is passed to cctbx functions that expect
+  bytestrings
+
+  Changes text string type (unicode in Python 2, str in Python 3) to
+  bytestring type (str or bytes in Python 2, bytes in Python 3)
+
+  The input is returned unmodified if it is already a bytestring
+  Will convert other types (e.g. int, float) to bytestring
+  None is returned as None, not as 'None'
+
+  For Linux/OS X, the default filesystem encoding is utf8.
+  For Windows, the default filesystem encoding is mbcs
+  This is important for handling files with basic Python functions.
+  With the wrong encoding, the filesystem will not recognize the file path
+  import sys; sys.getfilesystemencoding()
+  '''
+
+  if (codec is None):
+    codec = 'utf8'
+    if (sys.platform == 'win32'):
+      codec = 'mbcs'
+
+  if (isinstance(text, bytes)):
+    return text
+  elif (isinstance(text, unicode)):
+    new_text = text
+    try:
+      new_text = text.encode(codec, errors)
+    except UnicodeEncodeError: # in case errors='strict'
+      raise Sorry('Unable to encode text with %s' % codec)
+    finally:
+      return new_text
+  elif (text is not None):
+    return bytes(text)
+  else:
+    return None
+
+#-----------------------------------------------------------------------
+# Phenix side
+def start_coot_and_wait(
+    pdb_file,
+    map_file,
+    data_file,
+    work_dir=None,
+    coot_cmd="coot",
+    needs_rebuild=False,
+    log=None):
+  if (log is None) : log = sys.stdout
+  if (work_dir is None) : work_dir = os.getcwd()
+  if (not os.path.isdir(work_dir)):
+    os.makedirs(work_dir)
+  import mmtbx.maps.utils
+  from libtbx.str_utils import make_header
+  from libtbx import easy_run
+  from libtbx import group_args
+  import cootbx
+  base_script = __file__.replace(".pyc", ".py")
+  os.chdir(work_dir)
+  if (os.path.exists("coot_out_tmp.pdb")):
+    os.remove("coot_out_tmp.pdb")
+  if (os.path.exists("coot_out.pdb")):
+    os.remove("coot_out.pdb")
+  f = open("edit_in_coot.py", "w")
+  f.write(open(base_script).read())
+  f.write("\n")
+  f.write("import coot\n")
+  cootbx.write_disable_nomenclature_errors(f)
+  f.write("m = manager(\"%s\", \"%s\", needs_rebuild=%s)\n" %
+    (pdb_file, map_file, needs_rebuild))
+  f.close()
+  make_header("Interactive editing in Coot", log)
+  easy_run.call("\"%s\" --no-state-script --script edit_in_coot.py &" %
+    coot_cmd)
+  print("  Waiting for coot_out_tmp.pdb to appear at %s" % \
+    str(time.asctime()), file=log)
+  base_dir = os.path.dirname(pdb_file)
+  tmp_file = os.path.join(base_dir, "coot_out_tmp.pdb")
+  edit_file = os.path.join(base_dir, "coot_tmp_edits.pdb")
+  maps_file = os.path.join(base_dir, ".NEW_MAPS")
+  while (True):
+    if (os.path.isfile(tmp_file)):
+      print("  Coot editing complete at %s" % str(time.asctime()), file=log)
+      break
+    elif (os.path.isfile(maps_file)):
+      t1 = time.time()
+      assert os.path.isfile(edit_file)
+      mmtbx.maps.utils.create_map_from_pdb_and_mtz(
+        pdb_file=edit_file,
+        mtz_file=data_file,
+        output_file=os.path.join(base_dir, "maps_for_coot.mtz"),
+        fill=True,
+        out=log)
+      t2 = time.time()
+      print("Calculated new map coefficients in %.1fs" % (t2-t1), file=log)
+      os.remove(maps_file)
+    else :
+      time.sleep(t_wait/1000.)
+  shutil.move(tmp_file, "coot_out.pdb")
+  mmtbx.maps.utils.create_map_from_pdb_and_mtz(
+    pdb_file="coot_out.pdb",
+    mtz_file=data_file,
+    output_file="coot_out_maps.mtz",
+    fill=True,
+    out=log)
+  new_model = os.path.join(work_dir, "coot_out.pdb")
+  new_map = os.path.join(work_dir, "coot_out_maps.mtz")
+  skip_rebuild = None
+  if (needs_rebuild):
+    if (os.path.isfile(os.path.join(base_dir, "NO_BUILD"))):
+      skip_rebuild = True
+    else :
+      skip_rebuild = False
+  return group_args(
+    pdb_file=new_model,
+    map_file=new_map,
+    skip_rebuild=skip_rebuild)
+
+#-----------------------------------------------------------------------
+# Coot side
+class manager(object):
+  def __init__(self, pdb_file, map_file, needs_rebuild=False):
+    self.file_name = pdb_file
+    self.needs_rebuild = needs_rebuild
+    import gtk
+    import coot
+    import coot_python
+    toolbar = coot_python.main_toolbar()
+    assert (toolbar is not None)
+    return_button = gtk.ToolButton()
+    return_button.set_label("Return to PHENIX")
+    return_button.set_is_important(True)
+    toolbar.insert(return_button, -1)
+    return_button.connect("clicked", self.OnReturn)
+    return_button.show()
+    maps_button = gtk.ToolButton()
+    maps_button.set_label("Fetch new maps")
+    maps_button.set_is_important(True)
+    toolbar.insert(maps_button, -1)
+    maps_button.connect("clicked", self.OnNewMaps)
+    maps_button.show()
+    self._imol = read_pdb(to_bytes(pdb_file))
+    set_molecule_bonds_colour_map_rotation(self._imol, 30)
+    self._map_mols = []
+    self.load_maps(map_file)
+    dialog = gtk.MessageDialog(None, gtk.DIALOG_MODAL, gtk.MESSAGE_INFO,
+      gtk.BUTTONS_OK, "You may now edit your model to prepare for further "+
+      "building and refinement.   When you are finished, "+
+      "click the \"Save model and return\" button on the toolbar, then close "+
+      "Coot.  If you want to recalculate the map coefficients, click \"Fetch "+
+      "new maps\".")
+    dialog.run()
+    dialog.destroy()
+
+  def load_maps(self, map_file):
+    if (len(self._map_mols) > 0):
+      set_colour_map_rotation_for_map(0)
+      for imol in self._map_mols :
+        close_molecule(imol)
+    else :
+      set_colour_map_rotation_for_map(10)
+    print("Loading %s" % to_bytes(map_file))
+    self._map_mols = []
+    map_imol = auto_read_make_and_draw_maps(to_bytes(map_file))
+    if (isinstance(map_imol, int)):
+      # XXX this may be dangerous, but auto_read_make_and_draw_maps only returns
+      # the last imol
+      self._map_mols = [ map_imol - 1, map_imol ]
+    else :
+      self._map_mols = map_imol
+    set_imol_refinement_map(self._map_mols[0])
+    set_scrollable_map(self._map_mols[0])
+
+  def OnReturn(self, *args):
+    import coot
+    import gtk
+    dir_name = os.path.dirname(self.file_name)
+    pdb_out = os.path.join(dir_name, "coot_out_tmp.pdb")
+    if (self.needs_rebuild):
+      dialog = gtk.MessageDialog(None, gtk.DIALOG_MODAL, gtk.MESSAGE_INFO,
+        gtk.BUTTONS_YES_NO,
+        "Phenix has determined that your model needs to rebuilt in "+
+        "AutoBuild; however, if you have made significant changes manually "+
+        "this may no longer be necessary.  Do you want to run AutoBuild now? "+
+        "(Clicking \"No\" will skip to the next step.")
+      response = dialog.run()
+      if (dialog != gtk.RESPONSE_YES):
+        open(os.path.join(dir_name, "NO_BUILD"), "w").write("1")
+      dialog.destroy()
+    save_coordinates(self._imol, pdb_out)
+    dialog = gtk.MessageDialog(None, gtk.DIALOG_MODAL, gtk.MESSAGE_INFO,
+      gtk.BUTTONS_OK,
+      ("The PDB file has been saved to %s.  Click the \"Okay\" button to "+
+       "close Coot and continue.") % pdb_out)
+    dialog.run()
+    dialog.destroy()
+    gtk.main_quit()
+
+  def OnNewMaps(self, *args):
+    import coot
+    import gtk
+    import gobject
+    dir_name = os.path.dirname(self.file_name)
+    pdb_out = os.path.join(dir_name, "coot_tmp_edits.pdb")
+    maps_in = os.path.join(dir_name, "maps_for_coot.mtz")
+    if (os.path.exists(maps_in)):
+      os.remove(maps_in)
+    write_pdb_file(self._imol, pdb_out)
+    dialog = gtk.MessageDialog(None, gtk.DIALOG_MODAL, gtk.MESSAGE_INFO,
+      gtk.BUTTONS_OK_CANCEL,
+      "Phenix will generate new maps; these will be automatically loaded "+
+      "when complete.")
+    response = dialog.run()
+    if (response == gtk.RESPONSE_OK):
+      print("WRITING .NEW_MAPS")
+      open(os.path.join(dir_name, ".NEW_MAPS"), "w").write("1")
+      gobject.timeout_add(t_wait, self.OnWaitForMaps)
+    dialog.destroy()
+
+  def OnWaitForMaps(self, *args):
+    # TODO a spinner or progress bar might be nice here...
+    dir_name = os.path.dirname(self.file_name)
+    maps_in = os.path.join(dir_name, "maps_for_coot.mtz")
+    if (os.path.isfile(maps_in)):
+      self.load_maps(maps_in)
+      os.remove(maps_in)
+      return False # this kills the timeout
+    return True
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/ligand_checklist.py
+
+from __future__ import absolute_import, division, print_function
+import time
+import os
+import sys
+
+from libtbx.utils import to_str
+from six.moves import range
+from six.moves import zip
+
+t_wait = 250
+
+def start_coot_and_wait(
+    pdb_file,
+    map_file,
+    ligand_files,
+    ligand_ccs,
+    cif_files=(),
+    work_dir=None,
+    coot_cmd="coot",
+    log=None):
+  import iotbx.pdb
+  from libtbx.str_utils import make_header
+  from libtbx import easy_run
+  import cootbx
+  assert (len(ligand_files) > 0) and (len(ligand_files) == len(ligand_ccs))
+  if (log is None) : log = sys.stdout
+  cwd = os.getcwd()
+  if (work_dir is None) : work_dir = cwd
+  if (not os.path.isdir(work_dir)):
+    os.makedirs(work_dir)
+  os.chdir(work_dir)
+  base_script = __file__.replace(".pyc", ".py")
+  ligand_xyzs = []
+  for pdb_file in ligand_files :
+    pdb_file = to_str(pdb_file)
+    pdb_in = iotbx.pdb.input(pdb_file)
+    coords = pdb_in.atoms().extract_xyz()
+    ligand_xyzs.append(coords.mean())
+  ligand_info = list(zip(ligand_files, ligand_ccs, ligand_xyzs))
+  f = open("edit_in_coot.py", "w")
+  f.write(open(base_script).read())
+  f.write("\n")
+  f.write("import coot\n")
+  cootbx.write_disable_nomenclature_errors(f)
+  f.write("read_pdb(\"%s\")\n" % to_str(pdb_file))
+  f.write("auto_read_make_and_draw_maps(\"%s\")\n" % to_str(map_file))
+  for cif_file in cif_files :
+    f.write("read_cif_dictionary(\"%s\")\n" % to_str(cif_file))
+  f.write("m = manager(%s)\n" % str(ligand_info))
+  f.close()
+  make_header("Ligand selection in Coot", log)
+  rc = easy_run.call("\"%s\" --no-state-script --script edit_in_coot.py &" %
+    coot_cmd)
+  if (rc != 0):
+    raise RuntimeError("Launching Coot failed with status %d" % rc)
+  print("  Waiting for user input at %s" % str(time.asctime()), file=log)
+  out_file = ".COOT_LIGANDS"
+  output_files = output_ccs = None
+  while (True):
+    if (os.path.isfile(out_file)):
+      print("  Coot editing complete at %s" % str(time.asctime()), file=log)
+      ligand_indices = [ int(i) for i in open(out_file).read().split() ]
+      output_files = []
+      for i in ligand_indices :
+        ligand_file = os.path.join(work_dir, "coot_ligand_out_%d.pdb" % (i+1))
+        output_files.append(ligand_file)
+      output_ccs = [ ligand_ccs[i] for i in ligand_indices ]
+      break
+    else :
+      time.sleep(t_wait / 1000.)
+  assert (output_files is not None)
+  os.chdir(cwd)
+  return output_files, output_ccs
+
+class manager(object):
+  def __init__(self, ligand_file_info):
+    import gtk
+    import coot # import dependency
+    title = "Select ligand(s)"
+    self.ligand_file_info = ligand_file_info
+    self.ligand_imols = []
+    for file_name, cc, xyz in ligand_file_info :
+      self.ligand_imols.append(read_pdb(to_str(file_name)))
+    self.window = gtk.Window(gtk.WINDOW_TOPLEVEL)
+    self.window.set_default_size(300, 200)
+    self.window.set_title(title)
+    scrolled_win = gtk.ScrolledWindow()
+    outside_vbox = gtk.VBox(False, 2)
+    inside_vbox = gtk.VBox(False, 0)
+    inside_vbox.set_border_width(2)
+    self.window.add(outside_vbox)
+    outside_vbox.pack_start(scrolled_win, True, True, 0) # expand fill padding
+    scrolled_win.add_with_viewport(inside_vbox)
+    scrolled_win.set_policy(gtk.POLICY_AUTOMATIC, gtk.POLICY_ALWAYS)
+    frame = gtk.Frame(title)
+    vbox = gtk.VBox(False, 0)
+    inside_vbox.pack_start(frame, False, False, 2)
+    self.model = gtk.ListStore(bool, gobject.TYPE_STRING, gobject.TYPE_STRING)
+    tv = gtk.TreeView(self.model)
+    cell1 = gtk.CellRendererToggle()
+    cell1.connect("toggled", self.OnToggle, self.model)
+    col1 = gtk.TreeViewColumn("Keep")
+    col1.pack_start(cell1, False)
+    col1.add_attribute(cell1, "active", 0)
+    cell2 = gtk.CellRendererText()
+    col2 = gtk.TreeViewColumn("File")
+    col2.pack_start(cell2, False)
+    col2.add_attribute(cell2, "text", 1)
+    cell3 = gtk.CellRendererText()
+    col3 = gtk.TreeViewColumn("CC")
+    col3.pack_start(cell3, False)
+    col3.add_attribute(cell3, "text", 2)
+    tv.append_column(col1)
+    tv.append_column(col2)
+    tv.append_column(col3)
+    frame.add(tv)
+    for file_name, cc, xyz in ligand_file_info :
+      self.model.append([False, os.path.basename(file_name), cc])
+    continue_btn = gtk.Button("Close and continue")
+    continue_btn.connect("clicked", self.OnContinue)
+    outside_vbox.pack_end(continue_btn, False, False, 0)
+    self.window.show_all()
+
+  def OnToggle(self, cell, path, model):
+    model[path][0] = not model[path][0]
+
+  def OnContinue(self, *args):
+    import gtk
+    selected = []
+    for i_lig in range(len(self.ligand_file_info)):
+      if (self.model[i_lig][0]):
+        print("  selected ligand %d" % (i_lig+1))
+        pdb_out = "coot_ligand_out_%d.pdb" % (i_lig+1)
+        save_coordinates(self.ligand_imols[i_lig], pdb_out)
+        selected.append(str(i_lig))
+    open(".COOT_LIGANDS", "w").write(" ".join(selected))
+    dialog = gtk.MessageDialog(None, gtk.DIALOG_MODAL, gtk.MESSAGE_INFO,
+      gtk.BUTTONS_OK,
+      "The selected ligands have been saved.  You may now close Coot.")
+    dialog.run()
+    dialog.destroy()
+    gtk.main_quit()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/simple_zoom_list.py
+from __future__ import absolute_import, division, print_function
+
+# basic window for displaying a list of features of interest - these could
+# be ligands, difference map peaks, validation outliers, etc. (adapted from
+# templates in mmtbx.validation scripts).  This will usually be concatenated
+# with the actual data of interest, plus whatever additional commands we want
+# to run in Coot.
+
+def draw_simple_zoom_list(title, items, zoom_level=30):
+  import gtk
+  import coot # import dependency
+  window = gtk.Window(gtk.WINDOW_TOPLEVEL)
+  scrolled_win = gtk.ScrolledWindow()
+  outside_vbox = gtk.VBox(False, 2)
+  inside_vbox = gtk.VBox(False, 0)
+  window.set_default_size(300, 200)
+  window.set_title(title)
+  inside_vbox.set_border_width(2)
+  window.add(outside_vbox)
+  outside_vbox.pack_start(scrolled_win, True, True, 0) # expand fill padding
+  scrolled_win.add_with_viewport(inside_vbox)
+  scrolled_win.set_policy(gtk.POLICY_AUTOMATIC, gtk.POLICY_ALWAYS)
+  frame = gtk.Frame(title)
+  vbox = gtk.VBox(False, 0)
+  inside_vbox.pack_start(frame, False, False, 2)
+  frame.add(vbox)
+  def callback_recenter(widget, xyz):
+    set_rotation_centre(*xyz)
+    set_zoom(zoom_level)
+  for feature, xyz in items :
+    button = gtk.Button(feature)
+    button.connect("clicked", callback_recenter, xyz)
+    vbox.pack_start(button, False, False, 1)
+  outside_vbox.set_border_width(2)
+  ok_button = gtk.Button("  Close  ")
+  outside_vbox.pack_end(ok_button, False, False, 0)
+  ok_button.connect("clicked", lambda x: window.destroy())
+  window.show_all()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/validation_lists.py
+
+from __future__ import absolute_import, division, print_function
+from six.moves import cPickle as pickle
+from six.moves import range
+try :
+  import gobject
+except ImportError :
+  gobject = None
+import sys
+
+class coot_extension_gui(object):
+  def __init__(self, title):
+    import gtk
+    self.window = gtk.Window(gtk.WINDOW_TOPLEVEL)
+    scrolled_win = gtk.ScrolledWindow()
+    self.outside_vbox = gtk.VBox(False, 2)
+    self.inside_vbox = gtk.VBox(False, 0)
+    self.window.set_title(title)
+    self.inside_vbox.set_border_width(0)
+    self.window.add(self.outside_vbox)
+    self.outside_vbox.pack_start(scrolled_win, True, True, 0)
+    scrolled_win.add_with_viewport(self.inside_vbox)
+    scrolled_win.set_policy(gtk.POLICY_AUTOMATIC, gtk.POLICY_AUTOMATIC)
+
+  def finish_window(self):
+    import gtk
+    self.outside_vbox.set_border_width(2)
+    ok_button = gtk.Button("  Close  ")
+    self.outside_vbox.pack_end(ok_button, False, False, 0)
+    ok_button.connect("clicked", lambda b: self.destroy_window())
+    self.window.connect("delete_event", lambda a, b: self.destroy_window())
+    self.window.show_all()
+
+  def destroy_window(self, *args):
+    self.window.destroy()
+    self.window = None
+
+  def confirm_data(self, data):
+    for data_key in self.data_keys :
+      outlier_list = data.get(data_key)
+      if outlier_list is not None and len(outlier_list) > 0 :
+        return True
+    return False
+
+  def create_property_lists(self, data):
+    import gtk
+    for data_key in self.data_keys :
+      outlier_list = data[data_key]
+      if outlier_list is None or len(outlier_list) == 0 :
+        continue
+      else :
+        frame = gtk.Frame(self.data_titles[data_key])
+        vbox = gtk.VBox(False, 2)
+        frame.set_border_width(6)
+        frame.add(vbox)
+        self.add_top_widgets(data_key, vbox)
+        self.inside_vbox.pack_start(frame, False, False, 5)
+        list_obj = residue_properties_list(
+          columns=self.data_names[data_key],
+          column_types=self.data_types[data_key],
+          rows=outlier_list,
+          box=vbox)
+
+# Molprobity result viewer
+class coot_molprobity_todo_list_gui(coot_extension_gui):
+  data_keys = [ "rama", "rota", "cbeta", "probe" ]
+  data_titles = { "rama"  : "Ramachandran outliers",
+                  "rota"  : "Rotamer outliers",
+                  "cbeta" : "C-beta outliers",
+                  "probe" : "Severe clashes" }
+  data_names = { "rama"  : ["Chain", "Residue", "Name", "Score"],
+                 "rota"  : ["Chain", "Residue", "Name", "Score"],
+                 "cbeta" : ["Chain", "Residue", "Name", "Conf.", "Deviation"],
+                 "probe" : ["Atom 1", "Atom 2", "Overlap"] }
+  if (gobject is not None):
+    data_types = { "rama" : [gobject.TYPE_STRING, gobject.TYPE_STRING,
+                             gobject.TYPE_STRING, gobject.TYPE_FLOAT,
+                             gobject.TYPE_PYOBJECT],
+                   "rota" : [gobject.TYPE_STRING, gobject.TYPE_STRING,
+                             gobject.TYPE_STRING, gobject.TYPE_FLOAT,
+                             gobject.TYPE_PYOBJECT],
+                   "cbeta" : [gobject.TYPE_STRING, gobject.TYPE_STRING,
+                              gobject.TYPE_STRING, gobject.TYPE_STRING,
+                              gobject.TYPE_FLOAT, gobject.TYPE_PYOBJECT],
+                   "probe" : [gobject.TYPE_STRING, gobject.TYPE_STRING,
+                              gobject.TYPE_FLOAT, gobject.TYPE_PYOBJECT] }
+  else :
+    data_types = dict([ (s, []) for s in ["rama","rota","cbeta","probe"] ])
+
+  def __init__(self, data_file=None, data=None):
+    assert ([data, data_file].count(None) == 1)
+    if (data is None):
+      data = load_pkl(data_file)
+    if not self.confirm_data(data):
+      return
+    coot_extension_gui.__init__(self, "MolProbity to-do list")
+    self.dots_btn = None
+    self.dots2_btn = None
+    self._overlaps_only = True
+    self.window.set_default_size(420, 600)
+    self.create_property_lists(data)
+    self.finish_window()
+
+  def add_top_widgets(self, data_key, box):
+    import gtk
+    if data_key == "probe" :
+      hbox = gtk.HBox(False, 2)
+      self.dots_btn = gtk.CheckButton("Show Probe dots")
+      hbox.pack_start(self.dots_btn, False, False, 5)
+      self.dots_btn.connect("toggled", self.toggle_probe_dots)
+      self.dots2_btn = gtk.CheckButton("Overlaps only")
+      hbox.pack_start(self.dots2_btn, False, False, 5)
+      self.dots2_btn.connect("toggled", self.toggle_all_probe_dots)
+      self.dots2_btn.set_active(True)
+      self.toggle_probe_dots()
+      box.pack_start(hbox, False, False, 0)
+
+  def toggle_probe_dots(self, *args):
+    if self.dots_btn is not None :
+      show_dots = self.dots_btn.get_active()
+      overlaps_only = self.dots2_btn.get_active()
+      if show_dots :
+        self.dots2_btn.set_sensitive(True)
+      else :
+        self.dots2_btn.set_sensitive(False)
+      show_probe_dots(show_dots, overlaps_only)
+
+  def toggle_all_probe_dots(self, *args):
+    if self.dots2_btn is not None :
+      self._overlaps_only = self.dots2_btn.get_active()
+      self.toggle_probe_dots()
+
+class rsc_todo_list_gui(coot_extension_gui):
+  data_keys = ["by_res", "by_atom"]
+  data_titles = ["Real-space correlation by residue",
+                 "Real-space correlation by atom"]
+  data_names = {}
+  data_types = {}
+
+class residue_properties_list(object):
+  def __init__(self, columns, column_types, rows, box,
+      default_size=(380,200)):
+    assert len(columns) == (len(column_types) - 1)
+    if (len(rows) > 0) and (len(rows[0]) != len(column_types)):
+      raise RuntimeError("Wrong number of rows:\n%s" % str(rows[0]))
+    import gtk
+    self.liststore = gtk.ListStore(*column_types)
+    self.listmodel = gtk.TreeModelSort(self.liststore)
+    self.listctrl = gtk.TreeView(self.listmodel)
+    self.listctrl.column = [None]*len(columns)
+    self.listctrl.cell = [None]*len(columns)
+    for i, column_label in enumerate(columns):
+      cell = gtk.CellRendererText()
+      column = gtk.TreeViewColumn(column_label)
+      self.listctrl.append_column(column)
+      column.set_sort_column_id(i)
+      column.pack_start(cell, True)
+      column.set_attributes(cell, text=i)
+    self.listctrl.get_selection().set_mode(gtk.SELECTION_SINGLE)
+    for row in rows :
+      self.listmodel.get_model().append(row)
+    self.listctrl.connect("cursor-changed", self.OnChange)
+    sw = gtk.ScrolledWindow()
+    w, h = default_size
+    if len(rows) > 10 :
+      sw.set_size_request(w, h)
+    else :
+      sw.set_size_request(w, 30 + (20 * len(rows)))
+    sw.set_policy(gtk.POLICY_AUTOMATIC, gtk.POLICY_AUTOMATIC)
+    box.pack_start(sw, False, False, 5)
+    inside_vbox = gtk.VBox(False, 0)
+    sw.add(self.listctrl)
+
+  def OnChange(self, treeview):
+    import coot # import dependency
+    selection = self.listctrl.get_selection()
+    (model, tree_iter) = selection.get_selected()
+    if tree_iter is not None :
+      row = model[tree_iter]
+      xyz = row[-1]
+      if isinstance(xyz, tuple) and len(xyz) == 3 :
+        set_rotation_centre(*xyz)
+        set_zoom(30)
+        graphics_draw()
+
+def show_probe_dots(show_dots, overlaps_only):
+  import coot # import dependency
+  n_objects = number_of_generic_objects()
+  sys.stdout.flush()
+  if show_dots :
+    for object_number in range(n_objects):
+      obj_name = generic_object_name(object_number)
+      if overlaps_only and not obj_name in ["small overlap", "bad overlap"] :
+        sys.stdout.flush()
+        set_display_generic_object(object_number, 0)
+      else :
+        set_display_generic_object(object_number, 1)
+  else :
+    sys.stdout.flush()
+    for object_number in range(n_objects):
+      set_display_generic_object(object_number, 0)
+
+def load_pkl(file_name):
+  pkl = open(file_name, "rb")
+  data = pickle.load(pkl)
+  pkl.close()
+  return data
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/view_refinement.py
+
+from __future__ import absolute_import, division, print_function
+
+from libtbx.utils import to_str
+
+def load_refinement(
+    pdb_file,
+    map_file,
+    work_dir=None,
+    peaks_file=None,
+    show_symmetry=True,
+    have_anom_map=None,
+    have_residual_map=None):
+  import coot # import dependency
+  import os.path
+  import sys
+  if (work_dir is not None):
+    if os.path.isdir(work_dir):
+      os.chdir(work_dir)
+    else :
+      for k, arg in enumerate(sys.argv[1:-1]):
+        if (arg == "--script"):
+          script_file = sys.argv[k+2]
+          if os.path.isfile(script_file):
+            script_dir = os.path.dirname(script_file)
+            if (script_dir != ""):
+              os.chdir(script_dir)
+  read_pdb(to_str(pdb_file))
+  if (peaks_file is not None) and (os.path.isfile(peaks_file)):
+    imol = read_pdb(to_str(peaks_file))
+    set_mol_displayed(imol, False)
+  auto_read_make_and_draw_maps(to_str(map_file))
+  if (have_anom_map):
+    imol = make_and_draw_map(to_str(map_file),"ANOM","PHANOM","",0,0)
+    set_contour_level_in_sigma(imol, 3.0)
+    if (have_residual_map):
+      set_map_colour(imol, 0.0, 1.0, 1.0)
+      set_map_displayed(imol, False)
+    else :
+      set_map_colour(imol, 1.0, 1.0, 0.0)
+  if (have_residual_map):
+    imol = make_and_draw_map(to_str(map_file),"ANOMDIFF","PHANOMDIFF","",0,1)
+    set_contour_level_in_sigma(imol, 3.0)
+    set_map_colour(imol, 1.0, 1.0, 0.0)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/watch_file.py
+
+from __future__ import absolute_import, division, print_function
+import os.path
+
+from libtbx.utils import to_str
+
+class watch_model(object):
+  """
+  Simple filesystem-only automatic loader for PDB files.  Once invoked with
+  the specified file name, it will inspect the file mtime at regular intervals
+  and reload if modification is detected.
+  """
+  def __init__(self, file_name, timeout=2000, model_imol=None):
+    self.file_name = file_name
+    self.model_imol = model_imol
+    self.last_mtime = 0
+    import gobject
+    gobject.timeout_add(timeout, self.check_file)
+
+  def check_file(self):
+    import coot # import dependency
+    if os.path.exists(self.file_name):
+      file_mtime = os.path.getmtime(self.file_name)
+      if file_mtime > self.last_mtime :
+        if self.model_imol is not None :
+          clear_and_update_molecule_from_file(self.model_imol,
+            to_str(self.file_name))
+        else :
+          self.model_imol = read_pdb(to_str(self.file_name))
+        self.last_mtime = file_mtime
+
+
+class watch_model_and_maps(object):
+  """
+  Simple filesystem-only automatic loader for PDB and MTZ map coefficient
+  files.  Identical to the watch_model class in most respects.
+  """
+  def __init__(self, file_prefix, timeout=2000, model_imol=None,
+      map_imols=()):
+    self.file_prefix = file_prefix
+    self.pdb_file = self.file_prefix + ".pdb"
+    self.map_file = self.file_prefix + ".mtz"
+    self.model_imol = model_imol
+    self.map_imols = map_imols
+    self.last_mtime = 0
+    import gobject
+    gobject.timeout_add(timeout, self.check_files)
+
+  def check_files(self):
+    if os.path.exists(self.pdb_file) and os.path.exists(self.map_file):
+      pdb_mtime = os.path.getmtime(self.pdb_file)
+      map_mtime = os.path.getmtime(self.map_file)
+      if (pdb_mtime > self.last_mtime) and (map_mtime > self.last_mtime):
+        self.update_files()
+        self.last_mtime = max(pdb_mtime, map_mtime)
+
+  def update_files(self):
+    import coot # import dependency
+    if (self.model_imol is not None):
+      clear_and_update_molecule_from_file(self.model_imol,
+                                          to_str(self.pdb_file))
+    else :
+      self.model_imol = read_pdb(to_str(self.pdb_file))
+    if (len(self.map_imols) > 0):
+      set_colour_map_rotation_for_map(0)
+      for imol in self._map_mols :
+        close_molecule(imol)
+    else :
+      set_colour_map_rotation_for_map(10)
+    map_imol = auto_read_make_and_draw_maps(to_str(self.map_file))
+    if (isinstance(map_imol, int)):
+      # XXX this may be dangerous, but auto_read_make_and_draw_maps only returns
+      # the last imol
+      self.map_imols = [ map_imol - 1, map_imol ]
+    else :
+      self.map_imols = map_imol
+    set_imol_refinement_map(self.map_imols[0])
+    set_scrollable_map(self.map_imols[0])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+cootbx/xmlrpc_server.py
+
+"""
+Prototype for Coot XML-RPC plugin used by the Phenix GUI.  This is a fully
+functional implementation, but the code used in Phenix contains many additional
+methods in the coot_interface class which may also be called over XML-RPC.  A
+simple example is update_model() in the coot_interface class.
+
+libtbx.xmlrpc_utils contains tools used to launch and communicate with Coot
+from another Python process, including a fault-sensitive replacement for the
+ServerProxy class in xmlrpclib.  However, the client code could just as easily
+be written in an entirely different language.
+"""
+
+from __future__ import absolute_import, division, print_function
+import SimpleXMLRPCServer
+import traceback
+import os
+
+from libtbx.utils import to_str
+
+try :
+  import coot_python
+except Exception as e :
+  print("Could not import coot_python module!")
+  print("Coot GUI extensions will be disabled.")
+  class empty(object):
+    def main_menubar(self):
+      return None
+    def main_toolbar(self):
+      return None
+  coot_python = empty()
+
+def coot_startup():
+  gui = coot_interface()
+
+class coot_interface(object):
+  """
+  Class for managing communications, including a toolbar button to toggle the
+  XML-RPC connection (which doesn't actually change the socket connection,
+  but determines whether requests are ignored or processed).  Any method
+  defined for this class (or a subclass, if desired) will become callable
+  over XMl-RPC.
+  """
+  def __init__(self):
+    self.flag_enable_xmlrpc = True
+    self.xmlrpc_server = None
+    self._server_toggle_btn = None
+    self._current_model = None
+    toolbar = coot_python.main_toolbar()
+    port = 40000
+    if ("COOT_XMLRPC_PORT" in os.environ):
+      port = string.atoi(os.environ["COOT_XMLRPC_PORT"])
+    try :
+      self.xmlrpc_server = coot_xmlrpc_server(
+        interface=self,
+        addr=("127.0.0.1", port))
+      self.xmlrpc_server.socket.settimeout(0.01)
+    except Exception as e :
+      print("Error starting XML-RPC server:")
+      print(str(e))
+    else :
+      import gobject
+      import gtk
+      print("xml-rpc server running on port %d" % port)
+      # timeout used to be set to whatever the Phenix preferences have it as,
+      # but 250ms seems to be a universally good choice, and much shorter
+      # intervals screw up the Coot GUI (at least on Windows)
+      gobject.timeout_add(250, self.timeout_func)
+      if (toolbar is not None):
+        self._server_toggle_btn = gtk.ToggleToolButton()
+        self._server_toggle_btn.set_label("Connected to PHENIX")
+        self._server_toggle_btn.set_is_important(True)
+        toolbar.insert(self._server_toggle_btn, -1)
+        self._server_toggle_btn.connect("clicked", self.toggle_update)
+        self._server_toggle_btn.set_active(True)
+        self._server_toggle_btn.show()
+
+  def timeout_func(self, *args):
+    if (self.xmlrpc_server is not None):
+      self.xmlrpc_server.handle_request()
+    return True
+
+  def toggle_update(self, *args):
+    if (self._server_toggle_btn is not None):
+      if self._server_toggle_btn.get_active():
+        self._server_toggle_btn.set_label("XML-RPC enabled")
+        self.flag_enable_xmlrpc = True
+      else :
+        self._server_toggle_btn.set_label("XML-RPC disabled")
+        self.flag_enable_xmlrpc = False
+
+  def update_model(self, pdb_file):
+    """
+    Example of a user-defined function which will automatically be made
+    accessible via XML-RPC.
+    """
+    import coot
+    if (self.current_imol is None):
+      self.current_imol = read_pdb(to_str(pdb_file))
+    else :
+      clear_and_update_molecule_from_file(self.current_imol,
+        pdb_file)
+
+class coot_xmlrpc_server(SimpleXMLRPCServer.SimpleXMLRPCServer):
+  """
+  Replacement for the SimpleXMLRPCServer class, which can call methods
+  defined in multiple places.
+  """
+  def __init__(self, interface, **kwds):
+    self._interface = interface
+    SimpleXMLRPCServer.SimpleXMLRPCServer.__init__(self, **kwds)
+
+  def _dispatch(self, method, params):
+    """
+    Handle a method request for either a) a method of the interface object, or
+    b) wrapped C++ function exposed by the 'coot' module; both options will
+    be tried (in that order) if necessary.  Note that Python's None instance
+    is problematic, so it is replaced with -1.
+    """
+    if not self._interface.flag_enable_xmlrpc :
+      return -1
+    import coot
+    result = -1
+    func = None
+    if hasattr(self._interface, method):
+      func = getattr(self._interface, method)
+    elif hasattr(coot, method):
+      func = getattr(coot, method)
+    if not hasattr(func, "__call__"):
+      print("%s is not a callable object!" % method)
+    else :
+      try :
+        result = func(*params)
+      except Exception as e :
+        traceback_str = "\n".join(traceback.format_tb(sys.exc_info()[2]))
+        raise Exception("%s\nOriginal traceback:%s" % (str(e), traceback_str))
+      else :
+        if result is None :
+          result = -1
+    return result
+
+if (__name__ == "__main__"):
+  coot_startup()
+
+
+ *******************************************************************************

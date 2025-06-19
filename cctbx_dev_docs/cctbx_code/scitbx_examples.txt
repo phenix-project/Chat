@@ -1,0 +1,2650 @@
+
+
+ *******************************************************************************
+scitbx/examples/__init__.py
+"""
+examples
+"""
+
+from __future__ import division
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/bevington/__init__.py
+from __future__ import absolute_import, division, print_function
+from scitbx.lstbx import normal_eqns # import dependency
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_examples_bevington_ext")
+from scitbx_examples_bevington_ext import *
+
+#inject python method into non_linear_ls_eigen_wrapper
+@bp.inject_into(ext.non_linear_ls_eigen_wrapper)
+class _():
+
+  def get_eigen_summary(self): # ported from c++ code to encapsulate printing
+    from six.moves import StringIO
+    S = StringIO()
+    assert self.solved()
+    nm_ncols = self.get_normal_matrix_ncols()
+    matsize = nm_ncols * (nm_ncols+1)/2
+    print("Number of parameters      %12ld"%(self.n_parameters()), file=S)
+    print("Normal matrix square size %12ld"%(nm_ncols * nm_ncols), file=S)
+    print("Upper triangle size       %12ld"%matsize, file=S)
+    nonZeros = self.get_normal_matrix_nnonZeros()
+    percentNZ = 100. * nonZeros/float(matsize)
+    LnonZeros = self.get_lower_cholesky_nnonZeros()
+    LpercentNZ = 100. * LnonZeros/float(matsize)
+    print("Normal matrix non-zeros   %12ld, %6.2f%%"%(nonZeros,percentNZ), file=S)
+    print("Cholesky factor non-zeros %12ld, %6.2f%%"%(LnonZeros,LpercentNZ), file=S)
+    return S.getvalue()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/bevington/silver.py
+from __future__ import absolute_import, division, print_function
+from six.moves import range
+import scitbx.lbfgs
+from scitbx.array_family import flex
+from math import exp,sqrt
+from scitbx.matrix import sqr
+
+data = """
+Perform parameter fit three ways:
+1) LBFGS without curvatures
+2) Levenberg Marq. with dense matrix algebra
+3) Levenberg Marq. with Eigen sparse matrix algebra
+
+Take example from
+Bevington, P.R. & Robinson, D.K., Data Reduction and Error Analysis for the Physical Sciences,
+Third Edition.  New York: McGraw Hill, 2003.
+Chapter 8: Least-Squares Fit to an Arbitrary Function.
+The data describe beta-emission counts from the radioactive decay of silver.
+Time Counts
+15   775
+30   479
+45   380
+60   302
+75   185
+90   157
+105  137
+120  119
+135  110
+150  89
+165  74
+180  61
+195  66
+210  68
+225  48
+240  54
+255  51
+270  46
+285  55
+300  29
+315  28
+330  37
+345  49
+360  26
+375  35
+390  29
+405  31
+420  24
+435  25
+450  35
+465  24
+480  30
+495  26
+510  28
+525  21
+540  18
+555  20
+570  27
+585  17
+600  17
+615  14
+630  17
+645  24
+660  11
+675  22
+690  17
+705  12
+720  10
+735  13
+750  16
+765  9
+780  9
+795  14
+810  21
+825  17
+840  13
+855  12
+870  18
+885  10
+
+Will fit these data to the following functional form (bi-exponential decay):
+y(x) = a0 + a1 * exp( -x/ a3 ) + a2 * exp( -x/ a4)
+
+Initial values for parameters, to be refined:
+10 900 80 27 225
+"""
+
+raw_strings = data.split("\n")
+data_index = raw_strings.index("Time Counts")
+x_obs = flex.double([float(line.split()[0]) for line in raw_strings[data_index+1:data_index+60]])
+y_obs = flex.double([float(line.split()[1]) for line in raw_strings[data_index+1:data_index+60]])
+w_obs = 1./(y_obs)
+initial = flex.double([10, 900, 80, 27, 225])
+#initial = flex.double([10.4, 958.3, 131.4, 33.9, 205])
+
+from scitbx.examples.bevington import bevington_silver
+class lbfgs_biexponential_fit(bevington_silver):
+  def __init__(self, x_obs, y_obs, w_obs, initial):
+    super(lbfgs_biexponential_fit,self).__init__()
+    self.set_cpp_data(x_obs,y_obs,w_obs)
+    assert x_obs.size() == y_obs.size()
+    self.x_obs = x_obs
+    self.y_obs = y_obs
+    self.w_obs = w_obs
+    self.n = len(initial)
+    self.x = initial.deep_copy()
+    self.minimizer = scitbx.lbfgs.run(target_evaluator=self)
+    self.a = self.x
+
+  def print_step(pfh,message,target):
+    print("%s %10.4f"%(message,target), end=' ')
+    print("["," ".join(["%10.4f"%a for a in pfh.x]),"]")
+
+  def compute_functional_and_gradients(self):
+    self.a = self.x
+    f = self.functional(self.x)
+    self.print_step("LBFGS stp",f)
+    g = self.gvec_callable(self.x)
+    return f, g
+
+def lbfgs_example(verbose):
+
+  fit = lbfgs_biexponential_fit(x_obs=x_obs,y_obs=y_obs,w_obs=w_obs,initial=initial)
+  print("------------------------------------------------------------------------- ")
+  print("       Initial and fitted coeffcients, and inverse-curvature e.s.d.'s")
+  print("------------------------------------------------------------------------- ")
+
+  for i in range(initial.size()):
+
+    print("%2d %10.4f %10.4f %10.4f"%(
+           i, initial[i], fit.a[i], sqrt(2./fit.curvatures()[i])))
+
+from scitbx.lstbx import normal_eqns
+from scitbx.lstbx import normal_eqns_solving
+class levenberg_common(object):
+  def initialize(pfh, initial_estimates):
+    pfh.x_0 = flex.double(initial_estimates)
+    pfh.restart()
+    pfh.counter = 0
+
+  def restart(pfh):
+    pfh.x = pfh.x_0.deep_copy()
+    pfh.old_x = None
+
+  def step_forward(pfh):
+    pfh.old_x = pfh.x.deep_copy()
+    pfh.x += pfh.step()
+
+  def step_backward(pfh):
+    assert pfh.old_x is not None
+    pfh.x, pfh.old_x = pfh.old_x, None
+
+  def parameter_vector_norm(pfh):
+    return pfh.x.norm()
+
+  def print_step(pfh,message,target=None,functional=None):
+    if functional is None:  functional = flex.sum(target)
+    print("%s %10.4f"%(message,functional), end=' ')
+    print("["," ".join(["%10.4f"%a for a in pfh.x]),"]")
+
+from scitbx.examples.bevington import dense_base_class
+class levenberg_helper(dense_base_class,levenberg_common,normal_eqns.non_linear_ls_mixin):
+  def __init__(pfh, initial_estimates):
+    super(levenberg_helper, pfh).__init__(n_parameters=len(initial_estimates))
+    pfh.initialize(initial_estimates)
+
+  def build_up(pfh, objective_only=False):
+    if not objective_only: pfh.counter+=1
+    pfh.reset()
+    if not objective_only:
+      functional = pfh.functional(pfh.x)
+      pfh.print_step("LM  dense",functional = functional)
+    pfh.access_cpp_build_up_directly_dense(objective_only, current_values = pfh.x)
+
+class dense_worker(object):
+
+  def __init__(self,x_obs,y_obs,w_obs,initial):
+    self.counter = 0
+    self.x = initial.deep_copy()
+    self.helper = levenberg_helper(initial_estimates = self.x)
+    self.helper.set_cpp_data(x_obs,y_obs,w_obs)
+    self.helper.restart()
+    iterations = normal_eqns_solving.levenberg_marquardt_iterations(
+               non_linear_ls = self.helper,
+               n_max_iterations = 5000,
+               track_all=True,
+               step_threshold = 0.0001
+    )
+    ###### get esd's
+    self.helper.build_up()
+    upper = self.helper.step_equations().normal_matrix_packed_u()
+    nm_elem = flex.double(25)
+    self.c = flex.double(5)
+    ctr = 0
+    for x in range(5):
+      x_0 = ctr
+      for y in range(4,x-1,-1):
+        nm_elem[ 5*x+y ] = upper[x_0+(y-x)]
+        ctr += 1
+        if x!= y:
+          nm_elem[ 5*y+x ] = upper[x_0+(y-x)]
+        else:
+          self.c[x]=upper[x_0+(y-x)]
+    NM = sqr(nm_elem)
+    self.helper.solve()
+    #print list(self.helper.step_equations().cholesky_factor_packed_u())
+    error_matrix = NM.inverse()
+    self.error_diagonal = [error_matrix(a,a) for a in range(5)]
+    print("End of minimization: Converged", self.helper.counter,"cycles")
+
+def levenberg_example(verbose):
+
+  fit = dense_worker(x_obs=x_obs,y_obs=y_obs,w_obs=w_obs,initial=initial)
+  print("-------------------------------------------------------------------------------------- ")
+  print(" Initial and fitted parameters, full-matrix e.s.d.'s, and inverse-curvature e.s.d.'s")
+  print("-------------------------------------------------------------------------------------- ")
+
+  for i in range(initial.size()):
+
+    print("%2d %10.4f %10.4f %10.4f %10.4f"%(
+      i, initial[i], fit.helper.x[i], sqrt(fit.error_diagonal[i]), sqrt(1./fit.c[i])))
+
+from scitbx.examples.bevington import eigen_base_class as base_class
+class eigen_helper(base_class,levenberg_common,normal_eqns.non_linear_ls_mixin):
+  def __init__(pfh, initial_estimates):
+    super(eigen_helper, pfh).__init__(n_parameters=len(initial_estimates))
+    pfh.initialize(initial_estimates)
+
+  def build_up(pfh, objective_only=False):
+    if not objective_only: pfh.counter+=1
+    pfh.reset()
+    #print list(pfh.x),objective_only
+    if not objective_only:
+      functional = pfh.functional(pfh.x)
+      pfh.print_step("LM sparse",functional = functional)
+    pfh.access_cpp_build_up_directly_eigen_eqn(objective_only, current_values = pfh.x)
+
+class eigen_worker(object):
+
+  def get_helper_normal_matrix(self):
+    norm_mat_packed_upper = self.helper.get_normal_matrix()
+    # convert upper triangle to all elements:
+    Nx = len(self.helper.x)
+    all_elems = flex.double(Nx*Nx)
+    ctr = 0
+    for x in range(Nx):
+      x_0 = ctr
+      for y in range(Nx-1,x-1,-1):
+        all_elems[ Nx*x+y ] = norm_mat_packed_upper[x_0+(y-x)]
+        ctr += 1
+        if x!= y:
+          all_elems[ Nx*y+x ] = norm_mat_packed_upper[x_0+(y-x)]
+    return all_elems
+
+  def __init__(self,x_obs,y_obs,w_obs,initial):
+    self.counter = 0
+    self.x = initial.deep_copy()
+    self.helper = eigen_helper(initial_estimates = self.x)
+    self.helper.set_cpp_data(x_obs,y_obs,w_obs)
+    self.helper.restart()
+    iterations = normal_eqns_solving.levenberg_marquardt_iterations_encapsulated_eqns(
+               non_linear_ls = self.helper,
+               n_max_iterations = 5000,
+               track_all=True,
+               step_threshold = 0.0001,
+    )
+    ###### get esd's
+    self.helper.build_up()
+    NM = sqr(self.get_helper_normal_matrix())
+    from scitbx.linalg.svd import inverse_via_svd
+    svd_inverse,sigma = inverse_via_svd(NM.as_flex_double_matrix())
+    IA = sqr(svd_inverse)
+    self.error_diagonal = flex.double([IA(i,i) for i in range(self.helper.x.size())])
+
+    print("End of minimization: Converged", self.helper.counter,"cycles")
+
+def eigen_example(verbose):
+
+  fit = eigen_worker(x_obs=x_obs,y_obs=y_obs,w_obs=w_obs,initial=initial)
+  print("----------------------------------------------------------------- ")
+  print("       Initial and fitted parameters & full-matrix e.s.d.'s")
+  print("----------------------------------------------------------------- ")
+
+  for i in range(initial.size()):
+
+    print("%2d %10.4f %10.4f %10.4f"%(
+          i, initial[i], fit.helper.x[i], sqrt(fit.error_diagonal[i]) ))
+
+if (__name__ == "__main__"):
+  verbose=True
+  print("\n LBFGS:")
+  lbfgs_example(verbose)
+  print("\n DENSE MATRIX:")
+  levenberg_example(verbose)
+  print("\n SPARSE MATRIX:")
+  eigen_example(verbose)
+'''
+EXPLANATION OF CLASS HIERARCHY.
+
+bevington_silver(C++)
+fundamental expression of target function, gradients, curvatures
+  ^                  ^
+  |                  |
+  |
+lbfgs_biexponential_fit(Python)
+engine for lbfgs parameter fit; has a scitbx.lbfgs
+-------------------------------------------------- done with LBFGS
+                     |
+                     |  scitbx::lstbx::normal_equations::non_linear_ls
+                     |    ^
+                     |    |
+  dense_base_class(C++): specializes quick build up function for Levenberg Marquardt
+                 ^
+                 |            levenberg_common(Python)
+                 |            LM infrastructure
+                 |             ^
+                 |             |     normal_eqns.non_linear_ls_mixin(Python)
+                 |             |     LM infrastructure
+                 |             |      ^
+                 |             |      |
+  levenberg_helper(Python): main engine for dense-matrix levenberg
+  ------------------------------------------------ done with dense matrix LM
+
+                     ^    ^
+                     |    |
+                     |  non_linear_ls_eigen_wrapper(C++)
+                     |  specialization of non_linear_ls, has a linear_ls_eigen_wrapper
+                     |                     ^
+                     |                     |
+  eigen_base_class(C++): specializes sparse Cholesky build up function for Levenberg Marq.
+            ^
+            |                  ^      ^
+            |                  |      |
+  eigen_helper(Python): main engine for sparse-Cholesky levenberg
+  ------------------------------------------------ done with sparse Cholesky LM
+
+
+  To do list:
+  is there a quick calculation of the diag error elements?  Perhaps using sparse vectors.
+  try to implement the algorithm & see; then implement an eigen version
+'''
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/bootstrap.py
+from __future__ import absolute_import, division, print_function
+import scitbx.lbfgs
+import scitbx.math
+from scitbx.array_family import flex
+import math
+from six.moves import range
+
+"""
+This example shows and easy way of obtaining reasonable estimates of
+standard deviations of refinable parameters.
+
+A sample run is shown below:
+
+generated data:
+x_obs  y_obs
+0.0 1.89158676083
+1.0 7.26573570715
+2.0 17.4139845949
+3.0 34.7247015887
+4.0 57.2279161206
+5.0 86.7943470166
+6.0 121.658728013
+7.0 163.13278756
+8.0 209.591863552
+9.0 262.234445997
+10.0 321.838939765
+11.0 386.669697396
+12.0 457.737267767
+13.0 534.242112317
+14.0 618.481785819
+15.0 706.341196433
+16.0 801.835917893
+17.0 903.488114864
+18.0 1010.44961062
+19.0 1122.7567835
+
+final residual of fit on 'true' data
+2.54570348084
+
+Resulting fit and ESDs.
+
+-------------------------------------------
+       True and fitted coeffcients
+-------------------------------------------
+a 1.0 1.90288360993
+b 2.0 1.92697354706
+c 3.0 3.00469428576
+-------------------------------------------
+ Bootstrapped mean and standard deviations
+-------------------------------------------
+a 1.91734755932 0.225087363373
+b 1.92587646901 0.0510724881016
+c 3.00476495957 0.00291754050371
+
+
+Cross-check with GNUPLOT fitting shows a good correspondence with bootstrap results:
+
+=================================================================
+After 5 iterations the fit converged.
+final sum of squares of residuals : 2.5457
+rel. change during last iteration : -4.58051e-07
+
+degrees of freedom (ndf) : 17
+rms of residuals      (stdfit) = sqrt(WSSR/ndf)      : 0.386972
+variance of residuals (reduced chisquare) = WSSR/ndf : 0.149747
+
+Final set of parameters            Asymptotic Standard Error
+=======================            ==========================
+
+a               = 1.90288          +/- 0.2356       (12.38%)
+b               = 1.92697          +/- 0.05748      (2.983%)
+c               = 3.00469          +/- 0.002921     (0.0972%)
+
+
+correlation matrix of the fit parameters:
+
+               a      b      c
+a               1.000
+b              -0.840  1.000
+c               0.706 -0.965  1.000
+=================================================================
+"""
+
+
+
+
+class polynomial_fit:
+  def __init__(self, x_obs, y_obs, w_obs,n):
+    assert x_obs.size() == y_obs.size()
+    assert n < x_obs.size()
+    self.x_obs = x_obs
+    self.y_obs = y_obs
+    self.w_obs = w_obs*w_obs*0+1.0
+    self.n = n
+    self.x = flex.double(self.n,0)
+    self.minimizer = scitbx.lbfgs.run(target_evaluator=self)
+    self.a = self.x
+    del self.x
+
+  def compute_functional_and_gradients(self):
+    self.a = self.x
+    y_calc = flex.double(self.x_obs.size(),0)
+    for i in range(self.n):
+      y_calc = y_calc + (self.a[i])*flex.pow(self.x_obs,i)
+    y_diff = self.y_obs - y_calc
+    f = flex.sum(y_diff*y_diff/self.w_obs)
+    g = flex.double(self.n,0)
+    for i in range(self.n):
+      g[i] = -flex.sum( 2.0*(y_diff/self.w_obs)*flex.pow(self.x_obs,i) )
+    print(f)
+    return f, g
+
+
+class fake_data(object):
+  def __init__(self,
+               x_data,
+               y_data):
+
+    self.x_data = x_data
+    self.y_data = y_data
+
+    ## Make a permuation reference, this allows one to
+    ## do non parametric resampling of multidimensional data
+    self.permutation_reference = flex.double( range(x_data.size()) )
+
+    self.non_para_bootstrap = scitbx.math.non_parametric_bootstrap(
+      self.permutation_reference, 0 )
+
+  def fake_it(self, size):
+    selection_set = self.non_para_bootstrap.draw( size )
+    isel = flex.int()
+
+    for element in selection_set:
+      isel.append( int(element) )
+
+    new_x = flex.double( flex.select(self.x_data, isel ) )
+    new_y = flex.double( flex.select(self.y_data, isel ) )
+    return new_x, new_y
+
+
+def example():
+  x_obs = flex.double( range(20) )
+  a = flex.double([1,2,3])
+  w_obs = flex.double(20,100.0)
+  y_ideal = a[0] + a[1]*x_obs + a[2]*x_obs*x_obs
+  y_obs = y_ideal + flex.random_double(size=x_obs.size())*1.5
+
+  for ii in range(20):
+    print(x_obs[ii], y_obs[ii])
+
+  faker = fake_data(  x_obs,  y_obs)
+
+
+  fit = polynomial_fit(x_obs=x_obs,y_obs=y_obs,w_obs=w_obs,n=3)
+  print("------------------------------------------- ")
+  print("       True and fitted coeffcients")
+  print("------------------------------------------- ")
+  for i in range(a.size()):
+    print(i, a[i], fit.a[i])
+  print("------------------------------------------- ")
+  print(" Bootstrapped mean and standard deviations")
+  print("------------------------------------------- ")
+  mean=[0,0,0]
+  std=[0,0,0]
+
+  for trial in range(100):
+    x_new, y_new =  faker.fake_it(20)
+    fit = polynomial_fit(x_obs=x_new,y_obs=y_new,w_obs=w_obs,n=3)
+    for i in range(a.size()):
+      mean[i]+=fit.a[i]
+      std[i]+=fit.a[i]*fit.a[i]
+
+  for i in range(3):
+    mean[i]/=100.0
+    std[i]/=100.0
+    std[i] -= mean[i]*mean[i]
+    std[i] = math.sqrt( std[i] )
+    print(i, mean[i], std[i])
+
+
+if (__name__ == "__main__"):
+  example()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/chebyshev_lsq_example.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.math import chebyshev_polynome
+from scitbx.math import chebyshev_lsq_fit
+from six.moves import cStringIO as StringIO
+from six.moves import range
+from six.moves import zip
+
+
+
+def example():
+  x_obs = (flex.double(range(100))+1.0)/101.0
+  y_ideal = flex.sin(x_obs*6.0*3.1415) + flex.exp(x_obs)
+  y_obs = y_ideal + (flex.random_double(size=x_obs.size())-0.5)*0.5
+  w_obs = flex.double(x_obs.size(),1)
+  print("Trying to determine the best number of terms ")
+  print(" via cross validation techniques")
+  print()
+  n_terms = chebyshev_lsq_fit.cross_validate_to_determine_number_of_terms(
+    x_obs,y_obs,w_obs,
+    min_terms=5 ,max_terms=20,
+    n_goes=20,n_free=20)
+  print("Fitting with", n_terms, "terms")
+  print()
+  fit = chebyshev_lsq_fit.chebyshev_lsq_fit(n_terms,x_obs,y_obs)
+  print("Least Squares residual: %7.6f" %(fit.f))
+  print("  R2-value            : %7.6f" %(fit.f/flex.sum(y_obs*y_obs)))
+  print()
+  fit_funct = chebyshev_polynome(
+    n_terms, fit.low_limit, fit.high_limit, fit.coefs)
+
+  y_fitted = fit_funct.f(x_obs)
+  abs_deviation = flex.max(
+    flex.abs( (y_ideal- y_fitted) ) )
+  print("Maximum deviation between fitted and error free data:")
+  print("    %4.3f" %(abs_deviation))
+  abs_deviation = flex.mean(
+    flex.abs( (y_ideal- y_fitted) ) )
+  print("Mean deviation between fitted and error free data:")
+  print("    %4.3f" %(abs_deviation))
+  print()
+  abs_deviation = flex.max(
+    flex.abs( (y_obs- y_fitted) ) )
+  print("Maximum deviation between fitted and observed data:")
+  print("    %4.3f" %(abs_deviation))
+  abs_deviation = flex.mean(
+    flex.abs( (y_obs- y_fitted) ) )
+  print("Mean deviation between fitted and observed data:")
+  print("    %4.3f" %(abs_deviation))
+  print()
+  print("Showing 10 points")
+  print("   x    y_obs y_ideal y_fit")
+  for ii in range(10):
+    print("%6.3f %6.3f %6.3f %6.3f" \
+          %(x_obs[ii*9], y_obs[ii*9], y_ideal[ii*9], y_fitted[ii*9]))
+
+  try:
+    from iotbx import data_plots
+  except ImportError:
+    pass
+  else:
+    print("Preparing output for loggraph in a file called")
+    print("   chebyshev.loggraph")
+    chebyshev_plot = data_plots.plot_data(plot_title='Chebyshev fitting',
+                                          x_label = 'x values',
+                                          y_label = 'y values',
+                                          x_data = x_obs,
+                                          y_data = y_obs,
+                                          y_legend = 'Observed y values',
+                                          comments = 'Chebyshev fit')
+    chebyshev_plot.add_data(y_data=y_ideal,
+                            y_legend='Error free y values')
+    chebyshev_plot.add_data(y_data=y_fitted,
+                            y_legend='Fitted chebyshev approximation')
+    with open('chebyshev.loggraph', 'w') as output_logfile:
+      f = StringIO()
+      data_plots.plot_data_loggraph(chebyshev_plot, f)
+      output_logfile.write(f.getvalue())
+
+
+def another_example(np=41,nt=5):
+  x = flex.double( range(np) )/(np-1)
+  y = 0.99*flex.exp(-x*x*0.5)
+  y = -flex.log(1.0/y-1)
+  w = y*y/1.0
+  d = (flex.random_double(np)-0.5)*w
+  y_obs = y+d
+
+  y = 1.0/( 1.0 + flex.exp(-y) )
+
+  fit_w = chebyshev_lsq_fit.chebyshev_lsq_fit(nt,
+                                              x,
+                                              y_obs,
+                                              w )
+  fit_w_f = chebyshev_polynome(
+    nt, fit_w.low_limit, fit_w.high_limit, fit_w.coefs)
+
+
+  fit_nw = chebyshev_lsq_fit.chebyshev_lsq_fit(nt,
+                                              x,
+                                              y_obs)
+  fit_nw_f = chebyshev_polynome(
+    nt, fit_nw.low_limit, fit_nw.high_limit, fit_nw.coefs)
+  print()
+  print("Coefficients from weighted lsq")
+  print(list( fit_w.coefs ))
+  print("Coefficients from non-weighted lsq")
+  print(list( fit_nw.coefs ))
+  assert flex.max( flex.abs(fit_nw.coefs-fit_w.coefs) ) > 0
+
+def runge_phenomenon(self,n=41,nt=35,print_it=False):
+  x_e = 2.0*(flex.double( range(n) )/float(n-1)-0.5)
+  y_e = 1/(1+x_e*x_e*25)
+  fit_e = chebyshev_lsq_fit.chebyshev_lsq_fit(nt,
+                                              x_e,
+                                              y_e,
+                                              )
+  fit_e = chebyshev_polynome(
+    nt, fit_e.low_limit, fit_e.high_limit, fit_e.coefs)
+
+
+  x_c = chebyshev_lsq_fit.chebyshev_nodes(n, -1, 1, True)
+  y_c = 1/(1+x_c*x_c*25)
+  fit_c = chebyshev_lsq_fit.chebyshev_lsq_fit(nt,
+                                              x_c,
+                                              y_c,
+                                              )
+  fit_c = chebyshev_polynome(
+    nt, fit_c.low_limit, fit_c.high_limit, fit_c.coefs)
+
+
+  x_plot = 2.0*(flex.double( range(3*n) )/float(3*n-1)-0.5)
+  y_plot_e = fit_e.f( x_plot )
+  y_plot_c = fit_c.f( x_plot )
+  y_id =  1/(1+x_plot*x_plot*25)
+  if print_it:
+    for x,y,yy,yyy in zip(x_plot,y_id,y_plot_e,y_plot_c):
+      print(x,y,yy,yyy)
+
+
+
+
+
+
+
+if (__name__ == "__main__"):
+  example()
+  another_example()
+  runge_phenomenon(10)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/flex_array_loops.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from six.moves import range
+
+def demo():
+  # toy array
+  a = flex.double([10,11,12])
+  # one way of looping over the array
+  for i in range(a.size()):
+    print(a[i])
+  print()
+  # a better way of looping over the array
+  for ai in a:
+    print(ai)
+  print()
+  # another good way of looping over the array
+  for i,ai in enumerate(a):
+    print(i, ai)
+  print()
+  # modify the elements one-by-one
+  for i in range(a.size()):
+    a[i] *= 10
+  for ai in a:
+    print(ai)
+  print()
+  # a better way of modifying all elements
+  a += 100 # this works at C++ speed
+  for ai in a:
+    print(ai)
+  print()
+  print("OK")
+
+if (__name__ == "__main__"):
+  demo()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/flex_grid.py
+"""\
+grid = grid over N-dim box (but there is no array with data!)
+
+origin = N-dim indices of lower-left corner of box
+ focus = N-dim indices of upper-right corner of box as we want to use it
+  last = N-dim indices of upper-right corner of box as actually allocated
+   all = actual number or grid points to be allocated in each dimension
+
+Motivation for focus/last distinction:
+  padding required by real-to-complex FFT algorithms
+"""
+from __future__ import absolute_import, division, print_function
+
+from scitbx.array_family.flex import grid
+
+def show(g):
+  print("origin:", g.origin())
+  print(" focus:", g.focus())
+  print("  last:", g.last())
+  print("   all:", g.all())
+  print()
+
+def run():
+  print(__doc__)
+  g = grid((3,4,6))
+  show(g)
+  g.set_focus((3,4,5))
+  show(g)
+  g = grid((-2,-3,-4), (3,4,6))
+  show(g)
+  g.set_focus((3,4,5))
+  show(g)
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/functions.py
+from __future__ import absolute_import, division, print_function
+import math as m
+from six.moves import range
+from six.moves import zip
+
+def Function(name):
+    ''' Easy way to get a function constructor
+        based on its name
+    '''
+
+    funcs = { 'sphere' : Sphere ,
+            'ackley' : Ackley,
+            'michalewicz' : Michalewicz,
+            'rosenbrock' : Rosenbrock,
+            'rastrigin' : Rastrigin,
+            'easom' : Easom}
+
+    return funcs[name]
+
+def Sphere(dim):
+    ''' returns the sphere objective function with
+        mins and maxs defined
+    '''
+
+    return ObjFunc(_sphere, [-5.14]*dim, [5.14]*dim, [0.0]*dim)
+
+def Ackley(dim):
+    ''' returns the ackley objective function with
+        mins and maxs defined
+    '''
+
+    return ObjFunc(_ackley, [-30.0]*dim, [30.0]*dim, [0.0]*dim)
+
+def Michalewicz(dim):
+    ''' returns the michalewicz objective function with
+        mins and maxs defined
+    '''
+
+    return ObjFunc(_michalewicz, [0.0]*dim, [m.pi]*dim, [0.0]*dim) #that isn't the optima, but who cares for now.
+
+def Rastrigin(dim):
+    ''' returns the Rastrigin objective function with
+        mins and maxs defined
+    '''
+
+    return ObjFunc(_rastrigin, [-5.0]*dim, [5.0]*dim, [0.0]*dim)
+
+def Rosenbrock(dim):
+    ''' returns the Rosenbrock objective function with
+        mins and maxs defined
+    '''
+
+    return ObjFunc(_rosenbrock, [-5.0]*dim, [10.]*dim, [1.0]*dim)
+
+def Easom(dim):
+    ''' returns the Easom objective function with
+        mins and maxs defined
+    '''
+    if dim != 2:
+        raise
+
+    return ObjFunc(_easom, [-30.0, -30.0], [30.0, 30.0], [m.pi, m.pi])
+
+def _sphere(coords):
+    ''' the sphere (sphere) function
+    '''
+
+    return sum([x**2.0 for x in coords])
+
+def _ackley(coords):
+    ''' the ackley function
+    '''
+
+    n = len(coords)
+    a = 20.0
+    b = 0.2
+    c = 2.0 * m.pi
+    s1 = s2 = 0.0
+
+    for i in coords:
+        s1 += i**2.0
+        s2 += m.cos(c*i)
+
+    return -a * m.exp(-b * m.sqrt((1.0/n) * s1)) - \
+            m.exp((1.0/n) * s2) + a + m.e
+
+def _rastrigin(coords):
+    ''' rastrigin function
+    '''
+
+    return 20 + sum([x**2.0 - 10.0*m.cos(2.0 * m.pi * x) for x in coords])
+
+def _rosenbrock(coords):
+    ''' rosenbrock function
+    '''
+    m = len(coords)
+    p = m//2
+    x = coords[0:p]
+    y = coords[p:]
+    result=0
+    for xx,yy in zip(x,y):
+       result += 100*((xx*xx-yy)**2.0) + (yy-1.0)**2.0
+    return result
+
+def _michalewicz(coords):
+    ''' michalewicz function
+    '''
+    r = 10.0
+    return -sum([m.sin(coord) * (m.sin(i * coord**2.0 / m.pi))**(2.0 * r) \
+            for i, coord in enumerate(coords)])
+
+def _easom(coords):
+    ''' easom function
+    '''
+    x1 = coords[0]
+    x2 = coords[1]
+    return -m.cos(x1) * m.cos(x2) * m.exp((-(x1 - m.pi)**2.0) - ((x2 - m.pi)**2.0))
+
+class ObjFunc:
+    ''' This is our objective function.
+        It contains the function as well as its bounds
+    '''
+
+    def __init__(self, func, mins, maxs, xstar):
+        self.func = func
+        self.mins = mins
+        self.maxs = maxs
+        self.xstar = xstar
+
+    def eval(self, coords):
+        ''' Evaluates the function
+        '''
+
+        return self.func(coords)
+
+if __name__ == "__main__":
+    funcs = ['sphere',
+             'ackley',
+             'michalewicz',
+             'rosenbrock',
+             'rastrigin',
+             'easom']
+
+    x = range(-40,41)
+    y = range(-40,41)
+    for xx in x:
+      for yy in y:
+        tmp = [xx/10.0,yy/10.0]
+        print(xx/10.0,yy/10.0, end=' ')
+        for name in funcs:
+          print(Function(name)(2).eval( tmp ), end=' ')
+        print()
+      print()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/immoptibox_ports.py
+"""\
+http://www2.imm.dtu.dk/~hbn/immoptibox/
+"""
+
+from __future__ import absolute_import, division, print_function
+import scitbx.math
+import scitbx.linalg
+from scitbx import matrix
+from scitbx.array_family import flex
+from libtbx.test_utils import approx_equal
+from libtbx.utils import format_cpu_times
+import math
+import sys
+
+import scitbx.minpack
+import scitbx.lbfgs
+import scitbx.lbfgsb
+from six.moves import range
+from six.moves import zip
+
+try:
+  import knitro_adaptbx
+except ImportError:
+  knitro_adaptbx = None
+
+floating_point_epsilon_double = scitbx.math.floating_point_epsilon_double_get()
+
+def cholesky_decomposition(a, relative_eps=1.e-15):
+  assert a.is_square_matrix()
+  n = a.focus()[0]
+  eps = relative_eps * flex.max(flex.abs(a))
+  c = flex.double(a.accessor(), 0)
+  for k in range(n):
+    sum = 0
+    for j in range(k):
+      sum += c[(k,j)]**2
+    d = a[(k,k)] - sum
+    if (d <= eps): return None
+    c[(k,k)] = math.sqrt(d)
+    for i in range(k+1,n):
+      sum = 0
+      for j in range(k):
+        sum += c[(i,j)] * c[(k,j)]
+      c[(i,k)] = (a[(i,k)] - sum) / c[(k,k)]
+  return c
+
+def cholesky_solve(c, b):
+  assert c.is_square_matrix()
+  assert b.is_trivial_1d()
+  assert b.size() == c.focus()[0]
+  n = c.focus()[0]
+  z = flex.double(n, 0)
+  for k in range(n):
+    sum = 0
+    for j in range(k):
+      sum += c[(k,j)] * z[j]
+    z[k] = (b[k] - sum) / c[(k,k)]
+  x = flex.double(n, 0)
+  for k in range(n-1,-1,-1):
+    sum = 0
+    for j in range(k+1,n):
+      sum += c[(j,k)] * x[j]
+    x[k] = (z[k] - sum) / c[(k,k)]
+  return x
+
+class levenberg_marquardt:
+
+  def __init__(self,
+        function,
+        x0,
+        tau=1.e-3,
+        eps_1=1.e-16,
+        eps_2=1.e-16,
+        mu_min=1.e-300,
+        k_max=1000):
+    self.function = function
+    nu = 2
+    x = x0
+    f_x = function.f(x)
+    number_of_function_evaluations = 1
+    self.f_x0 = f_x
+    j = function.jacobian(x)
+    number_of_jacobian_evaluations = 1
+    number_of_cholesky_decompositions = 0
+    j_t = j.matrix_transpose()
+    a = j_t.matrix_multiply(j)
+    g = j_t.matrix_multiply(f_x)
+    found = flex.max(flex.abs(g)) <= eps_1
+    mu = tau * flex.max(a.matrix_diagonal())
+    k = 0
+    while (not found and k < k_max):
+      k += 1
+      a_plus_mu = a.deep_copy()
+      if (mu > mu_min):
+        a_plus_mu.matrix_diagonal_add_in_place(value=mu)
+      u = a_plus_mu.matrix_symmetric_as_packed_u()
+      gmw = scitbx.linalg.gill_murray_wright_cholesky_decomposition_in_place(u)
+      number_of_cholesky_decompositions += 1
+      h_lm = gmw.solve(b=-g)
+      if (h_lm.norm() <= eps_2 * (x.norm() + eps_2)):
+        found = True
+      else:
+        x_new = x + h_lm
+        f_x_new = function.f(x_new)
+        number_of_function_evaluations += 1
+        rho_denom = 0.5 * h_lm.dot(h_lm * mu - g)
+        assert rho_denom != 0
+        rho = 0.5*(f_x.norm()**2 - f_x_new.norm()**2) / rho_denom
+        if (rho > 0):
+          x = x_new
+          f_x = f_x_new
+          j = function.jacobian(x)
+          number_of_jacobian_evaluations += 1
+          j_t = j.matrix_transpose()
+          a = j_t.matrix_multiply(j)
+          g = j_t.matrix_multiply(f_x)
+          found = flex.max(flex.abs(g)) <= eps_1
+          if (mu > mu_min):
+            mu *= max(1/3., 1-(2*rho-1)**3)
+          else:
+            mu = mu_min
+          nu = 2
+        else:
+          mu *= nu
+          nu *= 2
+    self.x_star = x
+    self.f_x_star = f_x
+    self.number_of_iterations = k
+    self.number_of_function_evaluations = number_of_function_evaluations
+    self.number_of_jacobian_evaluations = number_of_jacobian_evaluations
+    self.number_of_cholesky_decompositions = number_of_cholesky_decompositions
+
+  def show_statistics(self):
+    print("levenberg_marquardt results:")
+    print("  function:", self.function.label())
+    print("  x_star:", list(self.x_star))
+    print("  0.5*f_x0.norm()**2:", 0.5*self.f_x0.norm()**2)
+    print("  0.5*f_x_star.norm()**2:", 0.5*self.f_x_star.norm()**2)
+    print("  number_of_iterations:", self.number_of_iterations)
+    print("  number_of_function_evaluations:", \
+        self.number_of_function_evaluations)
+    print("  number_of_jacobian_evaluations:", \
+        self.number_of_jacobian_evaluations)
+    print("  number_of_cholesky_decompositions:", \
+      self.number_of_cholesky_decompositions)
+
+class damped_newton:
+
+  def __init__(self,
+        function,
+        x0,
+        mu0=None,
+        tau=1.e-3,
+        eps_1=1.e-16,
+        eps_2=1.e-16,
+        k_max=1000):
+    self.function = function
+    x = x0
+    f_x = function.f(x=x)
+    number_of_function_evaluations = 1
+    self.f_x0 = f_x
+    fp = function.gradients(x=x, f_x=f_x)
+    number_of_gradient_evaluations = 1
+    number_of_hessian_evaluations = 0
+    number_of_cholesky_decompositions = 0
+    mu = mu0
+    nu = 2
+    k = 0
+    while (k < k_max):
+      if (flex.max(flex.abs(fp)) <= eps_1):
+        break
+      fdp = function.hessian(x=x)
+      number_of_hessian_evaluations += 1
+      if (mu is None):
+        mu = tau * flex.max(flex.abs(fdp))
+        if (mu == 0):
+          mu = fp.norm()/max(x.norm(), floating_point_epsilon_double**0.5)
+      while True:
+        fdp_plus_mu = fdp.deep_copy()
+        fdp_plus_mu.matrix_diagonal_add_in_place(value=mu)
+        fdp_plus_mu_cholesky = cholesky_decomposition(a=fdp_plus_mu)
+        number_of_cholesky_decompositions += 1
+        if (fdp_plus_mu_cholesky is not None):
+          break
+        mu *= 10
+      h_dn = cholesky_solve(c=fdp_plus_mu_cholesky, b=-fp)
+      if (h_dn.norm() <= eps_2*(eps_2 + x.norm())):
+        break
+      x_new = x + h_dn
+      f_x_new = function.f(x=x_new)
+      number_of_function_evaluations += 1
+      fp_new = function.gradients(x=x_new, f_x=f_x_new)
+      number_of_gradient_evaluations += 1
+      f = flex.sum_sq(f_x)
+      fn = flex.sum_sq(f_x_new)
+      df = f - fn
+      accept = 0
+      if (df > 0):
+        accept = 1
+        dl = 0.5 * h_dn.dot(h_dn * mu - fp)
+      elif (fn <= f + abs(f)*(1+100*floating_point_epsilon_double)):
+        df = (fp + fp_new).dot(fp - fp_new)
+        if (df > 0):
+          accept = 2
+      if (accept != 0):
+        if (accept == 1 and dl > 0):
+          mu *= max(1/3, 1 - (2*df/dl - 1)**3)
+          nu = 2
+        else:
+          mu *= nu
+          nu *= 2
+        x = x_new
+        f_x = f_x_new
+        fp = fp_new
+        fdp = None
+        k += 1
+      else:
+        mu *= nu
+        nu *= 2
+    self.x_star = x
+    self.f_x_star = f_x
+    self.number_of_iterations = k
+    self.number_of_function_evaluations = number_of_function_evaluations
+    self.number_of_gradient_evaluations = number_of_gradient_evaluations
+    self.number_of_hessian_evaluations = number_of_hessian_evaluations
+    self.number_of_cholesky_decompositions = number_of_cholesky_decompositions
+
+  def show_statistics(self):
+    print("damped_newton results:")
+    print("  function:", self.function.label())
+    print("  x_star:", list(self.x_star))
+    print("  0.5*f_x0.norm()**2:", 0.5*self.f_x0.norm()**2)
+    print("  0.5*f_x_star.norm()**2:", 0.5*self.f_x_star.norm()**2)
+    print("  number_of_iterations:", self.number_of_iterations)
+    print("  number_of_function_evaluations:", \
+        self.number_of_function_evaluations)
+    print("  number_of_gradient_evaluations:", \
+        self.number_of_gradient_evaluations)
+    print("  number_of_hessian_evaluations:", \
+        self.number_of_hessian_evaluations)
+    print("  number_of_cholesky_decompositions:", \
+        self.number_of_cholesky_decompositions)
+
+class minpack_levenberg_marquardt_adaptor:
+
+  def __init__(self, function, x0, max_iterations=1000):
+    self.function = function
+    self.f_x0 = function.f(x=x0)
+    x = x0.deep_copy()
+    self.number_of_iterations = 0
+    self.number_of_function_evaluations = 0
+    self.number_of_jacobian_evaluations = 0
+    minimizer = scitbx.minpack.levenberg_marquardt(
+      m=function.m,
+      x=x,
+      ftol=1.e-16,
+      xtol=1.e-16,
+      gtol=0,
+      maxfev=0,
+      factor=1.0e2,
+      call_back_after_iteration=True)
+    while (not minimizer.has_terminated()):
+      if (minimizer.requests_fvec()):
+        self.number_of_function_evaluations += 1
+        minimizer.process_fvec(
+          fvec=function.f(x=x))
+      elif (minimizer.requests_fjac()):
+        self.number_of_jacobian_evaluations += 1
+        minimizer.process_fjac(
+          fjac=function.jacobian(x=x).matrix_transpose().as_1d())
+      elif (minimizer.calls_back_after_iteration()):
+        self.number_of_iterations += 1
+        if (self.number_of_iterations >= max_iterations):
+          break
+        minimizer.continue_after_call_back_after_iteration()
+    self.x_star = x
+    self.f_x_star = function.f(x=self.x_star)
+
+  def show_statistics(self):
+    print("minpack.levenberg_marquardt results:")
+    print("  function:", self.function.label())
+    print("  x_star:", list(self.x_star))
+    print("  0.5*f_x0.norm()**2:", 0.5*self.f_x0.norm()**2)
+    print("  0.5*f_x_star.norm()**2:", 0.5*self.f_x_star.norm()**2)
+    print("  number_of_iterations:", self.number_of_iterations)
+    print("  number_of_function_evaluations:", \
+        self.number_of_function_evaluations)
+    print("  number_of_jacobian_evaluations:", \
+        self.number_of_jacobian_evaluations)
+
+class lbfgs_adaptor:
+
+  def __init__(self, function, x0, max_iterations=1000):
+    self.function = function
+    self.f_x0 = function.f(x=x0)
+    self.x = x0.deep_copy()
+    self.number_of_function_evaluations = 0
+    self.number_of_gradient_evaluations = 0
+    minimizer = scitbx.lbfgs.run(
+      target_evaluator=self,
+      termination_params=scitbx.lbfgs.termination_parameters(
+        traditional_convergence_test=True,
+        traditional_convergence_test_eps=1.e-16,
+        max_iterations=max_iterations))
+    self.number_of_iterations = minimizer.iter()
+    self.x_star = self.x
+    self.f_x_star = function.f(x=self.x_star)
+    del self.x
+
+  def compute_functional_and_gradients(self):
+    f = 0.5*self.function.f(x=self.x).norm()**2
+    self.number_of_function_evaluations += 1
+    g = self.function.gradients(x=self.x)
+    self.number_of_gradient_evaluations += 1
+    return f, g
+
+  def show_statistics(self):
+    print("lbfgs results:")
+    print("  function:", self.function.label())
+    print("  x_star:", list(self.x_star))
+    print("  0.5*f_x0.norm()**2:", 0.5*self.f_x0.norm()**2)
+    print("  0.5*f_x_star.norm()**2:", 0.5*self.f_x_star.norm()**2)
+    print("  number_of_iterations:", self.number_of_iterations)
+    print("  number_of_function_evaluations:", \
+        self.number_of_function_evaluations)
+    print("  number_of_gradient_evaluations:", \
+        self.number_of_gradient_evaluations)
+
+class lbfgsb_adaptor:
+
+  def __init__(self, function, x0, max_iterations=1000):
+    self.function = function
+    self.f_x0 = function.f(x=x0)
+    x = x0.deep_copy()
+    self.number_of_function_evaluations = 0
+    self.number_of_gradient_evaluations = 0
+    minimizer = scitbx.lbfgsb.minimizer(n=x.size(), factr=1.e-16, pgtol=1.e-16)
+    f = 0
+    g = flex.double(x.size(), 0)
+    while True:
+      if (minimizer.process(x, f, g, False)):
+        f = 0.5*self.function.f(x=x).norm()**2
+        self.number_of_function_evaluations += 1
+        g = self.function.gradients(x=x)
+        self.number_of_gradient_evaluations += 1
+      elif (minimizer.is_terminated()):
+        break
+      elif (minimizer.n_iteration() >= max_iterations):
+        break
+    self.number_of_iterations = minimizer.n_iteration()
+    self.x_star = x
+    self.f_x_star = function.f(x=self.x_star)
+
+  def show_statistics(self):
+    print("lbfgsb results:")
+    print("  function:", self.function.label())
+    print("  x_star:", list(self.x_star))
+    print("  0.5*f_x0.norm()**2:", 0.5*self.f_x0.norm()**2)
+    print("  0.5*f_x_star.norm()**2:", 0.5*self.f_x_star.norm()**2)
+    print("  number_of_iterations:", self.number_of_iterations)
+    print("  number_of_function_evaluations:", \
+        self.number_of_function_evaluations)
+    print("  number_of_gradient_evaluations:", \
+        self.number_of_gradient_evaluations)
+
+class MeyerFunctionError(RuntimeError): pass
+
+class test_function:
+
+  def __init__(self, m, n, check_with_finite_differences=True, verbose=1):
+    self.m = m
+    self.n = n
+    self.verbose = verbose
+    self.check_with_finite_differences = check_with_finite_differences
+    self.check_gradients_tolerance = 1.e-6
+    self.check_hessian_tolerance = 1.e-6
+    self.initialization()
+    assert self.m >= self.n
+    if (self.x_star is not None):
+      assert approx_equal(
+        0.5*self.f(x=self.x_star).norm()**2, self.capital_f_x_star)
+    if (1):
+      self.exercise_levenberg_marquardt()
+    if (1):
+      self.exercise_minpack_levenberg_marquardt()
+    if (1):
+      self.exercise_damped_newton()
+    if (1):
+      self.exercise_scitbx_minimizers_damped_newton()
+    if (1):
+      self.exercise_scitbx_minimizers_newton_more_thuente_1994()
+    if (1):
+      self.exercise_lbfgs()
+    if (1):
+      try:
+        self.exercise_lbfgsb()
+      except MeyerFunctionError:
+        print("Skipping: exercise_lbfgsb() with", self.__class__.__name__)
+    if (1 and knitro_adaptbx is not None):
+      self.exercise_knitro_adaptbx()
+
+  def label(self):
+    return self.__class__.__name__
+
+  def functional(self, x=None, f_x=None):
+    if (f_x is None): f_x = self.f(x=x)
+    return 0.5*flex.sum_sq(f_x)
+
+  def jacobian_finite(self, x, relative_eps=1.e-8):
+    x0 = x
+    result = flex.double()
+    for i in range(self.n):
+      eps = max(1, abs(x0[i])) * relative_eps
+      fs = []
+      for signed_eps in [eps, -eps]:
+        x = x0.deep_copy()
+        x[i] += signed_eps
+        fs.append(self.f(x=x))
+      result.extend((fs[0]-fs[1])/(2*eps))
+    result.resize(flex.grid(self.n, self.m))
+    return result.matrix_transpose()
+
+  def jacobian(self, x):
+    analytical = self.jacobian_analytical(x=x)
+    if (self.check_with_finite_differences):
+      finite = self.jacobian_finite(x=x)
+      scale = max(1, flex.max(flex.abs(analytical)))
+      assert approx_equal(analytical/scale, finite/scale, 1.e-5)
+    return analytical
+
+  def gradients_finite(self, x, relative_eps=1.e-7):
+    x0 = x
+    result = flex.double()
+    for i in range(self.n):
+      eps = max(1, abs(x0[i])) * relative_eps
+      fs = []
+      for signed_eps in [eps, -eps]:
+        x = x0.deep_copy()
+        x[i] += signed_eps
+        fs.append(self.functional(x=x))
+      result.append((fs[0]-fs[1])/(2*eps))
+    return result
+
+  def gradients_analytical(self, x, f_x=None):
+    if (f_x is None): f_x = self.f(x=x)
+    return self.jacobian_analytical(x=x).matrix_transpose() \
+      .matrix_multiply(f_x)
+
+  def gradients(self,x, f_x=None):
+    analytical = self.gradients_analytical(x=x, f_x=f_x)
+    if (self.check_with_finite_differences):
+      finite = self.gradients_finite(x=x)
+      scale = max(1, flex.max(flex.abs(analytical)))
+      assert approx_equal(analytical/scale, finite/scale,
+        self.check_gradients_tolerance)
+    return analytical
+
+  def hessian_finite(self, x, relative_eps=1.e-8):
+    x0 = x
+    result = flex.double()
+    for i in range(self.n):
+      eps = max(1, abs(x0[i])) * relative_eps
+      gs = []
+      for signed_eps in [eps, -eps]:
+        x = x0.deep_copy()
+        x[i] += signed_eps
+        gs.append(self.gradients_analytical(x=x))
+      result.extend((gs[0]-gs[1])/(2*eps))
+    result.resize(flex.grid(self.n, self.n))
+    return result
+
+  def hessian(self, x):
+    analytical = self.hessian_analytical(x=x)
+    if (self.check_with_finite_differences):
+      finite = self.hessian_finite(x=x)
+      scale = max(1, flex.max(flex.abs(analytical)))
+      assert approx_equal(analytical/scale, finite/scale,
+        self.check_hessian_tolerance)
+    return analytical
+
+  def check_minimized_x_star(self, x_star):
+    if (self.x_star is not None):
+      assert approx_equal(x_star, self.x_star)
+
+  def check_minimized_capital_f_x_star(self, f_x_star):
+    if (self.capital_f_x_star is not None):
+      assert approx_equal(0.5*f_x_star.norm()**2, self.capital_f_x_star)
+
+  def check_minimized(self, minimized):
+    self.check_minimized_x_star(x_star=minimized.x_star)
+    self.check_minimized_capital_f_x_star(f_x_star=minimized.f_x_star)
+
+  def exercise_levenberg_marquardt(self):
+    minimized = levenberg_marquardt(function=self, x0=self.x0, tau=self.tau0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+  def exercise_minpack_levenberg_marquardt(self):
+    minimized = minpack_levenberg_marquardt_adaptor(function=self, x0=self.x0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+  def exercise_damped_newton(self):
+    minimized = damped_newton(function=self, x0=self.x0, tau=self.tau0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+  def exercise_scitbx_minimizers_damped_newton(self):
+    import scitbx.minimizers
+    minimized = scitbx.minimizers.damped_newton(
+      function=self, x0=self.x0, tau=self.tau0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+  def exercise_scitbx_minimizers_newton_more_thuente_1994(self):
+    import scitbx.minimizers
+    minimized = scitbx.minimizers.newton_more_thuente_1994(
+      function=self, x0=self.x0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+  def exercise_lbfgs(self):
+    minimized = lbfgs_adaptor(function=self, x0=self.x0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+  def exercise_lbfgsb(self):
+    minimized = lbfgsb_adaptor(function=self, x0=self.x0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+  def exercise_knitro_adaptbx(self):
+    minimized = knitro_adaptbx.solve(function=self, x0=self.x0)
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+    minimized = knitro_adaptbx.solve(function=self, x0=self.x0,hessopt="bfgs")
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+    minimized = knitro_adaptbx.solve(function=self, x0=self.x0,hessopt="lbfgs")
+    if (self.verbose): minimized.show_statistics()
+    self.check_minimized(minimized=minimized)
+    if (self.verbose): print()
+
+class linear_function_full_rank(test_function):
+
+  def initialization(self):
+    self.a = flex.double(flex.grid(self.n, self.n), -2./self.m)
+    self.a.matrix_diagonal_add_in_place(value=1)
+    self.a.resize(flex.grid(self.m,self.n), -2./self.m)
+    self.x0 = flex.double(self.n, 1)
+    self.tau0 = 1.e-8
+    self.delta0 = 10
+    self.x_star = flex.double(self.n, -1)
+    self.capital_f_x_star = 0.5 * (self.m - self.n)
+
+  def label(self):
+    return "%s(m=%d, n=%d)" % (self.__class__.__name__, self.m, self.n)
+
+  def f(self, x):
+    return self.a.matrix_multiply(x) - flex.double(self.m, 1)
+
+  def jacobian_analytical(self, x):
+    return self.a
+
+  def hessian_analytical(self, x):
+    return self.a.matrix_transpose().matrix_multiply(self.a)
+
+class linear_function_rank_1(linear_function_full_rank):
+
+  def initialization(self):
+    m = self.m
+    n = self.n
+    self.a = flex.double(range(1,m+1)).matrix_outer_product(
+             flex.double(range(1,n+1)))
+    self.x0 = flex.double(n, 1)
+    self.tau0 = 1.e-8
+    self.delta0 = 10
+    self.x_star = None
+    self.capital_f_x_star = (m*(m-1))/(4*(2*m+1))
+
+  def check_minimized_x_star(self, x_star):
+    assert approx_equal(
+      flex.double(range(1,self.n+1)).dot(x_star),
+      3/(2*self.m+1))
+
+class linear_function_rank_1_with_zero_columns_and_rows(
+        linear_function_full_rank):
+
+  def initialization(self):
+    m = self.m
+    n = self.n
+    self.a = flex.double([0]+list(range(1,m-2+1))+[0]).matrix_outer_product(
+             flex.double([0]+list(range(2,n-1+1))+[0]))
+    self.x0 = flex.double(n, 1)
+    self.tau0 = 1.e-8
+    self.delta0 = 10
+    self.x_star = None
+    self.capital_f_x_star = (m**2+3*m-6)/(4*(2*m-3))
+
+  def check_minimized_x_star(self, x_star):
+    assert approx_equal(
+      flex.double([0]+list(range(2,self.n-1+1))+[0]).dot(x_star),
+      3/(2*self.m-3))
+
+class rosenbrock_function(test_function):
+
+  def initialization(self):
+    assert self.m == 2
+    assert self.n == 2
+    self.x0 = flex.double([-1.2, 1])
+    self.tau0 = 1
+    self.delta0 = 1
+    self.x_star = flex.double([1,1])
+    self.capital_f_x_star = 0
+
+  def f(self, x):
+    return flex.double([10*(x[1]-x[0]**2), 1-x[0]])
+
+  def jacobian_analytical(self, x):
+    return flex.double([[-20*x[0], 10], [-1, 0]])
+
+  def hessian_analytical(self, x):
+    f = self.f(x=x)
+    j = self.jacobian(x=x)
+    return j.matrix_transpose().matrix_multiply(j) \
+         + flex.double([[-20*f[0],0],[0,0]])
+
+class helical_valley_function(test_function):
+
+  def initialization(self):
+    assert self.m == 3
+    assert self.n == 3
+    self.x0 = flex.double([-1, 0, 0])
+    self.tau0 = 1
+    self.delta0 = 1
+    self.x_star = flex.double([1,0,0])
+    self.capital_f_x_star = 0
+
+  def f(self, x):
+    x1,x2,x3 = x
+    assert x1 != 0
+    t = math.atan(x2/x1)/(2*math.pi)
+    if (x1 < 0): t += 0.5
+    nx = x[:2].norm()
+    return flex.double([10*(x3 - 10*t), 10*(nx - 1), x3])
+
+  def jacobian_analytical(self, x):
+    x1,x2,x3 = x
+    nx = x[:2].norm()
+    nx2 = nx*nx
+    k1 = 50/math.pi/nx2
+    k2 = 10/nx
+    return flex.double([
+      [k1*x2, -k1*x1, 10],
+      [k2*x1, k2*x2, 0],
+      [0, 0, 1]])
+
+  def hessian_analytical(self, x):
+    x1,x2,x3 = x
+    nx = x[:2].norm()
+    nx2 = nx*nx
+    k1 = 50/math.pi/nx2
+    k2 = 10/nx
+    f = self.f(x=x)
+    j = self.jacobian_analytical(x=x)
+    result = j.matrix_transpose().matrix_multiply(j)
+    q1 = x1**2
+    q2 = x2**2
+    p = x1*x2
+    terms = f[0]*k1/nx2*flex.double([[-2*p,q1-q2],[q1-q2,2*p]]) \
+          + f[1]*k2/nx2*flex.double([[q2,-p],[-p,q1]])
+    for i in [0,1]:
+      for j in [0,1]:
+        result[i*3+j] += terms[i*2+j]
+    return result
+
+class powell_singular_function(test_function):
+
+  def initialization(self):
+    assert self.m == 4
+    assert self.n == 4
+    self.x0 = flex.double([3, -1, 0, 1])
+    self.tau0 = 1.e-8
+    self.delta0 = 1
+    self.x_star = flex.double([0,0,0,0])
+    self.capital_f_x_star = 0
+
+  def check_minimized_x_star(self, x_star):
+    assert approx_equal(x_star, self.x_star, 1.e-5)
+
+  def f(self, x):
+    x1,x2,x3,x4 = x
+    return flex.double([
+      x1+10*x2,
+      5**0.5*(x3-x4),
+      (x2-2*x3)**2,
+      10**0.5*(x1-x4)**2])
+
+  def jacobian_analytical(self, x):
+    x1,x2,x3,x4 = x
+    d3 = x2 - 2*x3
+    d4 = x1 - x4
+    s5 = 5**0.5
+    s10 = 10**0.5
+    return flex.double([
+      [1, 10, 0, 0],
+      [0, 0, s5, -s5],
+      [0, 2*d3, -4*d3, 0],
+      [2*s10*d4, 0, 0, -2*s10*d4]])
+
+  def hessian_analytical(self, x):
+    s10 = 10**0.5
+    f1,f2,f3,f4 = self.f(x=x)
+    j = self.jacobian_analytical(x=x)
+    result = j.matrix_transpose().matrix_multiply(j)
+    result += flex.double([
+     [f4*2*s10,0,0,-f4*2*s10],
+     [0,f3*2,-f3*4,0],
+     [0,-f3*4,f3*8,0],
+     [-f4*2*s10,0,0,f4*2*s10]])
+    return result
+
+class freudenstein_and_roth_function(test_function):
+
+  def initialization(self):
+    assert self.m == 2
+    assert self.n == 2
+    self.x0 = flex.double([0.5, -2])
+    self.tau0 = 1
+    self.delta0 = 1
+    self.x_star = (flex.double([53,2]) - 22**0.5*flex.double([4,1]))/3
+    self.capital_f_x_star = 24.4921268396
+
+  def f(self, x):
+    x1,x2 = x
+    return flex.double([
+      x1-x2*(2-x2*(5-x2))-13,
+      x1-x2*(14-x2*(1+x2))-29])
+
+  def jacobian_analytical(self, x):
+    x1,x2 = x
+    return flex.double([
+      [1, (-2 + x2*(10 - 3*x2))],
+      [1, (-14 + x2*(2 + 3*x2))]])
+
+  def hessian_analytical(self, x):
+    x1,x2 = x
+    f1,f2 = self.f(x=x)
+    j = self.jacobian_analytical(x=x)
+    result = j.matrix_transpose().matrix_multiply(j)
+    result[3] += f1*(10-6*x2) + f2*(2+6*x2)
+    return result
+
+class bard_function(test_function):
+
+  ys = [0.14, 0.18, 0.22, 0.25, 0.29, 0.32, 0.35, 0.39, 0.37, 0.58,
+        0.73, 0.96, 1.34, 2.10, 4.39]
+
+  def initialization(self):
+    assert self.m == 15
+    assert self.n == 3
+    self.x0 = flex.double([1, 1, 1])
+    self.tau0 = 1.e-8
+    self.delta0 = 1
+    self.x_star = flex.double([0.082411, 1.133036, 2.343695])
+    self.capital_f_x_star = 4.10744e-3
+
+  def f(self, x):
+    x1,x2,x3 = x
+    result = flex.double()
+    for i,yi in zip(range(1,15+1),bard_function.ys):
+      ui = i
+      vi = 16-i
+      wi = min(ui, vi)
+      denominator = x2*vi + x3*wi
+      assert denominator != 0
+      result.append(yi - (x1 + ui / denominator))
+    return result
+
+  def jacobian_analytical(self, x):
+    x1,x2,x3 = x
+    result = flex.double()
+    for i in range(1,15+1):
+      ui = i
+      vi = 16-i
+      wi = min(ui, vi)
+      denominator = (x2*vi + x3*wi)**2
+      assert denominator != 0
+      result.extend(flex.double([-1, ui*vi/denominator, ui*wi/denominator]))
+    result.resize(flex.grid(self.m,self.n))
+    return result
+
+  def hessian_analytical(self, x):
+    x1,x2,x3 = x
+    j = self.jacobian_analytical(x=x)
+    result = j.matrix_transpose().matrix_multiply(j)
+    for i,fi in zip(range(1,15+1), self.f(x=x)):
+      ui = i
+      vi = 16-i
+      wi = min(ui, vi)
+      denominator = (x2*vi + x3*wi)**3
+      assert denominator != 0
+      term = fi*2*ui/denominator
+      result[(1,1)] -= term*vi**2
+      result[(1,2)] -= term*vi*wi
+      result[(2,2)] -= term*wi**2
+    result[(2,1)] = result[(1,2)]
+    return result
+
+class kowalik_and_osborne_function(test_function):
+
+  ys = [0.1957, 0.1947, 0.1735, 0.1600, 0.0844, 0.0627,
+        0.0456, 0.0342, 0.0323, 0.0235, 0.0246]
+  us = [4.0000, 2.0000, 1.0000, 0.5000, 0.2500, 0.1670,
+        0.1250, 0.1000, 0.0833, 0.0714, 0.0625]
+
+  def initialization(self):
+    assert self.m == 11
+    assert self.n == 4
+    self.x0 = flex.double([0.25, 0.39, 0.415, 0.39])
+    self.tau0 = 1
+    self.delta0 = 0.1
+    self.x_star = flex.double([
+      0.1928069346, 0.1912823287, 0.1230565069, 0.1360623307])
+    self.capital_f_x_star = 1.53753e-4
+
+  def f(self, x):
+    x1,x2,x3,x4 = x
+    result = flex.double()
+    for yi,ui in zip(kowalik_and_osborne_function.ys,
+                     kowalik_and_osborne_function.us):
+      denominator = ui*(ui+x3)+x4
+      assert denominator != 0
+      result.append(yi-x1*ui*(ui+x2)/denominator)
+    return result
+
+  def jacobian_analytical(self, x):
+    x1,x2,x3,x4 = x
+    result = flex.double()
+    for ui in kowalik_and_osborne_function.us:
+      denominator = ui*(ui+x3)+x4
+      assert denominator != 0
+      denominator_sq = denominator**2
+      assert denominator_sq != 0
+      result.extend(flex.double([
+        -ui*(ui+x2)/denominator,
+        -ui*x1/denominator,
+        ui**2*x1*(ui+x2)/denominator_sq,
+        ui*x1*(ui+x2)/denominator_sq]))
+    result.resize(flex.grid(self.m, self.n))
+    return result
+
+  def hessian_analytical(self, x):
+    x1,x2,x3,x4 = x
+    j = self.jacobian_analytical(x=x)
+    result = j.matrix_transpose().matrix_multiply(j)
+    for ui,fi in zip(kowalik_and_osborne_function.us, self.f(x=x)):
+      denominator = ui*(ui+x3)+x4
+      assert denominator != 0
+      denominator_sq = denominator**2
+      assert denominator_sq != 0
+      denominator_cu = denominator**3
+      assert denominator_cu != 0
+      result[(0,0)] -= 0
+      result[(0,1)] -= fi*ui/denominator
+      result[(0,2)] -= -fi*(ui**2*(ui+x2))/denominator_sq
+      result[(0,3)] -= -fi*(ui*(ui+x2))/denominator_sq
+      result[(1,1)] -= 0
+      result[(1,2)] -= -fi*ui**2*x1/denominator_sq
+      result[(1,3)] -= -fi*ui*x1/denominator_sq
+      result[(2,2)] -= fi*2*ui**3*x1*(ui+x2)/denominator_cu
+      result[(2,3)] -= fi*2*ui**2*x1*(ui+x2)/denominator_cu
+      result[(3,3)] -= fi*2*ui*x1*(ui+x2)/denominator_cu
+    for i in range(0,4):
+      for j in range(i+1,4):
+        result[(j,i)] = result[(i,j)]
+    return result
+
+class meyer_function(test_function):
+
+  ys = [34780, 28610, 23650, 19630, 16370, 13720, 11540, 9744,
+        8261, 7030, 6005, 5147, 4427, 3820, 3307, 2872]
+  ts = [45+5*i for i in range(1,16+1)]
+
+  def initialization(self):
+    assert self.m == 16
+    assert self.n == 3
+    self.x0 = flex.double([0.02, 4000, 250])
+    self.tau0 = 1.e-6
+    self.delta0 = 100
+    self.x_star = flex.double([
+      5.60963646990603e-3, 6.181346346e3, 3.452236346e2])
+    self.capital_f_x_star = 43.9729275853
+    self.check_gradients_tolerance = 1.e-3
+    self.check_hessian_tolerance = 1.e-2
+
+  def check_minimized_x_star(self, x_star):
+    if (self.verbose):
+      print("  expected x_star: %.6g %.6g %.6g" % tuple(self.x_star))
+      print("    actual x_star: %.6g %.6g %.6g" % tuple(x_star))
+
+  def check_minimized_capital_f_x_star(self, f_x_star):
+    if (self.verbose):
+      print("  expected 0.5*f_x_star.norm()**2: %.6g" % self.capital_f_x_star)
+      print("    actual 0.5*f_x_star.norm()**2: %.6g" % (0.5*f_x_star.norm()**2))
+
+  def f(self, x):
+    x1,x2,x3 = x
+    result = flex.double()
+    for yi,ti in zip(meyer_function.ys,
+                     meyer_function.ts):
+      denominator = ti + x3
+      assert denominator != 0
+      result.append(x1 * math.exp(x2/denominator) - yi)
+    if (x[0] > 100): # numerical instability on some platforms
+      raise MeyerFunctionError
+    return result
+
+  def jacobian_analytical(self, x):
+    x1,x2,x3 = x
+    result = flex.double()
+    for ti in meyer_function.ts:
+      denominator = ti + x3
+      assert denominator != 0
+      denominator_sq = denominator**2
+      assert denominator_sq != 0
+      term = math.exp(x2/denominator)
+      result.extend(flex.double([
+        term,
+        x1*term/denominator,
+        -x1*term*x2/denominator_sq]))
+    result.resize(flex.grid(self.m, self.n))
+    return result
+
+  def hessian_analytical(self, x):
+    x1,x2,x3 = x
+    result = flex.double(flex.grid(3,3), 0)
+    for ti in meyer_function.ts:
+      denominator = ti + x3
+      assert denominator != 0
+      denominator_sq = denominator**2
+      assert denominator_sq != 0
+      denominator_cu = denominator**3
+      assert denominator_cu != 0
+      denominator_qa = denominator**4
+      assert denominator_qa != 0
+      term = math.exp(x2/denominator)
+      result[(0,0)] -= 0
+      result[(0,1)] -= term/denominator
+      result[(0,2)] -= -x2*term/denominator_sq
+      result[(1,1)] -= x1*term/denominator_sq
+      result[(1,2)] -= -x1*x2*term/denominator_cu - x1*term/denominator_sq
+      result[(2,2)] -= x1*x2**2*term/denominator_qa \
+                     + 2*x1*x2*term/denominator_cu
+    for i in range(0,3):
+      for j in range(i+1,3):
+        result[(j,i)] = result[(i,j)]
+    j = self.jacobian_analytical(x=x)
+    result += j.matrix_transpose().matrix_multiply(j)
+    return result
+
+def exercise_cholesky():
+  mt = flex.mersenne_twister(seed=0)
+  for n in range(1,10):
+    a = flex.double(n*n,0)
+    a.resize(flex.grid(n, n))
+    for i in range(n): a[(i,i)] = 1
+    c = cholesky_decomposition(a)
+    assert c is not None
+    assert approx_equal(c.matrix_multiply(c.matrix_transpose()), a)
+    b = mt.random_double(size=n, factor=4)-2
+    x = cholesky_solve(c, b)
+    assert approx_equal(a.matrix_multiply(x), b)
+    d = flex.random_size_t(size=n, modulus=10)
+    for i in range(n): a[(i,i)] = d[i]+1
+    c = cholesky_decomposition(a)
+    assert c is not None
+    assert approx_equal(c.matrix_multiply(c.matrix_transpose()), a)
+    b = mt.random_double(size=n, factor=4)-2
+    x = cholesky_solve(c, b)
+    assert approx_equal(a.matrix_multiply(x), b)
+  #
+  a = flex.double([8, -6, 0, -6, 9, -2, 0, -2, 8])
+  a.resize(flex.grid(3,3))
+  c = cholesky_decomposition(a)
+  assert c is not None
+  assert approx_equal(c.matrix_multiply(c.matrix_transpose()), a)
+  assert approx_equal(c, [
+    2.828427125,          0,              0,
+    -2.121320344,    2.121320343,         0,
+         0.,        -0.9428090418,   2.666666667])
+  #
+  a0 = matrix.sym(sym_mat3=[3,5,7,1,2,-1])
+  for i_trial in range(100):
+    r = scitbx.math.euler_angles_as_matrix(
+      mt.random_double(size=3,factor=360), deg=True)
+    a = flex.double(r * a0 * r.transpose())
+    a.resize(flex.grid(3,3))
+    c = cholesky_decomposition(a)
+    assert c is not None
+    assert approx_equal(c.matrix_multiply(c.matrix_transpose()), a)
+    for b in [(0.1,-0.5,2), (-0.3,0.7,-1), (1.3,2.9,4), (-10,-20,17)]:
+      b = flex.double(b)
+      x = cholesky_solve(c, b)
+      assert approx_equal(a.matrix_multiply(x), b)
+  #
+  for n in range(1,10):
+    for i in range(10):
+      r = mt.random_double(size=n*n, factor=10)-5
+      r.resize(flex.grid(n,n))
+      a = r.matrix_multiply(r.matrix_transpose())
+      c = cholesky_decomposition(a)
+      assert c is not None
+      b = mt.random_double(size=n, factor=4)-2
+      x = cholesky_solve(c, b)
+      assert approx_equal(a.matrix_multiply(x), b)
+      a[(i%n,i%n)] *= -1
+      c = cholesky_decomposition(a)
+      assert c is None
+
+def exercise():
+  verbose = "--verbose" in sys.argv[1:]
+  exercise_cholesky()
+  default_flag = True
+  if (0 or default_flag):
+    for m in range(1,5+1):
+      for n in range(1,m+1):
+        linear_function_full_rank(m=m, n=n, verbose=verbose)
+  if (0 or default_flag):
+    for m in range(1,5+1):
+      for n in range(1,m+1):
+        linear_function_rank_1(m=m, n=n, verbose=verbose)
+  if (0 or default_flag):
+    for m in range(3,7+1):
+      for n in range(3,m+1):
+        linear_function_rank_1_with_zero_columns_and_rows(
+          m=m, n=n, verbose=verbose)
+  if (0 or default_flag):
+    rosenbrock_function(m=2, n=2, verbose=verbose)
+  if (0 or default_flag):
+    helical_valley_function(m=3, n=3, verbose=verbose)
+  if (0 or default_flag):
+    powell_singular_function(m=4, n=4, verbose=verbose)
+  if (0 or default_flag):
+    freudenstein_and_roth_function(m=2, n=2, verbose=verbose)
+  if (0 or default_flag):
+    bard_function(m=15, n=3, verbose=verbose)
+  if (0 or default_flag):
+    kowalik_and_osborne_function(m=11, n=4, verbose=verbose)
+  if (0 or default_flag):
+    meyer_function(m=16, n=3, verbose=verbose)
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/integrating_a_weighted_sinc_function.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.math import chebyshev_polynome
+import scitbx.math
+import math
+from six.moves import range
+from six.moves import zip
+
+
+class function(object):
+  def __init__(self, n, m=100, k=2.5, d_max=45.0):
+    self.n = n
+    self.m = m
+    self.k = k
+    self.d_max=d_max
+    self.x = 1.0-2.0*(flex.double(range(m+1))/m)
+    self.r = 0.5*(1+self.x)*self.d_max
+    self.r[0] = 1e-8
+
+    self.coefs = (flex.random_double(self.n)-0.5)*0.0
+    self.load_coefs()
+    self.polynome = chebyshev_polynome(self.n, -1.0, +1.0, self.coefs)
+
+  def show(self):
+    result = get_p_of_r(self.x)
+    for r,y in zip(self.r, result):
+      print(r, y)
+
+  def load_coefs(self, coefs=None):
+    if coefs is None:
+      self.coefs = (flex.random_double(self.n)-0.5)*2.0
+    else:
+      assert len(coefs)==self.n
+      self.coefs = coefs
+    # no means to refresh the coefficients yet in an elegant manner
+    self.polynome = chebyshev_polynome(self.n, -1.0, +1.0, self.coefs)
+
+
+  def get_p_of_r(self,x):
+    base = flex.pow((1.0-x*x),self.k)
+    exp_pol = flex.exp( self.polynome.f( x ) )
+    result = exp_pol*base
+    return result
+
+  def get_sinc(self, q, x ):
+    r = 0.5*(x+1)*self.d_max
+    sinc = flex.sin( r*q )/(r*q)
+    return sinc
+
+  def integrate(self, q, ni):
+    gle = scitbx.math.gauss_legendre_engine(ni)
+    x_int = gle.x()
+    w_int = gle.w()
+    p_of_r = self.get_p_of_r(x_int)
+    sinc = self.get_sinc( q, x_int )
+    tbi = p_of_r*sinc
+    wtbi = tbi*w_int
+    result = flex.sum(wtbi)
+    return result
+
+def example():
+  f = function(5,100)
+  q_trials = [0.001, 0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+
+  ref_integrals = []
+  for q in q_trials:
+    ref_integrals.append( f.integrate(q,90) )
+
+  for q, jj in zip(q_trials, range(len(q_trials))):
+    print(q,jj, end=' ')
+    for ii in range(2,90):
+      print(100.0*abs(f.integrate(q,ii)-ref_integrals[jj])/abs(ref_integrals[jj]+1e-13), end=' ')
+    print()
+
+
+
+
+
+if (__name__ == "__main__"):
+  example()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/lbfgs_linear_least_squares_fit.py
+from __future__ import absolute_import, division, print_function
+import scitbx.lbfgs
+from scitbx.array_family import flex
+import math
+from six.moves import zip
+
+class linear_least_squares_fit(object):
+
+  def __init__(self, x_obs, y_obs):
+    self.x_obs = x_obs
+    self.y_obs = y_obs
+    self.x = flex.double([1, 0]) # start with slope=1, y_intercept=0
+    self.minimizer = scitbx.lbfgs.run(target_evaluator=self)
+    self.slope = self.x[0]
+    self.y_intercept = self.x[1]
+    del self.x
+
+  def compute_functional_and_gradients(self):
+    slope = self.x[0]
+    y_intercept = self.x[1]
+    y_calc = slope * self.x_obs + y_intercept
+    y_diff = self.y_obs - y_calc
+    f = flex.sum(flex.pow2(y_diff))
+    g = flex.double([
+      flex.sum(-2 * y_diff * self.x_obs),
+      flex.sum(-2 * y_diff)])
+    return f, g
+
+def example():
+  x_obs = flex.double([1,2,3,4,5,6,7,8,9,10])
+  slope = -math.pi
+  y_intercept = math.sqrt(3)
+  y_ideal = slope * x_obs + y_intercept
+  y_obs = y_ideal + flex.random_double(size=x_obs.size())*0.1
+  fit = linear_least_squares_fit(x_obs=x_obs, y_obs=y_obs)
+  print("fit.slope:", fit.slope)
+  print("fit.y_intercept:", fit.y_intercept)
+  y_calc = fit.slope * x_obs + fit.y_intercept
+  print(" x_obs  y_obs y_calc  diff")
+  for xo,yo,yc in zip(x_obs, y_obs, y_calc):
+    print("%6.2f %6.2f %6.2f %6.2f" % (xo,yo,yc,yo-yc))
+
+if (__name__ == "__main__"):
+  example()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/lbfgs_recipe.py
+from __future__ import absolute_import, division, print_function
+import scitbx.lbfgs
+from scitbx.array_family import flex
+
+class refinery:
+
+  def __init__(self):
+    print("refinery")
+    self.x = flex.double([0])
+    scitbx.lbfgs.run(target_evaluator=self)
+
+  def compute_functional_and_gradients(self):
+    print("compute_functional_and_gradients")
+    f = 0
+    g = flex.double([0])
+    return f, g
+
+  def callback_after_step(self, minimizer):
+    print("callback_after_step")
+
+def run():
+  refinery()
+  print("OK")
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/minimizer_comparisons.py
+from __future__ import absolute_import, division, print_function
+from scitbx.examples.functions import Function
+
+from scitbx import simplex
+from scitbx import direct_search_simulated_annealing
+from scitbx import differential_evolution
+from scitbx import cross_entropy
+
+from scitbx import lbfgs
+
+from scitbx.array_family import flex
+
+import libtbx.load_env
+from six.moves import range
+
+dim=2
+start = flex.double( [4,4] )
+
+funct_count=0
+
+def derivative(vector,f,h=1e-8):
+  ori = vector.deep_copy()
+  tmp = vector.deep_copy()
+  f0 = f(ori)
+  f_vector=tmp*0.0
+  for ii,var in enumerate(tmp):
+    tmp[ii] = var + h
+    f_vector[ii]=f(tmp)
+    tmp[ii]=var
+  f_vector = (f_vector-f0)/h
+  return f_vector
+
+class test_lbfgs(object):
+  def __init__(self, name):
+    self.x = start.deep_copy()
+    self.n = 2
+    self.name = name
+    self.fcount=0
+    self.minimizer = lbfgs.run(target_evaluator=self)
+    print("LBFGS ITERATIONS", self.minimizer.iter(), self.fcount," SOLUTION", list(self.x), self.function(self.x))
+
+  def function(self,vector):
+    self.fcount+=1
+    result = Function(self.name)(dim).eval(vector)
+    return result
+
+  def compute_functional_and_gradients(self):
+    f = self.function(self.x)
+    g = derivative(self.x, self.function,h=1e-5)
+    return f, g
+
+class test_simplex(object):
+  def __init__(self, name):
+    self.n = 2
+    self.x = start.deep_copy()
+    self.name=name
+    self.starting_simplex=[]
+    self.fcount=0
+    for ii in range(self.n+1):
+        self.starting_simplex.append((flex.random_double(self.n)/2-1)*0.0003+ self.x)
+    self.optimizer = simplex.simplex_opt(
+                                  dimension=self.n,
+                                  matrix  = self.starting_simplex,
+                                  evaluator = self,
+                                  tolerance=1e-10)
+    self.x = self.optimizer.get_solution()
+    print("SIMPLEX ITRATIONS", self.optimizer.count,self.fcount, "SOLUTION", list(self.x), self.target(self.x))
+
+  def target(self,vector):
+    self.fcount += 1
+    return  Function(self.name)(dim).eval(vector)
+
+
+class test_dssa(object):
+  def __init__(self,name):
+    self.name=name
+    self.fcount=0
+    self.n = 2
+    self.x = start.deep_copy()
+    self.starting_simplex=[]
+    for ii in range(self.n+1):
+      self.starting_simplex.append(3.1*(flex.random_double(self.n)/2-1) + self.x)
+    self.optimizer = direct_search_simulated_annealing.dssa(
+                          dimension=self.n,
+                          matrix = self.starting_simplex,
+                          evaluator = self,
+                          further_opt=True,
+                          coolfactor=0.5, simplex_scale=1
+                                          )
+    self.x = self.optimizer.get_solution()
+    print("DSSA ITERATIONS", self.optimizer.count, self.fcount, "SOLUTION", list(self.x), self.target(self.x))
+
+  def function(self,vector):
+    self.fcount+=1
+    return Function(self.name)(dim).eval(vector)
+
+  def target(self,vector):
+    return self.function(vector)
+
+  def compute_functional_and_gradients(self):
+    f = self.function(self.x)
+    g = derivative(self.x, self.function,h=1e-5)
+    return f, g
+
+
+
+class test_cross_entropy(object):
+  def __init__(self,name):
+    self.name=name
+    self.fcount=0
+    self.n = 2
+    self.x = start.deep_copy()
+    self.means = flex.double( self.n, 4.0 )
+    self.sigmas = flex.double( self.n, 2.0 )
+    self.optimizer =  cross_entropy.cross_entropy_optimizer(self,
+                                              mean=self.means,
+                                              sigma=self.sigmas,
+                                              alpha=0.95,
+                                              beta=0.75,
+                                              q=8.5,
+                                              elite_size=10,
+                                              sample_size=50, inject_eps=1e-4,
+                                              monitor_cycle=150,eps=1e-8)
+    print("CROSS ENTROPY ITERATIONS", self.optimizer.count, self.fcount, "SOLUTION", list(self.optimizer.best_sol), self.target(self.optimizer.best_sol))
+
+  def function(self,vector):
+    self.fcount += 1
+    result = Function(self.name)(dim).eval(vector)
+    return result
+
+  def target(self, vector):
+    return self.function(vector)
+
+  def compute_functional_and_gradients(self):
+    f = self.function(self.x)
+    g = derivative(self.x, self.function,h=1e-5)
+    return f, g
+
+
+
+
+
+class test_differential_evolution(object):
+  def __init__(self,name,npop=20):
+    self.name=name
+    self.fcount=0
+    self.n = 2
+    self.x = None #flex.double(self.n, 2)
+    self.domain = [(start[0]-1,start[0]+1),(start[1]-1, start[1]+1)]
+    self.optimizer =  differential_evolution.differential_evolution_optimizer(self,population_size=npop,cr=0.9,n_cross=2,eps=1e-12,show_progress=False)
+    print("DIFFERENTIAL EVOLUTION ITERATIONS", self.optimizer.count, self.fcount, "SOLUTION", list(self.x), self.target(self.x))
+
+  def function(self,vector):
+    self.fcount+=1
+    result = Function(self.name)(dim).eval(vector)
+    return result
+
+  def target(self,vector):
+    return self.function(vector)
+
+  def compute_functional_and_gradients(self):
+    f = self.function(self.x)
+    g = derivative(self.x, self.function,h=1e-5)
+    return f, g
+
+  def print_status(self, mins,means,vector,txt):
+    print(txt,mins, means, list(vector))
+
+
+
+class test_cma_es(object):
+  def __init__(self,name,l=0):
+    self.m = start.deep_copy()
+    self.s = flex.double( [2,2])
+    self.l = l
+    self.name = name
+    self.fcount = 0
+    from cma_es import cma_es_interface
+    self.minimizer = cma_es_interface.cma_es_driver( 2, self.m, self.s, self.my_function, self.l )
+    print("CMA-ES ITERATIONS", self.minimizer.count, self.fcount,"SOLUTION",  list(self.minimizer.x_final), self.my_function( self.minimizer.x_final ))
+
+    self.x = self.minimizer.x_final.deep_copy()
+
+
+  def compute_functional_and_gradients(self):
+    f = self.my_function(self.x)
+    g = derivative(self.x, self.my_function,h=1e-5)
+    return f, g
+
+  def my_function(self,vector):
+    self.fcount+=1
+    tmp = Function(self.name)(dim)
+    return tmp.eval(list(vector))
+
+
+def run(args):
+  assert len(args) == 0
+
+  have_cma_es = libtbx.env.has_module("cma_es")
+  if (not have_cma_es):
+    print("Skipping some tests: cma_es module not available or not configured.")
+    print()
+
+  names = ['easom','rosenbrock','ackley','rastrigin']
+  for name in names:
+    print("****", name, "****")
+    if name == 'easom':
+      start = flex.double( [0.0,0.0] )
+    else:
+      start = flex.double( [4,4] )
+    for ii in range(1):
+      test_lbfgs(name)
+      if (have_cma_es):
+        test_cma_es(name)
+      test_differential_evolution(name)
+      test_cross_entropy(name)
+      test_simplex(name)
+      test_dssa(name)
+      print()
+    print()
+  from libtbx.utils import format_cpu_times
+  print(format_cpu_times())
+
+if (__name__ == "__main__"):
+  import sys
+  run(args=sys.argv[1:])
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/principal_axes_of_inertia.py
+from __future__ import absolute_import, division, print_function
+from scitbx.math import principal_axes_of_inertia
+from scitbx.array_family import flex
+
+def run():
+  points = flex.vec3_double([
+    ( 8.292,  1.817,  6.147),
+    ( 9.159,  2.144,  7.299),
+    (10.603,  2.331,  6.885),
+    (11.041,  1.811,  5.855),
+    ( 9.061,  1.065,  8.369),
+    ( 7.665,  0.929,  8.902),
+    ( 6.771,  0.021,  8.327),
+    ( 7.210,  1.756,  9.920),
+    ( 5.480, -0.094,  8.796),
+    ( 5.904,  1.649, 10.416),
+    ( 5.047,  0.729,  9.831),
+    ( 3.766,  0.589, 10.291),
+    (11.358,  2.999,  7.612)])
+  pai = principal_axes_of_inertia(points=points)
+  print(pai.center_of_mass())
+  print(pai.inertia_tensor())
+  es = pai.eigensystem()
+  print(list(es.values()))
+  print(list(es.vectors()))
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/examples/rigid_body_refinement_core.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx import matrix
+import math
+import sys
+from six.moves import range
+from six.moves import zip
+
+angle_scale = math.pi / 2
+
+def euler_xyz_matrix(ea):
+  """
+  Mathematica code:
+    rx = {{1, 0, 0}, {0, cx, -sx}, {0, sx, cx}}
+    ry = {{cy, 0, sy}, {0, 1, 0}, {-sy, 0, cy}}
+    rz = {{cz, -sz, 0}, {sz, cz, 0}, {0, 0, 1}}
+    rx.ry.rz
+  """
+  sin, cos = math.sin, math.cos
+  cx = cos(ea[0] * angle_scale)
+  sx = sin(ea[0] * angle_scale)
+  cy = cos(ea[1] * angle_scale)
+  sy = sin(ea[1] * angle_scale)
+  cz = cos(ea[2] * angle_scale)
+  sz = sin(ea[2] * angle_scale)
+  return (
+              cy*cz,         -cy*sz,     sy,
+     cz*sx*sy+cx*sz, cx*cz-sx*sy*sz, -cy*sx,
+    -cx*cz*sy+sx*sz, cz*sx+cx*sy*sz,  cx*cy)
+
+def euler_xyz_ea_d_as_omega_fixed_frame_matrix(ea):
+  "Goldstein (A14.xyz) with sinus sign reversed"
+  sin, cos = math.sin, math.cos
+  cx = cos(ea[0] * angle_scale)
+  sx = sin(ea[0] * angle_scale)
+  cy = cos(ea[1] * angle_scale)
+  sy = sin(ea[1] * angle_scale)
+  return (
+    1,  0,     sy,
+    0, cx, -cy*sx,
+    0, sx,  cx*cy)
+
+def newton_euler_f(sites, pivot, d_potential_energy_d_site):
+  "Schwieters & Clore (2001) equations 24"
+  sum_grads = matrix.col((0,0,0))
+  sum_moments = matrix.col((0,0,0))
+  for site,grad in zip(sites, d_potential_energy_d_site):
+    grad = -matrix.col(grad)
+    sum_grads += grad
+    sum_moments += (matrix.col(site) - pivot).cross(grad)
+  return matrix.col(sum_moments.elems + sum_grads.elems)
+
+class rigid_body(object):
+
+  def __init__(self, sites):
+    self.sites_orig = sites
+    self.center_of_mass_orig = matrix.col(sites.mean())
+    self.lt = matrix.col((0,0,0))
+    self.ea = matrix.col((0,0,0))
+
+  def rotation_matrix(self):
+    return euler_xyz_matrix(ea=self.ea)
+
+  def center_of_mass_moved(self):
+    return self.center_of_mass_orig + self.lt
+
+  def sites_moved(self):
+    return \
+      self.rotation_matrix() \
+      * (self.sites_orig - self.center_of_mass_orig) \
+      + self.center_of_mass_moved()
+
+  def ea_gradients(self, energy_cart_function):
+    sites_moved = self.sites_moved()
+    energy_cart = energy_cart_function(
+      nodes=sites_moved, homes=self.sites_orig)
+    ne_f = newton_euler_f(
+      sites=sites_moved,
+      pivot=self.center_of_mass_moved(),
+      d_potential_energy_d_site=energy_cart.gradients())
+    f = list(-ne_f)
+    c = matrix.sqr(euler_xyz_ea_d_as_omega_fixed_frame_matrix(
+      ea=self.ea)).transpose()
+    return list(angle_scale * c * matrix.col(f[:3])) + f[-3:]
+
+def exercise(args):
+  assert len(args) == 0
+  sites = flex.vec3_double([
+    (10.949, 12.815, 15.189),
+    (10.405, 13.954, 15.917),
+    (10.779, 15.262, 15.227)])
+
+  class energy_cart(object):
+
+    def __init__(self, nodes, homes):
+      assert nodes.size() == homes.size()
+      self.nodes = nodes
+      self.homes = homes
+
+    def functional(self):
+      return flex.sum((self.nodes-self.homes).dot())
+
+    def gradients(self):
+      return 2*(self.nodes-self.homes)
+
+  def incr_position(rb, i, delta):
+    assert 0 <= i < 6
+    if (i < 3):
+      v = list(rb.ea)
+      v[i] += delta
+      rb.ea = matrix.col(v)
+    else:
+      v = list(rb.lt)
+      v[i-3] += delta
+      rb.lt = matrix.col(v)
+
+  def ea_gradients_fd(rb, energy_cart_function, eps=1.e-6):
+    result = []
+    for i in range(6):
+      fs = []
+      incr_position(rb=rb, i=i, delta=eps)
+      fs.append(energy_cart_function(
+        nodes=rb.sites_moved(), homes=rb.sites_orig).functional())
+      incr_position(rb=rb, i=i, delta=-eps)
+      incr_position(rb=rb, i=i, delta=-eps)
+      fs.append(energy_cart_function(
+        nodes=rb.sites_moved(), homes=rb.sites_orig).functional())
+      incr_position(rb=rb, i=i, delta=eps)
+      result.append((fs[0]-fs[1])/(2*eps))
+    return result
+
+  def show_gradients(rb):
+    an = rb.ea_gradients(energy_cart_function=energy_cart)
+    fd = ea_gradients_fd(rb=rb, energy_cart_function=energy_cart)
+    print("an ea:", an[:3])
+    print("fd ea:", fd[:3])
+    print("an lt:", an[3:])
+    print("fd lt:", fd[3:])
+    print()
+
+  rb = rigid_body(sites=sites)
+  mt = flex.mersenne_twister()
+  n_trials = 4
+  for i in range(n_trials):
+    rb.ea = matrix.col(mt.random_double_point_on_sphere()) * i
+    rb.lt = matrix.col(mt.random_double_point_on_sphere()) * i
+    show_gradients(rb=rb)
+
+  print("OK")
+
+if (__name__ == "__main__"):
+  exercise(sys.argv[1:])
+
+
+ *******************************************************************************

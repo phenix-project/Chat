@@ -1,0 +1,2589 @@
+
+
+ *******************************************************************************
+scitbx/__init__.py
+"""
+Python and C++ routines for carrying scientific calculations
+Many of these objects can be converted to and from
+Numpy arrays.
+
+"""
+
+from __future__ import absolute_import, division, print_function
+import libtbx.forward_compatibility
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/cross_entropy.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.python_utils import random_transform
+import sys
+from six.moves import range
+from six.moves import zip
+
+
+class cross_entropy_optimizer(object):
+  def __init__(self, function, mean, sigma, alpha, beta, q=7, elite_size=10, sample_size=50, eps=1e-7, inject_eps=1e-3, n_max=50000, monitor_cycle=50):
+    self.function = function
+    self.mean = mean
+    self.sigma = sigma
+
+    self.alpha = alpha
+    self.beta = beta
+    self.q = q
+    self.n = function.n
+    self.n_in = elite_size
+    self.sample_size = sample_size
+
+    self.eps = eps
+    self.inject_eps = inject_eps
+
+    self.monitor_cycle = monitor_cycle
+    self.n_max = n_max
+
+    self.count = 0.0
+    self.monitor_cycle=monitor_cycle
+    self.last_mean = self.mean.deep_copy()
+    self.last_sigma = self.sigma.deep_copy()
+
+    self.best_sol = self.mean.deep_copy()
+    self.best_score = 1e90
+    self.best_score = self.compute_target( self.best_sol )
+    self.best_sol_found = 0
+
+    converged = False
+    while not converged:
+      self.count += 1.0
+      self.generate_new_means_and_sigmas()
+      self.inject()
+      converged = self.convergence_test()
+
+  def inject(self,c=3.0):
+     mdelta = flex.max(self.mean - self.last_mean)
+     sdelta = flex.min(self.sigma)
+     if sdelta < self.inject_eps:
+       self.sigma = self.sigma + max(mdelta*c,c*self.inject_eps)
+     self.last_mean = self.mean.deep_copy()
+     self.last_sigma = self.sigma.deep_copy()
+
+
+  def compute_target(self,x):
+    t = self.function.target(x)
+    if t < self.best_score:
+      self.best_score = t
+      self.best_sol = x.deep_copy()
+      self.best_sol_found = self.count
+    return t
+
+  def generate_and_score_samples(self):
+    sample_list = []
+    target_list = flex.double()
+    for ii in range(self.sample_size):
+      x = random_transform.t_variate(a=max(2,self.n-1),N=self.n)
+      x = x*self.sigma + self.mean
+      t = self.compute_target(x )
+      sample_list.append( x )
+      target_list.append( t )
+
+    order = flex.sort_permutation( flex.double(target_list) )
+    return sample_list, t, order
+
+  def generate_new_means_and_sigmas(self):
+    s,t,o = self.generate_and_score_samples()
+    nm = self.mean*0.0
+    nv = self.mean*0.0
+
+    for ii in range(self.n_in):
+      nm = nm + s[o[ii]]
+      nv = nv + s[o[ii]]*s[o[ii]]
+    nm = nm/self.n_in
+    nv = nv/self.n_in - nm*nm
+    nv =  nv
+    self.mean  = self.mean*(1.0-self.alpha)  + self.alpha*nm
+    beta = self.beta -self.beta*((1.0-1.0/self.count)**self.q)
+    self.sigma = flex.sqrt( self.sigma*self.sigma*(1.0-beta) + beta*nv)
+    self.compute_target( self.mean )
+
+  def print_status(self,out=None):
+    if out is None:
+      out = sys.stdout
+    print(" Cycle:  %i"%self.count, file=out)
+    for mm in self.best_sol:
+      print("%5.3e "%mm, file=out)
+    print("Target : %5.3e"%self.best_score, file=out)
+    print(file=out)
+
+  def convergence_test(self):
+    max_var = flex.max( self.sigma )
+    if max_var < self.eps:
+      return True
+    if self.count - self.best_sol_found > self.monitor_cycle:
+      return True
+    if self.count ==  self.n_max:
+      return True
+
+    return False
+
+
+
+
+
+class test_rosenbrock_function(object):
+  def __init__(self, dim=4):
+    self.n = dim*2
+    self.dim = dim
+    self.means = flex.double( self.n, 2.0 )
+    self.sigmas = flex.double( self.n, 5.0 )
+
+
+    self.target_count=0
+    self.optimizer =  cross_entropy_optimizer(self,
+                                              mean=self.means,
+                                              sigma=self.sigmas,
+                                              alpha=0.75,
+                                              beta=0.75,
+                                              q=8.5,
+                                              elite_size=10,
+                                              sample_size=50, inject_eps=1e-4,
+                                              monitor_cycle=500)
+    self.sol = self.optimizer.best_sol
+    for ii in self.sol:
+      assert abs( ii-1.0 ) < 1e-2
+
+  def target(self, vector):
+    self.target_count += 1
+    x_vec = vector[0:self.dim]
+    y_vec = vector[self.dim:]
+    result=0
+    for x,y in zip(x_vec,y_vec):
+      result+=100.0*((y-x*x)**2.0) + (1-x)**2.0
+    return result
+
+
+
+
+def run():
+  flex.set_random_seed(0)
+  test_rosenbrock_function(1)
+
+if __name__ == "__main__":
+  run()
+  print("OK")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/cubicle_neighbors.py
+from __future__ import absolute_import, division, print_function
+import scitbx.array_family.flex # import dependency
+import scitbx.stl.map # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_cubicle_neighbors_ext")
+from scitbx_cubicle_neighbors_ext import *
+
+def __cubicles_max_memory_allocation_set():
+  from libtbx.introspection import machine_memory_info
+  m = machine_memory_info().memory_total()
+  if (m is None): m = 1000000000
+  l = 2**(8*bp.sizeof_void_ptr-1)-1
+  if (m > l): m = l
+  cubicles_max_memory_allocation_set(number_of_bytes=m//2)
+__cubicles_max_memory_allocation_set()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/differential_evolution.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.stdlib import random
+from six.moves import range
+from six.moves import zip
+
+class differential_evolution_optimizer(object):
+  """
+This is a python implementation of differential evolution
+It assumes an evaluator class is passed in that has the following
+functionality
+data members:
+ n              :: The number of parameters
+ domain         :: a  list [(low,high)]*n
+                   with approximate upper and lower limits for each parameter
+ x              :: a place holder for a final solution
+
+ also a function called 'target' is needed.
+ This function should take a parameter vector as input and return a the function to be minimized.
+
+ The code below was implemented on the basis of the following sources of information:
+ 1. http://www.icsi.berkeley.edu/~storn/code.html
+ 2. http://www.daimi.au.dk/~krink/fec05/articles/JV_ComparativeStudy_CEC04.pdf
+ 3. http://ocw.mit.edu/NR/rdonlyres/Sloan-School-of-Management/15-099Fall2003/A40397B9-E8FB-4B45-A41B-D1F69218901F/0/ses2_storn_price.pdf
+
+
+ The developers of the differential evolution method have this advice:
+ (taken from ref. 1)
+
+If you are going to optimize your own objective function with DE, you may try the
+following classical settings for the input file first: Choose method e.g. DE/rand/1/bin,
+set the number of parents NP to 10 times the number of parameters, select weighting
+factor F=0.8, and crossover constant CR=0.9. It has been found recently that selecting
+F from the interval [0.5, 1.0] randomly for each generation or for each difference
+vector, a technique called dither, improves convergence behaviour significantly,
+especially for noisy objective functions. It has also been found that setting CR to a
+low value, e.g. CR=0.2 helps optimizing separable functions since it fosters the search
+along the coordinate axes. On the contrary this choice is not effective if parameter
+dependence is encountered, something which is frequently occuring in real-world optimization
+problems rather than artificial test functions. So for parameter dependence the choice of
+CR=0.9 is more appropriate. Another interesting empirical finding is that rasing NP above,
+say, 40 does not substantially improve the convergence, independent of the number of
+parameters. It is worthwhile to experiment with these suggestions. Make sure that you
+initialize your parameter vectors by exploiting their full numerical range, i.e. if a
+parameter is allowed to exhibit values in the range [-100, 100] it's a good idea to pick
+the initial values from this range instead of unnecessarily restricting diversity.
+
+Keep in mind that different problems often require different settings for NP, F and CR
+(have a look into the different papers to get a feeling for the settings). If you still
+get misconvergence you might want to try a different method. We mostly use DE/rand/1/... or DE/best/1/... .
+The crossover method is not so important although Ken Price claims that binomial is never
+worse than exponential. In case of misconvergence also check your choice of objective
+function. There might be a better one to describe your problem. Any knowledge that you
+have about the problem should be worked into the objective function. A good objective
+function can make all the difference.
+
+Note: NP is called population size in the routine below.)
+Note: [0.5,1.0] dither is the default behavior unless f is set to a value other then None.
+
+  """
+
+  def __init__(self,
+               evaluator,
+               population_size=50,
+               f=None,
+               cr=0.9,
+               eps=1e-2,
+               n_cross=1,
+               max_iter=10000,
+               monitor_cycle=200,
+               out=None,
+               show_progress=False,
+               show_progress_nth_cycle=1,
+               insert_solution_vector=None,
+               dither_constant=0.4):
+    self.dither=dither_constant
+    self.show_progress=show_progress
+    self.show_progress_nth_cycle=show_progress_nth_cycle
+    self.evaluator = evaluator
+    self.population_size = population_size
+    self.f = f
+    self.cr = cr
+    self.n_cross = n_cross
+    self.max_iter = max_iter
+    self.monitor_cycle = monitor_cycle
+    self.vector_length = evaluator.n
+    self.eps = eps
+    self.population = []
+    self.seeded = False
+    if insert_solution_vector is not None:
+      assert len( insert_solution_vector )==self.vector_length
+      self.seeded = insert_solution_vector
+    for ii in range(self.population_size):
+      self.population.append( flex.double(self.vector_length,0) )
+
+
+    self.scores = flex.double(self.population_size,1000)
+    self.optimize()
+    self.best_score = flex.min( self.scores )
+    self.best_vector = self.population[ flex.min_index( self.scores ) ]
+    self.evaluator.x = self.best_vector
+    if self.show_progress:
+      self.evaluator.print_status(
+            flex.min(self.scores),
+            flex.mean(self.scores),
+            self.population[ flex.min_index( self.scores ) ],
+            'Final')
+
+
+  def optimize(self):
+    # initialise the population please
+    self.make_random_population()
+    # score the population please
+    self.score_population()
+    converged = False
+    monitor_score = flex.min( self.scores )
+    self.count = 0
+    while not converged:
+      self.evolve()
+      location = flex.min_index( self.scores )
+      if self.show_progress:
+        if self.count%self.show_progress_nth_cycle==0:
+          # make here a call to a custom print_status function in the evaluator function
+          # the function signature should be (min_target, mean_target, best vector)
+          self.evaluator.print_status(
+            flex.min(self.scores),
+            flex.mean(self.scores),
+            self.population[ flex.min_index( self.scores ) ],
+            self.count)
+
+      self.count += 1
+      if self.count%self.monitor_cycle==0:
+        if (monitor_score-flex.min(self.scores) ) < self.eps:
+          converged = True
+        else:
+         monitor_score = flex.min(self.scores)
+      rd = (flex.mean(self.scores) - flex.min(self.scores) )
+      rd = rd*rd/(flex.min(self.scores)*flex.min(self.scores) + self.eps )
+      if ( rd < self.eps ):
+        converged = True
+
+
+      if self.count>=self.max_iter:
+        converged =True
+
+  def make_random_population(self):
+    for ii in range(self.vector_length):
+      delta  = self.evaluator.domain[ii][1]-self.evaluator.domain[ii][0]
+      offset = self.evaluator.domain[ii][0]
+      random_values = flex.random_double(self.population_size)
+      random_values = random_values*delta+offset
+      # now please place these values ni the proper places in the
+      # vectors of the population we generated
+      for vector, item in zip(self.population,random_values):
+        vector[ii] = item
+    if self.seeded is not False:
+      self.population[0] = self.seeded
+
+  def score_population(self):
+    for vector,ii in zip(self.population,range(self.population_size)):
+      tmp_score = self.evaluator.target(vector)
+      self.scores[ii]=tmp_score
+
+  def evolve(self):
+    for ii in range(self.population_size):
+      rnd = flex.random_double(self.population_size-1)
+      permut = flex.sort_permutation(rnd)
+      # make parent indices
+      i1=permut[0]
+      if (i1>=ii):
+        i1+=1
+      i2=permut[1]
+      if (i2>=ii):
+        i2+=1
+      i3=permut[2]
+      if (i3>=ii):
+        i3+=1
+      #
+      x1 = self.population[ i1 ]
+      x2 = self.population[ i2 ]
+      x3 = self.population[ i3 ]
+
+      if self.f is None:
+        use_f = random.random()/2.0 + 0.5
+      else:
+        use_f = self.f
+
+      vi = x1 + use_f*(x2-x3)
+      # prepare the offspring vector please
+      rnd = flex.random_double(self.vector_length)
+      permut = flex.sort_permutation(rnd)
+      test_vector = self.population[ii].deep_copy()
+      # first the parameters that sure cross over
+      for jj in range( self.vector_length  ):
+        if (jj<self.n_cross):
+          test_vector[ permut[jj] ] = vi[ permut[jj] ]
+        else:
+          if (rnd[jj]>self.cr):
+            test_vector[ permut[jj] ] = vi[ permut[jj] ]
+      # get the score please
+      test_score = self.evaluator.target( test_vector )
+      # check if the score if lower
+      if test_score < self.scores[ii] :
+        self.scores[ii] = test_score
+        self.population[ii] = test_vector
+
+
+  def show_population(self):
+    print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+    for vec in self.population:
+      print(list(vec))
+    print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/direct_search_simulated_annealing.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.stdlib import math, random
+from libtbx.utils import Sorry
+from copy import deepcopy
+from scitbx import simplex
+from six.moves import range
+
+class dssa(object):
+  """
+  Directed Simplex Simulated Annealing
+  http://www-optima.amp.i.kyoto-u.ac.jp/member/student/hedar/Hedar_files/go_files/DSSA.pdf
+  Hybrid simulated annealing and direct search method for nonlinear unconstrained global optimization
+  """
+
+  def __init__(self,
+               dimension,
+               matrix, # ndm * (ndm+1)
+               evaluator,
+               further_opt=False,
+               n_candidate=None,
+               tolerance=1e-8,
+               max_iter=1e9,
+               coolfactor = 0.6,
+               T_ratio = 1e4,
+               simplex_scale=0.2,
+               monitor_cycle=11):
+
+    self.max_iter = max_iter
+    self.dimension=dimension
+    self.tolerance=tolerance
+    self.evaluator = evaluator
+    self.coolfactor = coolfactor
+    self.T_ratio = T_ratio
+    self.simplex_scale = simplex_scale
+    if(n_candidate is None):
+      self.n_candidate=dimension+1
+    else:
+      self.n_candidate=n_candidate
+
+    if((len(matrix) != self.dimension+1) or (matrix[0].size() != self.dimension)):
+       raise Sorry("The initial simplex matrix does not match dimensions specified")
+    for vector in matrix[1:]:
+      if (vector.size() !=  matrix[0].size()):
+        raise Sorry("Vector length in intial simplex do not match up" )
+
+    self.monitor_cycle=monitor_cycle
+    self.initialize(matrix)
+    self.candidates = []
+    self.optimize()
+    if(further_opt):
+      self.optimize_further()
+
+  def initialize(self,matrix):
+    self.end=False
+    self.found=False
+    self.simplexValue=flex.double()
+    self.matrix=[]
+    for vector in matrix:
+     self.matrix.append(vector.deep_copy())
+     self.simplexValue.append(self.function(vector))
+    self.centroid=flex.double()
+    self.reflectionPt=flex.double()
+
+  def optimize(self):
+    found = False
+    end = False
+    self.Nstep=self.dimension * 2
+    monitor_score=0
+    self.sort()
+
+    for point in self.matrix:
+      self.candidates.append(point.deep_copy() )
+    self.candi_value = self.simplexValue.deep_copy()
+
+    rd = 0
+    self.count = 0
+    while ((not found ) and (not end)):
+      self.explore()
+      self.update_candi()
+
+      self.count += 1
+      self.min_score=self.simplexValue[0]
+
+      if self.count%self.monitor_cycle==0:
+        rd = abs(self.simplexValue[self.dimension]-self.simplexValue[0])
+        rd = rd/(abs(self.min_score)+self.tolerance*self.tolerance)
+        if rd < self.tolerance:
+          found = True
+        else:
+          monitor_score = self.min_score
+
+      if self.count>=self.max_iter or self.T < self.min_T:
+        end =True
+
+  def update_candi(self):
+    for ii in range(2):
+      for jj in range(ii, self.n_candidate):
+        if self.simplexValue[ii] < self.candi_value[jj]:
+          if(self.simplexValue[ii] > self.candi_value[jj-1]):
+            self.candi_value.insert( jj, self.simplexValue[ii])
+            self.candidates.insert( jj, self.matrix[ii].deep_copy() )
+            if(self.candi_value.size() > self.n_candidate):
+              self.candi_value.pop_back()
+              self.candidates.pop()
+          break
+
+  def optimize_further(self):
+    self.solutions=[]
+    self.scores= flex.double()
+    for candi in self.candidates:
+      starting_simplex = []
+      for ii in range(self.dimension+1):
+        starting_simplex.append(flex.random_double(self.dimension)*self.simplex_scale + candi)
+      optimizer = simplex.simplex_opt(     dimension=self.dimension,
+                                           matrix = starting_simplex,
+                                           evaluator = self.evaluator,
+                                           tolerance=self.tolerance
+                                     )
+      self.solutions.append( optimizer.get_solution() )
+      self.scores.append( optimizer.get_score() )
+
+    min_index = flex.min_index( self.scores )
+    self.best_solution = self.solutions[ min_index ]
+    self.best_score = self.scores[ min_index ]
+
+
+  def explore(self):
+     if(self.count == 0):
+       self.T=(flex.mean(flex.pow2(self.simplexValue - flex.mean(self.simplexValue) )))**0.5 * 10.0
+       self.min_T = self.T /self.T_ratio
+     elif(self.count%self.Nstep == 0):
+       self.T = self.T*self.coolfactor
+
+     for kk in range(1,self.dimension+1):
+       self.FindCentroidPt(self.dimension+1-kk)
+       self.FindReflectionPt(kk)
+     self.sort()
+
+     return # end of this explore step
+
+  def sort(self):
+    tmp_matrix=deepcopy(self.matrix)
+    tmp_value=list(self.simplexValue)
+    sort_value=list(self.simplexValue)
+    sort_value.sort()
+    indx_array=[]
+    for value in sort_value:
+      indx=tmp_value.index(value)
+      indx_array.append(indx)
+    for ii in range(self.dimension+1):
+      self.matrix[ii]=tmp_matrix[indx_array[ii]]
+      self.simplexValue[ii]=tmp_value[indx_array[ii]]
+    return
+
+  def FindCentroidPt(self,kk):
+   self.centroid=self.matrix[0]*0
+   for ii in range (kk):
+     self.centroid += self.matrix[ii]
+   self.centroid /= kk
+
+  def FindReflectionPt(self,kk):
+    reflect_matrix=[]
+    reflect_value=[]
+    self.alpha=random.random()*0.2+0.9
+    for ii in range(self.dimension+1-kk, self.dimension+1):
+      reflectionPt=(self.centroid*(1.0+self.alpha) - self.alpha*self.matrix[ii])
+      reflect_matrix.append(reflectionPt)
+      reflect_value.append(self.function(reflectionPt))
+    self.reflectionPtValue=min(reflect_value)
+    if(self.reflectionPtValue > self.simplexValue[0]):
+      p=math.exp(-(self.reflectionPtValue-self.simplexValue[0])/self.T)
+      #print p
+      if(p >= random.random()):
+        self.ReplacePt(kk, reflect_matrix, reflect_value)
+    else:
+      self.ReplacePt(kk, reflect_matrix, reflect_value)
+
+
+
+  def ReplacePt(self,kk,reflect_matrix,reflect_value):
+    for ii in range(self.dimension+1-kk,self.dimension+1):
+      self.matrix[ii] = reflect_matrix[ii-(self.dimension+1-kk)]
+      self.simplexValue[ii]=reflect_value[ii-(self.dimension+1-kk)]
+    self.sort()
+    #self.update_candi()
+
+  def get_solution(self):
+    return self.best_solution
+
+  def get_candi(self):
+    return self.candidates
+
+  def function(self,point):
+    return self.evaluator.target( point )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/fftpack.py
+from __future__ import absolute_import, division, print_function
+import scitbx.array_family.flex # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_fftpack_ext")
+from scitbx_fftpack_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/genetic_algorithm_with_mp.py
+# -*- coding: utf-8 -*-
+
+from __future__ import division, print_function
+from libtbx import adopt_init_args
+from libtbx import group_args
+from libtbx.utils import null_out
+import sys
+import numpy.random as np_random
+from libtbx.easy_mp import run_jobs_with_large_fixed_objects
+
+##############################################################################
+#############  INSTRUCTIONS FOR GENETIC ALGORITHM WITH MULTIPROCESSING #######
+##############################################################################
+'''
+  Simple generic implementation of genetic algorithm with multiprocessing
+
+  To use, you need to create the following methods (You can copy examples
+    from below to get started):
+
+    new_gene_method(params, n)  #  returns n new genes
+    mutation_method(params, gene) # returns a mutated gene
+    recombination_method(params, gene, other_gene)  # returns recombined gene
+    scoring_method(params, gene)  # returns a score
+    genes_are_identical_method(gene, other_gene)  # returns True if same
+
+  Here a gene looks like (see example methods below):
+
+  gene = group_args(
+     group_args_type = 'default gene class as group_args',
+     gene_id = gene_id,
+     length = length,
+     values = values,
+     score = score)
+
+  Then you can edit the example params below and run with:
+
+  ga = genetic_algorithm(
+    params = params,
+    new_gene_method = new_gene_method,
+    mutation_method = mutation_method,
+    recombination_method = recombination_method,
+    scoring_method = scoring_method,
+    genes_are_identical_method = genes_are_identical_method,
+   )
+
+  and your result will be available with:
+
+  ga.get_best_gene()
+
+  NOTE: you may need to import some functions...see the top of this file
+  Example:
+    import numpy.random as np_random
+
+'''
+##############################################################################
+##########  EXAMPLE PARAMS FOR GENETIC ALGORITHM WITH MULTIPROCESSING #######
+##############################################################################
+
+''' Default parameters for genetic algorithm'''
+
+example_params = group_args(
+    group_args_type = 'parameters for genetic algorithm',
+    nproc = 1,
+    random_seed = 784321,
+    mutation_rate = 0.5,
+    recombination_rate = 0.5,
+    number_of_variants = None,
+    total_number_of_cycles = 1000,
+    number_of_cycles = None,
+    number_of_macro_cycles  = None,
+    top_fraction_of_variants_to_keep = 0.2,
+    number_of_variants_per_gene_unit = 10,
+    total_number_of_cycles_per_gene_unit = 10,
+    number_of_tries_for_mutations_and_crossovers = 2,
+    typical_gene_length = 10,
+    end_cycles_if_no_improvement_for_n_cycles = 2,
+    min_fraction_of_cycles_to_run = 0.1,
+  )
+##############################################################################
+##########  EXAMPLE METHODS FOR GENETIC ALGORITHM WITH MULTIPROCESSING #######
+##############################################################################
+
+def example_new_gene_method(params, n):
+  '''
+  Default gene for genetic algorithm. Create n new genes
+  You can use anything but it needs to have values for:
+    length
+    values
+    score
+    gene_id
+   '''
+  from scitbx.array_family import flex
+  genes = []
+  for i in range(n):
+    gene_id = i
+    length = params.typical_gene_length
+    values = flex.random_double(length)
+    score = None
+    gene = group_args(
+        group_args_type = 'default gene class as group_args',
+        gene_id = gene_id,
+        length = length,
+        values = values,
+        score = score)
+    genes.append(gene)
+  return genes
+
+def example_mutation_method(params, gene):
+  ''' Must take params and a gene and return a new gene '''
+  from copy import deepcopy
+  new_gene = deepcopy(gene)
+  new_gene.values[np_random.randint(0,gene.length,1)[0]] += np_random.uniform(-4,4,1)[0]
+  return new_gene
+
+def example_recombination_method(params,gene_1, gene_2):
+  ''' Must take params and two genes and return a new gene '''
+  from copy import deepcopy
+  new_gene = deepcopy(gene_1)
+  i = np_random.randint(0,gene_1.length,1)[0]
+  k = np_random.randint(0,2,1)[0]
+  if k == 0:
+    new_gene.values = gene_1.values[:i]
+    new_gene.values.extend(gene_2.values[i:])
+  else:
+    new_gene.values = gene_2.values[:i]
+    new_gene.values.extend(gene_1.values[i:])
+  return new_gene
+
+def example_scoring_method(params, gene):
+  ''' Must take params and a gene and return a number'''
+  from scitbx.array_family import flex
+  perfect = flex.double(list(range(gene.length)))  #
+  return params.typical_gene_length - (gene.values - perfect).rms()
+
+def example_genes_are_identical_method(gene, other_gene):
+  if gene.length != other_gene.length:
+    return False
+  for v1,v2 in zip(gene.values, other_gene.values):
+    if v1 != v2:
+      return False
+  return True
+
+##############################################################################
+##################  GENETIC ALGORITHM WITH MULTIPROCESSING ###################
+##############################################################################
+
+class genetic_algorithm:
+  def __init__(self,
+      params,
+      new_gene_method,
+      mutation_method,
+      recombination_method,
+      scoring_method,
+      genes_are_identical_method,
+      genes = None,
+      log = sys.stdout):
+
+    # Save inputs
+    adopt_init_args(self,locals())
+
+    self.check_params()
+
+    self.cycle = 0
+    if not genes:
+      self.genes = []
+    self.run()
+    self.update_random_seed()
+
+  def check_params(self):
+    '''  Make sure all expected values are there '''
+    expected_keys = example_params().keys()
+    found_keys = self.params().keys()
+    for key in expected_keys:
+      if not key in found_keys:
+        print("Missing parameter: %s" %(key), file = self.log)
+        assert key in found_keys # Missing parameter
+
+  def update_random_seed(self):
+    np_random.seed(self.params.random_seed)
+    self.params.random_seed = np_random.randint(0,100000)
+
+  def run(self):
+    if not self.genes:
+      self.get_genes()
+    if len(self.genes)< 1:
+      print("No genes available...quitting", file = self.log)
+      return
+    else:
+      print("\nTotal working genes: %s" %(len(self.genes)),
+         file = self.log)
+
+    # How many cycles to try
+    n_macro_cycles = self.get_number_of_macro_cycles()
+    n_cycles = self.get_number_of_cycles()
+
+    if n_macro_cycles:
+      self.run_macro_cycles(n_macro_cycles, n_cycles)
+    else:
+      self.run_cycles(n_cycles)
+
+    # Done, get best result
+    best_gene = self.get_best_gene()
+    print("Best gene with score of %s: \n%s" %(
+      self.get_best_score_as_text(),self.get_best_gene()), file = self.log)
+
+
+  def run_cycles(self, n_cycles):
+      # Run n_cycles, but if number of genes is smaller than target
+      #   then run more to generate more genes, up to 3x
+      n_extra_requested = 0
+      n_genes_target = self.get_number_of_variants_to_keep()
+      last_improvement_info = group_args(
+        group_args_type = 'last improvement info',
+        last_improvement_cycle = None,
+        last_improvement_score = None,
+       )
+      total_cycles_to_carry_out = n_cycles
+      max_cycles = n_cycles * 3
+      if self.params.min_fraction_of_cycles_to_run is None or \
+          self.params.end_cycles_if_no_improvement_for_n_cycles is None:
+        max_cycles_without_improvement = None
+      else:
+        max_cycles_without_improvement = max(
+          n_cycles * self.params.min_fraction_of_cycles_to_run,
+          2 *self.params.end_cycles_if_no_improvement_for_n_cycles)  # more here
+      for cycle in range(max_cycles): # maximum
+        self.one_cycle()
+        if len(self.genes) < n_genes_target:
+          total_cycles_to_carry_out += 1
+        if cycle > min(max_cycles, total_cycles_to_carry_out): break
+
+        new_best_score = self.get_best_score()
+        if last_improvement_info.last_improvement_score is None or \
+            new_best_score > last_improvement_info.last_improvement_score or \
+            len(self.genes) < n_genes_target:  # doesn't count yet
+          last_improvement_info.last_improvement_score = new_best_score
+          last_improvement_info.last_improvement_cycle = cycle
+        elif max_cycles_without_improvement is not None \
+          and cycle - last_improvement_info.last_improvement_cycle > \
+           max_cycles_without_improvement:
+          print("\nEnding cycles as no improvement in past %s cycles " %(
+          cycle - last_improvement_info.last_improvement_cycle),
+              file = self.log)
+          break
+
+  def run_macro_cycles(self, n_macro_cycles, n_cycles):
+      total_number_of_cycles = self.get_total_number_of_cycles()
+      print("\nRunning about ",
+       "%s macro_cycles of %s cycles each on %s processors" %(
+        n_macro_cycles,n_cycles, self.params.nproc), file = self.log)
+      max_macro_cycles = n_macro_cycles * 2
+      working_macro_cycles = n_macro_cycles
+      n_genes_target = self.get_number_of_variants_to_keep()
+
+      print("Approximate total of %s cycles" %(
+       total_number_of_cycles), file = self.log)
+      last_improvement_info = group_args(
+        group_args_type = 'last improvement info',
+        last_improvement_cycle = None,
+        last_improvement_score = None,
+       )
+      if self.params.min_fraction_of_cycles_to_run is None or \
+          self.params.end_cycles_if_no_improvement_for_n_cycles is None:
+        max_cycles_without_improvement = None
+      else:
+        max_cycles_without_improvement = max(
+          n_macro_cycles * self.params.min_fraction_of_cycles_to_run,
+          self.params.end_cycles_if_no_improvement_for_n_cycles)
+      for macro_cycle in range(max_macro_cycles):
+        if len(self.genes) < n_genes_target:
+          working_macro_cycles += 1 # need another cycle
+
+        if macro_cycle > min(working_macro_cycles, max_macro_cycles):
+          break # done
+        print( "\nMacro-cycle ",
+         "%s (Genes: %s current top score: %s length: %s nproc: %s)" %(
+          macro_cycle, len(self.genes), self.get_best_score_as_text(),
+          self.get_best_gene().length if self.get_best_gene() else None,
+           self.params.nproc),
+          file = self.log)
+        local_params = group_args(**self.params().copy())
+        local_params.number_of_macro_cycles = 0
+        local_params.total_number_of_cycles = n_cycles
+        self.run_something(params = local_params,
+           macro_cycle = True)
+        self.score_genes()
+        # Select the best genes
+        self.select_top_variants()
+
+        new_best_score = self.get_best_score()
+        if last_improvement_info.last_improvement_score is None or \
+            new_best_score > last_improvement_info.last_improvement_score:
+          last_improvement_info.last_improvement_score = new_best_score
+          last_improvement_info.last_improvement_cycle = macro_cycle
+        elif max_cycles_without_improvement is not None \
+           and macro_cycle - last_improvement_info.last_improvement_cycle > \
+           max_cycles_without_improvement:
+          print("\nEnding macro-cycles as no improvement in past %s cycles " %(
+          macro_cycle - last_improvement_info.last_improvement_cycle),
+              file = self.log)
+          break # done with cycles
+
+
+  def get_genes(self):
+      # Create genes using supplied new_gene_method
+      n = self.get_number_of_variants_to_make()
+      self.update_random_seed()
+      new_genes = self.new_gene_method(self.params, n)
+      if new_genes:
+        self.genes = new_genes
+      self.score_genes()
+      self.select_top_variants()
+
+
+  def one_cycle(self):
+    '''
+     Run one cycle of optimization
+     '''
+    # Mutate genes to create new genes
+    self.run_something(mutate = True)
+    self.genes = make_unique(self.genes, self.genes_are_identical_method)
+
+    if len(self.genes) > 1:
+      # Recombine genes to create new genes
+      self.run_something(recombine = True)
+      self.genes = make_unique(self.genes, self.genes_are_identical_method)
+
+    # Select the best genes
+    self.select_top_variants()
+
+  def run_something(self,
+     params = None,
+     genes = None,
+     macro_cycle = None,
+     create = None,
+     mutate = None,
+     recombine = None,
+     score_only = None,
+      ):
+
+    if not params:
+      params = self.params
+    if not genes:
+      genes = self.genes
+
+    all_new_genes = []
+
+    nproc = params.nproc
+    end_number = -1
+    if create:
+      n_tot = self.get_number_of_variants_to_make()
+    else:
+      n_tot = len(self.genes)
+    n = n_tot//nproc
+    if n * nproc < n_tot:
+      n = n + 1
+    assert n * nproc >= n_tot
+
+    runs_to_carry_out = []
+    for run_id in range(nproc):
+      start_number = end_number + 1
+      end_number = min(n_tot-1, start_number + n -1)
+      if end_number < start_number: continue
+      runs_to_carry_out.append(group_args(
+        run_id = run_id,
+        random_seed = np_random.randint(0,100000),
+        start_number = start_number,
+        end_number = end_number,
+        ))
+
+    local_params = group_args(**params().copy())
+    local_params.nproc = 1 # Required
+
+    kw_dict = {
+      'params':local_params,
+      'genes':genes,
+      'create':create,
+      'mutate':mutate,
+      'macro_cycle':macro_cycle,
+      'recombine':recombine,
+      'score_only':score_only,
+      'new_gene_method':self.new_gene_method,
+      'mutation_method':self.mutation_method,
+      'recombination_method':self.recombination_method,
+      'genes_are_identical_method':self.genes_are_identical_method,
+      'scoring_method':self.scoring_method,
+     }
+
+    runs_carried_out = run_jobs_with_large_fixed_objects(
+      nproc = nproc,
+      verbose = False,
+      kw_dict = kw_dict,
+      run_info_list = runs_to_carry_out,
+      job_to_run = group_of_run_something,
+      log = self.log)
+    for run_info in runs_carried_out:
+      new_genes = run_info.result.new_genes
+      if new_genes:
+        all_new_genes += new_genes
+    all_new_genes = make_unique(all_new_genes, self.genes_are_identical_method)
+
+    if score_only or create or macro_cycle:  # keep id and replace genes
+      self.genes = all_new_genes
+
+    else:  # usual
+      self.set_gene_id_values(all_new_genes)
+
+      self.genes += all_new_genes
+
+  def get_best_score_as_text(self):
+    score = self.get_best_score()
+    if score is None:
+      return "None"
+    else:
+      return "%.2f" %(score)
+
+  def get_best_score(self):
+    best_gene = self.get_best_gene()
+    if not best_gene:
+      return None
+    else:
+      return best_gene.score
+
+
+  def set_gene_id_values(self, new_genes):
+    if not new_genes:
+      return # nothing to do
+    gene_id = self.get_highest_gene_id() + 1
+    for gene in new_genes:
+      gene.gene_id = gene_id
+      gene_id += 1
+
+  def get_highest_gene_id(self):
+    highest = None
+    for gene in self.genes:
+      if highest is None or gene.gene_id > highest:
+        highest = gene.gene_id
+    if highest is None:
+      highest = 0
+    return highest
+  def get_best_gene(self):
+    if not self.genes:
+      return None
+    self.sort_genes()
+    return self.genes[0]
+
+  def _sort_genes_key(self, gene):
+    if not gene.score:
+      return -sys.maxsize
+    else:
+      return gene.score
+
+  def sort_genes(self):
+    self.genes = sorted(self.genes,
+      key = self._sort_genes_key, reverse = True)
+
+  def select_top_variants(self):
+    if not self.genes: return
+    self.sort_genes()
+
+    n = self.get_number_of_variants_to_keep()
+    self.genes = self.genes[:n]
+
+  def score_genes(self):
+    ''' Score all genes. If they already have a score...keep it'''
+    for gene in self.genes:
+      if gene.score is None:
+         gene.score = self.scoring_method(self.params, gene)
+    self.sort_genes()
+
+  def get_number_of_variants_to_keep(self, minimum_variants = 2):
+    if self.params.number_of_variants is not None:
+      return max(minimum_variants,int(0.5+self.params.number_of_variants * \
+       self.params.top_fraction_of_variants_to_keep))
+    else:
+      return max(minimum_variants,int(0.5+self.params.typical_gene_length * \
+         self.params.number_of_variants_per_gene_unit *\
+       self.params.top_fraction_of_variants_to_keep))
+
+  def get_number_of_variants_to_make(self):
+    if self.params.number_of_variants is not None:
+      return self.params.number_of_variants
+    else:
+      return max(1,int(0.5+self.params.typical_gene_length * \
+         self.params.number_of_variants_per_gene_unit))
+
+  def get_total_number_of_cycles(self):
+    #  Run a total of self.params.total_number_of_cycles, but if we have nproc>1
+    #    run them in nproc groups of total_number_of_cycles/nproc
+    #  total cycles = nproc * n_macro_cycles * n_cycles
+
+    if self.params.total_number_of_cycles is not None:
+      return self.params.total_number_of_cycles
+    else:
+      return max(1,int(0.5+self.params.typical_gene_length * \
+         self.params.total_number_of_cycles_per_gene_unit))
+
+  def get_number_of_cycles(self):
+    if self.params.number_of_cycles is not None:
+      return self.params.number_of_cycles
+    else:
+      #  Run a total of self.params.total_number_of_cycles,
+      #    in nproc groups of ncycles
+      nproc = self.params.nproc if self.params.nproc is not None else 1
+      n_total_cycles = self.get_total_number_of_cycles()
+      n_macro_cycles = self.get_number_of_macro_cycles()
+      n_cycles = max(1,
+        int(0.999 + n_total_cycles//max(1,n_macro_cycles*nproc)))
+      return n_cycles
+
+  def get_number_of_macro_cycles(self):
+    if self.params.number_of_macro_cycles is not None:
+      return self.params.number_of_macro_cycles
+    else:
+      nproc = self.params.nproc if self.params.nproc is not None else 1
+      if nproc == 1:
+         return 1
+      else:
+        n_total = self.get_total_number_of_cycles()
+        n_macro_cycles = int(0.9999+(n_total/nproc)**0.5)
+        return n_macro_cycles
+
+def group_of_run_something(
+        run_info,
+        params,
+        genes = None,
+        macro_cycle= None,
+        recombine = None,
+        create = None,
+        mutate = None,
+        score_only = None,
+        new_gene_method = None,
+        mutation_method = None,
+        recombination_method = None,
+        scoring_method = None,
+        genes_are_identical_method = None,
+        log = sys.stdout):
+
+  np_random.seed(run_info.random_seed)  # different for each run
+  params = group_args(**params().copy())
+  params.random_seed = np_random.randint(0,100000)
+
+  if macro_cycle:  # Run a macro-cycle
+    ga = genetic_algorithm(
+      genes = genes,
+      params = params,
+      new_gene_method = new_gene_method,
+      mutation_method = mutation_method,
+      recombination_method = recombination_method,
+      scoring_method = scoring_method,
+      genes_are_identical_method = genes_are_identical_method,
+      log = null_out(),
+     )
+    return group_args(
+      group_args_type = 'set of genes after running one macro_cycle',
+      new_genes = ga.genes,
+     )
+
+  # Usual
+  new_genes = []
+  for index in range(run_info.start_number, run_info.end_number + 1):
+    params.random_seed = np_random.randint(0,100000)
+    info = run_one_something(
+      params,
+      genes,
+      index,
+      recombine,
+      create,
+      mutate,
+      score_only,
+      new_gene_method,
+      mutation_method,
+      recombination_method,
+      scoring_method,
+      genes_are_identical_method,
+      log = log)
+    if info and info.new_genes:
+      new_genes += info.new_genes
+
+  # Make sure all new ones are unique
+  if (not score_only) and genes:  # we have existing ones and not just scoring
+    new_genes = make_unique(new_genes, genes_are_identical_method)
+
+  return group_args(
+      group_args_type = ' one set of recombined/mutated genes',
+      new_genes = new_genes,
+    )
+
+def make_unique(new_genes, genes_are_identical_method):
+  unique_new_genes = []
+  for new_gene in new_genes:
+    is_dup = False
+    for gene in unique_new_genes:
+      if genes_are_identical_method(gene, new_gene):
+         is_dup = True
+         break
+    if not is_dup:
+      unique_new_genes.append(new_gene)
+  return unique_new_genes
+
+def remove_duplicates_of_existing(existing_genes = None,
+    new_genes = None,
+    genes_are_identical_method = None):
+  unique_new_genes = []
+  for new_gene in new_genes:
+    is_dup = False
+    for gene in existing_genes:
+      if genes_are_identical_method(gene, new_gene):
+        is_dup = True
+        break
+    if not is_dup:
+      unique_new_genes.append(new_gene)
+  return unique_new_genes
+
+def run_one_something(
+        params,
+        genes = None,
+        index = None,
+        recombine = None,
+        create = None,
+        mutate = None,
+        score_only = None,
+        new_gene_method = None,
+        mutation_method = None,
+        recombination_method = None,
+        scoring_method = None,
+        genes_are_identical_method = None,
+        log = sys.stdout):
+
+    assert (create, mutate,  recombine, score_only).count(True) == 1
+    new_genes = []
+    if not genes and not create:
+      return new_genes
+
+    if create: # create a gene
+      new_gene = new_gene_method(params)
+      if new_gene:
+        new_genes.append(new_gene)
+
+    elif score_only:
+      new_genes.append(genes[index])
+
+    elif mutate:
+      # Mutate gene to create new gene
+      gene = genes[index]
+      new_gene = create_new_gene_by_mutation(
+        params,
+        gene,
+        mutation_method,
+        log = log)
+      if new_gene:
+        new_genes.append(new_gene)
+
+    elif recombine:
+      # Recombine gene to create new gene
+      gene = genes[index]
+      other_gene_index = np_random.randint(0,len(genes) - 1,1)[0]
+      if other_gene_index >= index:
+        other_gene_index += 1
+      other_gene = genes[other_gene_index]
+      new_gene = create_new_gene_by_recombination(
+        params,
+        gene,
+        other_gene,
+        recombination_method,
+        log = log)
+      if new_gene:
+        new_genes.append(new_gene)
+
+    for gene in new_genes:
+      gene.score = scoring_method(params, gene)
+    return group_args(
+      group_args_type = ' one set of recombined/mutated/scored genes',
+      new_genes = new_genes,
+    )
+
+
+def create_new_gene_by_mutation(params,
+    gene,
+    mutation_method,
+    log = sys.stdout):
+  n = np_random.poisson(params.mutation_rate,1)[0]
+  if n == 0:
+    return # nothing to do
+  n_mutations_made = 0
+  original_gene = gene
+  for i in range(params.number_of_tries_for_mutations_and_crossovers * n):
+    new_gene = mutation_method(params, gene)
+    if new_gene:
+      gene = new_gene
+      n_mutations_made += 1
+    if n_mutations_made >= n:
+      break
+  if n_mutations_made >= n:
+    return gene
+  else:
+    return None
+
+def create_new_gene_by_recombination(params,
+   gene,
+   other_gene,
+   recombination_method,
+   log = sys.stdout):
+
+  if np_random.uniform(0,1,1)[0] > params.recombination_rate:
+    return # nothing to do
+
+  return recombination_method(params, gene, other_gene)
+
+##############################################################################
+##################  END GENETIC ALGORITHM WITH MULTIPROCESSING ###############
+##############################################################################
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/golden_section_search.py
+from __future__ import absolute_import, division, print_function
+import sys
+from six.moves import range
+
+def print_progress_dots(out,ii,n_monitor=10,width=80,offset=5, is_final=False):
+  if ii-1 == 0:
+    print(" "*offset+"Starting search", file=out)
+
+  if (ii-1)%width==0:
+    print("\n"+offset*" ", end=' ', file=out)
+  if (ii-1)%n_monitor==0:
+    print(".", end=' ', file=out)
+    out.flush()
+  if is_final:
+    print(file=out)
+    print(file=out)
+    print("    Done after %s iterations"%ii, file=out)
+    print(file=out)
+
+
+def gss(f,a,b,eps=1e-7,N=1000,out=None,monitor_progress=False,n_monitor=1,offset=5):
+  if out is None:
+    out = sys.stdout
+
+  c = 0.61803398875 #golden ratio
+  x1 = c*a + (1-c)*b
+  fx1 = f(x1)
+  x2 = (1-c)*a + c*b
+  fx2 = f(x2)
+  for i in range(1,N-2):
+     if monitor_progress:
+       print_progress_dots(out,i,n_monitor,width=40,offset=offset)
+
+     if fx1 < fx2:
+        b = x2
+        x2 = x1
+        fx2 = fx1
+        x1 = c*a + (1-c)*b
+        fx1 = f(x1)
+     else:
+        a = x1
+        x1 = x2
+        fx1 = fx2
+        x2 = (1-c)*a + c*b
+        fx2 = f(x2)
+     if (abs(b-a) < eps):
+       if fx1 < fx2:
+         if monitor_progress: print_progress_dots(out,i,n_monitor,width=40,offset=offset, is_final=True)
+         return x1
+       else:
+        if monitor_progress: print_progress_dots(out,i,n_monitor,width=40,offset=offset, is_final=True)
+        return x2
+  if fx1 < fx2:
+    if monitor_progress: print_progress_dots(out,i,n_monitor,width=40,offset=offset, is_final=True)
+    return x1
+  else:
+    if monitor_progress: print_progress_dots(out,i,n_monitor,width=40,offset=offset, is_final=True)
+    return x2
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/lbfgsb.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_lbfgsb_ext")
+from scitbx_lbfgsb_ext import *
+
+
+class minimizer(ext.minimizer):
+
+  def __init__(self, n=None,
+                     m=None,
+                     l=None,
+                     u=None,
+                     nbd=None,
+                     enable_stp_init=False,
+                     factr=None,
+                     pgtol=None,
+                     iprint=None):
+    assert [l,u,nbd].count(None) in [0,3]
+    assert n is not None or l is not None
+    if (n is None):
+      assert u.size() == l.size() and nbd.size() == l.size()
+      n = l.size()
+    elif (l is None):
+      l = flex.double(n, 0)
+      u = l
+      nbd = flex.int(n, 0)
+    if (m is None): m = 5
+    if (factr is None): factr = 1.0e+7
+    if (pgtol is None): pgtol = 1.0e-5
+    if (iprint is None): iprint = -1
+    ext.minimizer.__init__(self,
+      n, m, l, u, nbd, enable_stp_init, factr, pgtol, iprint)
+
+
+def run(target_evaluator,
+               bound_flags,
+               lower_bound,
+               upper_bound,
+               n,
+               max_iterations = None):
+  """
+    Run the L-BFGS-B minimization algorithm using the provided target
+    evaluator and bounds.
+
+    This function minimizes a target function using the Limited-memory
+    Broyden-Fletcher-Goldfarb-Shanno with Box constraints (L-BFGS-B)
+    algorithm. It iteratively calls the target evaluator to compute the
+    function value and gradients, and processes them with the L-BFGS-B
+    minimizer.
+
+    Parameters
+    ----------
+    target_evaluator : callable
+        A callable object that provides the method
+        `compute_functional_and_gradients()`, which returns the current
+        values of the variables `x`, the function value `f`, and the
+        gradient `g`.
+    use_bounds : int
+        Number of bounds used in the optimization. Used to compute nbd which
+        is the flag that tells the optimizer which bounds to use.
+    lower_bound : flex.double
+        The lower bound for the optimization variables.
+    upper_bound : flex.double
+        The upper bound for the optimization variables.
+    n : int
+        The size of x (i.e. the number of variables to be optimized).
+    max_iterations : int, optional
+        Maximum number of iterations allowed during the optimization. If
+        None, there is no limit on the number of iterations.
+
+    Returns
+    -------
+    lbfgsb_minimizer : object
+        An instance of the minimizer object that contains the result of the
+        optimization process. Its attributes are:
+        - `x`: The optimized variables.
+        - `f`: The minimized function value.
+        - `g`: The gradient at the optimized point.
+        - `error`: A string containing any error message that occurred
+          during execution.
+        - `n_calls`: The number of iterations performed.
+
+    Raises
+    ------
+    RuntimeError
+        If the L-BFGS-B minimizer encounters an error during execution. The
+        error message is stored in `lbfgsb_minimizer.error`.
+
+    Notes
+    -----
+    - The process runs in a loop until either the minimizer converges, the
+      specified maximum number of iterations is reached, or an error
+      occurs.
+    - If bounds are specified, the optimization is constrained within the
+      provided lower and upper bounds.
+  """
+  callback_after_step = getattr(target_evaluator, "callback_after_step", None)
+  lbfgsb_minimizer = minimizer(
+    n   = n,
+    l   = lower_bound,
+    u   = upper_bound,
+    nbd = bound_flags) # flag to apply both bounds
+  lbfgsb_minimizer.error = None
+  x, f, g = target_evaluator.compute_functional_and_gradients()
+  try:
+    icall = 0
+    while 1:
+      have_request = lbfgsb_minimizer.process(x, f, g)
+      if(have_request):
+        requests_f_and_g = lbfgsb_minimizer.requests_f_and_g()
+        x, f, g = target_evaluator.compute_functional_and_gradients()
+        icall += 1
+        continue
+      assert not lbfgsb_minimizer.requests_f_and_g()
+      if(lbfgsb_minimizer.is_terminated()): break
+      if(max_iterations is not None and icall>max_iterations): break
+      if(callback_after_step is not None):
+        if(callback_after_step(minimizer) is True):
+          print("lbfgs minimizer stop: callback_after_step is True")
+          break
+  except RuntimeError as e:
+    lbfgsb_minimizer.error = str(e)
+  lbfgsb_minimizer.n_calls = icall
+  if(lbfgsb_minimizer.error is not None):
+    print("lbfgs-b: an error occured: %s"%lbfgsb_minimizer.error)
+  return lbfgsb_minimizer
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/libtbx_refresh.py
+"""
+Rebuild dependencies
+
+"""
+
+from __future__ import absolute_import, division, print_function
+import os
+op = os.path
+
+if (self.env.is_ready_for_build()):
+  from scitbx.source_generators.array_family import generate_all
+  target_dir = self.env.under_build("include/scitbx/array_family/detail")
+  if (not op.isdir(target_dir)):
+    os.makedirs(target_dir)
+  generate_all.refresh(array_family=op.dirname(target_dir))
+
+  from scitbx.source_generators import flex_fwd_h
+  from libtbx.str_utils import show_string
+  target_dir = self.env.under_build("include/scitbx/array_family/boost_python")
+  print("  Generating C++ files in:\n    %s" % show_string(target_dir))
+  if not op.isdir(target_dir):
+    os.makedirs(target_dir)
+  flex_fwd_h.run(target_dir)
+
+  from scitbx.source_generators import lbfgs_fem
+  print("  Using fable to convert", op.join("scitbx", "lbfgs.f"))
+  lbfgs_fem.run()
+
+  import libtbx.pkg_utils
+  libtbx.pkg_utils.define_entry_points(
+    {
+      "pytest_randomly.random_seeder": [
+        "scitbx_flex = scitbx.array_family.flex:set_random_seed"
+      ],
+    }
+  )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/minimizers.py
+from __future__ import absolute_import, division, print_function
+import scitbx.math
+from scitbx.array_family import flex
+from scitbx import lbfgsb as lbfgsb_core
+import scitbx.lbfgs as lbfgs_core
+from libtbx import adopt_init_args
+
+floating_point_epsilon_double = scitbx.math.floating_point_epsilon_double_get()
+
+class FunctionalException(RuntimeError): pass
+
+class damped_newton(object):
+
+  def __init__(self,
+        function,
+        x0,
+        mu0=None,
+        tau=1.e-3,
+        eps_1=1.e-16,
+        eps_2=1.e-16,
+        mu_min=1.e-300,
+        k_max=1000):
+    self.function = function
+    x = x0
+    f_x = function.f(x=x)
+    number_of_function_evaluations = 1
+    self.f_x0 = f_x
+    fp = function.gradients(x=x, f_x=f_x)
+    number_of_gradient_evaluations = 1
+    number_of_hessian_evaluations = 0
+    number_of_cholesky_decompositions = 0
+    mu = mu0
+    nu = 2
+    k = 0
+    while (k < k_max):
+      if (flex.max(flex.abs(fp)) <= eps_1):
+        break
+      fdp = function.hessian(x=x)
+      number_of_hessian_evaluations += 1
+      if (mu is None):
+        mu = tau * flex.max(flex.abs(fdp))
+        if (mu == 0):
+          mu = fp.norm()/max(x.norm(), floating_point_epsilon_double**0.5)
+      fdp_plus_mu = fdp.deep_copy()
+      if (mu > mu_min):
+        fdp_plus_mu.matrix_diagonal_add_in_place(value=mu)
+      u = fdp_plus_mu.matrix_symmetric_as_packed_u()
+      gmw = scitbx.linalg.gill_murray_wright_cholesky_decomposition_in_place(u)
+      number_of_cholesky_decompositions += 1
+      h_dn = gmw.solve(b=-fp)
+      if (h_dn.norm() <= eps_2*(eps_2 + x.norm())):
+        break
+      x_new = x + h_dn
+      f_x_new = function.f(x=x_new)
+      number_of_function_evaluations += 1
+      fp_new = function.gradients(x=x_new, f_x=f_x_new)
+      number_of_gradient_evaluations += 1
+      f = flex.sum_sq(f_x)
+      fn = flex.sum_sq(f_x_new)
+      df = f - fn
+      accept = 0
+      if (df > 0):
+        accept = 1
+        dl = 0.5 * h_dn.dot(h_dn * mu - fp)
+      elif (fn <= f + abs(f)*(1+100*floating_point_epsilon_double)):
+        df = (fp + fp_new).dot(fp - fp_new)
+        if (df > 0):
+          accept = 2
+      if (accept != 0):
+        if (accept == 1 and dl > 0):
+          if (mu > mu_min):
+            mu *= max(1/3, 1 - (2*df/dl - 1)**3)
+          else:
+            mu = mu_min
+          nu = 2
+        else:
+          mu *= nu
+          nu *= 2
+        x = x_new
+        f_x = f_x_new
+        fp = fp_new
+        fdp = None
+        k += 1
+      else:
+        mu *= nu
+        nu *= 2
+    self.x_star = x
+    self.f_x_star = f_x
+    self.number_of_iterations = k
+    self.number_of_function_evaluations = number_of_function_evaluations
+    self.number_of_gradient_evaluations = number_of_gradient_evaluations
+    self.number_of_hessian_evaluations = number_of_hessian_evaluations
+    self.number_of_cholesky_decompositions = number_of_cholesky_decompositions
+
+  def show_statistics(self):
+    print("scitbx.minimizers.damped_newton results:")
+    print("  function:", self.function.label())
+    print("  x_star:", list(self.x_star))
+    print("  0.5*f_x0.norm()**2:", 0.5*self.f_x0.norm()**2)
+    print("  0.5*f_x_star.norm()**2:", 0.5*self.f_x_star.norm()**2)
+    print("  number_of_iterations:", self.number_of_iterations)
+    print("  number_of_function_evaluations:", \
+        self.number_of_function_evaluations)
+    print("  number_of_gradient_evaluations:", \
+        self.number_of_gradient_evaluations)
+    print("  number_of_hessian_evaluations:", \
+        self.number_of_hessian_evaluations)
+    print("  number_of_cholesky_decompositions:", \
+        self.number_of_cholesky_decompositions)
+
+class newton_more_thuente_1994(object):
+
+  def __init__(self,
+        function,
+        x0,
+        xtol=None,
+        gtol=None,
+        ftol=None,
+        stpmin=None,
+        stpmax=None,
+        eps_1=1.e-16,
+        eps_2=1.e-16,
+        matrix_symmetric_relative_epsilon=1.e-12,
+        k_max=1000,
+        constant_hessian=False):
+    self.function = function
+    self.constant_hessian = constant_hessian
+    fdp = None
+    gmw = None
+    u = None
+    x = x0.deep_copy()
+    function_f, callback_after_step = [getattr(function, attr, None)
+      for attr in ["f", "callback_after_step"]]
+    if (function_f is not None):
+      f_x = function_f(x=x)
+      functional = function.functional(f_x=f_x)
+      fp = function.gradients(x=x, f_x=f_x)
+    else:
+      f_x = None
+      functional = function.functional(x=x)
+      fp = function.gradients(x=x)
+    self.f_x0 = f_x
+    self.functional_x0 = functional
+    number_of_function_evaluations = 1
+    number_of_functional_exceptions = 0
+    number_of_gradient_evaluations = 1
+    number_of_hessian_evaluations = 0
+    number_of_cholesky_decompositions = 0
+    line_search = scitbx.math.line_search_more_thuente_1994()
+    if (xtol is not None): line_search.xtol = xtol
+    if (ftol is not None): line_search.ftol = ftol
+    if (gtol is not None): line_search.gtol = gtol
+    if (stpmin is not None): line_search.stpmin = stpmin
+    if (stpmax is not None): line_search.stpmax = stpmax
+    k = 0
+    while (k < k_max):
+      if (flex.max(flex.abs(fp)) <= eps_1):
+        break
+      if (fdp is None) or ( not self.constant_hessian ):
+        fdp = function.hessian(x=x)
+        number_of_hessian_evaluations += 1
+        u = fdp.matrix_symmetric_as_packed_u(
+          relative_epsilon=matrix_symmetric_relative_epsilon)
+        gmw = scitbx.linalg \
+          .gill_murray_wright_cholesky_decomposition_in_place(u)
+        number_of_cholesky_decompositions += 1
+      h_dn = gmw.solve(b=-fp)
+      initial_step_length = 1
+      backup_x = x.deep_copy()
+      if (function_f is not None):
+        backup_f_x = f_x.deep_copy()
+      backup_functional = functional
+      backup_fp = fp.deep_copy()
+      while True:
+        try:
+          line_search.start(
+            x=x,
+            functional=functional,
+            gradients=fp,
+            search_direction=h_dn,
+            initial_estimate_of_satisfactory_step_length=initial_step_length)
+          while (line_search.info_code == -1):
+            if (function_f is not None):
+              f_x = function_f(x=x)
+              functional = function.functional(f_x=f_x)
+              fp = function.gradients(x=x, f_x=f_x)
+            else:
+              functional = function.functional(x=x)
+              fp = function.gradients(x=x)
+            number_of_function_evaluations += 1
+            number_of_gradient_evaluations += 1
+            line_search.next(x=x, functional=functional, gradients=fp)
+        except FunctionalException:
+          number_of_functional_exceptions += 1
+          x = backup_x.deep_copy()
+          if (function_f is not None):
+            f_x = backup_f_x.deep_copy()
+          functional = backup_functional
+          fp = backup_fp.deep_copy()
+          initial_step_length *= 0.5
+        else:
+          break
+      h_dn *= line_search.stp
+      k += 1
+      if (callback_after_step): callback_after_step(x=x)
+      if (h_dn.norm() <= eps_2*(eps_2 + x.norm())):
+        break
+    self.x_star = x
+    self.f_x_star = f_x
+    self.functional_x_star = functional
+    self.number_of_iterations = k
+    self.number_of_function_evaluations = number_of_function_evaluations
+    self.number_of_functional_exceptions = number_of_functional_exceptions
+    self.number_of_gradient_evaluations = number_of_gradient_evaluations
+    self.number_of_hessian_evaluations = number_of_hessian_evaluations
+    self.number_of_cholesky_decompositions = number_of_cholesky_decompositions
+    self.line_search_info = line_search.info_meaning
+
+  def show_statistics(self):
+    print("scitbx.minimizers.newton_more_thuente_1994 results:")
+    get_label = getattr(self.function, "label", None)
+    if (get_label is not None):
+      print("  function:", get_label())
+    print("  x_star:", list(self.x_star))
+    if (self.f_x0 is not None):
+      print("  0.5*f_x0.norm()**2:", 0.5*self.f_x0.norm()**2)
+      print("  0.5*f_x_star.norm()**2:", 0.5*self.f_x_star.norm()**2)
+    print("  functional_x0:", self.functional_x0)
+    print("  functional_x_star:", self.functional_x_star)
+    print("  number_of_iterations:", self.number_of_iterations)
+    print("  number_of_function_evaluations:", \
+        self.number_of_function_evaluations)
+    print("  number_of_functional_exceptions:", \
+        self.number_of_functional_exceptions)
+    print("  number_of_gradient_evaluations:", \
+        self.number_of_gradient_evaluations)
+    print("  number_of_hessian_evaluations:", \
+        self.number_of_hessian_evaluations)
+    print("  number_of_cholesky_decompositions:", \
+        self.number_of_cholesky_decompositions)
+    print("  line_search_info:", \
+        self.line_search_info)
+
+
+class lbfgs(object):
+  """
+    A general L-BFGS and L-BFGS-B minimizer class.
+
+    This class implements a minimizer for solving optimization problems using
+    either the Limited-memory Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) or
+    L-BFGS with Box constraints (L-BFGS-B) algorithms.
+    The behavior is determined by the selected mode, and it interacts with
+    provided calculator object to compute function values, gradients, and
+    curvatures.
+
+    Parameters
+    ----------
+    mode : str
+        The minimization mode, either 'lbfgs' for L-BFGS or 'lbfgsb' for
+        L-BFGS-B.
+    calculator : object
+        An object that provides methods to compute the target function value,
+        gradients, and optionally curvatures. It must have `x`,
+        `initial_values`, `target()`, `gradients()`, and `curvatures()`
+        methods.
+    max_iterations : int, optional
+        Maximum number of iterations for the minimization. Defaults to None,
+        allowing unlimited iterations.
+    diag_mode : str, optional
+        If specified, controls the frequency of diagonal updates for curvature
+        approximation. Must be either 'once' or 'always'. Defaults to None.
+
+    Attributes
+    ----------
+    x : flex.double
+        The current values of the variables being optimized.
+    minimizer : object
+        The underlying L-BFGS or L-BFGS-B minimizer object, depending on the
+        selected mode.
+
+    Notes
+    -----
+    - The class selects between L-BFGS and L-BFGS-B based on
+      the value of `mode`. For L-BFGS-B, it also uses bounds specified by the
+      `calculator` object.
+    - The `diag_mode` controls if curvature are used during optimization.
+
+    Methods
+    -------
+    compute_functional_and_gradients()
+        Computes the target function value and gradients for the current
+        values of the variables.
+    compute_functional_gradients_diag()
+        Computes the target function value, gradients, and curvatures
+        (diagonal) for the current values of the variables (only applicable
+        in modes where curvature is needed).
+  """
+
+  def __init__(self,
+               mode,
+               calculator,
+               core_params = None,
+               exception_handling_params = None,
+               max_iterations = None,
+               min_iterations = 0,
+               diag_mode = None,
+               gradient_only = False):
+    """
+    Initialize the minimizer with the selected mode and calculator object.
+    """
+    adopt_init_args(self, locals())
+    self.callback_after_step = getattr(
+      self.calculator, "callback_after_step", None)
+    assert mode in ['lbfgs', 'lbfgsb']
+    self.x = self.calculator.x
+    # necessary? also done in run_c_plus_plus
+    if diag_mode is not None: assert diag_mode in ['once', 'always']
+    if self.mode == 'lbfgs':
+      # TODO: How to best expose all the params of these classes?
+      if core_params is None: core_params = lbfgs_core.core_parameters()
+      termination_params = lbfgs_core.termination_parameters(
+        max_iterations = max_iterations, min_iterations = min_iterations)
+      if exception_handling_params is None:
+        exception_handling_params = lbfgs_core.exception_handling_parameters()
+      self.minimizer = lbfgs_core.run_c_plus_plus(
+        target_evaluator          = self,
+        termination_params        = termination_params,
+        core_params               = core_params,
+        exception_handling_params = exception_handling_params,
+        log                       = None,
+        gradient_only             = gradient_only,
+        line_search               = True
+        )
+    if self.mode == 'lbfgsb':
+      self.minimizer = lbfgsb_core.run(
+        target_evaluator = self,
+        max_iterations   = max_iterations,
+        bound_flags      = self.calculator.bound_flags,
+        lower_bound      = self.calculator.lower_bound,
+        upper_bound      = self.calculator.upper_bound,
+        n                = self.x.size())
+
+  def compute_functional_and_gradients(self):
+    """
+    Compute the target function value and gradients.
+
+    Updates the calculator with the current values of the variables `x`,
+    then computes the target function value and gradients.
+    """
+    self.calculator.update(x = self.x)
+    t = self.calculator.target()
+    g = self.calculator.gradients()
+    if self.mode == 'lbfgs':
+      return t,g
+    if self.mode == 'lbfgsb':
+      return self.x,t,g
+
+  def compute_functional_gradients_diag(self):
+    """
+    Compute the target function value, gradients, and diagonal curvatures.
+
+    Updates the calculator with the current values of the variables `x`,
+    then computes the target function value, gradients, and curvatures
+    (diagonal elements).
+    """
+    self.calculator.update(x = self.x)
+    t = self.calculator.target()
+    g = self.calculator.gradients()
+    d = self.calculator.curvatures()
+    return t,g,d
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/minpack.py
+from __future__ import absolute_import, division, print_function
+import scitbx.array_family.flex # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_minpack_ext")
+from scitbx_minpack_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/r3_utils.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex # import dependency
+
+import boost_adaptbx.boost.python as bp
+ext = bp.import_ext("scitbx_r3_utils_ext")
+from scitbx_r3_utils_ext import *
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/regular_grid_on_unit_sphere.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from scitbx.stdlib import math
+from six.moves import range
+
+def rosca(m=9, hemisphere=True):
+  """
+  Regular grid on the unit sphere, Rosca (2010).
+  """
+  def truncate(x):
+    if(abs(x)<1.e-6): return 0
+    else:             return x
+  def add(result, new):
+    foud = False
+    for s in result:
+      d = math.sqrt((s[0]-new[0])**2+(s[1]-new[1])**2+(s[2]-new[2])**2)
+      if(d<1.e-3): return
+    result.append(new)
+    return
+  d_l = math.sqrt(2)/m
+  result = flex.vec3_double()
+  for m_ in range(m+1):
+    if(m_==0):
+      add(result, [0,0,1])
+    else:
+      l_m = m_ * d_l
+      d_phi = math.pi/(4*m_)
+      assert l_m>=0 and l_m<=math.sqrt(2)
+      for k in range(m_+1):
+        arg1 = k*d_phi
+        arg2 = l_m*math.sqrt(1-l_m**2/4)
+        x_km = truncate(math.cos(arg1)*arg2)
+        y_km = truncate(math.sin(arg1)*arg2)
+        z_m  = truncate(1.-l_m**2/2                                )
+        add(result, [ x_km, y_km,z_m])
+        add(result, [ y_km, x_km,z_m])
+        add(result, [-y_km, x_km,z_m])
+        add(result, [-x_km, y_km,z_m])
+        add(result, [ x_km,-y_km,z_m])
+        add(result, [ y_km,-x_km,z_m])
+        add(result, [-x_km,-y_km,z_m])
+        add(result, [-y_km,-x_km,z_m])
+        if(not hemisphere):
+          add(result, [ x_km, y_km,-z_m])
+          add(result, [ y_km, x_km,-z_m])
+          add(result, [-y_km, x_km,-z_m])
+          add(result, [-x_km, y_km,-z_m])
+          add(result, [ x_km,-y_km,-z_m])
+          add(result, [ y_km,-x_km,-z_m])
+          add(result, [-x_km,-y_km,-z_m])
+          add(result, [-y_km,-x_km,-z_m])
+  for r in result:
+    assert abs(1.-math.sqrt(r[0]**2+r[1]**2+r[2]**2))<1.e-6
+  # XXX for debugging
+  if(0):
+    f = "HETATM%5d  O   HOH A%4d    %8.3f%8.3f%8.3f  1.00 23.99           O "
+    o = open("junk.pdb", "w")
+    for i, r in enumerate(result):
+      print(f%(i, i, r[0],r[1],r[2]), file=o)
+    o.close()
+  return result
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/restraints.py
+
+"""
+Handling for normalized target and gradients.
+"""
+
+from __future__ import absolute_import, division, print_function
+from scitbx.stdlib import math
+from libtbx.utils import Sorry
+
+class energies(object):
+  """
+  Convenient wrapper class for encapsulating the output of any arbitrary
+  restraining target function, such as the geometry restraints used elsewhere
+  in CCTBX.  Tracks the number of restraints to facilitate normalized targets.
+  """
+  def __init__(O,
+        compute_gradients,
+        gradients,
+        gradients_size,
+        gradients_factory,
+        normalization):
+    O.number_of_restraints = 0
+    O.residual_sum = 0
+    if (not compute_gradients):
+      O.gradients = None
+    else:
+      if (gradients is None):
+        assert gradients_size is not None
+        O.gradients = gradients_factory(gradients_size)
+      else:
+        if (gradients_size is not None):
+          assert gradients.size() == gradients_size
+        O.gradients = gradients
+    O.normalization = normalization
+    O.normalization_factor = None
+
+  def __iadd__(O, rhs):
+    O.number_of_restraints += rhs.number_of_restraints
+    O.residual_sum += rhs.residual_sum
+    if (O.gradients is not None):
+      assert rhs.gradients is not None
+      if (O.gradients.id() != rhs.gradients.id()):
+        O.gradients += rhs.gradients
+    return O
+
+  def __setattr1__(self, attr, value):
+    if attr=="target":
+      if math.isnan(value):
+        raise Sorry('target value (energy) is "nan"')
+    object.__setattr__(self, attr, value)
+
+  def finalize_target_and_gradients(O):
+    O.target = O.residual_sum
+    if (O.normalization):
+      O.normalization_factor = 1.0 / max(1, O.number_of_restraints)
+      O.target *= O.normalization_factor
+      if (O.gradients is not None):
+        O.gradients *= O.normalization_factor
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/run_tests.py
+from __future__ import absolute_import, division, print_function
+from libtbx import test_utils
+import libtbx.load_env
+
+tst_list = [
+  "$D/tests/tst_smoothing.py",
+  "$D/tests/tst_genetic_algorithm_with_mp.py",
+  "$D/tests/tst_basic.py",
+  "$B/array_family/tst_af_1",
+  "$B/array_family/tst_af_2",
+  "$B/array_family/tst_af_3",
+  "$B/array_family/tst_af_4",
+  "$B/array_family/tst_af_5",
+  "$B/array_family/tst_vec3",
+  "$B/array_family/tst_unsigned_float_arithmetic",
+  "$B/array_family/tst_mat3",
+  "$B/array_family/tst_sym_mat3",
+  "$B/array_family/tst_ref_matrix_facet",
+  "$B/array_family/tst_accessors",
+  "$B/array_family/tst_optional_copy",
+  "$B/array_family/tst_rectangular_full_packed",
+  "$D/array_family/boost_python/tst_flex_argument_passing.py",
+  "$B/serialization/tst_base_256",
+  "$D/math/tests/tst_minimum_covering_ellipsoid.py",
+  "$D/math/tests/tst_gaussian_fit_1d_analytical.py",
+  "$D/math/tests/tst_cubic_equation.py",
+  "$B/math/tests/tst",
+  "$B/matrix/tests/tst_givens",
+  "$B/matrix/tests/tst_householder",
+  "$B/matrix/tests/tst_svd",
+  "$B/matrix/tests/tst_cholesky",
+  "$D/matrix/tests/tst_row_echelon.py",
+  "$D/matrix/tests/tst_householder.py",
+  "$D/linalg/tests/tst_matrix.py",
+  "$D/linalg/tests/tst_cholesky.py",
+  "$D/linalg/tests/tst_svd.py",
+  "$D/linalg/tests/tst_eigensystem.py",
+  "$D/linalg/tests/tst_lapack_svd.py",
+  "$D/linalg/tests/tst_lapack_dsyev.py",
+  "$D/error/tst_error.py",
+  "$D/stl/tst_map.py",
+  "$D/stl/tst_set.py",
+  "$D/stl/tst_vector.py",
+  "$D/array_family/boost_python/regression_test.py",
+  "$D/array_family/boost_python/tst_flex.py",
+  "$D/array_family/boost_python/tst_numpy_bridge.py",
+  "$D/array_family/boost_python/tst_smart_selection.py",
+  "$D/array_family/boost_python/tst_shared.py",
+  "$D/array_family/boost_python/tst_integer_offsets_vs_pointers.py",
+  "$D/array_family/boost_python/tst_cost_of_m_handle_in_af_shared.py",
+  "$D/tests/tst_cubicle_neighbors.py",
+  "$D/tests/tst_r3_utils.py",
+  "$D/tests/tst_regular_grid_on_unit_sphere.py",
+  "$D/matrix/__init__.py",
+  "$D/python_utils/tst_random_transform.py",
+  "$D/python_utils/tst_graph.py",
+  "$D/python_utils/tst_robust.py",
+  "$D/math/superpose.py",
+  "$D/math/spe.py",
+  "$D/math/incremental_SO3_sampling.py",
+  "$D/math/tests/tst_curve_fitting.py",
+  "$D/math/tests/tst_weighted_correlation.py",
+  "$D/math/tests/tst_similarity_indices.py",
+  "$D/math/tests/tst_exp_functions.py",
+  "$D/math/tests/tst_fit_quadratic_function.py",
+  "$D/math/tests/tst_gcd.py",
+  "$D/math/tests/tst_math.py",
+  "$D/math/tests/tst_r3_rotation.py",
+  "$D/math/tests/tst_resample.py",
+  "$D/math/tests/tst_line_search.py",
+  "$D/math/tests/tst_gaussian.py",
+  "$D/math/tests/tst_quadrature.py",
+  "$D/math/tests/tst_bessel.py",
+  "$D/math/tests/tst_halton.py",
+  "$D/math/tests/tst_euler_angles.py",
+  "$D/math/tests/tst_superpose.py",
+  "$D/math/tests/tst_uniform_rotation_matrix.py",
+  "$D/math/tst_zernike.py",
+  "$D/math/tst_zernike_mom.py",
+  "$D/math/sieve_of_eratosthenes.py",
+  "$D/math/besselk.py",
+  "$D/math/scale_curves.py",
+  "$D/math/tests/tst_fit_peak.py",
+  "$D/math/tests/tst_clustering.py",
+  "$D/math/tests/tst_orthonormal_basis.py",
+  "$D/math/tests/tst_g_function.py",
+  "$D/math/tests/tst_angle_derivative.py",
+  "$D/math/tests/tst_periodogram.py",
+  "$D/math/tests/tst_error_propagation_matrix_inverse.py",
+  "$D/math/tests/tst_tetrahedron.py",
+  "$D/math/tst_undirected_graph.py",
+  "$D/math/tst_so3_lie_algebra.py",
+  "$D/minpack/tst.py",
+  ["$D/lbfgs/tst_ext.py"],
+  "$D/lbfgs/tst_curvatures.py",
+  "$D/lbfgs/tst_lbfgs_fem.py",
+  "$D/lbfgs/tst_func_free_line_search.py",
+  "$B/lbfgs/tst_lbfgs",
+  "$D/lbfgsb/boost_python/tst_lbfgsb.py",
+  ["$D/fftpack/boost_python/tst_fftpack.py"],
+  "$D/examples/flex_grid.py",
+  "$D/examples/flex_array_loops.py",
+  "$D/examples/principal_axes_of_inertia.py",
+  "$D/examples/lbfgs_recipe.py",
+  "$D/examples/lbfgs_linear_least_squares_fit.py",
+  "$D/examples/chebyshev_lsq_example.py",
+  "$D/examples/immoptibox_ports.py",
+  "$D/examples/rigid_body_refinement_core.py",
+  "$D/examples/integrating_a_weighted_sinc_function.py",
+  "$D/examples/minimizer_comparisons.py",
+  "$D/graph/tst_utils.py",
+  "$D/graph/rigidity.py",
+  "$D/graph/tst_rigidity.py",
+  "$D/graph/rigidity_matrix_symbolic.py",
+  "$D/graph/tst_tardy_tree_find_paths.py",
+  "$D/graph/tst_tardy_tree.py",
+  "$D/graph/test_cases_tardy_pdb.py",
+  "$D/rigid_body/essence/tst_basic.py",
+  "$D/rigid_body/essence/tst_tardy.py",
+  "$D/rigid_body/essence/tst_energy_plots.py",
+  "$D/rigid_body/tst.py",
+  "$D/rigid_body/proto/free_motion_reference_impl.py",
+  "$D/rigid_body/proto/tst_featherstone.py",
+  "$D/rigid_body/proto/tst_free_motion.py",
+  "$D/rigid_body/proto/tst_free_motion_hard.py",
+  "$D/rigid_body/proto/tst_joint_lib.py",
+  "$D/rigid_body/proto/tst_singular.py",
+  "$D/rigid_body/proto/tst_spherical_refinement.py",
+  "$D/rigid_body/proto/tst_molecules.py",
+  "$D/sparse/tests/tst_sparse.py",
+  "$D/sparse/tests/tst_lu_factorization.py",
+  "$D/iso_surface/tst_iso_surface.py",
+  "$D/tests/simplex.py",
+  "$D/tests/differential_evolution.py",
+  "$D/tests/golden_section_search.py",
+  "$D/tests/tst_minimizer_lbfgs_general.py",
+  "$D/tests/direct_search_simulated_annealing.py",
+  "$D/random/tests/tst_random.py",
+  "$D/lstbx/tests/tst_normal_equations.py",
+  "$D/lstbx/tests/test_problems.py",
+  "$D/glmtbx/tests/tst.py",
+  "$D/dtmin/regression/tst_dtmin_basic.py",
+  "$D/dtmin/regression/tst_dtmin_booth.py",
+  "$D/dtmin/regression/tst_dtmin_twisted.py",
+  "$D/suffixtree/test/tst_single.py",
+  ]
+
+def run():
+  build_dir = libtbx.env.under_build("scitbx")
+  dist_dir = libtbx.env.dist_path("scitbx")
+
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/simplex.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+from libtbx.utils import Sorry
+from six.moves import range
+
+class simplex_opt(object):
+  """
+  Python implementaion of Nelder-Mead Simplex method
+  The first publication is By JA Nelder and R. Mead:
+    A simplex method for function minimization, computer journal 7(1965), 308-313
+  The routine is following the description by Lagarias et al:
+    Convergence properties of the nelder-mead simplex method in low dimensions SIAM J. Optim. Vol 9, No. 1, pp. 112-147
+  And a previous implementation in (c++) by Adam Gurson and Virginia Torczon can be found at:
+    http://www.cs.wm.edu/~va/software/SimplexSearch/AGEssay.html
+
+  User need to specifiy the dimension and an initial 'guessed' simplex (n*(n+1)) matrix
+    where n is the dimension
+
+  A minimum is desired for simplex algorithm to work well, as the searching is not bounded.
+
+  !! Target function should be modified to reflect specific purpose
+
+  Problems should be referred to haiguang.liu@gmail.com
+  """
+
+  def __init__(self,
+               dimension,
+               matrix, # ndm * (ndm+1)
+               evaluator,
+               tolerance=1e-6,
+               max_iter=1e9,
+               alpha=1.0,
+               beta=0.5,
+               gamma=2.0,
+               sigma=0.5,
+               monitor_cycle=10):
+
+    self.max_iter = max_iter
+    self.dimension=dimension
+    self.tolerance=tolerance
+    self.evaluator = evaluator
+    if((len(matrix) != self.dimension+1) or (matrix[0].size() != self.dimension)):
+       raise Sorry("The initial simplex matrix does not match dimensions specified")
+    for vector in matrix[1:]:
+      if (vector.size() !=  matrix[0].size()):
+        raise Sorry("Vector length in intial simplex do not match up" )
+
+    self.alpha=alpha
+    self.beta=beta
+    self.gamma=gamma
+    self.sigma=sigma
+    self.monitor_cycle=monitor_cycle
+    self.initialize(matrix)
+    self.optimize()
+
+  def initialize(self,matrix):
+    self.end=False
+    self.found=False
+    self.simplexValue=flex.double()
+    self.matrix=[]
+    for vector in matrix:
+     self.matrix.append(vector.deep_copy())
+     self.simplexValue.append(self.function(vector))
+    self.centroid=flex.double()
+    self.reflectionPt=flex.double()
+    self.expansionPt=flex.double()
+    self.contractionPt=flex.double()
+
+    self.min_indx=0
+    self.second_indx=0
+    self.max_indx=0
+    self.maxPrimePtId=0
+    self.secondHigh=0.0
+
+    self.max=0.0
+    self.min=0.0
+
+  def optimize(self):
+    found = False
+    end = False
+    self.count = 0
+    monitor_score=0
+    while ((not found ) and (not end)):
+      self.explore()
+      self.count += 1
+      self.min_score=self.simplexValue[self.min_indx]
+      if self.count%self.monitor_cycle==0:
+        rd = abs(monitor_score-self.min_score)
+        #rd = abs(self.simplexValue[self.max_indx]-self.min_score)
+        rd = rd/(abs(self.min_score)+self.tolerance*self.tolerance)
+        if rd < self.tolerance:
+          found = True
+        else:
+          monitor_score = self.min_score
+
+      if self.count>=self.max_iter:
+        end =True
+
+  def explore(self):
+     self.FindMinMaxIndices()
+     self.FindCentroidPt()
+     self.FindReflectionPt()
+     self.secondHigh=self.simplexValue[self.second_indx]
+     if self.simplexValue[self.min_indx] > self.reflectionPtValue:
+        self.FindExpansionPt()
+        if self.reflectionPtValue > self.expansionPtValue:
+          self.ReplaceSimplexPoint(self.expansionPt)
+          self.simplexValue[self.max_indx]=self.expansionPtValue
+        else:
+          self.ReplaceSimplexPoint(self.reflectionPt)
+          self.simplexValue[self.max_indx]=self.reflectionPtValue
+     elif (self.secondHigh > self.reflectionPtValue) and (self.reflectionPtValue >= self.simplexValue[self.min_indx]):
+        self.ReplaceSimplexPoint(self.reflectionPt)
+        self.simplexValue[self.max_indx]=self.reflectionPtValue
+     elif self.reflectionPtValue >= self.secondHigh:
+        self.FindContractionPt()
+        if(self.maxPrimePtId == 0):
+          if(self.contractionPtValue>self.maxPrimePtValue):
+             self.ShrinkSimplex()
+          else:
+             self.ReplaceSimplexPoint(self.contractionPt)
+             self.simplexValue[self.max_indx] = self.contractionPtValue
+        elif (self.maxPrimePtId == 1):
+          if(self.contractionPtValue >= self.maxPrimePtValue):
+             self.ShrinkSimplex()
+          else:
+             self.ReplaceSimplexPoint(self.contractionPt)
+             self.simplexValue[self.max_indx] = self.contractionPtValue
+     return # end of this explore step
+
+  def FindMinMaxIndices(self):
+    self.max=self.min=second_max=self.simplexValue[0]
+    self.max_indx=0
+    self.min_indx=0
+    self.second_indx=0
+    for ii in range(1,self.dimension+1):
+      if(self.simplexValue[ii] > self.max):
+        second_max=self.max
+        self.max=self.simplexValue[ii]
+        self.second_indx=self.max_indx
+        self.max_indx=ii
+      elif(self.simplexValue[ii] > second_max):
+        second_max=self.simplexValue[ii]
+        self.second_indx=ii
+      elif(self.simplexValue[ii] < self.min):
+        self.min=self.simplexValue[ii]
+        self.min_indx=ii
+    return
+
+  def FindCentroidPt(self):
+   self.centroid=self.matrix[0]*0
+   for ii in range (self.dimension+1):
+      if(ii != self.max_indx):
+        self.centroid += self.matrix[ii]
+   self.centroid /= self.dimension
+
+  def FindReflectionPt(self):
+    self.reflectionPt=self.centroid*(1.0+self.alpha) -self.alpha*self.matrix[self.max_indx]
+    self.reflectionPtValue=self.function(self.reflectionPt)
+
+  def FindExpansionPt(self):
+    self.expansionPt=self.centroid*(1.0-self.gamma)+self.gamma*self.reflectionPt
+    self.expansionPtValue=self.function(self.expansionPt)
+
+  def FindContractionPt(self):
+    if(self.max <= self.reflectionPtValue):
+      self.maxPrimePtId=1
+      self.maxPrimePtValue=self.max
+      self.contractionPt=self.centroid*(1.0-self.beta)+self.beta*self.matrix[self.max_indx]
+    else:
+      self.maxPrimePtId = 0
+      self.maxPrimePtValue = self.reflectionPtValue
+      self.contractionPt = self.centroid*(1.0-self.beta)+self.beta*self.reflectionPt
+    self.contractionPtValue=self.function(self.contractionPt)
+
+  def ShrinkSimplex(self):
+    for ii in range(self.dimension+1):
+      if(ii != self.min_indx):
+        self.matrix[ii] = self.matrix[self.min_indx]+self.sigma*(self.matrix[ii] - self.matrix[self.min_indx])
+        self.simplexValue[ii]=self.function(self.matrix[ii])
+
+  def ReplaceSimplexPoint(self,vector):
+    #self.FindCentroidPt()
+    self.matrix[self.max_indx] = vector
+
+  def get_solution(self):
+    return self.matrix[self.min_indx]
+
+  def get_score(self):
+    return self.simplexValue[ self.min_indx ]
+
+  def function(self,point):
+    return self.evaluator.target( point )
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+scitbx/smoothing.py
+from __future__ import absolute_import, division, print_function
+from scitbx.array_family import flex
+import scitbx.matrix
+from six.moves import range
+
+
+def savitzky_golay_coefficients(n_left, n_right, degree, derivative=0, wraparound=True):
+  """
+    Compute the convolution coefficients to be used for smoothing data by the
+    method of Savitzky and Golay [1].
+    Parameters
+    ----------
+    n_left and n_right are the number of past and future data points used. The
+    total number of data points used is n_left + n_right + 1.
+    degree is the degree or order of the smoothing polynomial.
+    wraparound: if True then the coefficients are returned in "wraparound" order
+    i.e. point 0 is at index[0], 1 at index[1], etc. and point -1 is at index[-1],
+    point -2 at index[-2], etc.
+    Notes
+    -----
+    See also:
+    http://www.scipy.org/Cookbook/SavitzkyGolay
+    References
+    ----------
+    .. [1] A. Savitzky, M. J. E. Golay, Smoothing and Differentiation of
+       Data by Simplified Least Squares Procedures. Analytical
+       Chemistry, 1964, 36 (8), pp 1627-1639.
+    .. [2] Numerical Recipes 3rd Edition: The Art of Scientific Computing
+       W.H. Press, S.A. Teukolsky, W.T. Vetterling, B.P. Flannery
+       Cambridge University Press ISBN-13: 9780521880688
+    """
+  # the highest conserved moment is equal to the degree of the smoothing polynomial
+  assert derivative <= degree
+  a = flex.double([[k**i for i in range(degree+1)] for k in range(-n_left, n_right+1)])
+  b = flex.double(degree+1, 0)
+  b[derivative] = 1 # choose which derivative we want
+  lu = a.matrix_transpose_multiply(a)
+  pivot_indices = lu.matrix_lu_decomposition_in_place()
+  x = lu.matrix_lu_back_substitution(pivot_indices=pivot_indices, b=b)
+  coefficients = flex.double(n_left+n_right+1, 0)
+  for i, k in enumerate(range(-n_left, n_right+1)):
+    c = scitbx.matrix.col([k**n for n in range(degree+1)]).dot(
+      scitbx.matrix.row(x))
+    np = n_left+n_right+1
+    if wraparound:
+      coefficients[(np - k) %np] = c
+    else:
+      coefficients[i] = c
+  return coefficients
+
+
+def savitzky_golay_filter(x, y, half_window, degree, derivative=0):
+  # pad the signal at the extremes with
+  # values taken from the signal itself
+  firstvals = y[1:half_window+1].reversed()
+  lastvals = y[-half_window-1:-1].reversed()
+  firstvals.extend(y)
+  firstvals.extend(lastvals)
+  y = firstvals
+  # discrete convolution
+  coeffs = savitzky_golay_coefficients(
+    half_window, half_window, degree, derivative=derivative, wraparound=False)
+  x, y = x, convolve(y, coeffs)[half_window:-half_window]
+  y = y[half_window:-half_window]
+  return x, y
+
+
+def convolve(x, y, mode="full"):
+  assert mode in ("full", "same", "valid")
+  P, Q, N = len(x), len(y), len(x)+len(y)-1
+  z = []
+  for k in range(N):
+    t, lower, upper = 0, max(0, k-(Q-1)), min(P-1, k)
+    for i in range(lower, upper+1):
+      t = t + x[i] * y[k-i]
+    z.append(t)
+  z = flex.double(z)
+  if mode == "full":
+    return flex.double(z)
+  elif mode == "same":
+    padding = (N - P)//2
+    if (N - P) % 2 == 0:
+      return z[padding:-padding]
+    else:
+      return z[padding:-padding-1]
+  elif mode == "valid":
+    padding = N - P
+    return z[padding:-padding]
+
+
+ *******************************************************************************

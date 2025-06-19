@@ -1,0 +1,3211 @@
+
+
+ *******************************************************************************
+mmtbx/ligands/__init__.py
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/chemistry.py
+from __future__ import division
+
+angstrom = 'angstrom'
+#angstrom = u"\u212Bngstr\u00F6m"
+lower_elements =      ("c",  "n",  "o",
+                                   "s",
+                       )
+more_lower_elements = (      "p",
+                       "ge", "as", "se",
+                           )
+lower_elements += more_lower_elements
+
+elements = ('X',
+            'H', 'He',
+            'Li','Be','B', 'C', 'N' ,'O', 'F', 'Ne',
+            'Na','Mg','Al','Si','P' ,'S', 'Cl','Ar',
+            'K' ,'Ca',
+            'Sc','Ti','V', 'Cr','Mn','Fe','Co','Ni','Cu','Zn',
+                      'Ga','Ge','As','Se','Br','Kr',
+            'Rb', 'Sr',
+            'Y', 'Zr','Nb','Mo','Tc','Ru','Rh','Pd','Ag','Cd',
+                      'In','Sn','Sb','Te','I', 'Xe',
+            'Cs','Ba',
+            'La',
+            'Ce','Pr','Nd','Pm','Sm','Eu','Gd','Tb','Dy','Ho','Er','Tm','Yb','Lu',
+                 'Hf','Ta','W', 'Re','Os','Ir','Pt','Au','Hg',
+                      'Tl','Pb','Bi','Po','At','Rn',
+            'Fr','Ra',
+            'Ac',
+            'Th','Pa','U', 'Np','Pu','Am','Cm','Bk','Cf','Es','Fm','Md','No','Lr',
+                 'Rf','Ha','Sg','Ns','Hs','Mt',
+            )
+
+# Valences H-Ba
+valences = ( -1,                                       # X
+              1,   0,                                  # H, He
+              1,   2,   3,  4,  3,  2,  1,  0,
+              1,   2,   3,  4,  3,  2,  1,  0,
+              1,   2,
+             #-1,  -1,  -1, -1, -1, -1, -1, -1, -1, -1, # 1st transition metals
+              1,   2,   3,  4,  5,  4,  3,  2,  1,  0, # 1st transition metals
+                        3,  4,  3,  2,  1,  0,
+              1,   2,
+             #-1,  -1,  -1, -1, -1, -1, -1, -1, -1, -1, # 2nd transition metals
+              1,   2,   3,  4,  5,  4,  3,  2,  1,  0, # 2nd transition metals
+                        3,  4,  3,  2,  1,  0,
+              1,   2,
+              1,
+             -1,  -1,  -1, -1, -1, -1, -1,  # rare earth 1a
+             -1,  -1,  -1, -1, -1, -1, -1,  # rare earth 1b
+             #     -1,  -1, -1, -1, -1, -1, -1, -1, -1, # 3rd transition metals
+                   2,   3,  4,  5,  4,  3,  2,  1,  0, # 3rd transition metals
+                        3,  4,  3,  2,  1,  0,
+              1,   2,
+              1,
+             -1,  -1,   0, -1, -1, -1, -1,  # rare earth 2a
+             -1,  -1,  -1, -1, -1, -1, -1,  # rare earth 2b
+             #     -1,  -1, -1, -1, -1, -1, -1, -1, -1, # 4th transition metals
+                   2,   3,  4,  5,  4,  3,  2,  1,  0, # 4th transition metals
+                        3,  4,  3,  2,  1,  0,
+            )
+
+non_metal_indices = [0,1,2]
+for i in range(5,11): non_metal_indices.append(i)
+for i in range(14,19): non_metal_indices.append(i)
+for i in range(32,37): non_metal_indices.append(i)
+for i in range(51,55): non_metal_indices.append(i)
+for i in range(84,87): non_metal_indices.append(i)
+
+lone_pairs = ( -1,
+                0,  0,
+                0,  0,  0,  0,  1,  2,  3,  0,
+                0,  0,  0,  0,  1,  2,  3,  0,
+                0,  0,
+               -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                        0,  0,  1,  2,  3,  0,
+               0,   0,
+               -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                        0,  0,  1,  2,  3,  0,
+               0,   0,
+               )
+
+def get_valences(element, atomic_number=None, charge=0):
+  assert atomic_number!=0
+  assert type(charge) is type(1)
+  if atomic_number is None:
+    atomic_number = elements.index(element.title())
+  rc = valences[atomic_number]
+  if rc is None: return []
+  if type(rc)==type([]):
+    for i, j in enumerate(rc):
+      rc[i]+=charge
+    return rc
+  else:
+    rc += charge
+    return [rc]
+
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/electrons.py
+from __future__ import absolute_import, division, print_function
+import iotbx.pdb
+import mmtbx.model
+import sys
+import time
+
+from functools import cmp_to_key
+
+from libtbx.utils import Sorry
+
+#
+# TODO:
+#  test on radicals - MTN
+#
+
+get_class = iotbx.pdb.common_residue_names_get_class
+
+base_amino_acid_charges = { # all the rest are zero
+  'ARG' :  1,
+  'ASP' : -1,
+  'CYS' :  0, # just to be clear
+  'GLU' : -1,
+  'HIS' :  1,
+  'LYS' :  1,
+  }
+other_charges = {
+  'HOH' : 0,
+}
+disallowed_element_charges = {
+  'N' :  1,
+  'O' : -1,
+  'C' :  1,
+}
+default_metal_charges = {
+  'Li' : 1,
+  'Na' : 1,
+  'Mg' : 2,
+  'K'  : 1,
+  'Ca' : 2,
+  'Cu' : 1,
+  'Zn' : 2,
+}
+
+class atoms(dict):
+  def __repr__(self):
+    from mmtbx.ligands.chemistry import elements
+    outl = ''
+    for element in elements:
+      outl += '  %2s : %s\n' % (element, self.get(element, None))
+    return outl
+
+def get_atom_database():
+  from mmtbx.ligands.chemistry import elements, valences, lone_pairs
+  from mmtbx.ligands.chemistry import non_metal_indices
+  atom_database = atoms()
+  for i, element in enumerate(elements):
+    atom_database[element.upper()]={'number':i}
+  for element, valence in zip(elements, valences):
+    if valence>-1:
+      atom_database[element.upper()]['valence'] = valence
+  for element, lone_pair in zip(elements, lone_pairs):
+    if lone_pair>0:
+      atom_database[element.upper()]['lone pairs'] = lone_pair
+  for i, element in enumerate(elements):
+    if i not in non_metal_indices:
+      atom_database[element.upper()]['metal']=True
+      if element in default_metal_charges:
+        # atom_database['valence'] = default_metal_charges[element]*-1
+        atom_database[element.upper()]['charge'] = default_metal_charges[element]
+      else:
+        atom_database[element.upper()]['charge'] = None
+  atom_database['D']=atom_database['H']
+  return atom_database
+
+class atom_property(dict):
+  def __init__(self):
+    atom_database = get_atom_database()
+    for element, data in atom_database.items():
+      self[element] = data
+
+  def __repr__(self):
+    outl = 'atom properties\n'
+    for element, data in self.items():
+      outl += '  %-2s : %s\n' % (element, data)
+    return outl
+
+  def get_valence(self, element, effective=True):
+    assert effective
+    return self.get(element.strip(), {}).get('valence', None)
+
+  def get_lone_pairs(self, element):
+    return self.get(element.strip(), {}).get('lone pairs', 0)
+
+  def get_atomic_number(self, element):
+    return self.get(element.strip(), {}).get('number', 0)
+
+  def is_metal(self, element):
+    return self.get(element.strip(), {}).get('metal', False)
+
+  def get_charge(self):
+    return self.get(element.strip(), {}).get('charge', None)
+
+class electron_distribution(dict):
+  def __init__(self,
+               hierarchy,
+               grm,
+               specific_atom_charges=None, # a list of selections and charges
+               specific_atom_multiplicities=None,
+               alternative_location_id=None,
+               alternative_location_index=None,
+               log=None,
+               verbose=False,
+               ):
+    alternative_location_id='A'
+    self.properties = atom_property()
+    self.hierarchy = hierarchy
+    self.atoms = self.hierarchy.atoms()
+    self.grm = grm
+    #
+    self.xrs = self.hierarchy.extract_xray_structure(
+      crystal_symmetry=self.grm.crystal_symmetry)
+    self.simple, self.asu = self.grm.get_all_bond_proxies(
+      sites_cart=self.xrs.sites_cart())
+    #
+    self.specific_atom_charges = specific_atom_charges
+    self.specific_atom_multiplicities = specific_atom_multiplicities
+    self.atoms_with_charges_set = []
+    if log is None:
+      self.logger = sys.stdout
+    else:
+      self.logger = log
+    self.verbose=verbose
+    if [_f for _f in hierarchy.get_conformer_indices().conformer_indices if _f]:
+      assert (alternative_location_id is not None or
+              alternative_location_index is not None)
+    for atom in self.atoms:
+      e = self.properties.get_valence(atom.element)
+      assert e is not None, ' element %s not found' % atom.element
+      metal = self.properties.is_metal(atom.element)
+      if metal:
+        if atom.element.capitalize() in default_metal_charges:
+          self[atom.i_seq]=default_metal_charges[atom.element.capitalize()]*-1
+          # self[atom.i_seq]=None
+        else:
+          print(atom.quote())
+          # assert 0, ' charge not found for %s' % atom.quote()
+      else:
+        self[atom.i_seq] = e
+    self.set_charges() # place for selections
+    self.validate_metals()
+    self.form_bonds()
+    self.adjust_for_multiplicity()
+
+  def __repr__(self):
+    return self.show()
+
+  def _repr_(self,
+             show_all = False,
+             show_unpaired = True,
+             show_empty_bonds = True,
+             ):
+    atoms = self.hierarchy.atoms()
+    header = 'elec. dist.\n'
+    outl = ''
+    for key, electrons in self.items():
+      if type(key)==type(tuple([])):
+        if(show_empty_bonds and electrons==0) or show_all:
+          outl += '  %s-%s : %d electrons\n' % (atoms[key[0]].quote(),
+                                      atoms[key[1]].quote(),
+                                      electrons,
+          )
+      else:
+        assert abs(electrons)<20
+        if(show_unpaired and electrons) or show_all:
+          outl += '  %s  : %3de\n' % (atoms[key].quote(), electrons)
+    if not outl:
+      outl = '  molecule neutral'
+    outl = '%s%s' % (header, outl)
+    return outl
+
+  def show_detailed(self):
+    return self._repr_(show_all=True)
+
+  def show(self):
+    return self._repr_()
+
+  def show_bonds(self):
+    assert 0
+
+  def show_residues(self):
+    outl = 'elec. dist.\n'
+    for residue_group in self.hierarchy.residue_groups():
+      sum_e = 0
+      for atom in residue_group.atoms():
+        sum_e += self[atom.i_seq]
+      outl += '  %s : %2d\n' % (atom.parent().id_str(), sum_e)
+    return outl
+
+  def show_dot(self, filename='molecule.png'):
+    import graphviz
+    f = graphviz.Digraph(filename=filename)
+    indx=[]
+    element=[]
+    edges=[]
+    atoms=self.hierarchy.atoms()
+    for key, electrons in self.items():
+      if type(key)==type(tuple([])):
+        if atoms[key[0]].element in ['H', 'D']: continue
+        if atoms[key[1]].element in ['H', 'D']: continue
+        for e in range(electrons):
+          edges.append([str(key[0]), str(key[1])])
+      else:
+        if atoms[key].element in ['H', 'D']: continue
+        indx.append(str(key))
+        element.append('%s' % (atoms[key].name))
+        if electrons: element[-1]+=' (%s)' % electrons
+    for name, position in zip(indx, element):
+      f.node(name, position)
+    for e1, e2 in edges:
+      f.edge(e1,e2)
+    print(f.source)
+    f.render(view=True)
+
+  def _generate_atoms(self):
+    for key, electrons in self.items():
+      if type(key)==type(tuple([])): continue
+      yield key
+
+  def _generate_bonds(self):
+    for key, electrons in self.items():
+      if type(key)==type(tuple([])):
+        yield key
+
+  def __setitem__(self, i_seq, electrons):
+    if electrons<-1:
+      if self.properties.get_lone_pairs(self.atoms[i_seq].element):
+        electrons+=2
+    dict.__setitem__(self, i_seq, electrons)
+
+  def _add_electron_to_bond(self, i_seqs, verbose=False):
+    if verbose:
+      atoms = self.hierarchy.atoms()
+      print('_add_electron_to_bond')
+      print(i_seqs, atoms[i_seqs[0]].quote(), atoms[i_seqs[1]].quote())
+      print(self)
+    if i_seqs not in self:
+      tmp = (i_seqs[1], i_seqs[0])
+      i_seqs=tmp
+    self[i_seqs]+=1
+    self[i_seqs[0]]-=1
+    self[i_seqs[1]]-=1
+
+  def _subtract_electron_from_bond(self, i_seqs, verbose=False):
+    if verbose:
+      atoms = self.hierarchy.atoms()
+      print('_subtract_electron_from_bond')
+      print(i_seqs, atoms[i_seqs[0]].quote(), atoms[i_seqs[1]].quote())
+      print(self)
+    if i_seqs not in self:
+      tmp = (i_seqs[1], i_seqs[0])
+      i_seqs=tmp
+    self[i_seqs]-=1
+    self[i_seqs[0]]+=1
+    self[i_seqs[1]]+=1
+
+  def set_charges(self):
+    atoms = self.hierarchy.atoms()
+    for key, electrons in self.items():
+      element = atoms[key].element.strip()
+      if element.capitalize() in default_metal_charges:
+        self[key]=default_metal_charges[element.capitalize()]*-1
+
+    for atom in atoms:
+      element = atom.element.strip()
+      if self.properties.is_metal(element):
+        if atom.charge:
+          self[atom.i_seq]=atom.charge_as_int()*-1
+
+    if self.specific_atom_charges:
+      for i, sac in enumerate(self.specific_atom_charges):
+        metal_asc = self.hierarchy.atom_selection_cache()
+        metal_sel = metal_asc.selection(sac.atom_selection)
+        metal_hierarchy = self.hierarchy.select(metal_sel)
+        for i, atom in enumerate(metal_hierarchy.atoms()):
+          self[atom.i_seq]=sac.charge*-1
+          self.atoms_with_charges_set.append(atom.i_seq)
+          assert i<1
+
+  def adjust_for_multiplicity(self):
+    if self.specific_atom_multiplicities:
+      for i, mac in enumerate(self.specific_atom_multiplicities):
+        radical_asc = self.hierarchy.atom_selection_cache()
+        radical_sel = radical_asc.selection(mac.atom_selection)
+        radical_hierarchy = self.hierarchy.select(radical_sel)
+        for i, atom in enumerate(radical_hierarchy.atoms()):
+          if self[atom.i_seq] and not atom.i_seq in self.atoms_with_charges_set:
+            if mac.multiplicity==2:
+              self[atom.i_seq]=0
+              print('\nCharge on %s changed to zero because of multiplicity. CHECK!' % atom.quote(),
+                    file=self.logger)
+              break
+
+  def _has_metal(self, atom1, atom2):
+    is_metal_count = [0,1][self.properties.is_metal(atom1.element)]
+    is_metal_count+= [0,1][self.properties.is_metal(atom2.element)]
+    if is_metal_count==2:
+      print('\nMore than one metal in a bond can lead to issues. CHECK!', file=self.logger)
+    return is_metal_count
+
+  def is_metal_bond(self, key):
+    assert key in self
+    atoms = self.hierarchy.atoms()
+    return self._has_metal(atoms[key[0]], atoms[key[1]])
+
+  def validate_metals(self):
+    for atom in self.hierarchy.atoms():
+      element = atom.element.strip()
+      if self.properties.is_metal(element):
+        if atom.i_seq not in self:
+          raise Sorry('''Charge error:
+  Atom %s does not have a charge specified. Use PHIL parameter
+  specific_atom_charges or specify in the input model.
+  ''' % (
+    atom.quote(),
+    )
+  )
+
+  def _is_max_bond_valence(self, i_seq):
+    max_valence = self.properties.get_valence(self.atoms[i_seq].element)
+    lp = self.properties.get_lone_pairs(self.atoms[i_seq].element)
+    if lp: max_valence += lp*2
+    for bond in self._generate_bonds():
+      if i_seq in bond:
+        max_valence -= self[bond]
+        if max_valence==0: break
+    return max_valence==0
+
+  def _is_c_c_bond(self, i_seq, j_seq, tetra=['C']):
+    # not checked for bonding
+    if (self.atoms[i_seq].element.strip() in tetra and
+        self.atoms[j_seq].element.strip() in tetra
+      ): return True
+    return False
+
+  def _can_denote_electron_to_covalent_bond(self,
+                                            i_seq,
+                                            j_seq,
+                                            dangling=False,
+                                            verbose=False):
+    if verbose:
+      print('processing %s %s' % (self.atoms[i_seq].quote(), self.atoms[j_seq].quote()))
+    if self[i_seq]>0 and self[j_seq]>0:
+      if verbose:
+        print('bonding %s %s' % (self.atoms[i_seq].quote(), self.atoms[j_seq].quote()))
+      return True
+    elif self[i_seq]==0 and self[j_seq]==0:
+      return False
+    atom1 = self.atoms[i_seq]
+    if atom1.element_is_hydrogen() and self[i_seq]==0: return False
+    atom2 = self.atoms[j_seq]
+    if atom2.element_is_hydrogen() and self[j_seq]==0: return False
+    if self._is_max_bond_valence(i_seq) or self._is_max_bond_valence(j_seq):
+      return False
+    assert i_seq==atom1.i_seq
+    assert j_seq==atom2.i_seq
+    if atom1.element_is_hydrogen():
+      hydrogen = atom1
+      other = atom2
+    elif atom2.element_is_hydrogen():
+      hydrogen = atom2
+      other = atom1
+    elif dangling and self.properties.get_lone_pairs(atom1.element)==0:
+      if verbose: print('atom has no lone pairs',atom1.quote())
+      return False
+    elif dangling and self.properties.get_lone_pairs(atom2.element)==0:
+      if verbose: print('atom has no lone pairs',atom2.quote())
+      return False
+    else:
+      an1 = self.properties.get_atomic_number(atom1.element)
+      an2 = self.properties.get_atomic_number(atom2.element)
+      if an2>an1:
+        dummy = atom1
+        atom1 = atom2
+        atom2 = dummy
+      if self.properties.get_lone_pairs(atom1.element):
+        lone_pair = atom1
+        other = atom2
+      elif self.properties.get_lone_pairs(atom2.element):
+        lone_pair = atom2
+        other = atom1
+      else:
+        return False
+      if verbose:
+        print('other-lp   %s-%s' % (other.quote(), lone_pair.quote()))
+        print(self.properties.get_lone_pairs(atom1.element))
+        print(self.properties.get_lone_pairs(atom2.element))
+        print(self[lone_pair.i_seq], self[other.i_seq])
+      if self[other.i_seq]>0:
+        return True
+      return False
+    if self.properties.get_lone_pairs(other.element):
+      #self[other.i_seq]+=2
+      if verbose: print('hydrogen-X lone pair TRUE')
+      return True
+    return None
+
+  def form_bonds_using_simple(self, extend_based_on_proximity=False, verbose=False):
+    if self.verbose or verbose: verbose=1
+    # verbose=1
+    def _get_sum_lone_pairs(bp):
+      i_seq, j_seq = bp.i_seqs
+      lp1 = self.properties.get_lone_pairs(atoms[i_seq].element)
+      lp2 = self.properties.get_lone_pairs(atoms[j_seq].element)
+      return lp1+lp2
+    def _sort_lone_pairs(bp1, bp2):
+      slp1 = _get_sum_lone_pairs(bp1)
+      slp2 = _get_sum_lone_pairs(bp2)
+      if slp2>slp1: return -1
+      return 1
+    def generate_bonds_from_simple(simple, sort_on_lone_pairs=False):
+      if sort_on_lone_pairs:
+        l = []
+        for bp in simple:
+          l.append(bp)
+        l.sort(key=cmp_to_key(_sort_lone_pairs))
+        l.reverse()
+        later = []
+        for bp in l:
+          atom1 = atoms[bp.i_seqs[0]]
+          atom2 = atoms[bp.i_seqs[1]]
+          if atom1.parent().parent().resseq != atom2.parent().parent().resseq:
+            later.append(bp)
+            continue
+          yield bp
+        for bp in later:
+          yield bp
+      else:
+        assert 0
+    def generate_bonds(simple, asu, sort_on_lone_pairs=False):
+      for rc in generate_bonds_from_simple(simple,
+                                           sort_on_lone_pairs=sort_on_lone_pairs,
+                                           ):
+        yield rc
+    def generate_atoms_from_simple(simple):
+      for bp in simple:
+        # assert bp.origin_id in [0,3], ' origin_id "%s"' % bp.origin_id
+        i_seq, j_seq = bp.i_seqs
+        assert i_seq in self
+        assert j_seq in self
+        atom1 = atoms[i_seq]
+        atom2 = atoms[j_seq]
+        yield bp, i_seq, j_seq, atom1, atom2
+    def generate_atoms(simple, asu):
+      for rc in generate_atoms_from_simple(simple):
+        yield rc
+      assert not len(asu)
+    ###
+    xrs = self.hierarchy.extract_xray_structure(
+      crystal_symmetry=self.grm.crystal_symmetry)
+    simple, asu = self.grm.get_all_bond_proxies(sites_cart=xrs.sites_cart())
+    # need to check asu...
+    # need to filter out H-bonds
+    # look for metal coordination
+    # maybe use origin_id
+    metal_coordination = []
+    for bp, i_seq, j_seq, atom1, atom2 in generate_atoms(simple, asu):
+      assert bp.i_seqs not in self
+      if is_metal(atom1, atom2):
+        self[bp.i_seqs]=0
+        metal_coordination.append(i_seq)
+        metal_coordination.append(j_seq)
+        self[bp.i_seqs]+=1
+        if verbose: print('metal',self)
+    # look for single (non-metal) bonds
+    for bp, i_seq, j_seq, atom1, atom2 in generate_atoms(simple, asu):
+      if is_metal(atom1, atom2): continue
+      mc = None
+      if i_seq in metal_coordination:
+        mc = atoms[i_seq]
+        other = atoms[j_seq]
+      elif j_seq in metal_coordination:
+        mc = atoms[j_seq]
+        other = atoms[i_seq]
+      if mc:
+        if other.element_is_hydrogen():
+          continue
+      self[bp.i_seqs]=0
+      if _can_denote_electron_to_covalent_bond(i_seq, j_seq):
+        self._add_electron_to_bond(bp.i_seqs)
+        if verbose: print('single: %s-%s\n%s' % (atoms[i_seq].quote(),
+                                                 atoms[j_seq].quote(),
+                                                 self))
+    # look for double bonds
+    for bp in generate_bonds_from_simple(simple,
+                                         sort_on_lone_pairs=True,
+                                         ):
+      if bp.i_seqs not in self: continue
+      i_seq, j_seq = bp.i_seqs
+      assert i_seq in self
+      assert j_seq in self
+      while self[i_seq]>0 and self[j_seq]>0:
+        self._add_electron_to_bond(bp.i_seqs)
+        if verbose: print('double',self)
+        if verbose: print('bonding 2',atoms[i_seq].quote(), atoms[j_seq].quote())
+    hypers = []
+    for bp in simple:
+      if bp.i_seqs not in self: continue
+      if verbose: print('hyper',self)
+      i_seq, j_seq = bp.i_seqs
+      assert i_seq in self
+      assert j_seq in self
+      while _can_denote_electron_to_covalent_bond(i_seq,
+                                                  j_seq,
+                                                  verbose=verbose):
+        self._add_electron_to_bond(bp.i_seqs)
+    # remove HG on sulfur bridge
+    # self.check_sulfur_bridge()
+
+  def generate_bond_i_seqs(self, verbose=False):
+    for bpc in [self.simple, self.asu]:
+      for bp in bpc:
+        if hasattr(bp, 'j_seq'):
+          i_seqs = [bp.i_seq, bp.j_seq]
+          i_seqs.sort()
+          i_seqs=tuple(i_seqs)
+          # i_seq, j_seq = i_seqs
+        else:
+          i_seqs = bp.i_seqs
+          # i_seq, j_seq = bp.i_seqs
+        if verbose:
+          print(i_seqs,
+                self.atoms[i_seqs[0]].quote(),
+                self.atoms[i_seqs[1]].quote(),
+                )
+        yield i_seqs
+
+  def get_bonds_containing_i_seq(self, i_seq):
+    rc = []
+    for i_seqs in self.generate_bond_i_seqs():
+      if i_seq in i_seqs:
+        rc.append(i_seqs)
+    return rc
+
+  def get_cycle_charge_count(self, cycle):
+    tmp=[]
+    for c in cycle:
+      tmp.append(c[0])
+      tmp.append(c[1])
+    rc=0
+    for key, item in self.items():
+      if key in tmp:
+        if item: rc+=1
+    return rc
+
+  def get_cycle_charge(self, cycle):
+    tmp=[]
+    for c in cycle:
+      tmp.append(c[0])
+      tmp.append(c[1])
+    rc=0
+    for key, item in self.items():
+      if key in tmp:
+        if item: rc-=self[key]
+    return rc
+
+  def process_dangling_heavy_atoms(self, verbose=False):
+    for key, electrons in self.items():
+      bonds = self.get_bonds_containing_i_seq(key)
+      if len(bonds)==1:
+        i_seq, j_seq = bonds[0]
+        if self._can_denote_electron_to_covalent_bond(i_seq,
+                                                      j_seq,
+                                                      dangling=True,
+                                                      verbose=verbose):
+          self._add_electron_to_bond((i_seq, j_seq))
+          if verbose: print('dangling: %s-%s\n' % (self.atoms[i_seq].quote(),
+                                                   self.atoms[j_seq].quote(),
+                                                  ))
+
+  def does_using_hyper_remove_electrons(self, cycle):
+    def _generate_ij(cycle):
+      for i_seq, j_seq in cycle:
+        yield i_seq, j_seq
+        yield j_seq, i_seq
+    if self.get_cycle_charge(cycle)!=-1: return
+    for i_seq, j_seq in _generate_ij(cycle):
+      if self[i_seq]==1:
+        bonds = self.get_bonds_containing_i_seq(i_seq)
+        for b_i_seq, b_j_seq in bonds:
+          rc = self._can_denote_electron_to_covalent_bond(b_i_seq, b_j_seq)
+          if rc:
+            self._add_electron_to_bond((i_seq, j_seq))
+          if self.get_cycle_charge(cycle)==1:
+            break
+      if self.get_cycle_charge(cycle)==1:
+        break
+
+  def form_bonds_using_networkx(self, verbose=False):
+    import networkx as nx
+    g = nx.DiGraph()
+    #
+    def generate_atom_nodes():
+      for atom in self.atoms:
+        yield (atom.i_seq,
+               {'element':atom.element.strip(),
+                'i_seq': atom.i_seq,
+               })
+    def generate_bond_edges(extend_based_on_proximity=False, verbose=False):
+      for i_seqs in self.generate_bond_i_seqs():
+        if i_seqs in self: continue
+        self[i_seqs]=0
+        i_seq, j_seq = i_seqs
+        if self._can_denote_electron_to_covalent_bond(i_seq, j_seq):
+          self._add_electron_to_bond(i_seqs)
+          if verbose: print('single: %s-%s\n%s' % (self.atoms[i_seq].quote(),
+                                                   self.atoms[j_seq].quote(),
+                                                   self))
+        yield i_seqs
+    #
+    t0=time.time()
+    g.add_nodes_from(generate_atom_nodes())
+    g.add_edges_from(generate_bond_edges(verbose=verbose))
+    h = g.to_undirected()
+    if verbose: print('  Created graphs of molecule : %0.1fs' % (time.time()-t0))
+    self.process_dangling_heavy_atoms()
+    cycle_bases = nx.cycle_basis(h)
+    done_cycles = []
+    t0=time.time()
+    for i_seq, (node, attrs) in enumerate(g.nodes(data=True)):
+      if attrs['element'] in ['H', 'D']: continue
+      assert i_seq==node, '%s %s' % (i_seq, node)
+      # =O
+      if len(h.adj[i_seq])==1:
+        j_seq=list(h.adj[i_seq].keys())[0]
+        if self._can_denote_electron_to_covalent_bond(i_seq, j_seq):
+          self._add_electron_to_bond((i_seq, j_seq))
+          if verbose: print('double: %s-%s\n' % (self.atoms[i_seq].quote(),
+                                                 self.atoms[j_seq].quote(),
+                                                ))
+      # rings
+      cycle=[]
+      for cb in cycle_bases:
+        if i_seq in cb:
+          for e in g.edges:
+            if e[0]in cb and e[1] in cb:
+              cycle.append(e)
+
+      # try:
+      #   cycle = nx.find_cycle(g, i_seq, orientation='ignore')
+      # except Exception:
+      #   pass
+      if not cycle: continue
+      tmp = []
+      for bond in list(cycle): tmp.append(bond[0])
+      tmp.sort()
+      if tmp in done_cycles: continue
+      done_cycles.append(tmp)
+      tries=10
+      cycle_charge_count=self.get_cycle_charge_count(cycle)
+      subtract=[]
+      while cycle_charge_count and tries:
+        tries-=1
+        if not tries:
+          self.does_using_hyper_remove_electrons(cycle)
+        while subtract:
+          i_seqs = subtract.pop()
+          self._subtract_electron_from_bond(i_seqs)
+        for filter_non_tetra_coordinate in range(2,-1,-1):
+          import random
+          # cycle=_sort_on_element(cycle, self.atoms)
+          for i_seq, j_seq in cycle:
+            if filter_non_tetra_coordinate:
+              if not self._is_c_c_bond(i_seq, j_seq):
+                if verbose: print('skipping C-C bond')
+                continue
+            if self[i_seq]>0 and self[j_seq]>0:
+              self._add_electron_to_bond((i_seq, j_seq))
+              subtract.append((i_seq, j_seq))
+              if verbose: print('rings : %s-%s\n%s' % (self.atoms[i_seq].quote(),
+                                                       self.atoms[j_seq].quote(),
+                                                       self))
+        cycle_charge_count=self.get_cycle_charge_count(cycle)
+        random.shuffle(cycle)
+    if verbose: print('  Double & rings : %0.1fs' % (time.time()-t0))
+    #
+    # hyper and triple
+    #
+    t0=time.time()
+    for i_seqs in self.generate_bond_i_seqs():
+    # for bp in self.simple:
+      if i_seqs not in self: continue
+      if verbose: print('hyper',self)
+      i_seq, j_seq = i_seqs
+      assert i_seq in self
+      assert j_seq in self
+      while self._can_denote_electron_to_covalent_bond(i_seq,
+                                                       j_seq,
+                                                       verbose=verbose):
+        self._add_electron_to_bond(i_seqs)
+        if verbose: print('hyper : %s-%s\n' % (self.atoms[i_seq].quote(),
+                                               self.atoms[j_seq].quote(),
+                                              ))
+    if verbose: print('  Hyper & triple : %0.1fs' % (time.time()-t0))
+
+  def form_bonds(self, extend_based_on_proximity=False, verbose=False):
+    if self.verbose or verbose: verbose=1
+    # verbose=1
+    self.form_bonds_using_networkx(verbose=verbose)
+
+  def check_sulfur_bridge(self, verbose=False):
+    assert 0
+    atoms = self.hierarchy.atoms()
+    for i_seq in self._generate_atoms():
+      for j_seq in self._generate_atoms():
+        if j_seq==i_seq: break
+        atom1 = atoms[i_seq]
+        atom2 = atoms[j_seq]
+        if self[i_seq]<0 and self[j_seq]<0:
+          bond0 = bond1 = bond2 = None
+          for key in self:
+            if type(key)==type(tuple([])):
+              if i_seq in key and j_seq in key:
+                bond0 = key
+              elif i_seq in key and not bond1:
+                other1=list(key)
+                other1.remove(i_seq)
+                if atoms[other1[0]].element_is_hydrogen():
+                  bond1 = key
+              elif j_seq in key and not bond2:
+                other2=list(key)
+                other2.remove(j_seq)
+                if atoms[other2[0]].element_is_hydrogen():
+                  bond2 = key
+          if bond0 and bond1 and bond2:
+            if verbose:
+              print('-'*80)
+              print(bond0, bond1, bond2)
+              print(atoms[bond0[0]].quote())
+              print(atoms[bond0[1]].quote())
+              print(atoms[bond1[0]].quote())
+              print(atoms[bond1[1]].quote())
+              print(atoms[bond2[0]].quote())
+              print(atoms[bond2[1]].quote())
+            self[bond1]-=1
+            self[bond2]-=1
+            self[bond1[0]]+=1
+            self[bond1[1]]+=1
+            self[bond2[0]]+=1
+            self[bond2[1]]+=1
+            assert 0
+
+  def extend_based_on_proximity(self):
+    # use available electrons and proximity
+    # needs more care or does not need bond proxies
+    rc = self.get_possible_covalent_bonds()
+    atoms = self.hierarchy.atoms()
+    for i_seq, j_seq in rc:
+      if verbose:
+        print('  forming bond between %s %s' % (atoms[i_seq].quote(),
+                                                atoms[j_seq].quote()))
+      assert (i_seq, j_seq) not in self
+      self[(i_seq, j_seq)] = 1
+      self[i_seq]-=1
+      self[j_seq]-=1
+
+  def get_possible_covalent_bonds(self):
+    def distance2(xyz1, xyz2):
+      sum = 0
+      for i in range(3): sum+=(xyz2[i]-xyz1[i])**2
+      return sum
+    rc = []
+    atoms = self.hierarchy.atoms()
+    for i_seq in self._generate_atoms():
+      if self[i_seq]<1: continue
+      for j_seq in self._generate_atoms():
+        if j_seq==i_seq: break
+        if self[j_seq]<1: continue
+        atom1 = atoms[i_seq]
+        atom2 = atoms[j_seq]
+        # exclude H-H
+        if atom1.element_is_hydrogen() and atom2.element_is_hydrogen(): continue
+        # terminal atoms on a single amino acid C..N
+        if not (atom1.element_is_hydrogen() or atom2.element_is_hydrogen()):
+          continue
+        d2 = distance2(atoms[i_seq].xyz, atoms[j_seq].xyz)
+        if atom1.element_is_hydrogen() or atom2.element_is_hydrogen():
+          if d2<1.5:
+            rc.append([i_seq, j_seq])
+          continue
+        assert d2>9, ' %s-%s is %0.1f' % (atoms[i_seq].quote(),
+                                          atoms[j_seq].quote(),
+                                          d2,
+                                          )
+    return rc
+
+  def validate_atomic_formal_charges(self, verbose=False):
+    data = {'*'   : {'N'  : [-1,0,1],
+                     'OXT': [1,0],
+                     },
+            'LYS' : {'NZ' : [-1]},
+            'GLU' : {'OE2': [1]},
+            'ASP' : {'OD2': [1]},
+            }
+    rc = []
+    for i_seq in self._generate_atoms():
+      atom = self.atoms[i_seq]
+      residue_data = data.get(atom.parent().resname, {})
+      residue_data.update(data['*'])
+      if not residue_data:
+        if self[i_seq]:
+          rc.append(i_seq)
+        assert 0
+      else:
+        if self[i_seq] in residue_data.get(atom.name.strip(), [0]): continue
+      residue_data = data['*'] # needs to be only AA?
+      if self[i_seq] in residue_data.get(atom.name.strip(), [0]): continue
+      rc.append(i_seq)
+    if verbose:
+      for i_seq in rc:
+        print(i_seq, self.atoms[i_seq].quote())
+    return rc
+
+  def get_total_charge(self):
+    total=0
+    for key, electrons in self.items():
+      if type(key)==type(tuple([])): continue
+      total+=electrons
+    return total*-1
+
+  def get_charged_atoms(self):
+    rc = []
+    atoms = self.hierarchy.atoms()
+    for key, electrons in self.items():
+      if type(key)==type(tuple([])): continue
+      if electrons:
+        rc.append([ atoms[key],electrons])
+    return rc
+
+  def validate(self, ignore_water=False, raise_if_error=True):
+    charged_atoms = self.get_charged_atoms()
+    charged_residues = {}
+    rc = {}
+
+    atoms = self.hierarchy.atoms()
+    for key, electrons in self.items():
+      if type(key)==type(tuple([])):
+        if self.is_metal_bond(key): pass
+        elif electrons==0:
+          outl = 'No electrons allocated to bond: %s-%s' % (
+            atoms[key[0]].quote(),
+            atoms[key[1]].quote(),
+          )
+          if raise_if_error: raise Sorry(outl)
+          rc.setdefault(outl, [])
+          rc[outl].append([ atoms[key[0]].quote(),
+                            atoms[key[1]].quote(),
+                            key])
+      else:
+        assert abs(electrons)<10
+        disallowed = disallowed_element_charges.get(atoms[key].element, None)
+        outl = 'Element has strange number of electrons  %s  : %d' % (
+          atoms[key].element,
+          electrons)
+        if electrons!=0 and disallowed is not None:
+          def _comp_disallowed(actual, disallowed):
+            if disallowed<0: return actual<=disallowed
+            elif disallowed>0: return actual>=disallowed
+            assert 0
+          if _comp_disallowed(electrons, disallowed):
+            if raise_if_error: raise Sorry(outl)
+            rc.setdefault(outl, [])
+            rc[outl].append([atoms[key].quote(), key])
+
+    terminals = {}
+    for atom, charge in charged_atoms:
+      if atom.name in [' OXT']: terminals[atom.parent().id_str()]=charge
+      ag = atom.parent()
+      if get_class(ag.resname) in ['common_amino_acid']:
+        base = base_amino_acid_charges.get(ag.resname, 0)
+        tmp = charged_residues.setdefault(ag.id_str(), base)
+        tmp += charge
+        charged_residues[ag.id_str()] = tmp
+
+      if ag.resname in other_charges:
+        if ignore_water and ag.resname in ['HOH']: continue
+        if charge!=other_charges[ag.resname]:
+          outl = '  Residue %s has a problem with the charge : %s!=%s' % (
+            ag.resname,
+            charge,
+            other_charges[ag.resname]
+            )
+        if raise_if_error: raise Sorry(outl)
+        rc.setdefault(outl, [])
+        rc[outl].append(atom.quote())
+
+    for ag in self.hierarchy.atom_groups():
+      delta = 1
+      if ag.resname in ['HIS']: delta=2
+      terminal_adjust = ag.id_str() in terminals
+      charge = charged_residues.get(ag.id_str(), 0)
+      outl = 'Unlikely charge for %s of %s' % (ag.resname, charge)
+      if abs(charge-base_amino_acid_charges.get(ag.resname, 0)-int(terminal_adjust)) > delta:
+        if raise_if_error: raise Sorry(outl)
+        rc.setdefault(outl, [])
+        rc[outl].append('"%s"' % ag.id_str())
+    return rc
+
+  def report(self, ignore_water=False, show_detailed=False):
+    answers = {
+      'Residue HOH has a problem with the charge : 2!=0' : \
+        'Hydrogen atoms not added to water',
+      'Element has strange number of electrons  N  : 1' : \
+        'N terminal (or break) missing hydrogen atoms',
+      'Element has strange number of electrons  O  : -1' : \
+        'C terminal (or break) missing oxygen atoms',
+    }
+    report = self.validate(ignore_water=ignore_water,
+                           raise_if_error=False)
+    outl=''
+    for key, item in sorted(report.items()):
+      outl += '\n  %s\n' % key.strip()
+      for instance in item:
+        i=instance
+        if type(instance)==type([]):
+          i=instance[0]
+        outl += '    %s\n' % i
+      if show_detailed:
+        answer = answers.get(key.strip(), None)
+        if answer:
+          outl += '\n     HINT: %s\n' % answer
+        else:
+          if key.find('Unlikely charge for')>-1 and int(key.split()[-1])>1:
+            outl += '\n     HINT: %s\n' % 'Missing side chain atoms'
+          elif key.find('No electrons allocated to bond:')>-1:
+            outl += '\n     HINT: %s\n' % 'Too many hydrogen atoms'
+          else:
+            pass
+    if outl:
+      outl = 'Validation report\n%s' % outl
+      print(outl)
+    return report
+
+from libtbx.program_template import ProgramTemplate
+from libtbx.utils import null_out
+from libtbx import group_args
+
+master_phil_str = '''
+input
+{
+  selection = None
+    .type = atom_selection
+  ignore_water = False
+    .type = bool
+}
+output
+  .style = menu_item auto_align
+{
+  file_name_prefix = None
+    .type = path
+    .short_caption = Prefix for file name
+    .help = Prefix for file name
+    .input_size = 400
+}
+'''
+
+class Program(ProgramTemplate):
+  description = '''
+Count electrons
+
+Inputs:
+  PDB or mmCIF file containing atomic model
+  Ligand CIF file, if needed
+'''
+  datatypes = ['model', 'restraint', 'phil']
+  master_phil_str = master_phil_str
+
+  def validate(self):
+    self.data_manager.has_models(raise_sorry=True)
+
+  def run(self):
+    model = self.data_manager.get_model()
+    model.set_log(null_out())
+    model.process(make_restraints=True)
+    if self.params.input.selection:
+      new_model = model.selection(self.params.input.selection)
+      new_model = model.select(new_model)
+      model = new_model
+    t0=time.time()
+    self.atom_valences = electron_distribution(
+      model.get_hierarchy(), # needs to be altloc free
+      model.get_restraints_manager().geometry,
+      verbose=False,
+    )
+    print('Distribution time : %01.fs' % (time.time()-t0))
+    print('='*80)
+    print(self.atom_valences)
+    self.report = self.atom_valences.report(
+      ignore_water=self.params.input.ignore_water,
+      show_detailed=True,
+      )
+    self.total_charge = self.atom_valences.get_total_charge()
+
+  def get_results(self):
+    return group_args(atom_valences = self.atom_valences,
+                      validation = self.report,
+                      total_charge = self.total_charge,
+                      )
+
+def run(pdb_filename=None,
+        raw_records=None,
+        return_formal_charges=False,
+        verbose=False,
+        cif_objects=None,
+        ):
+  # legacy from Q|R...
+  if pdb_filename:
+    # Read file into pdb_input class
+    inp = iotbx.pdb.input(file_name=pdb_filename)
+  elif raw_records:
+    inp = iotbx.pdb.input(lines=raw_records, source_info='lines from PDB')
+  else:
+    assert 0
+
+  # create a model manager
+  from io import StringIO
+  log = StringIO()
+  default_scope = mmtbx.model.manager.get_default_pdb_interpretation_scope()
+  working_params = default_scope.extract()
+  # optional???
+  working_params.pdb_interpretation.automatic_linking.link_metals=True
+  model = mmtbx.model.manager(
+    model_input = inp,
+    restraint_objects=cif_objects,
+    log = log,
+  )
+  model.process(make_restraints=True,
+    pdb_interpretation_params = working_params)
+  # get xray structure
+  xrs = model.get_xray_structure()
+  grm = model.get_restraints_manager()
+  t0=time.time()
+  atom_valences = electron_distribution(
+    model.get_hierarchy(), # needs to be altloc free
+    model.get_restraints_manager().geometry,
+    verbose=verbose,
+  )
+  if verbose: print(atom_valences)
+  total_charge = atom_valences.get_total_charge()
+  rc = atom_valences.validate_atomic_formal_charges()
+  if return_formal_charges: return atom_valences
+  return total_charge
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/hierarchy_utils.py
+from __future__ import absolute_import, division, print_function
+import iotbx
+from string import ascii_letters
+
+from mmtbx.ligands.ready_set_basics import construct_xyz
+
+def _new_atom(name, element, xyz, occ, b, hetero, segid=' '*4):
+  # altloc???
+  atom = iotbx.pdb.hierarchy.atom()
+  atom.name = name
+  atom.element = element
+  atom.xyz = xyz
+  atom.occ = occ
+  atom.b = b
+  atom.hetero = hetero
+  atom.segid = segid
+  return atom
+
+def _add_atom_to_chain(atom, ag, icode=None):
+  rg = _add_atom_to_residue_group(atom, ag, icode=icode)
+  chain = ag.parent().parent()
+  tc = iotbx.pdb.hierarchy.chain()
+  tc.id = chain.id
+  tc.append_residue_group(rg)
+  return tc
+
+def _add_atom_to_residue_group(atom, ag, icode=None):
+  tag = iotbx.pdb.hierarchy.atom_group()
+  tag.resname = ag.resname
+  tag.append_atom(atom)
+  rg = iotbx.pdb.hierarchy.residue_group()
+  rg.resseq = ag.parent().resseq
+  if icode is not None: rg.icode=icode
+  rg.append_atom_group(tag)
+  for i, c in enumerate(ascii_letters):
+    if c==ag.parent().parent().id:
+      break
+  atom.tmp = i
+  return rg
+
+def new_atom_with_inheritance(name, element, xyz, parent=None):
+  occ=1
+  b=20
+  hetero=False
+  if parent:
+    occ=parent.occ
+    b=parent.b
+    hetero=parent.hetero
+  return _new_atom(name, element, xyz, occ, b, hetero)
+
+def add_hydrogens_to_atom_group_using_bad(ag,
+                                          atom_name,
+                                          atom_element,
+                                          bond_atom,
+                                          angle_atom,
+                                          dihedral_atom,
+                                          bond_length,
+                                          angle,
+                                          dihedral,
+                                          append_to_end_of_model=False,
+                                          ):
+  rc = []
+  if ag.get_atom(atom_name.strip()): return []
+  if type(bond_atom)==type(''):
+    ba = ag.get_atom(bond_atom.strip())
+    if ba is None: return []
+  else: ba = bond_atom
+  if type(angle_atom)==type(''):
+    aa = ag.get_atom(angle_atom.strip())
+    if aa is None: return []
+  else: aa = angle_atom
+  if type(dihedral_atom)==type(''):
+    da = ag.get_atom(dihedral_atom.strip())
+    if da is None: return []
+  else: da = dihedral_atom
+  ro2 = construct_xyz(ba, bond_length,
+                      aa, angle,
+                      da, dihedral,
+                      period=1,
+                     )
+  atom = _new_atom(atom_name, atom_element, ro2[0], ba.occ, ba.b, ba.hetero)
+  if append_to_end_of_model:
+    chain = _add_atom_to_chain(atom, ag, icode=ba.parent().parent().icode)
+    rc.append(chain)
+  else:
+    ag.append_atom(atom)
+  return rc
+
+def attempt_to_squash_alt_loc(hierarchy):
+  indices = hierarchy.altloc_indices()
+  altlocs = [_f for _f in indices if _f]
+  if len(altlocs)==0: return hierarchy
+  elif len(altlocs)>1: return None
+  squash_hierarchy = hierarchy.deep_copy()
+  for rg in squash_hierarchy.residue_groups():
+    if len(rg.atom_groups())==1: continue
+    ags = rg.atom_groups()
+    detached_ag = ags[1].detached_copy()
+    for atom in detached_ag.atoms():
+      ags[0].append_atom(atom.detached_copy())
+    rg.remove_atom_group(ags[1])
+  return squash_hierarchy
+
+def get_bonds_as_dict(geometry_restraints_manager, include_non_zero_origin_id=True):
+  bonds={}
+  for bond in geometry_restraints_manager.get_all_bond_proxies():
+    if not hasattr(bond, 'get_proxies_with_origin_id'): continue
+    for p in bond.get_proxies_with_origin_id():
+      tmp=bonds.setdefault(p.i_seqs[0], [])
+      tmp.append(p.i_seqs[1])
+      tmp=bonds.setdefault(p.i_seqs[1], [])
+      tmp.append(p.i_seqs[0])
+    if include_non_zero_origin_id:
+      for p in bond.get_proxies_without_origin_id(0):
+        tmp=bonds.setdefault(p.i_seqs[0], [])
+        tmp.append(p.i_seqs[1])
+        tmp=bonds.setdefault(p.i_seqs[1], [])
+        tmp.append(p.i_seqs[0])
+  return bonds
+
+def simple_valence_check(ph, geometry_restraints_manager):
+  from mmtbx.ligands.chemistry import get_valences
+  bonds = get_bonds_as_dict(geometry_restraints_manager.geometry)
+  for atom in ph.atoms():
+    if atom.element_is_hydrogen(): continue
+    if atom.parent().resname in ['HOH']: continue
+    number_of_bonds = len(bonds.get(atom.i_seq, None))
+    # if number_of_bonds is None: continue
+    # print(atom.quote(), number_of_bonds, get_valences(atom.element, atom.charge_as_int()))
+    v = get_valences(atom.element, charge=atom.charge_as_int())
+    if number_of_bonds not in v:
+      print(atom.quote(), number_of_bonds, v)
+
+def main(filename):
+  from iotbx import pdb
+  pdb_inp=pdb.input(filename)
+  ph=pdb_inp.construct_hierarchy()
+  print('is_hierarchy_altloc_consistent')
+  print(ph.is_hierarchy_altloc_consistent())
+
+if __name__ == '__main__':
+  import sys
+  main(*tuple(sys.argv[1:]))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/rdkit_utils.py
+from __future__ import absolute_import, division, print_function
+
+from libtbx.utils import Sorry
+
+from rdkit import Chem
+from rdkit.Chem import rdDistGeom
+from rdkit.Chem import rdFMCS
+
+"""
+Utility functions to work with rdkit
+
+Functions:
+  convert_model_to_rdkit: Convert cctbx model to rdkit mol
+  convert_elbow_to_rdkit: Convert elbow molecule to rdkit mol
+  mol_to_3d: Generate 3D conformer of an rdkit mol
+  mol_to_2d: Generate 2D conformer of an rdkit mol
+  mol_from_smiles: Generate rdkit mol from smiles string
+  match_mol_indices: Match atom indices of different mols
+"""
+
+def get_prop_safe(rd_obj, prop):
+  if prop not in rd_obj.GetPropNames(): return False
+  return rd_obj.GetProp(prop)
+
+def get_cc_cartesian_coordinates(cc_cif, label='pdbx_model_Cartn_x_ideal', ignore_question_mark=False):
+  rc = []
+  for i, (code, monomer) in enumerate(cc_cif.items()):
+    atom = monomer.get_loop_or_row('_chem_comp_atom')
+    # if atom is None: return rc
+    for j, tmp in enumerate(atom.iterrows()):
+      if label=='pdbx_model_Cartn_x_ideal':
+        xyz = (tmp.get('_chem_comp_atom.pdbx_model_Cartn_x_ideal'),
+               tmp.get('_chem_comp_atom.pdbx_model_Cartn_y_ideal'),
+               tmp.get('_chem_comp_atom.pdbx_model_Cartn_z_ideal'),
+               )
+      elif label=='model_Cartn_x':
+        xyz = (tmp.get('_chem_comp_atom.model_Cartn_x'),
+               tmp.get('_chem_comp_atom.model_Cartn_y'),
+               tmp.get('_chem_comp_atom.model_Cartn_z'),
+               )
+      rc.append(xyz)
+      if not ignore_question_mark and '?' in xyz[-1]: return None
+  # print(rc)
+  return rc
+
+def read_chemical_component_filename(filename):
+  from iotbx import cif
+  bond_order_ccd = {
+    1.5:Chem.rdchem.BondType.AROMATIC,
+    'SING': Chem.rdchem.BondType.SINGLE,
+    'DOUB': Chem.rdchem.BondType.DOUBLE,
+    'TRIP': Chem.rdchem.BondType.TRIPLE,
+  }
+  bond_order_rdkitkey = {value:key for key,value in bond_order_ccd.items()}
+  ccd = cif.reader(filename).model()
+  lookup={}
+  def is_coordinates(x):
+    return x!=('?', '?', '?')
+  xyzs = get_cc_cartesian_coordinates(ccd, ignore_question_mark=True)
+  xyzs = list(filter(is_coordinates, xyzs))
+  if xyzs is None or len(xyzs)==0:
+    xyzs = get_cc_cartesian_coordinates(ccd, label='model_Cartn_x', ignore_question_mark=True)
+    xyzs = list(filter(is_coordinates, xyzs))
+  if xyzs is None or len(xyzs)==0:
+    for code, monomer in ccd.items():
+      break
+    raise Sorry('''
+  Generating H restraints from Chemical Components for %s failed. Please supply
+  restraints.
+  ''' % code)
+  for i, (code, monomer) in enumerate(ccd.items()):
+    molecule = Chem.Mol()
+    desc = monomer.get_loop_or_row('_chem_comp')
+    rwmol = Chem.RWMol(molecule)
+    atom = monomer.get_loop_or_row('_chem_comp_atom')
+    # if atom is None: continue
+    conformer = Chem.Conformer(atom.n_rows())
+    for j, tmp in enumerate(atom.iterrows()):
+      new = Chem.Atom(tmp.get('_chem_comp_atom.type_symbol').capitalize())
+      new.SetFormalCharge(int(tmp.get('_chem_comp_atom.charge')))
+      for prop in ['atom_id', 'type_symbol']:
+        new.SetProp(prop, tmp.get('_chem_comp_atom.%s' % prop, '?'))
+      rdatom = rwmol.AddAtom(new)
+      if xyzs[j][0] in ['?']:
+        pass
+      else:
+        xyz = (float(xyzs[j][0]), float(xyzs[j][1]), float(xyzs[j][2]))
+        conformer.SetAtomPosition(rdatom, xyz)
+      lookup[tmp.get('_chem_comp_atom.atom_id')]=j
+    bond = monomer.get_loop_or_row('_chem_comp_bond')
+    if bond:
+      for tmp in bond.iterrows():
+        atom1 = tmp.get('_chem_comp_bond.atom_id_1')
+        atom2 = tmp.get('_chem_comp_bond.atom_id_2')
+        atom1 = lookup.get(atom1)
+        atom2 = lookup.get(atom2)
+        order = tmp.get('_chem_comp_bond.value_order')
+        order = bond_order_ccd[order]
+        rwmol.AddBond(atom1, atom2, order)
+  rwmol.AddConformer(conformer)
+  # Chem.SanitizeMol(rwmol)
+  # from rdkit.Chem.PropertyMol import PropertyMol
+  molecule = rwmol.GetMol()
+  # molecule = PropertyMol(molecule)
+#  print(dir(molecule))
+#  print(desc)
+#  print(dir(desc))
+#  for key, item in desc.items():
+#    key = key.split('.')[1]
+#    print(key,list(item))
+#    molecule.SetProp(key,item[0])
+#    print(molecule.HasProp(key))
+#    print(molecule.GetProp(key))
+#  print(dir(molecule.GetPropNames()))
+#  print(molecule.GetPropsAsDict())
+  # print(dir(rwmol))
+  return molecule
+
+def get_molecule_from_resname(resname):
+  import os
+  from mmtbx.chemical_components import get_cif_filename
+  filename = get_cif_filename(resname)
+  if not os.path.exists(filename): return None
+  try:
+    molecule = read_chemical_component_filename(filename)
+  except Exception as e:
+    print(e)
+    return None
+  return molecule
+
+def mol_from_chemical_component(code):
+  from mmtbx.chemical_components import get_cif_filename
+  rc = get_cif_filename(code)
+  molecule = read_chemical_component_filename(rc)
+  return molecule
+
+def convert_model_to_rdkit(cctbx_model):
+  """
+  Convert a cctbx model molecule object to an
+  rdkit molecule object
+
+  TODO: Bond type is always unspecified
+  """
+  assert cctbx_model.restraints_manager is not None, "Restraints manager must be set"
+
+  mol = Chem.Mol()
+  rwmol = Chem.RWMol(mol)
+  conformer = Chem.Conformer(cctbx_model.get_number_of_atoms())
+
+  for i,atom in enumerate(cctbx_model.get_atoms()):
+    element = atom.element.strip().upper()
+    if element =="D":
+      element = "H"
+    else:
+      element = element
+    atomic_number = Chem.GetPeriodicTable().GetAtomicNumber(element)
+    rdatom = Chem.Atom(atomic_number)
+    rdatom.SetFormalCharge(atom.charge_as_int())
+    rdatom_idx = rwmol.AddAtom(rdatom)
+    conformer.SetAtomPosition(rdatom_idx,atom.xyz)
+
+  rm = cctbx_model.restraints_manager
+  grm = rm.geometry
+  bonds_simple, bonds_asu = grm.get_all_bond_proxies()
+  bond_proxies = bonds_simple.get_proxies_with_origin_id()
+  for bond_proxy in bond_proxies:
+    begin, end = bond_proxy.i_seqs
+    order = Chem.rdchem.BondType.UNSPECIFIED
+    rwmol.AddBond(int(begin),int(end),order)
+
+  rwmol.AddConformer(conformer)
+  mol = rwmol.GetMol()
+  return mol
+
+def convert_elbow_to_rdkit(elbow_mol):
+  """
+  Convert elbow molecule object to an
+  rdkit molecule object
+
+  TODO: Charge
+  """
+  # elbow bond order to rdkit bond orders
+  bond_order_elbowkey = {
+    1.5:Chem.rdchem.BondType.AROMATIC,
+    1: Chem.rdchem.BondType.SINGLE,
+    2: Chem.rdchem.BondType.DOUBLE,
+    3: Chem.rdchem.BondType.TRIPLE,
+  }
+  bond_order_rdkitkey = {value:key for key,value in bond_order_elbowkey.items()}
+  atoms = list(elbow_mol)
+  mol = Chem.Mol()
+  rwmol = Chem.RWMol(mol)
+  conformer = Chem.Conformer(len(atoms))
+
+  for i,atom in enumerate(atoms):
+    xyz = atom.xyz
+    atomic_number = atom.number
+    rdatom = rwmol.AddAtom(Chem.Atom(int(atomic_number)))
+    conformer.SetAtomPosition(rdatom,xyz)
+
+  for i,bond in enumerate(elbow_mol.bonds):
+    bond_atoms = list(bond)
+    start,end = atoms.index(bond_atoms[0]), atoms.index(bond_atoms[1])
+    order = bond_order_elbowkey[bond.order]
+    rwmol.AddBond(int(start),int(end),order)
+
+  rwmol.AddConformer(conformer)
+  mol = rwmol.GetMol()
+  return mol
+
+def convert_rdkit_to_elbow(rwmol):
+  from elbow.chemistry.SimpleMoleculeClass import SimpleMoleculeClass
+  from elbow.chemistry.xyzClass import xyzClass
+  positions = molecule.GetConformer().GetPositions()
+  smc = SimpleMoleculeClass()
+  for i, atom in enumerate(smc):
+    atom.xyz = xyzClass(positions[i])
+    atom.record_name = 'LIG'
+    atom.chainID = 'A'
+    atom.segID = ''
+  smc.SetOriginalFormat('PDB')
+  assert 0
+
+def enumerate_bonds(mol):
+  idx_set_bonds = {frozenset((bond.GetBeginAtomIdx(),bond.GetEndAtomIdx())) for bond in mol.GetBonds()}
+  # check that the above approach matches the more exhaustive approach used for angles/torsion
+  idx_set = set()
+  for atom in mol.GetAtoms():
+    for neigh1 in atom.GetNeighbors():
+      idx0,idx1 = atom.GetIdx(), neigh1.GetIdx()
+      s = frozenset([idx0,idx1])
+      if len(s)==2:
+        if idx0>idx1:
+            idx0,idx1 = idx1,idx0
+            idx_set.add(s)
+  assert idx_set == idx_set_bonds
+  return idx_set_bonds
+
+def enumerate_angles(mol):
+  idx_set = set()
+  for atom in mol.GetAtoms():
+    for neigh1 in atom.GetNeighbors():
+      for neigh2 in neigh1.GetNeighbors():
+        idx0,idx1,idx2 = atom.GetIdx(), neigh1.GetIdx(),neigh2.GetIdx()
+        s = (idx0,idx1,idx2)
+        if len(set(s))==3:
+          if idx0>idx2:
+            idx0,idx2 = idx2,idx0
+          idx_set.add((idx0,idx1,idx2))
+  return idx_set
+
+def enumerate_torsions(mol):
+  idx_set = set()
+  for atom0 in mol.GetAtoms():
+    idx0 = atom0.GetIdx()
+    for atom1 in atom0.GetNeighbors():
+      idx1 = atom1.GetIdx()
+      for atom2 in atom1.GetNeighbors():
+        idx2 = atom2.GetIdx()
+        if idx2==idx0:
+          continue
+        for atom3 in atom2.GetNeighbors():
+          idx3 = atom3.GetIdx()
+          if idx3 == idx1 or idx3 == idx0:
+            continue
+          s = (idx0,idx1,idx2,idx3)
+          if len(set(s))==4:
+            if idx0<idx3:
+              idx_set.add((idx0,idx1,idx2,idx3))
+            else:
+              idx_set.add((idx3,idx2,idx1,idx0))
+  return idx_set
+
+def mol_to_3d(mol):
+  """
+  Convert and rdkit mol to 3D coordinates
+  """
+  assert len(mol.GetConformers())==0, "mol already has conformer"
+  param = rdDistGeom.ETKDGv3()
+  conf_id = rdDistGeom.EmbedMolecule(mol,clearConfs=True)
+  return mol
+
+def mol_to_2d(mol):
+  """
+  Convert and rdkit mol to 2D coordinates
+  """
+  mol = Chem.Mol(mol) # copy to preserve original coords
+  ret = Chem.rdDepictor.Compute2DCoords(mol)
+  return mol
+
+def mol_from_smiles(smiles, embed3d=False, addHs=True, removeHs=False, verbose=False):
+  """
+  Convert a smiles string to rdkit mol
+  """
+  ps = Chem.SmilesParserParams()
+  ps.removeHs=removeHs
+  rdmol = Chem.MolFromSmiles(smiles, ps)
+  if verbose: print('rdmol',rdmol)
+  if rdmol is None: return rdmol
+  if verbose: print('rdmol',rdmol.Debug())
+  if addHs: rdmol = Chem.AddHs(rdmol)
+  if verbose: print('rdmol',rdmol.Debug())
+  if embed3d: rdmol = mol_to_3d(rdmol)
+  if verbose: print('rdmol',rdmol.Debug())
+  if removeHs: rdmol = Chem.RemoveHs(rdmol)
+  if verbose: print('rdmol',rdmol.Debug())
+  Chem.SetHybridization(rdmol)
+  if verbose: print('rdmol',rdmol.Debug())
+  rdmol.UpdatePropertyCache()
+  if verbose: print('rdmol',rdmol.Debug())
+  return rdmol
+
+def match_mol_indices(mol_list):
+  """
+  Match atom indices of molecules.
+
+  Args:
+      mol_list (list): a list of rdkit mols
+
+  Returns:
+      match_list: (list): a list of tuples
+                          Each entry is a match beween in mols
+                          Each value is the atom index for each mol
+  """
+  mol_list = [Chem.Mol(mol) for mol in mol_list]
+  mcs_SMARTS = rdFMCS.FindMCS(mol_list)
+  smarts_mol = Chem.MolFromSmarts(mcs_SMARTS.smartsString)
+  match_list = [x.GetSubstructMatch(smarts_mol) for x in mol_list]
+  return list(zip(*match_list))
+
+def is_amino_acid(molecule):
+  atom_names = ['N', 'CA', 'C', 'O']
+  bond_names = [['CA', 'N'],
+                ['C', 'O'],
+                ['C', 'CA'],
+               ]
+  acount=0
+  for atom in molecule.GetAtoms():
+    if get_prop_safe(atom, 'atom_id') in atom_names:
+      acount+=1
+  bcount=0
+  for bond in molecule.GetBonds():
+    names = [get_prop_safe(bond.GetBeginAtom(), 'atom_id'),
+             get_prop_safe(bond.GetEndAtom(), 'atom_id'),
+            ]
+    names.sort()
+    if names in bond_names:
+      bcount+=1
+  if acount==4 and bcount==3:
+    return True
+  return False
+
+def is_nucleic_acid(molecule):
+  atom_names = ['P', "'O5'", 'OP1', 'OP2',
+                "O3'", "C3'"]
+  bond_names = [["O5'", 'P'],
+                ['OP1', 'P'],
+                ['OP2', 'P'],
+                ["C3'", "O3'"],
+               ]
+  acount=0
+  for atom in molecule.GetAtoms():
+    if get_prop_safe(atom, 'atom_id') in atom_names:
+      acount+=1
+  bcount=0
+  for bond in molecule.GetBonds():
+    names = [get_prop_safe(bond.GetBeginAtom(), 'atom_id'),
+             get_prop_safe(bond.GetEndAtom(), 'atom_id'),
+            ]
+    names.sort()
+    if names in bond_names:
+      bcount+=1
+  if acount==5 and bcount==4:
+    return True
+  return False
+
+if __name__ == '__main__':
+  import sys
+  if sys.argv[1:]:
+    read_chemical_component_filename(sys.argv[1])
+  else:
+    for smiles_string in ['CD',
+                          'Cd',
+                          '[Cd]',
+                          'CC',
+                          'c1ccc1',
+      ]:
+      mol = mol_from_smiles(smiles_string, verbose=True)
+      try:
+        print(mol.Debug())
+      except Exception: pass
+    assert 0
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/ready_set_basics.py
+from __future__ import absolute_import, division, print_function
+import math
+
+import iotbx.pdb
+from scitbx import matrix
+import six
+from six.moves import range
+
+def construct_xyz(ba, bv,
+                  aa, av,
+                  da, dv,
+                  period=3,
+                  ):
+  """Construct a list of cartesian coordinates based on Z-matrix information
+
+  Args:
+      ba (hierarchy atom): 1st atom
+      bv (float): bond length to ba
+      aa (hierarchy atom): 2nd atom
+      av (float): angle value to ba-aa
+      da (hierarchy atom): 3rd atom
+      dv (float): torsion value to da-aa-ba
+      period (int, optional): periodicity of torsion
+
+  Returns:
+      matrix: List of cartesian coordinates of lenght period
+
+
+           bv
+      ?--------ba
+                 \
+                  \
+                av \
+                    \
+                     \
+                     aa---------da
+  """
+  assert ba is not None
+  assert aa is not None
+  assert da is not None
+  rn = matrix.col(ba.xyz)
+  rca = matrix.col(aa.xyz)
+  rc = matrix.col(da.xyz)
+  rcca = rc -rca
+
+  e0 = (rn - rca).normalize()
+  e1 = (rcca - (rcca.dot(e0))*e0).normalize()
+  e2 = e0.cross(e1)
+
+  pi = math.pi
+  alpha = math.radians(av)
+  phi = math.radians(dv)
+
+  rh_list = []
+  for n in range(0, period):
+    rh = rn + bv * (math.sin(alpha)*(math.cos(phi + n*2*pi/period)*e1 +
+                                     math.sin(phi + n*2*pi/period)*e2) -
+                    math.cos(alpha)*e0)
+    rh_list.append(rh)
+  return rh_list
+
+def get_hierarchy_atom(name, element, xyz, occ=1., b=20.):
+  atom = iotbx.pdb.hierarchy.atom()
+  atom.name = name
+  atom.element = element #"H"
+  atom.xyz = xyz # rh3[i]
+  atom.occ = occ # n.occ
+  atom.b = b #n.b
+  atom.segid = ' '*4
+  return atom
+
+def get_hierarchy_h_atom(name, xyz, heavy_atom, proton_element='H'):
+  return get_hierarchy_atom(name,
+                            proton_element,
+                            xyz,
+                            heavy_atom.occ,
+                            heavy_atom.b,
+                            )
+
+def is_perdeuterated(ag):
+  protons = {}
+  for atom in ag.atoms():
+    if atom.element_is_hydrogen():
+      protons.setdefault(atom.element, 0)
+      protons[atom.element]+=1
+  if len(protons) in [0,2]: return False
+  if len(protons)==1:
+    if 'D' in protons:
+      return True
+    else:
+      return False
+  assert 0
+
+def get_proton_info(ag):
+  proton_name=proton_element='H'
+  if is_perdeuterated(ag):
+    proton_name=proton_element='D'
+  return proton_element, proton_name
+
+def generate_atom_group_atom_names(rg, names, return_Nones=False, verbose=True):
+  '''
+  Generate all alt. loc. groups of names
+  '''
+  atom_groups = rg.atom_groups()
+  atom_altlocs = {}
+  for ag in atom_groups:
+    for atom in ag.atoms():
+      atom_altlocs.setdefault(atom.parent().altloc, [])
+      atom_altlocs[atom.parent().altloc].append(atom)
+  if len(atom_altlocs)>1 and '' in atom_altlocs:
+    for key in atom_altlocs:
+      if key=='': continue
+      for atom in atom_altlocs['']:
+        atom_altlocs[key].append(atom)
+    del atom_altlocs['']
+  for key, value in six.iteritems(atom_altlocs):
+    atoms=[]
+    for name in names:
+      for atom in value:
+        if atom.name.strip()==name.strip():
+          atoms.append(atom)
+          break
+      else:
+        if return_Nones:
+          atoms.append(None)
+        else:
+          if verbose:
+            print('not all atoms found. missing %s from %s' % (name, names))
+          break
+    if len(atoms)!=len(names):
+      yield None, None
+    else:
+      yield atoms[0].parent(), atoms
+
+if __name__ == '__main__':
+  ba = get_hierarchy_atom('BA', 'B', (0,0,0))
+  aa = get_hierarchy_atom('AA', 'C', (0,1,0))
+  da = get_hierarchy_atom('DA', 'O', (1,1,0))
+  print(ba.format_atom_record())
+  print(aa.format_atom_record())
+  print(da.format_atom_record())
+  rc = construct_xyz(ba, 1, aa, 90, da, 0)
+  print(rc)
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/ready_set_utils.py
+from __future__ import absolute_import, division, print_function
+
+import iotbx
+from iotbx.pdb import amino_acid_codes as aac
+from scitbx.math import dihedral_angle
+from mmtbx.ligands.ready_set_basics import construct_xyz
+from mmtbx.ligands.ready_set_basics import generate_atom_group_atom_names
+from mmtbx.ligands.ready_set_basics import get_hierarchy_h_atom
+from mmtbx.ligands.ready_set_basics import get_proton_info
+from mmtbx.ligands.hierarchy_utils import _add_atom_to_chain
+from mmtbx.hydrogens.specialised_hydrogen_atoms import process_disulphide_hydrogen_atoms
+from six.moves import range
+
+get_class = iotbx.pdb.common_residue_names_get_class
+
+def distance2(xyz1, xyz2):
+  d2=0
+  for k in range(3):
+    d2+=(xyz2[k]-xyz1[k])**2
+  return d2
+
+def is_n_terminal_residue(residue_group):
+  residues = []
+  for atom_group in residue_group.atom_groups():
+    if atom_group.resname not in residues: residues.append(atom_group.resname)
+  assert len(residues)==1
+  #if residues[0] in n_terminal_amino_acid_codes: return True
+  return False
+
+def _add_atoms_from_chains_to_end_of_hierarchy(hierarchy, chains):
+  lookup = {}
+  for chain in chains:
+    lookup.setdefault(chain.id, [])
+    lookup[chain.id].append(chain)
+  model = hierarchy.models()[0]
+  for i, chain_group in sorted(lookup.items()):
+    tc = iotbx.pdb.hierarchy.chain()
+    tc.id = i
+    for chain in chain_group:
+      for rg in chain.residue_groups():
+        tc.append_residue_group(rg.detached_copy())
+    model.append_chain(tc)
+
+def validate_c_ca_n_for_n_terminal(c,ca,n,bonds):
+  if bonds is None: return True
+  nb = bonds.get(n.i_seq, None)
+  if not nb: return False
+  if len(nb) not in [1, 2]: return False
+  return True
+
+def validate_c_ca_n_for_c_terminal(c,ca,n,bonds):
+  if bonds is None: return True
+  cb = bonds.get(c.i_seq, None)
+  if not cb: return False
+  if len(cb) not in [2]: return False
+  return True
+
+def add_n_terminal_hydrogens_to_atom_group(ag,
+                                           bonds=None,
+                                           use_capping_hydrogens=False,
+                                           append_to_end_of_model=False,
+                                           retain_original_hydrogens=True,
+                                           n_ca_c=None,
+                                           verbose=False,
+                                          ):
+  if verbose and bonds is None:
+    print('\n\t%s\n' % 'add_n_terminal_hydrogens_to_atom_group has not been given bonds')
+  rc=[]
+  if n_ca_c is not None:
+    n, ca, c = n_ca_c
+  else:
+    n = ag.get_atom("N")
+    if n is None: return 'no N'
+    ca = ag.get_atom("CA")
+    if ca is None: return 'no CA'
+    c = ag.get_atom("C")
+    if c is None: return 'no C'
+
+  if not validate_c_ca_n_for_n_terminal(c, ca, n, bonds): return []
+
+  proton_element, proton_name = get_proton_info(ag)
+  atom = ag.get_atom(proton_element) # just so happens that the atom is named H/D
+  dihedral=120.
+  if atom:
+    dihedral = dihedral_angle(sites=[atom.xyz,
+                                     n.xyz,
+                                     ca.xyz,
+                                     c.xyz,
+                                   ],
+                              deg=True)
+  if retain_original_hydrogens: pass
+  else:
+    if ag.get_atom(proton_name): # maybe needs to be smarter or actually work
+      ag.remove_atom(ag.get_atom(proton_name))
+
+  rh3 = construct_xyz(n, 1.0,
+                      ca, 109.5,
+                      c, dihedral,
+                     )
+  # this could be smarter
+  if proton_element=='H':
+    possible = ['H', 'H1', 'H2', 'H3', 'HT1', 'HT2']
+  elif proton_element=='D':
+    possible = ['D', 'D1', 'D2', 'D3'] #, 'HT1', 'HT2']
+  h_count = 0
+  d_count = 0
+  for h in possible:
+    if ag.get_atom(h): h_count+=1
+    if ag.get_atom(h.replace('H', 'D')): d_count+=1
+  number_of_hydrogens=3
+  if verbose: print('starting number_of_hydrogens',number_of_hydrogens)
+  if use_capping_hydrogens:
+    if verbose: print('use_capping_hydrogens...')
+    number_of_hydrogens-=1
+    #if ag.atoms()[0].parent().resname=='PRO':
+    #  number_of_hydrogens=-1
+    #  # should name the hydrogens correctly
+  if bonds:
+    def _get_atom_with_i_seq(ag, i_seq):
+      for atom in ag.atoms():
+        if atom.i_seq==i_seq: return atom
+      return None
+    atoms=ag.atoms()
+    i_seqs = atoms.extract_i_seq()
+    number_of_heavy=0
+    for i_seq in bonds.get(n.i_seq, []):
+      if i_seq in i_seqs:
+        ba = _get_atom_with_i_seq(ag, i_seq)
+        if not ba.element_is_hydrogen():
+          number_of_heavy+=1
+      # else:
+      #   number_of_heavy+=1
+    if number_of_heavy==2 and ag.resname!='PRO': # need central PRO-like...
+      number_of_hydrogens-=2
+    if verbose: print('number_of_heavy', number_of_heavy)
+  if verbose: print('number_of_hydrogens',number_of_hydrogens)
+  if h_count+d_count>=number_of_hydrogens: return []
+  j=0
+  for i in range(0, number_of_hydrogens):
+    name = " %s%d " % (proton_element, i+1)
+    if number_of_hydrogens==1: name = ' %s  ' % proton_element
+    if retain_original_hydrogens:
+      if i==0 and ag.get_atom(proton_name): continue
+      if i==1 and ag.get_atom(proton_name):
+        retained = ag.get_atom(proton_name)
+        d2 = distance2(retained.xyz, rh3[j])
+        if d2<0.5: j+=1
+    if ag.get_atom(name.strip()): continue
+    if ag.resname=='PRO':
+      if i==0:
+        continue
+    # _new_atom in heirarchy_utils.py
+    atom = iotbx.pdb.hierarchy.atom()
+    atom.name = name
+    atom.element = proton_element
+    atom.xyz = rh3[j]
+    atom.occ = n.occ
+    atom.b = n.b
+    atom.segid = ' '*4
+    if verbose: print('adding', atom.quote())
+    if append_to_end_of_model and i+1==number_of_hydrogens:
+      rg = _add_atom_to_chain(atom,
+                              ag,
+                              icode=n.parent().parent().icode)
+      rc.append(rg)
+    else:
+      ag.append_atom(atom)
+    j+=1
+    if j==number_of_hydrogens: j=0
+  return rc
+
+def add_n_terminal_hydrogens_to_residue_group(residue_group,
+                                              bonds=None,
+                                              use_capping_hydrogens=False,
+                                              append_to_end_of_model=False,
+                                              retain_original_hydrogens=True,
+                                             ):
+  rc=[]
+  for atom_group, atoms in generate_atom_group_atom_names(residue_group,
+                                                       ['N', 'CA', 'C'],
+                                                       verbose=False
+                                                       ):
+    if None not in [atom_group, atoms]:
+      tmp = add_n_terminal_hydrogens_to_atom_group(
+        atom_group,
+        bonds=bonds,
+        use_capping_hydrogens=use_capping_hydrogens,
+        append_to_end_of_model=append_to_end_of_model,
+        retain_original_hydrogens=retain_original_hydrogens,
+        n_ca_c=atoms,
+      )
+      assert type(tmp)!=type(''), 'not string "%s" %s' % (tmp, type(tmp))
+      rc += tmp
+  return rc
+
+def add_c_terminal_oxygens_to_atom_group(ag,
+                                         bonds=None,
+                                         use_capping_hydrogens=False,
+                                         append_to_end_of_model=False,
+                                         c_ca_n=None,
+                                        ):
+  #
+  # do we need ANISOU
+  #
+  proton_element, proton_name = get_proton_info(ag)
+  rc = []
+  atom_name=' OXT'
+  atom_element = 'O'
+  bond_length=1.231
+  if use_capping_hydrogens:
+    if ag.get_atom(atom_name.strip()): return []
+    atom_name=" %sC " % proton_element
+    atom_element=proton_element
+    bond_length=1.
+  if ag.get_atom(atom_name.strip()): return []
+  if c_ca_n is not None:
+    c, ca, n = c_ca_n
+  else:
+    c = ag.get_atom("C")
+    if c is None: return
+    ca = ag.get_atom("CA")
+    if ca is None: return
+    n = ag.get_atom("N")
+    if n is None: return
+  if not validate_c_ca_n_for_c_terminal(c, ca, n, bonds): return []
+  atom = ag.get_atom('O')
+  dihedral = dihedral_angle(sites=[atom.xyz,
+                                   c.xyz,
+                                   ca.xyz,
+                                   n.xyz,
+                                 ],
+                            deg=True)
+  ro2 = construct_xyz(c, bond_length,
+                      ca, 120.,
+                      n, dihedral,
+                      period=2,
+                     )
+  oxys = [' O  ', atom_name]
+  for i in range(0,2):
+    name = oxys[i]
+    atom = ag.get_atom(name.strip())
+    if atom:
+      pass #atom.xyz = ro2[i]
+    else:
+      atom = iotbx.pdb.hierarchy.atom()
+      atom.name = name
+      atom.element = atom_element
+      atom.occ = c.occ
+      atom.b = c.b
+      atom.segid = ' '*4
+      atom.xyz = ro2[i]
+      if append_to_end_of_model:
+        chain = _add_atom_to_chain(atom,
+                                   ag,
+                                   icode=c.parent().parent().icode)
+        rc.append(chain)
+      else:
+        # add the atom to the hierarchy
+        ag.append_atom(atom)
+  return rc
+
+def add_c_terminal_oxygens_to_residue_group(residue_group,
+                                            bonds=None,
+                                            use_capping_hydrogens=False,
+                                            append_to_end_of_model=False,
+                                           ):
+  result=[]
+  for ag, rc in generate_atom_group_atom_names(residue_group,
+                                                       ['C', 'CA', 'N'],
+                                                       ):
+    if rc is None: continue
+    c, ca, n = rc
+    tmp = add_c_terminal_oxygens_to_atom_group(
+      ag,
+      bonds=bonds,
+      use_capping_hydrogens=use_capping_hydrogens,
+      append_to_end_of_model=append_to_end_of_model,
+      c_ca_n = [c, ca, n],
+    )
+    result += tmp
+  return result
+
+def add_main_chain_o_to_atom_group(ag, c_ca_n=None):
+  # cetral functuon
+  if c_ca_n is not None:
+    c, ca, n = c_ca_n
+  else:
+    c = ag.get_atom("C")
+    if c is None: return
+    ca = ag.get_atom("CA")
+    if ca is None: return
+    n = ag.get_atom("N")
+    if n is None: return
+  atom = ag.get_atom('O')
+  dihedral = dihedral_angle(sites=[atom.xyz,
+                                   c.xyz,
+                                   ca.xyz,
+                                   n.xyz,
+                                 ],
+                            deg=True)
+  ro2 = construct_xyz(c, bond_length,
+                      ca, 120.,
+                      n, dihedral,
+                      period=2,
+                     )
+  oxys = [' O  ', atom_name]
+  for i in range(0,2):
+    name = oxys[i]
+    atom = ag.get_atom(name.strip())
+    if atom:
+      pass #atom.xyz = ro2[i]
+    else:
+      atom = iotbx.pdb.hierarchy.atom()
+      atom.name = name
+      atom.element = atom_element
+      atom.occ = c.occ
+      atom.b = c.b
+      atom.segid = ' '*4
+      atom.xyz = ro2[i]
+      if append_to_end_of_model:
+        chain = _add_atom_to_chain(atom, ag)
+        rc.append(chain)
+      else:
+        # add the atom to the hierarchy
+        ag.append_atom(atom)
+
+  #for
+  assert atom
+
+def add_main_chain_atoms_to_residue_group(residue_group):
+  # I think this needs a three
+  assert 0
+  for ag, (c, ca, n, o) in generate_atom_group_atom_names(residue_group,
+                                                          ['C', 'CA', 'N', 'O'],
+                                                          return_Nones=True,
+                                                          ):
+    if o is None:
+      add_main_chain_o_to_atom_group(ag,
+                                     c_ca_n = [c, ca, n],
+                                    )
+
+def add_main_chain_atoms_to_protein_three(three):
+  for ag, (c, ca, n, o) in generate_atom_group_atom_names(three[1],
+                                                          ['C', 'CA', 'N', 'O'],
+                                                          return_Nones=True,
+                                                          ):
+    if o is None:
+      add_main_chain_o_to_atom_group(ag,
+                                     c_ca_n = [c, ca, n],
+                                    )
+
+  assert 0
+
+def generate_residues_via_conformer(hierarchy,
+                                    backbone_only=False,
+                                    verbose=False,
+                                    ):
+  backbone_asc = hierarchy.atom_selection_cache()
+  backbone_sel = backbone_asc.selection("name ca or name c or name n or name o or name cb")
+  backbone_hierarchy = hierarchy.select(backbone_sel)
+  get_class = iotbx.pdb.common_residue_names_get_class
+  loop_hierarchy=hierarchy
+  if backbone_only: loop_hierarchy=backbone_hierarchy
+  for model in loop_hierarchy.models():
+    if verbose: print('model: "%s"' % model.id)
+    for chain in model.chains():
+      if verbose: print('chain: "%s"' % chain.id)
+      for conformer in chain.conformers():
+        if verbose: print('  conformer: altloc="%s"' % (conformer.altloc))
+#        while threes: del threes[0]
+#        threes.start=None
+#        threes.end=None
+#        list_of_threes = []
+        for residue in conformer.residues():
+          if verbose:
+            if residue.resname not in ["HOH"]:
+              print('    residue: resname="%s" resid="%s"' % (
+                residue.resname, residue.resid()))
+          if verbose: print('      residue class : %s' % get_class(residue.resname))
+          if get_class(residue.resname) not in ["common_amino_acid",
+                                                'modified_amino_acid',
+                                              ]:
+            # this needs to be moved to cctbx get_class
+            #'ETA', # COOH terminal - not in modified
+            if residue.resname not in aac.three_letter_l_given_three_letter_d:
+              continue
+          yield residue
+
+def generate_protein_fragments(hierarchy,
+                               geometry,
+                               backbone_only=False,
+                               use_capping_hydrogens=False,
+                               verbose=False,
+                               ):
+  '''
+  Called by qrefine. This should be replaced by the function in hierarchy_utils
+  after much testing.
+  '''
+  from mmtbx.conformation_dependent_library.multi_residue_class import \
+    ThreeProteinResidues, RestraintsRegistry
+  registry = RestraintsRegistry()
+  threes = ThreeProteinResidues(geometry, registry=registry)
+  for residue in generate_residues_via_conformer(hierarchy,
+                                                 backbone_only=backbone_only,
+                                                 verbose=verbose,
+                                                 ):
+    list.append(threes, residue)
+    if verbose: print('THREE',threes)
+    sub_unit = threes.provide_second_sub_unit_if_unlinked()
+    if verbose: print('THREE, SUBUNIT',threes, sub_unit)
+    if sub_unit:
+      threes.start = True
+      threes.end = True
+      yield threes
+      threes = sub_unit
+  threes.start = True
+  threes.end = True
+  yield threes
+
+def _hierarchy_into_slots(hierarchy,
+                          geometry_restraints_manager,
+                          verbose=False,
+                          ):
+  def _is_linked(residue_group1, residue_group2, bpt):
+    if residue_group2 is None: return False
+    if residue_group2 is False: return False
+    atom_group1 = residue_group1.only_atom_group()
+    atom_group2 = residue_group2.only_atom_group()
+    c_atom = atom_group1.get_atom('N') # order important
+    n_atom = atom_group2.get_atom('C')
+    if c_atom and n_atom:
+      key = [c_atom.i_seq, n_atom.i_seq]
+      bond = bpt.lookup(*tuple(key))
+      if bond: return bond
+    for i, atom1 in enumerate(atom_group1.atoms()):
+      for j, atom2 in enumerate(atom_group2.atoms()):
+        key = [atom2.i_seq, atom1.i_seq]
+        bond = bpt.lookup(*tuple(key))
+        if bond: return bond
+    return False
+
+  if verbose: print('_hierarchy_into_slots')
+  terminal_entities = ['ACE']
+  slots=[]
+  #start=18
+  assert len(hierarchy.models())==1
+  for chain in hierarchy.chains():
+    for j, residue_group in enumerate(chain.residue_groups()):
+      if verbose: print(j, chain.id, residue_group.id_str())
+      protein = True
+      for atom_group in residue_group.atom_groups():
+        gc_aa = get_class(atom_group.resname) in ["common_amino_acid",
+                                                  "modified_amino_acid",
+                                                 ]
+        # not completely sure about this
+        d_aa = atom_group.resname in aac.three_letter_l_given_three_letter_d
+        t_aa = atom_group.resname in terminal_entities
+        if verbose: print('get_class', gc_aa, 'd-amino', d_aa, 'term. ent', t_aa)
+        if(not gc_aa and not d_aa and not t_aa):
+          protein=False
+          break
+      if not protein:
+        slots.append(False)
+        continue
+      if slots:
+        bonded = _is_linked(residue_group,
+                            slots[-1],
+                            geometry_restraints_manager.bond_params_table)
+        if getattr(bonded, 'origin_id', None)!=0: # default for peptide links...
+          bonded=False
+        if bonded:
+          pass
+        else:
+          slots.append(None)
+      slots.append(residue_group)
+    slots.append(None)
+  return slots
+
+def generate_residue_group_with_start_and_end(hierarchy,
+                                              geometry_restraints_manager,
+                                              # ideal_hierarchy=None,
+                                              ):
+  # assert not ideal_hierarchy
+  slots = _hierarchy_into_slots(hierarchy, geometry_restraints_manager)
+  for i in range(len(slots)):
+    start=False
+    end=False
+    if slots[i]:
+      if i==0: start=True
+      elif not slots[i-1]: start=True
+      if i==len(slots)-1: end=True
+      elif not slots[i+1]: end=True
+      # does not work for chain ends
+    else: continue
+    residue_group = slots[i]
+    yield residue_group, start, end
+
+def add_terminal_hydrogens_old(hierarchy,
+                           geometry_restraints_manager,
+                           terminate_all_N_terminals=False,
+                           terminate_all_C_terminals=False,
+                           use_capping_hydrogens=False,
+                           append_to_end_of_model=False,
+                           verbose=False,
+                           ):
+  assert 0
+  ptr=0 # belt and braces
+  additional_hydrogens = []
+  for residue_group, start, end in generate_residue_group_with_start_and_end(
+    hierarchy,
+    geometry_restraints_manager,
+    verbose=verbose,
+    ):
+    if use_capping_hydrogens:
+      conditional_add_cys_hg_to_atom_group(geometry_restraints_manager,
+                                           residue_group)
+    if start:
+      ptr+=1
+      assert ptr==1
+      if is_n_terminal_residue(residue_group):
+        rc = None
+      else:
+        rc = add_n_terminal_hydrogens_to_residue_group(
+          residue_group,
+          use_capping_hydrogens=use_capping_hydrogens,
+          append_to_end_of_model=append_to_end_of_model,
+        )
+      if rc: additional_hydrogens.append(rc)
+    if end:
+      ptr-=1
+      assert ptr==0
+      rc = add_c_terminal_oxygens_to_residue_group(
+        residue_group,
+        use_capping_hydrogens=use_capping_hydrogens,
+        append_to_end_of_model=append_to_end_of_model,
+      )
+      if rc: additional_hydrogens.append(rc)
+    else:
+      pass
+
+def add_terminal_hydrogens_threes(hierarchy,
+                                  geometry_restraints_manager,
+                                  terminate_all_N_terminals=False,
+                                  terminate_all_C_terminals=False,
+                                  use_capping_hydrogens=False,
+                                  append_to_end_of_model=False,
+                                  verbose=False,
+                                  ):
+  assert 0
+  from mmtbx.conformation_dependent_library import generate_protein_threes
+  additional_hydrogens= [] #hierarchy_utils.smart_add_atoms()
+  hierarchy.show()
+  for three in generate_protein_threes(hierarchy,
+                                       geometry_restraints_manager,
+                                       include_non_linked=True,
+                                       backbone_only=False,
+                                       include_linked_via_restraints_manager=True,
+                                       verbose=verbose,
+                                       ):
+    bond_params_table = geometry_restraints_manager.bond_params_table
+
+    def get_bonds():
+      bonds = {}
+      for i, a1 in enumerate(residue_group.atoms()):
+        for j, a2 in enumerate(residue_group.atoms()):
+          if i>=j: continue
+          bond=three.bond_params_table.lookup(a1.i_seq, a2.i_seq)
+          if bond:
+            bonds[(a1.i_seq, a2.i_seq)] = True
+            bonds[(a2.i_seq, a1.i_seq)] = True
+      return bonds
+
+    if use_capping_hydrogens:
+      for i in range(len(three)):
+        residue_group=three.get_residue_group_from_hierarchy(hierarchy, i)
+        rc = conditional_add_cys_hg_to_atom_group(geometry_restraints_manager,
+                                                  residue_group)
+      #assert not rc, '%s' % rc
+    if three.start:
+      residue_group=three.get_residue_group_from_hierarchy(hierarchy, 0)
+      rc = add_n_terminal_hydrogens_to_residue_group(
+        residue_group,
+        bonds=get_bonds(),
+        use_capping_hydrogens=use_capping_hydrogens,
+        append_to_end_of_model=append_to_end_of_model,
+      )
+      if rc: additional_hydrogens.append(rc)
+    if three.end:
+      residue_group=three.get_residue_group_from_hierarchy(hierarchy, 2)
+      rc = add_c_terminal_oxygens_to_residue_group(
+        residue_group,
+        bonds=get_bonds(),
+        use_capping_hydrogens=use_capping_hydrogens,
+        append_to_end_of_model=append_to_end_of_model,
+      )
+      if rc: additional_hydrogens.append(rc)
+  return additional_hydrogens
+
+def _check_for(atom_holder, resname, name):
+  for atom in atom_holder.atoms():
+    if atom.name.strip()!=name.strip(): continue
+    p1 = atom.parent()
+    if p1.resname.strip()!=resname.strip(): continue
+    print(atom.quote(), resname, name)
+    return True
+  return False
+
+def add_terminal_hydrogens_via_residue_groups(hierarchy,
+                                              geometry_restraints_manager,
+                                              terminate_all_N_terminals=False,
+                                              terminate_all_C_terminals=False,
+                                              use_capping_hydrogens=False,
+                                              append_to_end_of_model=False,
+                                              retain_original_hydrogens=True,
+                                              verbose=False,
+                                              ):
+  # assert not _check_for(hierarchy, '0QS', 'HC')
+  from mmtbx.ligands.hierarchy_utils import get_bonds_as_dict
+  bonds=get_bonds_as_dict(geometry_restraints_manager)
+  additional_hydrogens = []
+  for residue_group, start, end in generate_residue_group_with_start_and_end(
+    hierarchy,
+    geometry_restraints_manager,
+    ):
+    if use_capping_hydrogens:
+      # conditional_add_cys_hg_to_atom_group(geometry_restraints_manager,
+      #                                      residue_group)
+      process_disulphide_hydrogen_atoms(geometry_restraints_manager,
+                                        residue_group)
+    if start:
+      # ptr+=1
+      # assert ptr==1
+      if is_n_terminal_residue(residue_group):
+        rc = None
+      else:
+        rc = add_n_terminal_hydrogens_to_residue_group(
+          residue_group,
+          bonds=bonds,
+          use_capping_hydrogens=use_capping_hydrogens,
+          append_to_end_of_model=append_to_end_of_model,
+          retain_original_hydrogens=retain_original_hydrogens,
+        )
+      if rc: additional_hydrogens.append(rc)
+    if end:
+      # ptr-=1
+      # assert ptr==0
+      rc = add_c_terminal_oxygens_to_residue_group(
+        residue_group,
+        bonds=bonds,
+        use_capping_hydrogens=use_capping_hydrogens,
+        append_to_end_of_model=append_to_end_of_model,
+      )
+      if rc: additional_hydrogens.append(rc)
+    else:
+      pass
+  return additional_hydrogens
+
+def add_terminal_hydrogens(hierarchy,
+                           geometry_restraints_manager,
+                           terminate_all_N_terminals=False,
+                           terminate_all_C_terminals=False,
+                           use_capping_hydrogens=False,
+                           append_to_end_of_model=False,
+                           retain_original_hydrogens=True,
+                           verbose=False,
+                           ):
+  """Adds hydrogen atoms to a macromolecular model
+
+  Args:
+      hierarchy (pdb_hierarch): The model hierarchy
+      geometry_restraints_manager (geometry restraints manager): Matching
+        geometry restaints manager for hierarch
+      terminate_all_N_terminals (bool, optional): Description
+      terminate_all_C_terminals (bool, optional): Description
+      use_capping_hydrogens (bool, optional): Description
+      append_to_end_of_model (bool, optional): Description
+      verbose (bool, optional): Description
+  """
+  additional_hydrogens = add_terminal_hydrogens_via_residue_groups(
+    hierarchy,
+    geometry_restraints_manager,
+    terminate_all_N_terminals=terminate_all_N_terminals,
+    terminate_all_C_terminals=terminate_all_C_terminals,
+    use_capping_hydrogens=use_capping_hydrogens,
+    append_to_end_of_model=append_to_end_of_model,
+    retain_original_hydrogens=retain_original_hydrogens,
+    verbose=verbose,
+    )
+
+  if append_to_end_of_model and additional_hydrogens:
+    tmp = []
+    for group in additional_hydrogens:
+      for chain in group:
+        tmp.append(chain)
+    _add_atoms_from_chains_to_end_of_hierarchy(hierarchy, tmp)
+
+def delete_charged_n_terminal_hydrogens(hierarchy):
+  for ag in hierarchy.atom_groups():
+    if get_class(ag.resname) not in ['common_amino_acid',
+                                     'modified_amino_acid']: continue
+    h1 = ag.get_atom('H1')
+    if not h1: continue
+    h2 = ag.get_atom('H2')
+    if not h2: continue
+    h3 = ag.get_atom('H3')
+    if not h3: continue
+    ag.remove_atom(h3)
+
+def add_water_hydrogen_atoms_simple(hierarchy, log=None):
+  displacements = [
+    [ 1.0,  0.0,  0.0],
+    [-0.7, -0.7,  0.0],
+    [ 0.0,  1.0,  0.0],
+    [-0.7, -0.7,  0.0],
+    [ 0.0,  0.0,  1.0],
+    [ 0.0, -0.7, -0.7],
+    ]
+  for atom_group in hierarchy.atom_groups():
+    if atom_group.resname in ['HOH', 'DOD']:
+      proton_element='H'
+      if atom_group.resname=='DOD': proton_element='D'
+      if len(atom_group.atoms())==3: continue
+      names = [atom.name for atom in atom_group.atoms()]
+      o_atom = atom_group.atoms()[0]
+      for name in [' %s1 ' % proton_element, ' %s2 ' % proton_element]:
+        if name not in names:
+          j=0
+          min_d2=0
+          while min_d2<.9:
+            xyz = (o_atom.xyz[0]+displacements[j][0],
+                   o_atom.xyz[1]+displacements[j][1],
+                   o_atom.xyz[2]+displacements[j][2])
+            min_d2 = 1e9
+            for atom in atom_group.atoms():
+              d2 = distance2(xyz, atom.xyz)
+              min_d2=min(d2, min_d2)
+            j+=1
+          h = get_hierarchy_h_atom(name, xyz, o_atom, proton_element=proton_element)
+          atom_group.append_atom(h)
+      # for atom in atom_group.atoms(): print(atom.format_atom_record())
+
+def add_main_chain_atoms(hierarchy,
+                         geometry_restraints_manager,
+                         verbose=False,
+                         ):
+  from mmtbx.conformation_dependent_library import generate_protein_threes
+  for three in generate_protein_threes(hierarchy,
+                                       geometry_restraints_manager,
+                                       verbose=verbose,
+                                       ):
+    print(three)
+    add_main_chain_atoms_to_protein_three(three)
+  assert 0
+
+def perdeuterate_model_ligands(hierarchy,
+                               verbose=False,
+                               ):
+  if verbose: hierarchy.show()
+  for model in hierarchy.models():
+    if verbose: print('model: "%s"' % model.id)
+    for chain in model.chains():
+      if verbose: print('chain: "%s"' % chain.id)
+      for residue_group in chain.residue_groups():
+        if verbose: print('  residue_group: resseq="%s" icode="%s"' % (
+          residue_group.resseq, residue_group.icode))
+        altlocs = []
+        for atom_group in residue_group.atom_groups():
+          altlocs.append(atom_group.altloc)
+        for atom_group in residue_group.atom_groups():
+          if verbose: print('  atom_group: resname="%s" altloc="%s"' % (
+            atom_group.resname, atom_group.altloc))
+          for atom in atom_group.atoms():
+            if atom.element.strip() in ["H"]:
+              atom.element = " D"
+              atom.name = atom.name.replace("H","D", 1)
+
+  hierarchy.atoms().reset_serial()
+  if verbose: hierarchy.show()
+  return hierarchy
+
+def main_hydrogen(model,
+                  terminate_all_N_terminals=False,
+                  terminate_all_C_terminals=False,
+                  cap_all_terminals=False,
+                  append_to_end_of_model=False,
+                  verbose=False):
+  """Main loop for ReadySet!
+
+    Add specialised hydrogens not done by Reduce
+    Curate ligands
+
+  Args:
+      model (TYPE): Model class with all the model info
+      terminate_all_N_terminals (bool, optional): Description
+      terminate_all_C_terminals (bool, optional): Description
+      cap_all_terminals (bool, optional): Description
+      append_to_end_of_model (bool, optional): Description
+      verbose (bool, optional): Description
+
+  Returns:
+      TYPE: Description
+
+  """
+  #
+  # make sure all pdb_interpretation parameters have been done
+  #
+  hierarchy = model.get_hierarchy()
+  # should be automatic
+  model.process(make_restraints=True)
+  geometry_restraints_manager = model.get_restraints_manager().geometry
+  atoms = hierarchy.atoms()
+
+  #ready_set_utils.add_main_chain_atoms(hierarchy, geometry_restraints_manager)
+  if (terminate_all_N_terminals or
+      terminate_all_C_terminals or
+      cap_all_terminals
+      ):
+    add_terminal_hydrogens(
+      hierarchy,
+      geometry_restraints_manager,
+      terminate_all_N_terminals=terminate_all_N_terminals,
+      terminate_all_C_terminals=terminate_all_C_terminals,
+      use_capping_hydrogens=cap_all_terminals,
+      append_to_end_of_model=append_to_end_of_model,
+      verbose=False,
+      )
+  return
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/tst_electron_scripting.py
+from __future__ import absolute_import, division, print_function
+
+from iotbx.cli_parser import run_program
+from mmtbx.ligands import electrons
+
+pdb_1x24_modified = '''
+CRYST1  146.891  146.891  146.891  90.00  90.00  90.00 I 21 3
+ATOM      1  N   PRO A   9      39.761-121.668 105.645  1.00 65.50           N
+ATOM      2  CA  PRO A   9      38.280-121.485 105.595  1.00 65.50           C
+ATOM      3  C   PRO A   9      37.853-120.009 105.641  1.00 65.50           C
+ATOM      4  O   PRO A   9      37.565-119.454 106.709  1.00 65.50           O
+ATOM      5  CB  PRO A   9      37.692-122.267 106.767  1.00 82.07           C
+ATOM      6  CG  PRO A   9      38.901-122.331 107.732  1.00 82.07           C
+ATOM      7  CD  PRO A   9      40.132-122.487 106.816  1.00 82.07           C
+ATOM      8  N   VAL A  10      37.821-119.386 104.464  1.00 67.31           N
+ATOM      9  CA  VAL A  10      37.429-117.984 104.324  1.00 67.31           C
+ATOM     10  C   VAL A  10      35.942-117.869 103.987  1.00 67.31           C
+ATOM     11  O   VAL A  10      35.428-118.537 103.086  1.00 67.31           O
+ATOM     12  CB  VAL A  10      38.256-117.261 103.215  1.00 55.89           C
+ATOM     13  CG1 VAL A  10      39.729-117.340 103.529  1.00 55.89           C
+ATOM     14  CG2 VAL A  10      37.996-117.887 101.864  1.00 55.89           C
+ATOM     15  N   GLU A  11      35.257-117.017 104.732  1.00 38.26           N
+ATOM     16  CA  GLU A  11      33.832-116.787 104.541  1.00 38.26           C
+ATOM     17  C   GLU A  11      33.661-115.357 104.025  1.00 38.26           C
+ATOM     18  O   GLU A  11      34.303-114.430 104.515  1.00 38.26           O
+ATOM     19  CB  GLU A  11      33.113-116.993 105.880  1.00 47.28           C
+ATOM     20  CG  GLU A  11      31.647-116.714 105.867  1.00 47.28           C
+ATOM     21  CD  GLU A  11      30.927-117.240 107.101  1.00 47.28           C
+ATOM     22  OE1 GLU A  11      31.427-117.062 108.233  1.00 47.28           O
+ATOM     23  OE2 GLU A  11      29.834-117.825 106.935  1.00 47.28           O
+'''
+
+pdb_1x24_modified_complete = '''
+CRYST1  146.891  146.891  146.891  90.00  90.00  90.00 I 21 3
+ATOM      1  N   PRO A   9      39.761  25.223 105.645  1.00 65.50           N
+ATOM      2  CA  PRO A   9      38.280  25.406 105.595  1.00 65.50           C
+ATOM      3  C   PRO A   9      37.853  26.882 105.641  1.00 65.50           C
+ATOM      4  O   PRO A   9      37.565  27.437 106.709  1.00 65.50           O
+ATOM      5  CB  PRO A   9      37.692  24.624 106.767  1.00 82.07           C
+ATOM      6  CG  PRO A   9      38.901  24.560 107.732  1.00 82.07           C
+ATOM      7  CD  PRO A   9      40.132  24.404 106.816  1.00 82.07           C
+ATOM      8  H2  PRO A   9      40.220  26.153 105.717  0.00 65.50           H
+ATOM      9  H3  PRO A   9      40.078  24.746 104.777  0.00 65.50           H
+ATOM     10  HA  PRO A   9      37.908  24.935 104.685  0.00 65.50           H
+ATOM     11  HB2 PRO A   9      36.851  25.160 107.207  0.00 82.07           H
+ATOM     12  HB3 PRO A   9      37.375  23.631 106.449  0.00 82.07           H
+ATOM     13  HG2 PRO A   9      38.962  25.480 108.314  0.00 82.07           H
+ATOM     14  HG3 PRO A   9      38.800  23.704 108.399  0.00 82.07           H
+ATOM     15  HD2 PRO A   9      41.030  24.792 107.297  0.00 82.07           H
+ATOM     16  HD3 PRO A   9      40.281  23.362 106.534  0.00 82.07           H
+ATOM     17  N   VAL A  10      37.821  27.505 104.464  1.00 67.31           N
+ATOM     18  CA  VAL A  10      37.429  28.907 104.324  1.00 67.31           C
+ATOM     19  C   VAL A  10      35.942  29.022 103.987  1.00 67.31           C
+ATOM     20  O   VAL A  10      35.428  28.354 103.086  1.00 67.31           O
+ATOM     21  CB  VAL A  10      38.256  29.630 103.215  1.00 55.89           C
+ATOM     22  CG1 VAL A  10      39.729  29.551 103.529  1.00 55.89           C
+ATOM     23  CG2 VAL A  10      37.996  29.004 101.864  1.00 55.89           C
+ATOM     24  H   VAL A  10      38.064  27.061 103.578  0.00 67.31           H
+ATOM     25  HA  VAL A  10      37.621  29.395 105.280  0.00 67.31           H
+ATOM     26  HB  VAL A  10      37.952  30.676 103.182  0.00 55.89           H
+ATOM     27 HG11 VAL A  10      40.287  30.061 102.744  0.00 55.89           H
+ATOM     28 HG12 VAL A  10      39.913  30.033 104.489  0.00 55.89           H
+ATOM     29 HG13 VAL A  10      40.026  28.503 103.575  0.00 55.89           H
+ATOM     30 HG21 VAL A  10      38.585  29.528 101.111  0.00 55.89           H
+ATOM     31 HG22 VAL A  10      38.286  27.954 101.898  0.00 55.89           H
+ATOM     32 HG23 VAL A  10      36.934  29.089 101.632  0.00 55.89           H
+ATOM     33  N   GLU A  11      35.257  29.874 104.732  1.00 38.26           N
+ATOM     34  CA  GLU A  11      33.832  30.104 104.541  1.00 38.26           C
+ATOM     35  C   GLU A  11      33.661  31.534 104.025  1.00 38.26           C
+ATOM     36  O   GLU A  11      34.303  32.461 104.515  1.00 38.26           O
+ATOM     37  CB  GLU A  11      33.113  29.898 105.880  1.00 47.28           C
+ATOM     38  CG  GLU A  11      31.647  30.177 105.867  1.00 47.28           C
+ATOM     39  CD  GLU A  11      30.927  29.651 107.101  1.00 47.28           C
+ATOM     40  OE1 GLU A  11      31.427  29.829 108.233  1.00 47.28           O
+ATOM     41  OE2 GLU A  11      29.834  29.066 106.935  1.00 47.28           O
+ATOM     42  OXT GLU A  11      32.873  31.768 103.108  1.00 38.26           O
+ATOM     43  H   GLU A  11      35.663  30.428 105.486  0.00 38.26           H
+ATOM     44  HA  GLU A  11      33.384  29.414 103.826  0.00 38.26           H
+ATOM     45  HB2 GLU A  11      33.244  28.859 106.184  0.00 47.28           H
+ATOM     46  HB3 GLU A  11      33.564  30.562 106.618  0.00 47.28           H
+ATOM     47  HG2 GLU A  11      31.493  31.255 105.823  0.00 47.28           H
+ATOM     48  HG3 GLU A  11      31.204  29.701 104.992  0.00 47.28           H
+'''
+
+def main():
+  f=open('pdb_1x24_modified.pdb', 'w')
+  f.write(pdb_1x24_modified)
+  del f
+  rc = run_program(electrons.Program, args=['pdb_1x24_modified.pdb'])
+  print('-'*80)
+  print(rc.keys())
+  print(rc)
+
+  f=open('pdb_1x24_modified_complete.pdb', 'w')
+  f.write(pdb_1x24_modified_complete)
+  del f
+  rc = run_program(electrons.Program, args=['pdb_1x24_modified_complete.pdb'])
+  print('-'*80)
+  print(rc.keys())
+  print(rc)
+
+if __name__ == '__main__':
+  main()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/tst_ready_set_utils.py
+from __future__ import absolute_import, division, print_function
+import sys
+from libtbx import easy_run
+from libtbx.test_utils import assert_lines_in_file
+from iotbx.pdb import pdb_input
+
+from mmtbx.hydrogens.specialised_hydrogen_atoms import add_side_chain_acid_hydrogens
+from mmtbx.hydrogens.specialised_hydrogen_atoms import add_disulfur_hydrogen_atoms
+
+pdb_strings = {'ASP' :'''
+CRYST1  112.354   50.667   75.061  90.00 127.09  90.00 C 1 2 1
+SCALE1      0.008900  0.000000  0.006729        0.00000
+SCALE2      0.000000  0.019737  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.016701        0.00000
+ATOM      1  OE1 GLU A 249      23.084 -14.146  55.991  1.00 28.06           O
+ATOM      2  OD2 ASP A 258      20.555 -12.607  61.969  1.00 37.35           O
+ATOM      3  CA  ASN A 269      25.385 -16.651  56.738  1.00 15.81           C
+ATOM      4  C   ASN A 269      24.892 -16.548  58.188  1.00 15.44           C
+ATOM      5  O   ASN A 269      25.355 -17.281  59.072  1.00 15.27           O
+ATOM      6  ND2 ASN A 269      23.311 -19.122  57.209  1.00 18.88           N
+ATOM      7  N   ASP A 270      23.952 -15.610  58.412  1.00 18.53           N
+ATOM      8  CA  ASP A 270      23.251 -15.460  59.662  1.00 19.81           C
+ATOM      9  C   ASP A 270      22.320 -16.673  59.865  1.00 17.50           C
+ATOM     10  O   ASP A 270      21.839 -17.297  58.893  1.00 18.62           O
+ATOM     11  CB  ASP A 270      22.308 -14.226  59.624  1.00 25.44           C
+ATOM     12  CG  ASP A 270      22.950 -13.023  59.939  1.00 30.80           C
+ATOM     13  OD1 ASP A 270      24.170 -12.930  59.713  1.00 37.22           O
+ATOM     14  OD2 ASP A 270      22.211 -12.121  60.434  1.00 33.61           O
+ATOM     15  N   ALA A 271      22.030 -16.956  61.120  1.00 15.85           N
+ATOM     16  CA  ALA A 271      21.096 -17.989  61.489  1.00 16.38           C
+''',
+  'GLU' : '''
+CRYST1   39.183   52.539  207.533  90.00  90.00  90.00 P 21 21 21
+SCALE1      0.025521  0.000000  0.000000        0.00000
+SCALE2      0.000000  0.019033  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.004819        0.00000
+ATOM      3  N   TRP A 194      -7.810  10.259  62.633  1.00  9.35           N
+ATOM      4  CA  TRP A 194      -8.280  11.585  62.268  1.00  8.84           C
+ATOM      5  C   TRP A 194      -9.778  11.593  61.945  1.00  8.77           C
+ATOM      6  O   TRP A 194     -10.269  10.714  61.243  1.00  8.79           O
+ATOM      7  CB  TRP A 194      -7.513  12.112  61.045  1.00  9.05           C
+ATOM      8  CG  TRP A 194      -6.007  12.290  61.215  1.00  8.60           C
+ATOM      9  N   GLU A 195     -10.509  12.592  62.436  1.00  8.58           N
+ATOM     10  CA  GLU A 195     -11.870  12.816  61.951  1.00  8.31           C
+ATOM     11  C   GLU A 195     -11.832  13.095  60.469  1.00  7.49           C
+ATOM     12  O   GLU A 195     -12.710  12.683  59.735  1.00  7.68           O
+ATOM     13  CB  GLU A 195     -12.550  13.986  62.659  1.00  8.68           C
+ATOM     14  CG  GLU A 195     -12.799  13.775  64.152  1.00 11.46           C
+ATOM     15  CD  GLU A 195     -14.045  14.499  64.657  1.00 12.48           C
+ATOM     16  OE1 GLU A 195     -14.622  15.293  63.883  1.00 11.73           O
+ATOM     17  OE2 GLU A 195     -14.441  14.257  65.826  1.00 12.64           O
+ATOM     18  N   ARG A 196     -10.811  13.811  60.021  1.00  7.15           N
+ATOM     19  CA  ARG A 196     -10.703  14.129  58.605  1.00  6.38           C
+ATOM     20  C   ARG A 196      -9.350  13.639  58.107  1.00  6.27           C
+ATOM     21  O   ARG A 196      -8.343  14.350  58.179  1.00  6.00           O
+ATOM     22  CB  ARG A 196     -10.981  15.619  58.367  1.00  6.18           C
+ATOM     23  CG  ARG A 196     -12.144  16.088  59.223  1.00  4.12           C
+ATOM     24  CD  ARG A 196     -12.782  17.328  58.735  1.00  3.90           C
+ATOM     25  N   PRO A 197      -9.326  12.382  57.633  1.00  6.31           N
+ATOM     26  CG  PRO A 197     -10.015  10.265  56.861  1.00  5.41           C
+ATOM     27  CD  PRO A 197     -10.537  11.559  57.405  1.00  5.91           C
+TER
+HETATM   49  O5  CIT A 500     -11.052  16.238  62.773  0.75 26.13           O
+HETATM   52  O   HOH A 512     -14.767  12.104  68.190  1.00 29.69           O
+''',
+  'CYS_1' : '''
+CRYST1   61.314   37.470   44.915  90.00  94.55  90.00 P 1 21 1
+SCALE1      0.016309  0.000000  0.001298        0.00000
+SCALE2      0.000000  0.026688  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.022335        0.00000
+ATOM      8  N   CYS A  26      21.129  -6.109  34.429  1.00  4.21           N
+ATOM      9  CA  CYS A  26      20.061  -5.459  33.689  1.00  4.17           C
+ATOM     10  C   CYS A  26      18.827  -6.331  33.559  1.00  4.48           C
+ATOM     11  O   CYS A  26      17.694  -5.822  33.620  1.00  4.91           O
+ATOM     12  CB  CYS A  26      20.554  -5.076  32.290  1.00  4.37           C
+ATOM     13  SG  CYS A  26      21.811  -3.780  32.291  1.00  4.75           S
+ATOM     14  H   CYS A  26      21.889  -6.315  34.036  1.00  5.05           H
+ATOM     15  HA  CYS A  26      19.806  -4.622  34.173  1.00  5.01           H
+ATOM     16  HB2 CYS A  26      20.927  -5.881  31.852  1.00  5.24           H
+ATOM     17  HB3 CYS A  26      19.782  -4.771  31.752  1.00  5.24           H
+ATOM     18  N   ASN A  27      19.008  -7.633  33.365  1.00  4.35           N
+ATOM     19  CA  ASN A  27      17.845  -8.529  33.284  1.00  4.69           C
+ATOM     20  C   ASN A  27      16.993  -8.399  34.537  1.00  5.07           C
+ATOM     28  CB  CYS A  84      20.151  -1.930  30.554  1.00  5.45           C
+ATOM     29  SG  CYS A  84      20.664  -2.084  32.297  1.00  5.40           S
+''',
+  'CYS_2' : '''
+CRYST1   61.314   37.470   44.915  90.00  94.55  90.00 P 1 21 1
+SCALE1      0.016309  0.000000  0.001298        0.00000
+SCALE2      0.000000  0.026688  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.022335        0.00000
+ATOM      8  N   CYS A  26      21.129  -6.109  34.429  1.00  4.21           N
+ATOM      9  CA  CYS A  26      20.061  -5.459  33.689  1.00  4.17           C
+ATOM     10  C   CYS A  26      18.827  -6.331  33.559  1.00  4.48           C
+ATOM     11  O   CYS A  26      17.694  -5.822  33.620  1.00  4.91           O
+ATOM     12  CB  CYS A  26      20.554  -5.076  32.290  1.00  4.37           C
+ATOM     13  SG  CYS A  26      21.811  -3.780  32.291  1.00  4.75           S
+ATOM     14  H   CYS A  26      21.889  -6.315  34.036  1.00  5.05           H
+ATOM     15  HA  CYS A  26      19.806  -4.622  34.173  1.00  5.01           H
+ATOM     16  HB2 CYS A  26      20.927  -5.881  31.852  1.00  5.24           H
+ATOM     17  HB3 CYS A  26      19.782  -4.771  31.752  1.00  5.24           H
+''',
+}
+for key, item in list(pdb_strings.items()):
+  pdb_strings[key+'_D'] = item
+geo_strings = {'ASP' :
+  {0 : '''nonbonded pdb=" OD2 ASP A 258 "
+          pdb=" HD2 ASP A 270 "
+   model   vdw
+   1.612 1.970''',
+   1 : '''nonbonded pdb=" OD2 ASP A 258 "
+          pdb=" HD2 ASP A 270 "
+   model   vdw
+   2.750 1.970''',
+   2 : '''nonbonded pdb=" N   ASP A 270 "
+          pdb=" HD2 ASP A 270 "
+   model   vdw
+   2.262 2.650''',
+   3 : '''nonbonded pdb=" OD1 ASP A 270 "
+          pdb=" HD2 ASP A 270 "
+   model   vdw
+   2.475 2.056''',
+  },
+               'ASP_D' :
+  {
+  0 : '''nonbonded pdb=" OD2 ASP A 258 "
+          pdb=" DD2 ASP A 270 "
+   model   vdw
+   1.583 1.970''',
+  1 : '''nonbonded pdb=" OD2 ASP A 258 "
+          pdb=" OD2 ASP A 270 "
+   model   vdw
+   2.310 3.040''',
+  2 : '''nonbonded pdb=" N   ASP A 270 "
+          pdb=" DD2 ASP A 270 "
+   model   vdw
+   2.228 2.650''',
+  3 : '''nonbonded pdb=" N   ASP A 270 "
+          pdb=" DD2 ASP A 270 "
+   model   vdw
+   3.904 2.650''',
+  },
+               'GLU' :
+  {
+  0 : '''nonbonded pdb=" HE2 GLU A 195 "
+          pdb=" O   HOH A 512 "
+   model   vdw
+   2.511 1.970''',
+  1 : '''nonbonded pdb=" HE2 GLU A 195 "
+          pdb=" O   HOH A 512 "
+   model   vdw
+   3.316 1.970''',
+  2 : '''nonbonded pdb=" HE2 GLU A 195 "
+          pdb=" O5  CIT A 500 "
+   model   vdw
+   3.338 1.970''',
+  3 : '''nonbonded pdb=" HE2 GLU A 195 "
+          pdb=" O5  CIT A 500 "
+   model   vdw
+   4.592 1.970''',
+  },
+               'CYS_2' : '''bond pdb=" SG  CYS A  26 "
+     pdb=" HG  CYS A  26 "
+  ideal  model  delta    sigma   weight residual
+  1.200  1.200  0.000 2.00e-02 2.50e+03 3.33e-04''',
+               'CYS_2_D' : '''bond pdb=" SG  CYS A  26 "
+     pdb=" DG  CYS A  26 "
+  ideal  model  delta    sigma   weight residual
+  1.200  1.200  0.000 2.00e-02 2.50e+03 3.33e-04''',
+}
+
+def tst_adding_side_chain_acid_hydrogen_atoms(switch):
+  element='H'
+  if switch.endswith('_D'): element='D'
+  for i in range(4):
+    fn = 'tst_ready_hydrogens_%s_%d.pdb' % (switch, i)
+    with open(fn, 'w') as f:
+      f.write(pdb_strings[switch])
+    pdb_inp = pdb_input(fn)
+    hierarchy = pdb_inp.construct_hierarchy()
+    add_side_chain_acid_hydrogens(hierarchy, configuration_index=i, element=element)
+    hierarchy.write_pdb_file(fn.replace('.pdb', '_updated.pdb'))
+    cmd='phenix.pdb_interpretation const_shrink_donor_acceptor=0.6 %s flip_sym=0 write_geo=True' % fn.replace('.pdb', '_updated.pdb')
+    print(cmd)
+    easy_run.go(cmd)
+    assert_lines_in_file(file_name='%s.geo' % fn.replace('.pdb', '_updated.pdb'),
+                         lines = geo_strings[switch][i])
+
+def tst_adding_disulfur_hydrogen_atoms(switch):
+  element='H'
+  if switch.endswith('_D'): element='D'
+  fn = 'tst_ready_hydrogens_%s.pdb' % (switch)
+  with open(fn, 'w') as f:
+    f.write(pdb_strings[switch])
+  pdb_inp = pdb_input(fn)
+  hierarchy = pdb_inp.construct_hierarchy()
+  from mmtbx.conformation_dependent_library.testing_utils import get_geometry_restraints_manager
+  grm = get_geometry_restraints_manager(pdb_filename=fn)
+  add_disulfur_hydrogen_atoms(grm, hierarchy, element=element)
+  hierarchy.write_pdb_file(fn.replace('.pdb', '_updated.pdb'))
+  if switch=='CYS_1':
+    with open(fn.replace('.pdb', '_updated.pdb'), 'r') as f:
+      lines = f.read()
+    assert lines.find('HG')==-1
+  else:
+    cmd='phenix.pdb_interpretation const_shrink_donor_acceptor=0.6 %s write_geo=True' % fn.replace('.pdb', '_updated.pdb')
+    print(cmd)
+    easy_run.go(cmd)
+    assert_lines_in_file(file_name='%s.geo' % fn.replace('.pdb', '_updated.pdb'),
+                         lines = geo_strings[switch])
+
+def switcher(switch):
+  if switch in ['ASP', 'GLU', 'ASP_D']:
+    tst_adding_side_chain_acid_hydrogen_atoms(switch)
+  elif switch in ['CYS_1', 'CYS_2', 'CYS_2_D']:
+    tst_adding_disulfur_hydrogen_atoms(switch)
+
+def main(switch=None):
+  if switch is None:
+    for switch in ['ASP', 'GLU', 'CYS_1', 'CYS_2', 'ASP_D', 'CYS_2_D']:
+      switcher(switch)
+  else:
+    switcher(switch)
+
+if __name__ == '__main__':
+  main(*tuple(sys.argv[1:]))
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/tst_xtal_screens.py
+# -*- coding: utf-8; py-indent-offset: 2 -*-
+from __future__ import absolute_import, division, print_function
+
+def exercise():
+  from mmtbx.ligands import xtal_screens
+  s = xtal_screens.server()
+
+  try:
+    condition = s.get_condition("chrysler", "1")
+    assert False
+  except RuntimeError:
+    pass
+
+  condition = s.get_condition("crystal_screen", "4")
+  assert condition.pH() == 8.5
+  assert condition.ligands() == ["TRS", "CL", "NH4", "SO4"]
+
+  condition = s.get_condition("crystal_screen", "E6")
+  assert condition.pH() == 7.0
+  assert condition.ligands() == ["IMD"]
+
+  condition = s.get_condition("crystal_screen", "A9")
+  assert condition.pH() == 5.6
+  assert condition.ligands() == ["NH4", "ACT", "NA", "FLC", "PEG"]
+
+  condition = s.get_condition("index", "5")
+  assert condition.pH() == 7.5
+  assert condition.ligands() == ["EPE", "NH4", "SO4"]
+
+  condition = s.get_condition("index", "F12")
+  assert condition.pH() == 7.5
+  assert condition.ligands() == ["NA", "CL", "EPE", "PEG"]
+
+  condition = s.get_condition("peg_ion", "48")
+  assert condition.pH() == None
+  assert condition.ligands() == ["NH4", "FLC", "PEG"]
+
+  try:
+    condition = s.get_condition("peg_ion", "49")
+    assert False
+  except RuntimeError:
+    pass
+
+  condition = s.get_condition("peg_ion", "G12")
+  assert condition.pH() == None
+  assert condition.ligands() == ["CIT", "BTB", "TME", "PEG"]
+
+  print("OK")
+
+if (__name__ == "__main__"):
+  exercise()
+
+
+ *******************************************************************************
+
+
+ *******************************************************************************
+mmtbx/ligands/xtal_screens.py
+# -*- coding: utf-8; py-indent-offset: 2 -*-
+from __future__ import absolute_import, division, print_function
+from libtbx import slots_getstate_setstate
+
+import os.path
+
+xtal_params_str = """
+screen = None
+  .type = str
+  .help = ...
+screen_number = None
+  .type = int
+  .help = ...
+"""
+
+class server(object):
+  def __init__(self):
+    import iotbx.cif
+    params_path = os.path.join(os.path.split(__file__)[0],
+      "crystallization_screens.cif")
+    assert (os.path.isfile(params_path))
+    self._cif_model = iotbx.cif.reader(file_path=params_path).model()
+
+  def get_condition(self, screen_name, condition_id):
+    """
+    Gets the crystallization conditions used within a particular well.
+
+    Parameters
+    ----------
+    screen_name : str
+        The name of the crystal screen used. (i.e. Crystal Screen HT)
+    condition_id : int
+        The condition number within that screen. (i.e. D2 or 38)
+
+    Returns
+    -------
+    mmtbx.ligands.xtal_screens.solution
+        The information associated with that screen.
+    """
+    screen_name = screen_name.lower().replace(" ", "_")
+    data = None
+    # NOTE: I assumed cif_model is a dict
+    if screen_name in self._cif_model:
+      data = self._cif_model[screen_name]
+    else :
+      for other_key in self._cif_model :
+        other_data = self._cif_model[other_key]
+        for name in other_data["_xtal_screen.name"]:
+          if name == screen_name:
+            data = other_data
+            break
+    if (data is None):
+      raise RuntimeError("Screen '%s' not recognized!" % screen_name)
+    official_name = data["_xtal_screen.name"]
+    well_ids = data["_lib_screen.well_number"]
+    _id = None
+    for i_well, well_id in enumerate(data["_lib_screen.well_number"]):
+      if (condition_id == well_id):
+        _id = i_well
+      elif(condition_id == data["_lib_screen.condition_number"][i_well]):
+        _id = i_well
+      if (_id is not None):
+        kwds = {}
+        for name in solution.__slots__[1:]:
+          kwds[name] = data["_lib_screen." + name[:-1]][_id]
+        kwds["screen_name_"] = official_name
+        return solution(**kwds)
+    raise RuntimeError("Condition '%s' not found in '%s'." % (condition_id,
+      screen_name))
+
+class solution(slots_getstate_setstate):
+  """
+  Container for information about a specific crystallization condition (as
+  defined in crystallization_screens.cif).
+  """
+  __slots__ = [
+    "screen_name_",
+    "screen_number_",
+    "well_number_",
+    "tube_number_",
+    "condition_number_",
+    "ligands_",
+    "pH_",
+    "condition_"
+  ]
+  def __init__(self, **kwds):
+    for name in self.__slots__ :
+      setattr(self, name, kwds.get(name))
+
+  def condition_name(self):
+    return "%s: %s" % (self.screen_name_, self.condition_number_)
+
+  def pH(self):
+    if (self.pH_ == ".") : return None
+    return float(self.pH_)
+
+  def ligands(self):
+    if (self.ligands_ == "."):
+      return []
+    else :
+      return self.ligands_.split(",")
+
+
+ *******************************************************************************
