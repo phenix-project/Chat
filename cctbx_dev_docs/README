@@ -5,7 +5,9 @@ all cctbx code.
 
 NOTE: To do the same for Phenix, follow the same procedure but use 
 the Phenix code in your repository at <path_to_phenix_project> and
-documentation from https://cci.lbl.gov/docs/phenix/.
+documentation from https://cci.lbl.gov/docs/phenix/. You can put the
+two together for Phenix.  Use a small number for number_of_files (like 100)
+for each.
 
 The necessary code is in the phenix_project/Chat repository. First clone
 or find that repository and use that path below where it 
