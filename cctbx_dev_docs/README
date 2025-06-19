@@ -1,0 +1,38 @@
+README for cctbx_dev_docs chatbot generation
+
+This chatbot uses NotebookLM and contains the CCTBX documentation and
+all cctbx code. 
+
+The necessary code is in the phenix_project/Chat repository. First clone
+or find that repository and use that path below where it 
+says Chat.
+ 
+To recreate it:
+
+1. Point to the Chat repository and your copy of cctbx code:
+setenv Chat <path-to-chat>
+setenv cctbx <path_to_cctbx_project>
+
+
+2.  Get the documentation in cctbx_docs.pdf:
+
+
+mkdir cctbx_dev_docs
+cd cctbx_dev_docs
+
+cp $Chat/code/crawler.py .
+
+python $Chat/crawler.py https://cci.lbl.gov/docs/cctbx/
+cp discovered_urls.txt phenix_cctbx.list
+
+Now go through each url in phenix_cctbx.list and download that page as a pdf
+file.  Then combine all these pdf files to make cctbx_docs.pdf
+
+3.  Get the code as a series of text files.
+
+python  $Chat/code/cctbx_list.py $cctbx
+
+That should result in a little under 300 .txt files.  If too many... adjust the parameter max_words in cctbx_list.py to make it bigger.
+
+
+

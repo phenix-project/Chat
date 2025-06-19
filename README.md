@@ -1,5 +1,6 @@
 # Chat
 Code and materials to create sources for Phenix user Chat, CCTBX developer chat. 
+For CCTBX developer chat, see cctbx_dev_docs subdirectory.
 
 phenix_docs include current Phenix user documentation, reference material (pdf of papers), Phenix newsletters, selected documentation for atom selection and Phil
 
