@@ -38,7 +38,7 @@ def run(main_directory, max_files):
   i = 0
   for fg in file_groups:
     i += 1
-    f = open('code_base_%s.txt' %(i), 'w')
+    f = open('%s_%s.txt' %(last_word,i), 'w')
     for fn, text in zip(fg.file_name_list, fg.text_list):
       local_fn = fn.replace(remove_text,"")
       if local_fn.startswith(os.path.sep):
