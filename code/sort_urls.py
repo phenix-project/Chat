@@ -24,12 +24,15 @@ def get_url_type(url, url_types, top_level_kw, skip_kw):
   return 'misc'
 
 def run(args):
-  if len(args) != 1:
+  if len(args) == 2:  # specify url-types in last arg
+    url_types = args[1].split()
+  elif len(args) != 1:
     print("python sort_urls output.dat")
     return
+  else: # usual
+    url_types = ['top_level','faqs', 'misc', 'overviews','reference','tutorials']
   fn = args[0]
   url_dict = {}
-  url_types = ['top_level','faqs', 'misc', 'overviews','reference','tutorials']
   for url_type in url_types:
     url_dict[url_type] = []
   top_level_kw = ['what-is-phenix', 'phenix-modules',

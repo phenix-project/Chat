@@ -117,7 +117,6 @@ def crawl_site(start_url: str) -> list[str]:
             if clean_link.find(start_url)>-1: # ok
               # 6. If the link is new and valid, add it to the queue
               if clean_link not in visited_urls and clean_link not in queue:
-                  print("CLEAN A:",clean_link)
                   queue.append(clean_link)
 
             else:
@@ -126,7 +125,6 @@ def crawl_site(start_url: str) -> list[str]:
               clean_link = remove_double_slash_except_at_start(clean_link)
               # 6. If the link is new and valid, add it to the queue
               if clean_link not in visited_urls and clean_link not in queue:
-                  print("CLEAN B:",clean_link)
                   queue.append(clean_link)
 
     print(f"\nCrawl finished. Found {len(unique_urls)} unique pages.")
@@ -156,9 +154,16 @@ if __name__ == "__main__":
       OUTPUT_FILE = args[1]
     if (not START_URL.endswith("/")):
       START_URL+="/"
+
+    if len(args) <= 2: # Phenix user docs
+      extras = "reference tutorials overviews".split()
+    else: #specify extra_paths with next arg
+      extras = args[2].split()
+
+
     EXTRA_PATHS = [None]
-    for extra in [ "/reference/", "/tutorials/", "/overviews/"]:
-      EXTRA_PATHS.append("%s%s" %(START_URL,extra))
+    for extra in extras:
+      EXTRA_PATHS.append("%s/%s/" %(START_URL,extra))
     print("START_URL: ",START_URL)
     print("EXTRA_PATHS", EXTRA_PATHS)
     print("OUTPUT_FILE", OUTPUT_FILE)
