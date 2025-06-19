@@ -1,0 +1,1 @@
+Please use the data_manager for file reading and writing.  Please do not include sources when writing code; create clean code that is documented with doc strings and that is easy to read. Please use high-level managers (map_manager, map_model_manager, model_manager) whenever possible.
