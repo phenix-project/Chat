@@ -26,9 +26,7 @@ setenv cctbx <path_to_cctbx_project>
 mkdir cctbx_dev_docs
 cd cctbx_dev_docs
 
-cp $Chat/code/crawler.py .
-
-python $Chat/crawler.py https://cci.lbl.gov/docs/cctbx/
+python $Chat/code/crawler.py https://cci.lbl.gov/docs/cctbx/
 cp discovered_urls.txt phenix_cctbx.list
 
 Now go through each url in phenix_cctbx.list and download that page as a pdf
