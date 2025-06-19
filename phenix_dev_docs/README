@@ -1,0 +1,7 @@
+For Phenix developers' documentation, follow the same procedures as
+for cctbx developers' documentation generation, then repeat with
+the Phenix developer documentation site at https://cci.lbl.gov/docs/phenix/.
+Use the Phenix code in your repository at <path_to_phenix_project> and
+put the two together for Phenix.  Use a small number for 
+number_of_files (like 100) for each.
+
