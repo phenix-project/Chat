@@ -23,6 +23,8 @@ phenix_docs:
 
   videos.list:  list of youtube videos to include in documentation
 
+  video_transcripts:  video transcripts obtained from videos.list 
+
 HOW TO CREATE PHENIX DOCUMENTATION CHAT WITH NOTEBOOKLM AND THESE MATERIALS
 
 1. Start a new NotebookLM project. You may need to have a paid account to be allowed to use the number
@@ -64,3 +66,9 @@ python sort_urls.py urls.list
 
 # Now load each combine_phenix_xxx.html into Orion or Safari and save as PDF
 # Put these files in documentation/
+
+VIDEO TRANSCRIPTS:
+Get a free key from supadata.ai and then use it with videos.list and
+code/get_youtube_transcript.py to get transcripts.  
+
+Can get titles with code/get_youtube_title.py
