@@ -1,0 +1,54 @@
+Phenix tutorial: phenix.refine using default values (GUI)
+
+Hi everybody, This tutorial is about running phenix.refine
+via the graphical user interface and using default options. The data for this tutorial are available from
+the example datasets which come with the Phenix installation. To run phenix.refine using these data, only
+two input files are required: the starting model and the reflection file. In this example, default refinement parameters
+are used. To set up the example data, open the Phenix
+GUI and click on New Project. In the new window, click on 'Set up tutorial
+data' and another window appears. Open the drop down menu next to 'Tutorial
+data'. Go down to 'refinement' and choose the first
+dataset, called 'ribonuclease Sa'. Don't forget to choose a directory where the
+data are to be saved. Then click OK to save the changes. Before explaining how to run phenix.refine,
+I want to describe shortly the default refinement parameters. * Atomic coordinates against structure factors
+* Atomic coordinates against electron density (this is also called real-space)
+* B-factors: Depending on the input model, B-factors are refined isotropically or anisotropically
+* The fourth parameter to be refined is the occupancy: By default, the occupancies of
+alternate conformations and partially occupied atoms are refined, but a variety of scenarios
+for occupancy refinement is possible. * Finally: Bulk solvent and overall scale:
+protein crystals contain a considerable amount of solvent, which has to be modeled along
+with the atomic features of the protein. The scale factor is used to put the observed
+and calculated structure factors to a common scale. Now let's switch to the program and see how
+to run it. To do this, open the Phenix GUI. In the panel on the right hand side, choose
+Refinement and then click on phenix.refine, which opens a new window. Go to configure and the 'input data' tab. To add the example data, click "Add file"
+and select the files from the dialog window. I will first add the model file '. and then
+the reflection file. In the box underneath, the space group and
+unit cell parameters appear. It is good to check if this is correct. Also, Don't forget to choose the appropriate
+data columns with the Data labels drop down menu. Depending on how the data were treated, several
+columns may be available. We will use the columns F-obs and SigF-obs. If desired, the high and low resolution limits
+can be modified in this section as well. Then, click on the Refinement settings tab,
+which contains most of the essential options for running phenix.refine. The first section controls the model parameters
+to be refined. The default parameters are already activated:
+coordinates, real-space (remember: this means coordinates against electron density), B-factors
+and occupancy. The Bulk solvent and scale should be refined
+in the majority of cases, this is why it cannot be de-activated in this section. The number of refinement cycles is set to
+three, which should be usually sufficient to reach convergence of the parameters. Click the "Run" button on the toolbar to start
+the program. When the refinement starts, a new tab will
+appear, which contains two inner tabs: Log output and Run status. The latter displays the basic refinement statistics
+(such as R-factors, bond and angle deviations, and validation scores). On the left is a list for the current model
+and on the right is a plot of the statistics over the course of refinement. While refinement is running, and if Coot is
+available on your system, it will be started and the current model and maps will be automatically
+loaded each time they change. Once the job completes, additional tabs will
+appear reporting the output files, final statistics and a variety of validation criteria. The final statistics show amongst others the
+crystallographic R-factors. The gap between R and Rfree is rather large,
+it seems therefore that the default strategy of phenix.refine was not optimal for this
+data set. Refer to the description of the RNase tutorial
+in the Phenix documentation to see a more appropriate strategy, which also involves
+TLS. It is important to go through all the validation
+criteria and to make sure that there are no problems. If there are problems, they should be fixed. For example, the Ramachandran plot can be
+found under Molprobity in the 'protein tab'. Outliers are marked with a red circle. Click on it and coot will automatically center
+on the problematic part. Similarly, it is possible to center on the
+clashes. Go to the clashes tab and click on a clash
+in the list. These two oxygen atoms f.ex. are rather close
+and their position should be corrected before moving on.
+

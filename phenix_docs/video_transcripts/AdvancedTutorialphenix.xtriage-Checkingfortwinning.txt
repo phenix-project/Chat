@@ -1,0 +1,51 @@
+Advanced Tutorial phenix.xtriage - Checking for twinning
+
+Today we are going to learn about twinning
+using Xtriage In this tutorial we are thinking of solving
+a challenging structure as a treasure hunt. The treasures are the problems. Once you've found them all and fixed them
+or accounted for them, you get to solve your structure. In the first Advanced Xtriage tutorial we
+covered translational NCS. You might want to watch that tutorial before
+this one. Today's treasure is going to be: Twinning In a later tutorial we will cover Ice rings
+and the Wrong space group. We will illustrate each situation with an
+Xtriage analysis of datasets from the Phenix tutorial called "Advanced Xtriage" Merohedral twinning is quite common and occurs
+when your crystal is composed of identical but rotated crystals sandwiched together with
+their lattices matching. In this case, the h,k,l reflection from one
+crystal superimposes exactly on the twin-related reflection from the other crystal and we measure
+the weighted average. The weights for the two are the volumes of
+the two crystals. The possible twin relationships for your crystal
+depend on the crystal symmetry and cell dimensions. For a twinned crystal, as each reflection
+is mixed with a twin-related reflection, the intensities tend all to be more average than
+for a normal crystal and the intensity and amplitude distributions are narrowed. Note that translational NCS can mask the effects
+of twinning, and if both are present the intensity and amplitude distributions can look almost
+normal. That's why we first check for tNCS and use
+a different test for twinning if it is present. The amplitude distribution for twinned porin
+data is narrow compared with an untwinned crystal. When you run Xtriage on the twinned porin
+data available in the Advanced Xtriage tutorial it will show you this traffic light summary. Notice the big red light letting you know
+that there may be twinning. You can click on this button and you will
+get the "twinning and intensity statistics summary" that we will see shortly. For now we will use the pull-down menu labelled
+Xtriage summary to go to "diagnostic tests for twinning and pseudosymmetry". Here is the Xtriage analysis of this twinned
+porin data. The highest Patterson peak is just 6% of the
+origin, so no translational NCS is present. The Wilson ratio is 1.67, just a little higher
+than the 1.5 of a perfect twin. The "Twinning and intensity statistics summary"
+in Xtriage tells us the twin law in this case is h,-h-k,-l, based on the lowest R-value
+between twin-related reflections, or Robs, of 0.195. The twin fraction alpha estimated using the
+Britton analysis which we will see in detail in a moment is 0.29. Let's look at Xtriage plots for the twin law
+h,-h-k,-l. If you have twinned data and you know the
+twin fraction alpha, you can detwin the data and estimate true intensities using the observed
+intensities for pairs of twin-related reflections. The Britton analysis counts the number of
+negative intensities obtained when the data are detwinned using each possible twinning
+fraction. Notice that many negative reflections are
+obtained if the data are detwinned using twin fractions bigger than 0.29. We can conclude that these diffraction data
+are from a twinned crystal with one domain comprising about 29% of the volume and another
+domain about 71%. This crystal is called "29% twinned" Here is the Xtriage cumulative intensity plot
+for this twinned porin data. For acentric reflections in the porin dataset
+there are fewer weak reflections than for acentric reflections in an ideal untwinned
+dataset. The plot for acentric reflections in the porin
+dataset goes up more slowly than for the ideal dataset. Here are some things to keep in mind if your
+data are twinned. Your dataset has lost information. If your data are 50% twinned, each reflection
+is averaged with the twin-related reflection and you have only half as much information
+as an untwinned dataset at the same resolution. Your maps are going to have model bias that
+is worse than usual. It may be difficult to solve your structure
+by experimental phasing. Twinning may make it appear as if your crystal
+has symmetry that is not really present. 
+

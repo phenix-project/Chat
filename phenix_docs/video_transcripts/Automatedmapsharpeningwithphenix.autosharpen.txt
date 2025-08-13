@@ -1,0 +1,54 @@
+Automated map sharpening with phenix.autosharpen
+
+Today we are going to learn about automatic
+map sharpening using auto sharpen in the Phenix GUI. Have a look at this cryo-EM map. We are going to blur and sharpen this map
+by adjusting the resolution-dependent weighting of the map. As the map is sharpened the clarity initially
+improves but eventually it becomes worse as the connectivity is lost. The numbers in the upper right corner indicate
+the final B-iso of the map, a measure of its sharpness where lower means sharper. Notice that the map is most interpretable
+when the B-iso value is about 20 in this case Phenix autosharpen is going to automatically
+choose the sharpening of the map that leads to the highest level of detail while maintaining
+the connectivity of the map. This combination is called "adjusted surface
+area" because the clarity is highest when the surface area of the contours in the map
+is highest. In most cases maximizing adjusted surface
+area leads to an optimally sharpened map. The required inputs for map sharpening are
+a map file and the high-resolution limit of the map. The map file can be any standard format such
+as an mrc map or a ccp4-style map or MTZ file. The map can come from cryo-EM or from X-ray
+crystallography. The resolution limit is used to reduce the
+contribution of high-resolution noise to the map. For a cryo-EM map you can use the resolution
+limit you have identified using half-dataset Fourier Shell Correlations. For an X-ray map you can use the resolution
+of your data. Here is the oversharpened rotavirus map that
+we would like to auto-sharpen. Let's open the Phenix GUI and optimize the
+sharpening of this map. In the main Phenix GUI, click "new project"
+and then "set up tutorial data". Then under "please select a dataset" go down
+to the Cryo-EM datasets and pick the "autosharpen map" tutorial. Choose a suitable place to put this data and
+hit OK Now there will be a new rotavirus auto sharpening
+project ready for you to use. To run auto sharpen, click on Maps and then
+scroll down and click on "Autosharpen map" This will set up a new autosharpen run. Let's put in a title We can choose our map file by clicking on
+browse which will take us to the directory where we copied the tutorial data. Select "rotavirus over sharpened map and click
+Open to load the file. Let's set the resolution to 2.6 A. Now we're ready to go. Hit Run and the autosharpen GUI will try to
+automatically figure out the optimal sharpening of this map. As the run starts, a new autosharpen tab will
+appear and the log file is displayed in the Run Status window. Here the log file is telling us about the
+map we supplied. Notice the grid and unit cell and make sure
+these agree with what you expect. Also notice the origin and extent of the map. The origin of cryo-EM maps is not necessarily
+at (0,0,0) and often is instead at the center of the map. Auto-sharpen will write out the sharpened
+map with the same origin as the input map. Here autosharpen is identifying the value
+of the final sharpening parameter B-iso that maximizes the adjusted surface area (SA),
+which is the combination of map clarity and connectivity. The best value of B-iso is 100, with an adjusted
+surface area value of 3.9 This corresponds to a sharpening B applied
+of minus 86, that is, the map is blurred compared to the starting map. At the end of the run, a summary is presented. It lists the final sharpening B applied of
+-86. It lists the file containing the sharpened
+map as well. If we click on the "Open in coot" button,
+the sharpened map is displayed. The sharpened map is quite nice. It looks very little like the original over-sharpened
+map. However note that these two maps have exactly
+the same information in them. It is just that the weighting of Fourier terms
+at high resolution is different in the two maps. The over sharpened map has large Fourier coefficients
+at high resolution and the optimally sharpened map has lower values. In this case it was necessary to blur the
+map to optimize it. In other cases it is necessary to sharpen
+it. Auto-sharpen can also be used to optimally
+sharpen a map to best fit a model. This can sometimes give just a little bit
+better sharpening the without a model, but it also has just a little bit of bias towards
+the model. In the autosharpen window you just enter the
+model. You can also use autosharpen to sharpen locally,
+with a different value in different parts of the map. To do this, go to all parameters in the autosharpen
+window, then click on map modification, and turn on local sharpening. 
+

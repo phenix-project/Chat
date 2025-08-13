@@ -1,0 +1,65 @@
+Running Emplace_local via ChimeraX
+
+Hi everyone, This tutorial explains how to run emplace_local, 
+a tool that docks a model in a cryo-EM map.   It is assumed that you have already 
+set up the Phenix/ChimeraX extension.   In case you need it, our channel has a 
+separate video that explains this process.  Before demonstrating how to run the program, 
+let's briefly discuss the challenges of docking.   The difficulty of docking tasks can vary greatly, 
+depending on the quality of the reconstruction.   It can be trivial when the map is good, 
+and distinct features of the search model   can be identified by eye. However, it can 
+be very challenging when there is barely   enough signal to assess if a docked 
+model agrees with a very noisy map. To address these challenges, the em_placement tool 
+improves docking calculations by considering the   log-likelihood-gain - or LLG - score that 
+would be expected for a correct solution   given the quality of the data and the model. 
+Following this strategy, the program compares   and analyzes half-maps to determine signal and 
+noise power as smooth functions in Fourier space.   This information is used to search over the full 
+map to place a model. If you want to know more   about the details of the algorithm, have a look 
+at the two papers linked in the video description.  When you have an idea of where the 
+model or a component might be located,   it’s faster and more sensitive to do a local 
+search with the emplace_local version of the   em_placement tool. The most convenient way to 
+carry out this local search is inside ChimeraX. The bottom line is that the strategy using 
+the LLG score can successfully place models   into very noisy low-resolution maps. We 
+will see an example of that in a moment.  To run emplace_local, you will need two half-maps,   and the model that you want to 
+place in the reconstruction.  Note that the statistical analysis requires 
+the half-maps to correspond to the full volume   of the cryo-EM reconstruction, 
+so cut-out boxes cannot be used.  Here is how you run emplace_local via ChimeraX. 
+Open a map and the model that you want to dock. In our first example, we are going to use a 
+1.7 Å reconstruction of the membrane domain   of the GABA receptor in which we will dock 
+chain A of the 4cof crystallography model.   The two half maps are colored in 
+green, the model is shown in purple.  To start the job, go to "Tools", choose "Phenix" 
+in the dropdown, then select "Local EM fitting".  In the new window, you can select the input files. 
+Make sure the appropriate model and half-maps are   selected. If you know the map resolution, it’s 
+best to put the value in the corresponding field.   Otherwise, the program will make a reasonable 
+guess for you. Finally, you can specify the   region of the map into which the model should be 
+docked. You will be able to interactively adjust   the center of the search region, but here you can 
+choose how to specify its preliminary position. You can either use the center of 
+view, the center of a map or a model,   or give specific coordinates. Here 
+we are going to use the center of   view. So make sure the map is centered 
+in the ChimeraX window. Then click OK. A transparent orange marker will appear in the 
+main window. emplace_local will try docking   the search model into that sphere. So let's 
+move the sphere so that it encloses the map   region into which we want to dock the search 
+model. To move the sphere, goto markers and   activate the "move" option. Now you can move the 
+sphere by clicking on your right mouse button. This position should be OK, as it encompasses the 
+part of the map that resembles the search model.   Now you can click "start search".
+You can see the status of the job   in the lower left bar of the chimeraX window. 
+This particular example will take about 1-2 min.   Once the search is complete, the model has 
+been moved to its docked position. The log   window indicates the log-likelihood-gain and map 
+CC. A LLG score greater than 60 suggests that a   solution is significantly better than random.
+Here we have a value above 4,000, along with   a map correlation of 0.76, suggesting 
+that the docking task was successful.   If we look at how the model was placed, we can 
+see that it fits nicely into the map. We can   also compare the docked model to the deposited 
+model of this map, they superpose very well.  Once the model or all domains have been 
+placed into the map, you can move on to   automated rebuilding, loop_fitting or refinement. Now let’s look at an example for a docking 
+task in a noisy low-resolution map. We will   place subunit L of PDB entry 3rko (a crystal 
+structure) in the very bad cryo-EM density   of respiratory complex I (EMDB: 12654) for the 
+same subunit of PDB entry 7nyu. While the nominal   resolution of this map is 3.8Å, the region 
+of subunit L has a local resolution of 9-11Å.  Let’s proceed as before and move the search sphere 
+in the region where we think the model should be.   The job finishes in about a minute, and 
+produces a solution with a LLG above 120.   The model superposes well with the corresponding 
+subunit of the deposited structure.   Although it would have been immensely 
+challenging to manually place this   model into the map, the emplace_local tool 
+automatically found the correct location. Likelihood-based signal and noise analysis 
+for docking of models into cryo-EM maps  https://doi.org/10.1107/S2059798323001596
+Likelihood-based docking   of models into cryo-EM maps
+https://doi.org/10.1107/S2059798323001602
+

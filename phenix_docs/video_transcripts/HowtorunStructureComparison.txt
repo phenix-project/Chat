@@ -1,0 +1,79 @@
+How to run Structure Comparison
+
+Hi everyone, this tutorial is about the program
+"Structure Comparison". "Structure Comparison" is a tool for the analysis
+of near-identical protein structures, such as models from different crystal forms, various
+mutants, or NCS-related copies. It displays validation outliers and regions
+of difference in tables. The GUI is linked to Coot and PyMOL for easy
+visualization. To run "Structure Comparison", at least two
+or more related protein chains are required. It is possible to use separate files or NCS-related
+copies in a single file. Optionally, diffraction data or pre-calculated
+map-coefficients can be provided, so that maps can be shown in addition to the protein
+chains. The data for this tutorial are available from
+the example datasets which come with the Phenix installation. To set up the example data, open the Phenix
+GUI and click on 'New Project'. Then, choose "Set up tutorial data". In the new window, open the drop down menu
+next to "Tutorial data". Go down to "Other" and choose the data set
+in the middle, called "Protein Kinase A (Structure comparison)". Choose a directory and then click OK. To run Structure Comparison, choose "Validation"
+and then click on "Structure Comparison", which opens a new window. For book-keeping, add a job title. To add files, either the "Add file", "Add
+directory" or "Add directory tree" button can be used. "Add file" opens files one by one. "Add directory" opens a pair of files, such
+as a model and a data file in a directory, and "Add directory tree" searches for file
+pairs by walking through a directory tree. As there are many files in the tutorial directory,
+let's choose "Add directory". The directory contains 6 model files, which
+are now listed in the input file window, along with the corresponding data files. The sequence file, which is at the bottom
+is used to define the reference chain. An important choice is whether to superpose
+the structures onto the reference. If this option is enabled, all similar chains
+and their density maps are superposed onto the reference. The results of the comparison are the same,
+but the graphics window will show all chains superposed. Let's activate the superposition for this
+example, and then click run to start the program. If diffraction data were provided, maps are
+calculated, which can be time-consuming. Therefore, if files with map-coefficients
+are available, it is recommended to use them instead. When the run is finished, several new tabs
+appear, which summarize the results of the different analyses. Lets start with the summary tab. In the left column is a list of the chains
+matching the reference, for example chain E of model 1l3r matches chains A and B of
+model 1syk. The table then lists the number of atoms and
+residues, the sequence identity in percent, the average isotropic B-factor and the RMSD
+if superposition was enabled. Click on the "Show Coot Controls" button. In the Coot Control window, click "Load models
+and maps" to open a Coot session with the superposed models and maps. We will look more closely at the structures
+in a moment, but let's first continue with the result tabs. The ligand summary tab lists similar properties
+for all ligands present in the chains to be compared. Note that columns are sortable, the items
+in the table can be for example sorted according to the number of atoms. The next table shows the rotamer angle differences. Any set of equivalent residues with multiple
+rotamer classes or outliers will be displayed. Let's have a look at residue Lys 309. The rotamer is identified as outlier, highlighted
+in red, in model 3dnd. The cell for model 1l3r is grey, which means
+this residue is missing or incomplete. If more than half of the side-chains for a
+common residue have the same rotamer, the cell is highlighted in green, which is the
+case for chains A and B of model 1syk and chain E of model 3fjq. The rotamer IDs, mttt in this example, are
+taken from a study published by Lovell et. al. The reference can be found in the description
+of this video. Minority conformations are highlighted in
+orange, as for chains A in models 3fhi and 3dne. Note also that the rotamer ID of the latter
+is written in italics, which means this is an "allowed" rotamer, which only occurs in
+0.3 to 2 % of residues. The summary table below can serve as a legend
+for the cell colors. For Lys309, there is one outlier, three favored
+rotamers, one minority favoured and one minority allowed rotamer, and one residue has missing
+atoms. Now double click on the cell marked "OUTLIER",
+which will center on this residue in the COOT window. Let's focus on the rotamers of 3dnd and 3dne
+and hide all other maps and models. The side-chains point to the right, partly
+covered with negative difference density, while there is 2fo-fc and positive difference
+density on the left. The orientation of these side-chains can be
+most likely improved by trying to fit them better to the density. It can be also noted that the side-chain of
+Lys309 in 3fjq also points to the left. Therefore, the rotamer table can help identifying
+regions which need further attention. If you have turned on structure superpositioning,
+there will be a separate PDB file for each chain, plus CCP4 map files if map coefficients
+were available. The results of the other tabs are represented
+similarly so let's go a bit quicker through them. The Ramachandran table shows any set of residues
+with outliers or multiple Ramachandran angles. The cells contain the values of the angles. The missing atoms table displays missing atoms
+or residues. The cell lists which atoms are missing. Note that the cell can be expanded to see
+all the atom names. The secondary structure table shows any set
+of matching residues with more than one type of secondary structure assignment, for example
+a residue labeled as beta sheet in one chain and without assignment in another chain. The water results table lists water molecules
+and ions which are not conserved in all chains. For example, the first column shows that there
+are a Mg ion, two Mn ions and one water molecule at equivalent positions in four of the chains,
+while there is no water in three of the chains. Similarly, the ligand information table shows
+if there are ligands at equivalent positions. The B-factor tab shows the per-residue average
+isotropic B-factor. It can be used to identify regions with higher
+B-factors, which can represent larger mobility or reflect modeling errors. Result tabs only appear if there are differences
+between chains. This is why the following two result tabs
+do not appear for the protein kinase example: Omega angle analysis:
+Omega angles are categorized as trans, cis or twisted. Any matching residues with different assignments
+are displayed in the results table. Histidine protonation:
+The histidine side-chain can have three different protonation states. The results table shows different protonation
+states if hydrogen atoms are present in at least one of the input models.
+

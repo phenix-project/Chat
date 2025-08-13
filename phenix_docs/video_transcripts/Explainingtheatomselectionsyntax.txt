@@ -1,0 +1,59 @@
+Explaining the atom selection syntax
+
+Hi everybody, this tutorial is about the Phenix
+atom selection syntax. Many of the programs in Phenix allow specifying
+selections of atoms in a model. Common examples include:
+TLS and rigid-body refinement groups Atoms to leave out for omit map calculation
+Selections for isotropic vs. anisotropic B-factor refinement
+and Modifying properties for subsets of atoms The selection is expressed as a string, which
+is a sequence of characters or words, and is defined using a common syntax. The selection syntax uses atomic properties
+such as atom name, residue number, chain ID, the B-factor and many more. Here are some examples illustrating the selection
+syntax: To select all atoms, use "all"
+To select all C alpha atoms, use "name ca" (ca stands for CA)
+As you can see, the string for atom name is not case sensitive. To select chain B, use "chain B". The chain ID is case sensitive if there are
+both chain IDs lowercase b and uppercase B in the model. To select a single residue by number, such
+as residue number 42, use "resseq 42" To select a range of residues, such as the
+residues from number 2 to 10, use "resseq 2 : 10" (2 and 10 are included in the selection) The examples we looked at previously are quite
+intuitive. But let's have a closer look at one of the
+examples. To select the residue by its number, we used
+"resseq 42". This selection can be ambiguous. Imagine the case where there are several chains
+in the model, f.ex. chain A and B. The selection "resseq 42" will
+select residue 42 from chain A and from chain B. If you want to select residue 42 from chain
+B only, both properties have to be combined. In general, selections can be combined by
+using the Boolean operators AND
+OR NOT
+In our example, the syntax to select residue 42 in chain B is "chain B and resseq 42". Here are some examples of combined expressions
+using Boolean operators: To select all alanine residues in chain A,
+use "chain a and resname ALA" To select alternative conformation B of residue
+74 in chain A, use "chain a and resseq 74 and altloc B"
+To select all atoms except hydrogen atoms, use "not element H"
+To select chain A and B, use "chain A or chain B" The last example showed that a Boolean expression
+can be different compared to natural language. To say that we select both chain A and chain
+B, we use the word "and" in natural language. However, the corresponding Boolean expression
+uses the operator "or". The expression "chain A and chain B" will
+yield an empty selection, because there is no atom that can satisfy these two conditions
+simultaneously. Keep this in mind when combining expressions. Usually, phenix stops if the selection is
+wrong. But what if the selection syntax is correct
+but does not reflect what you wanted to select? Here is a way to test a selection before running
+a program. In the command line, run the command 'phenix.pdb_atom_selection'
+followed by the model file and the selection string between quotation marks. Here is an example:
+Let's check for the selection string 'chain A and resseq 7' in model 4gs3.pdb. So write 'phenix.pdb_atom_selection 4gs3.pdb
+'chain A and resseq 7'' in the command line. At the end of the standard output is a pdb
+string of the selection and the total number of atoms selected, in our case 9 atoms for
+residue 7. Let's try residue number 6. This yields an empty selection, because the
+residue is not present in the model. This command line tool can be therefore used
+to quickly check a selection. It is also possible to select atoms based
+on their numerical properties. Here are some examples:
+To select all atoms with B factors larger than 50, use:
+‘bfactor > 50’ To select all atoms with occupancy smaller
+than 0.5, use: ‘occupancy < 0.5’
+There are also smart selections, but note that they may not be recognized by all programs:
+To select all water molecules, use: ‘water’
+To select the protein backbone, use: ‘backbone’
+To select all residues within a sphere of radius five angstrom around residue number
+20, use: within(5, resseq 20) The documentation page about the selection
+syntax lists more examples of selection expression. Also, there is a newsletter article about
+typical scenarios for occupancy refinement, which shows selections in the context of alternative
+conformations. You can find links for both texts in the description
+box of this video.
+

@@ -1,0 +1,71 @@
+Scaling and merging anomalous data
+
+Today we are going to learn about scaling
+datasets using scale-and-merge in the Phenix GUI. The purpose of Phenix scale and merge is to
+combine data from multiple crystals. Let's see how scale and merge works. The key features of scale and merge are local
+scaling and automatic assessment of inter-crystal variation. Let's look at local scaling . We use the intensities
+from one crystal as a reference, and scale the intensities of another crystal to that
+reference. We use a scale factor that is local so that
+it can take account of effects such as absorption that vary across the diffraction pattern. Let's get the scale factor for a particular
+reflection. We take the average intensity for all the
+reflections in a sphere surrounding the reflection in the reference crystal, and compare it with
+the average intensity for all the same reflections in the crystal we want to scale. We leave out the reflection we are going to
+scale so we don't bias the result. This gives us a scale factor for this reflection
+and we can multiply our measured value by the scale factor to give a scaled intensity. The process is repeated for each other reflection
+to give a scaled dataset. Now lets look at merging data obtained from
+several crystals. We want the anomalous data corresponding to
+an ideal crystal. We will use amplitudes (F) instead of intensities
+as that is what scale and merge uses. What we have is data measured from several
+real crystals. To optimally combine these data we need to
+keep in mind that these crystals are actually different and consider the crystal-to-crystal
+variation. Let's imagine how the data we measure are
+related to the F+ and F- for an ideal crystal. If we measured data from an ideal crystal
+the observed F+, fobs would be the ideal F+ with some error in measurement sigma-obs. Now if we measure data from a real crystal,
+the observed F+ will be the ideal F+, with errors in measurement, sigma obs, and also
+variation between this crystal and the ideal one, sigma-crystal-A. Now when combining observations
+of a particular reflection, we can weight each observation based on the error in measurement
+and the inter-crystal variation. The weights are one over the squares of the
+sigmas, so big sigmas mean small weights. We can estimate the inter-crystal variation
+for each crystal from the differences between the data for each crystal and the average
+of all crystals. The data from crystals that are most similar
+to the average are weighted more strongly, and the data from crystals that are more different
+are weighted less. Here is the procedure for scaling and merging. The data are first locally scaled to the average
+of all datasets. Then the observations from each crystal are
+combined, taking both uncertainties in measurement and inter-crystal variation into account,
+to produce scaled anomalous data. Note that you can use scale-and-merge with
+native data (without anomalous differences) as well. Let's apply scale-and-merge to some data from
+the phenix tutorials. We are going to use some very weak data from
+an NS1 protein. We will scale just 4 datasets to see how it
+works. In the main phenix GUI, click on "new project"
+and then "set up tutorial data". In the pull-down menu under "OTHER" select
+the "NS1 low-resolution SAD data tutorial". Choose a suitable place to put the files and
+hit OK Now there will be a new ns1-scale-and-merge
+project listed for you. Let's run scale_and_merge. Under "Reflection Tools" select "scale and
+merge". let's enter a title. Let's find the data in the tutorial directory. Under "anomalous data file" hit browse and
+pick all 4 data files one by one, using the plus sign to add additional files. You can also make a directory and put all
+your files in it and just specify that directory. The data for scale-and-merge should be unmerged
+original index data. That means that the data files have individual
+observations kept separate and record the original hkl indices of the data. If we scroll down notice that the unit cell
+box is empty. This means that the data files we used, which
+are scale pack unmerged format, do not specify the unit cell. Let's put it in now. Let's look at some of the parameters that
+are set for us by default. "Require F+ and F-" means only include an
+observation of F+ if the corresponding F- is present in the same dataset. This helps reduce systematic errors by always
+pairing reflections measured from the same crystal. Scrolling up, if we click on the Scaling button,
+the "Make anisotropy uniform" parameter is set to True so that anisotropy for each datafile
+will be adjusted to match the average. Under Merging notice that we have chosen to
+include the inter-dataset variance. We have also chosen to optimize anomalous
+differences. If we were using non-anomalous data we might
+turn that off. We're ready to go. Hit Run and as scale and merge starts, a new
+scale and merge run will appear. The Log status tab will show the log file. Let's look at some parts of this log file. First each dataset is scaled with local scaling. Notice that the anisotropy in the data files
+is examined so that it can be made uniform. The datafiles are first scaled using just
+an overall scale factor to put them on similar scales. Then the data are scaled using just the original
+sigmas, without inter-dataset variation. The inter-dataset variation is estimated by
+comparing each dataset to the average and accounting for measurement errors. And the data are scaled again, including inter-dataset
+variation. Finally the half-dataset anomalous correlation
+is estimated by splitting the datasets into two groups and comparing the anomalous differences
+between groups. The summary page shows the half-dataset anomalous
+correlations. For these NS1 crystals using just 4 datasets
+it is pretty poor even at low resolution. A value of 0.3 in a resolution range is useable,
+but you would hope for something above 0.5 in at least your lower resolution shells. For these NS1 crystals, it took not 4 but
+27 crystals to yield a useful set of merged data. 
+

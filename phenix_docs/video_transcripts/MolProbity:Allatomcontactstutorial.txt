@@ -1,0 +1,53 @@
+MolProbity: All atom contacts tutorial
+
+In this video, you will learn the basic concepts
+of the all-atom contact analysis used in MolProbity and Phenix. This analysis is used in the calculation of
+the clashscore and also as part of the MolProbity score. As implied by the name, a key requirement
+for all-atom contact analysis is that your structure has to have all atoms present. Unfortunately, for a variety of reasons, structure
+files in the Protein Databank may or may not have hydrogen atoms included, as can be seen
+in this example, with the protein backbone shown in white and the sidechain atoms in
+cyan. To address this issue, MolProbity includes
+software, which is named Reduce, to automatically calculate the positions of the hydrogens using
+the heavy atom positions and add them to a file. Here, we have added the hydrogens, shown in
+grey. A file without hydrogens is essentially missing
+half of its atoms, and hopefully you can see that because hydrogens extend out from the
+heavy atoms, without hydrogens, a structure will be missing the majority of its contacts
+and will give misleading validation results. To illustrate how we do the all-atom contact
+analysis, let’s take a look at this protein structure. We turn on all the atoms, and then zoom in
+on this particular region. Here we can show the van der Waals surfaces
+of the atoms with this dot representation. Our software, called “Probe”, takes a
+tiny ball and rolls it around on these dot surfaces. When the ball just starts to touch another
+atom, we can color the dot blue. As the probe ball continues, and the contact
+gets closer, we can color those dots green, and then back to blue as the contact gets
+further. Moving over here, we can see an example where
+the atoms are just touching. Those dots get colored in yellow to indicate
+a close contact. Finally, in this region, we can see two examples
+of where atoms are overlapping. The overlap on the right is a hydrogen bond,
+which is favorable, and gets colored with pale green dots. The overlap on the left is an impossible steric
+clash, which gets colored with red spikes to indicate a problem. Note that this doesn’t mean the protein
+structure is actually doing this in real life, this is a mistake in the model of that structure. Usually, we think it’s unnecessary to look
+at all of the van der Waals surfaces, so we can turn those off, and this way you can see
+just the contacts. Furthermore, most output options presented
+in MolProbity focus on clashes to encourage people to try to fix them. Here we see a typical example, where the protein
+sidechain has several clashes to the protein backbone. In this example, you can see that in the best
+case, even with all the hydrogens, everything is just touching and well packed, without
+any clashes. MolProbity has several result output options,
+as shown here. In the summary table, we show an overall clashscore
+for a structure. This clashscore is calculated using the number
+of clashes and the number of atoms in your structure, so a lower clashscore means your
+structure has less clashes and is generally higher quality. Because this score is normalized by the size
+of the structure, this allows you to compare clashscores between structures of a different
+size. MolProbity can also create a residue-by-residue
+table which shows information about the worst clash, if any, of each residue. MolProbity can also create a kinemage file,
+which can be downloaded and viewed in the KiNG 3D visualization software in order to
+see the contacts in the context of your structure, like we showed earlier in this video. Similarly, Phenix has several options for
+showing the results from all-atom contact analysis. The analysis is run by default during phenix.refine
+jobs, which you can see in action in our phenix.refine tutorial. Alternatively, you can run all-atom contacts
+as part of the comprehensive validation option. Like in MolProbity, this option gives the
+overall clashscore for your structure. It also has button to show the clashes in
+the Coot model building software, if you have it installed. Once you have Coot open, you can go to the
+Clashes tab in the Phenix window to see a residue-by-residue listing of the clashes,
+sorted by the worst clashes. Clicking on a particular residue will go to
+that residue in the Coot window, which is particularly convenient for fixing problems. This concludes our quick tutorial video about
+the all-atom contact analysis. 
+

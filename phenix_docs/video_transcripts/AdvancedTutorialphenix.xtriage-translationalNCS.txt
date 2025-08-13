@@ -1,0 +1,41 @@
+Advanced Tutorial phenix.xtriage - translational NCS (tNCS)
+
+Today we are going to learn about examining
+translational non-crystallographic symmetry (translational NCS) using Xtriage. You might want to watch the introductory Xtriage
+tutorial first if you haven't used Xtriage before. You can think of solving a challenging structure
+as a treasure hunt. The treasures are the problems. Once you've found them all and fixed them
+or accounted for them, you get to solve your structure. Today's treasure is going to be: Translational NCS In separate tutorials we will cover Twinning,
+Ice rings and the Wrong space group. We will illustrate each situation with an
+Xtriage analysis of datasets from the Phenix tutorial called "Advanced Xtriage" Translational NCS or tNCS occurs when the
+asymmetric unit of your crystal contains two or more copies of a molecule related by a
+simple translation. Here are the three copies of one chain in
+the asymmetric unit of the 1J4R dataset. Notice that they are related by pure translations
+of 1/3, -1/3, -1/3. The symptom of translational NCS is a strong
+peak in the Patterson function corresponding to the translation between copies of your
+molecule. This is the first thing to check for in looking
+for tNCS. The Xtriage output for the 1J4R dataset points
+out that there is a huge Patterson peak at 1/3, -1/3, -1/3, with a height of 63% of the
+origin. Over 20% is generally considered strong translational
+NCS The effect of translational NCS is to create
+a pattern of alternating strong and weak reflections. This leads to a systematic broadening of the
+distribution of amplitudes and intensities. Let's look at this is a little detail. At first we will look at amplitudes, as it
+is easier to see the effects of the NCS. Then we will look at intensities (the squares
+of the amplitudes). After scaling the data to remove the resolution
+dependent fall-off of intensity, the amplitudes of reflections from an untwinned crystal without
+translational NCS are distributed according to the Wilson distribution. This is indicated by the red "Expected" curve For acentric reflections the Wilson distribution
+looks a little like a Gaussian. If your crystal has translational NCS, the
+amplitudes tend to be either very weak or very strong, and the distribution is broader
+than for a normal crystal, as in this distribution for the 1J4R dataset This broadening of the distribution can be
+seen in two ways in Xtriage. Xtriage uses the intensities instead of amplitudes,
+but the consequences are similar. First, the Wilson ratio, the mean square intensity
+divided by mean intensity, squared, for this dataset is 2.4, much larger than the 2.0 expected
+for an ideal untwinned crystal. Second, a cumulative intensity plot shows
+that for acentric reflections in the 1J4R dataset there are more weak reflections than
+for acentric reflections in an ideal untwinned dataset. The plot for acentric reflections in the 1J4R
+dataset goes up more quickly than for the ideal dataset. Note that you can get a similar intensity
+plot if your data are exceptionally noisy. If your crystal has translational NCS, you
+should use the L-test when analyzing twinning because tNCS can mask twinning, use a translational
+NCS-corrected likelihood target such as the one in Phaser in molecular replacement, and
+if you calculate an omit map, be sure to omit corresponding parts of all copies of your
+molecule or you won't really be making an omit map. 
+

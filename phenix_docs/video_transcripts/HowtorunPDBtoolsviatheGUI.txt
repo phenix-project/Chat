@@ -1,0 +1,43 @@
+How to run PDB tools via the GUI
+
+Hi everybody, This tutorial is about running phenix.pdbtools
+via the graphical user interface. Phenix.pdbtools is a tool for model manipulations. It offers a large variety of options, which
+can be applied to the whole model or to selected parts by using atom selections. In this tutorial, some usage examples are
+presented. Note that the full list of options is listed
+on the documentation page. As input, only a PDB file is required. Optionally, a ligand restraints file can be
+used in addition. The data from this example are from the lysozyme
+model with the Protein Data Bank ID 2vb1. The resolution of the data extends to 0.65
+A Now let's switch to the program and see how
+to run it. To do this, open the Phenix GUI. In the panel on the right hand side, choose
+Model Tools and then click on PDB tools, which opens a new window. For book-keeping, add a job title, I will
+use phenix_tutorial. To add the model file, click "Add file" and
+select the input file from the dialog window. The geometry restraints file is optional and
+can be de-activated by unchecking the box "Stop for unknown residues". However they are strongly recommended and
+should be used if possible. 2vb1 does not contain non-standard ligands and does therefore not require a restraints file. Make sure that the output directory is set
+up correctly in the output section at the bottom of the window. Then click the 'options' tab to choose the
+input parameters. The top section is used to define the atom
+selections by a selection string. Use 'Modify atom selection' if the modification
+should be applied only to a subset of atoms. Use 'Remove atom selection', if a subset of
+atoms should be removed from the input model. Use 'Keep only atom selection', if only a
+subset of atoms should be kept from the input model. Important: the commands' keep' and 'remove'
+cannot be used simultaneously. Scenario 1:
+In this example, we prepare a file for usage with lower resolution data. To do this, we remove hydrogen atoms, alternate
+conformations, water molecules, ligands, convert the B-factors to isotropic and set them to
+a constant value of 30 A2. To remove hydrogen atoms, use the selection
+string 'element H' in the 'remove atom selection' field. To remove alternate conformations, check the
+corresponding box in the 'actions' section of the window. To remove water molecules and ligands, add
+'or not protein' to the selection string in the 'remove atom selection' field. To convert B-factors to isotropic, check the
+corresponding box. The B-factors in this ultra-high resolution
+structure are very low, it is therefore advisable to set them with a higher value before using
+this model with lower resolution data. Write 30 into the field next to 'Set isotropic
+B to'. Then click run to start the program. This close up shows the changes from the initial
+model to the modified model. The H atoms, water molecules and ligands are
+deleted and alternate conformations are reduced to single conformations. Scenario 2:
+In the second example, we change all protein residues to alanine, keep only protein residues
+and delete double conformations. To keep only the protein in the model, write
+the selection string 'protein' in the 'keep only atom selection' field. To remove alternate conformations, check the
+corresponding box in the 'actions' section of the window. To convert all residues to alanine, check
+the box 'truncate to poly-Ala'. Then click run to start the program. This close up shows the changes from the initial
+model to the modified model. The non-protein atoms are deleted and alternate
+conformations are reduced to single conformations. All residues are converted to alanine.
+

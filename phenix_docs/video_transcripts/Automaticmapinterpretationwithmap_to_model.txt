@@ -1,0 +1,47 @@
+Automatic map interpretation with map_to_model
+
+Today we are going to learn about automatic
+map interpretation using map_to_model in the Phenix GUI. The purpose of Phenix map_to_model is to take
+a 3-dimensional map like this one and interpret it to produce an atomic model. Let's see how map-to-model works. First the input map is optimized for clarity. This is done using the phenix autosharpen
+tool. Next the unique part of the map is identified
+to avoid duplication of effort. Then models are built into the unique part
+of the map using several independent methods. Finally the best parts of all the models are
+assembled into a final model. Here the green is the known structure of a
+ribosome and the brown is the structure built by map-to-model. Note that map-to-model produces a preliminary
+model, not a fully complete one. The key input for map interpretation is the
+map file. It can be in any standard format such as mrc,
+or ccp4 map or mtz format. The map can come from cryo-EM or from crystallography. It is not necessary to sharpen the map beforehand
+as this will be done by map-to-model. The high-resolution limit of the map will
+also be needed. The resolution limit is used to reduce the
+contribution of high-resolution noise to the map. For a cryo-EM map you can use the resolution
+limit you have identified using half-dataset Fourier Shell Correlations. For an X-ray map you can use the resolution
+of your data. A sequence file is also needed. This tells map-to-model what is in the map
+and whether it is protein, rna or dna or a combination of these. If symmetry has been applied during reconstruction
+of the map, a symmetry file is helpful. You can also specify the symmetry type such
+as D7 or I. Now let's automatically interpret a map for
+part of a rotavirus structure from the phenix tutorials. Here is the map that we are going to interpret. It is a pretty clear map, but as we will see,
+it needs sharpening. In the main phenix GUI, click on "new project"
+and then "set up tutorial data". In the pull-down menu under "cryoEM" select
+the "model-building tutorial". Choose a suitable place to put the files and
+hit OK Now there will be a new rotavirus project
+listed for you. It contains a small part of a rotavirus map
+cut out with the Phenix map-box tool. We are going to build into this small map. Let's run map-to-model. Under "model-building" select "map-to-model". let's enter a title. Let's find the map file in the tutorial directory. pick "rotavirus_short_box.ccp4". If there were reconstruction symmetry used,
+we could enter it here under NCS file (NCS is the term in crystallography corresponding
+to reconstruction symmetry). We need a sequence file. Let's get it from the tutorial directory. Let's set the resolution to 2.6 A and the
+number of processors to 4 We're ready to go. Hit Run and as map-to-model starts, a new
+map-to-model run will appear. The Run status tab will show the log file. Map-to-model can take a while to run...for
+a ribosome it can be many days unless you use many processors. This tutorial data takes about an hour to
+run. The first big thing that map-to-model does
+is automatically sharpen the map. Here it is identifying the optimal sharpening
+by maximizing the clarity and connectivity of the map, combined to yield adjusted surface
+area or SA. The optimal sharpening is a B-sharpen of 35
+Angstroms squared, leading to a maximal SA of 4. Here's the original map we saw before and
+the sharpened map which looks much clearer. Next map-to-model chooses the region to build
+in, builds several models, puts everything together, refines it, and writes out map_to_model.pdb. Here is the end of the log file. Map to model has built 152 residues in 13
+chains. The map-model correlation is 0.78 which is
+very good, and the final model has been copied to map_to_model.pdb. Let's click on "open in coot" and we can see
+the sharpened map and the model that has been built. This is the kind of result that you would
+expect for a high-resolution map. At lower resolution the model will be less
+complete and the sequence may not be matched to the model. The next step will be manual model-building
+to fill out the model and refinement to optimize the model. 
+

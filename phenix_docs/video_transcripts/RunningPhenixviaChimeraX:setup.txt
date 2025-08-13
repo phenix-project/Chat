@@ -1,0 +1,27 @@
+Running Phenix via ChimeraX: setup
+
+Hi everyone. This tutorial explains how to install the
+Phenix extension for ChimeraX. This extension allows you to run certain Phenix
+tools via the ChimeraX Molecular Viewer. First, install a daily build of ChimeraX. You can download the build from the website
+- the address is in the video description below - and follow the installation instructions
+for your operating system. You also need a recent nightly build of Phenix. The address is also given in the video description. Finally, you'll need the Phenix UI bundle. You can download it from the ChimeraX Toolshed
+website or you can install it directly from the GUI. Here is how to install the bundle with the
+GUI: Go to the "Tools" menu and then select "More Tools". In the new window, click on "All Bundles"
+and scroll down to find the PhenixUI. Click "install" und confirm in the prompt. Now that you have all programs installed,
+you need to link the Phenix installation to ChimeraX. If Phenix is installed into its default location,
+ChimeraX will normally find it. Otherwise, type "phenix location", followed
+by the path_to_your_phenix_installation, for example "phenix location /Applications/phenix-dev-4753". Note that you can also drag and drop the phenix
+top directory onto the command line instead of having to type out its path. You can see the syntax of the supported phenix
+commands with “usage phenix”. To run a Phenix tool via the GUI, go to "Tools",
+and then choose "Phenix" in the dropdown. Here is a quick preview of running the water
+placement tool "phenix.douse": In the "Phenix" dropdown, choose "Water placement". Choose the model to which water molecules
+should be added, and the corresponding map. Input the map resolution and hit "OK". The computation typically takes one or several
+minutes, depending on the size of the model. In the result window, you can see a table
+that lists the number of hydrogen bonds and the map density value for each water molecule
+added by phenix.douse. If the input model already had water molecules,
+there are additional columns for waters that were not found by douse, and for waters that
+are both in the input model and found by douse. Toolshed
+https://cxtoolshed.rbvi.ucsf.edu Phenix nightly build
+https://phenix-online.org/download/nightly_builds.cgi ChimeraX daily build
+https://www.cgl.ucsf.edu/chimerax/download.html
+

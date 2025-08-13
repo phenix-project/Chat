@@ -1,0 +1,88 @@
+SAD phasing using AutoSol
+
+Hi Everyone. This tutorial explains how to solve a structure
+by SAD phasing using AutoSol. "SAD" is a widely used experimental phasing
+technique and stands for Single Wavelength Anomalous diffraction. The technique consists of measuring X-ray
+diffraction data using energies close to the absorption edge of an anomalous scatterer. These scatterers can be purposely incorporated
+into the sample, such as by replacing methionine with selenomethio- nine or the scatterers
+can be naturally present. The following inputs are needed to run AutoSol:
+1. anomalous diffraction data. This is a data file that contains separate
+intensities for each Friedel pair. The intensities are commonly called I plus
+and I minus. 2. the wavelength, at which the data where collected
+3. the atom type of the anomalous scatterer
+and 4. the sequence of the molecule in the crystal AutoSol will perform the following steps:
+- first, the program locates the anomalously-scattering atoms. The resulting set of coordinates is called
+the sub-structure, because it is just a part of the structure of the molecule in the crystal. - then the sub-structure and the anomalous
+data are used to estimate crystallographic phases and calculate a density map. - this initial density map can be improved
+with density modification - Finally, the map is interpreted by building
+a preliminary model that matches the map. To run this tutorial, we will use example
+data coming with the Phenix installation. Open the Phenix GUI, then Click "New Project"
+and choose "Set up tutorial data". Select the first tutorial dataset "P aerophilum
+translation initiation factor 5a (SAD)". Choose an appropriate location to save the
+files and Click OK. To start the program, go to the right panel
+and click on "experimental phasing". Then click on "AutoSol" and a new window opens. For bookkeeping add a job title. To load files, click on "Browse" and double-click
+on "seq.dat". The GUI now lists this file and assigned a
+data type to it. seq.dat is correctly listed as a "sequence"
+file. If you want to look at the file, click on
+the magnifying glass. Then load the data file, p9.sca, which is
+in scalepack format. The GUI has correctly guessed that this is
+a SAD or MAD peak wavelength data set and also assigned the correct labels: I+ SIGI+
+I- SIGI-. If there are several data arrays in the reflection
+file, it is good to double-check the data type and the labels to make sure that they
+are correct. To enter the wavelength, go to the box next
+to the Greek lambda symbol. For this experiment, the wavelength was 0.9792. To input the atom type, enter Se for selenium
+into the Atom box. If we had measured the f' and f" scattering
+factors, they would be entered as well. But they are not mandatory as they can be
+calculated from the atom type and the wavelength. We leave the boxes empty for this tutorial. We can also enter the number of NCS copies
+and sites if they are known. Otherwise the program will guess them based
+on the volume taken up by a molecule with the provided sequence, the volume of the asymmetric
+unit, and the assumption that about 50% of the crystal is occupied by the molecule. Finally, check that the Unit cell (113.9 113.9
+32.5, 90 90 90) and the space group (I4) match those of your data collection. Then Click on the "Options and output' tab. Default options are typically fine, but to
+speed up the runtime of this tutorial, set the high-resolution limit to 3 A and the number
+of processors to 4. Then go to "RUN" and click on "RUN NOW" to
+start the program. A new tab, labeled run_1 will appear next
+to the configure tab. The Status tab on the left shows what is happening
+now. More tabs will appear while the program is
+running and they will be constantly updated. Let's have a look through some of the tabs
+of the finished AutoSol run. The "Graphs" tab shows the quality of phasing
+as expressed by figure of merit vs resolution. The Figure of Merit is an estimate of phase
+quality, ranging from 0 to 1. It normally falls off with resolution. Acentric reflections, which have anomalous
+differences that yield phase information, have higher figures of merit than centric
+reflections, which have no anomalous differences. The "Substructure Search" tab shows the heavy-atom
+sites obtained. For SAD, a figure of merit above 0.45 is very
+good, and between 0.25 and 0.45 is fine. The Overall Score is the estimated correlation
+coefficient between your experimental map and the true map, multiplied by 100. The higher this number is, the better the
+solution. Select a solution and click on "show selected
+sites" which will list below the atom type, coordinates, and occupancy for each site. The occupancies should normally all be similar,
+but they might not all be equal to 1 if the scattering factors are not quite right or
+if there are partially occupied sites. The "Phasing and density modification tab"
+allows visualizing the anomalous sites and density maps from this AutoSol run. Highlight the first solution and click on
+"view sites and experimental map" and then "open in coot". A Coot window opens showing the map before
+density modification. Go to "Edit", choose "map parameters" and
+set the map radius to 35 to see more of the map. Go to "Draw" and then "Go to Atom", click
+"Chain Z" and then click on the first atom in the list to zoom in on one of the selenium
+sites. Now the view is centered near this atom. Notice that the map has regions that are mostly
+empty (the solvent) and regions that have more density (the protein). If we zoom in, we can see some density representing
+protein chain, but it is not very clear. Go back to the "phasing and density modification
+tab". The lower part shows the solution from density
+modification. An R-factor below 0.3 is ideal but a low value
+does not guarantee a usable solution. Note that this is the R-factor for density
+modification, not the crystallographic R-factor for model vs. data. The "skew" is a measure of the deviation of
+the distribution of electron density values in the raw phased map from a Gaussian; a skew
+of 0.2 is usually very good. Highlight solution 1 in the lower part. Click on "view sites and resolve map" and
+then "open in coot". The density-modified map appears on top of
+the experimental map in the Coot window. To hide the previous map, click on "display
+manager" and uncheck ("phaser_1.mtz"). The density modified map is greatly improved,
+as the density shows connected volumes for the protein chain. The summary tab shows final statistics and
+output files. The correct solution in this case is unambiguous
+based on visual inspection, the refinement R-factors, and the correlation coefficient. To open the model and final map click "Open
+in Coot." Select the first atom in chain A to center
+on the molecule. This is a very clear map. You can get this sort of result with AutoSol
+if you have accurately measured high-resolution anomalous data with strong anomalous signal,
+as in this tutorial dataset. In more challenging cases, the map might be
+less clear and less model built. Note that the final model from AutoSol is
+rarely complete and may contain errors. The next step is usually to run phenix.autobuild,
+which tries to iteratively improve the map with density modification and build a more
+complete model. To run AutoBuild with the results of this
+AutoSol run, hit the "run AutoBuild" button in the summary tab.
+

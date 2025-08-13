@@ -1,0 +1,36 @@
+Changing custom parameters in phenix.refine
+
+Hi Everybody, This tutorial is about changing custom parameters
+in phenix.refine. Phenix.refine has now more than 800 parameters. Those which are often used, are available
+as buttons or input fields in the graphical user interface, but obviously, it is not possible
+to squeeze all of them into the GUI window. Some of the parameters are therefore available
+by other means. I will now explain how to change a specific
+parameter via the GUI. First of all, here is where you can find the
+summary of the phenix.refine parameters. Open the Phenix homepage at phenix-online.org. On the right hand side, click onto 'documentation'. Then click on 'Complete Phenix reference documentation'
+from the list on top. The page which just opened contains links
+to the documentation pages of all Phenix tools. Scroll down to 'Structure refinement and restraint
+generation', and click on the first link in the list. This opens the documentation for phenix.refine. Scroll down the table of contents, to find
+a link for the 'list of available parameters' at the end. Click, to jump to the list of parameters. The parameter is written in black, the default
+value in red, and the description of the parameter is in blue. As an example, I want to change the parameter,
+which prevents that two neighboring cysteine sulfur atoms are interpreted as a disulfide
+bond. This parameter might be of use in the case
+of radiation-damaged structures, where disulfide bonds may break under the influence of X-rays. For example, in chicken egg white lysozyme,
+the disulfide bond between Cys 30 and Cys 115 shows indications for cleavage after being
+irradiated by about 1 MGy. Let's go back to the documentation and look
+for the name of the parameter. It is found under pdb_interpretation and is
+called 'disulfide_bond_exclusions_selection_string'. So where to find it in the graphical user
+interface of phenix.refine? Let's switch to the Phenix GUI'
+In the right panel, open the phenix.refine window. Usually, the necessary files for refinement
+should be input first, but let's skip this step for our example. Under 'configure', go the the 'refinement
+settings' tab. In the 'other options' field at the bottom,
+click on 'all parameters'. In the drop down menu, choose 'Search Parameters'
+which is on the bottom of the list. Then type in the name of the parameter. You can type in either the complete name or
+only part of it, it should not matter if capital or lowercase letters are used. Click OK and all parameters matching the search
+string appear, in this case three parameters are listed . Here is the parameter which we
+want to change in our example: disulfide_bond_exclusions_selection_string. In the input field next to it, the default
+value can be changed. For the disulfide bond in the lysozyme model,
+the selection string is 'chain A and resseq 30 and name SG'. The sulfur atom in Cysteine 30 will therefore
+not be considered as part of a disulfide bond. Then click OK to save the changes. If you want to check if the parameter was
+changed, click on 'all parameters' and choose 'view all settings' in the drop down menu. Our keyword is found under pdb_interpretation. The default value was indeed changed to the
+selection string I typed previously.
+

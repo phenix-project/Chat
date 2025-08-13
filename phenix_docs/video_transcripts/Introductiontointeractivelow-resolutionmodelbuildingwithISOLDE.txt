@@ -1,0 +1,244 @@
+Introduction to interactive low-resolution model building with ISOLDE
+
+Hi everyone. I'm Tristan, and I'm very proud to introduce
+my new baby ISOLDE. The name stands for Interactive Structure
+Optimisation by Local Direct Exploration, but the simplest description is that it's
+a new interactive model building environment. In particular, it's designed to ease the often
+fraught task of building and refining models into low-resolution maps. So before we get properly started, I'd like
+to spend a minute or two discussing why that's important. There's quite a lot going on in this plot,
+so let me break it down for you. On the y axis we have the MolProbity score
+which combines common measures of structural error, namely atomic overlaps or clashes,
+unlikely backbone conformations and unlikely sidechain conformations into a single log-scale
+score, where lower is better. On the x-axis we have the R-free, a measure
+of how well the model fits the data. Again, lower is better. So the bottom left corner is where we want
+to be. Each spot represents one three point five
+to four Angstrom crystal structure deposited in the last decade, and is coloured by resolution
+from blue for 3.5 to yellow for 4 Angstroms. The problem here isn't just that few models
+are in that bottom quadrant, but that it appears that in this resolution range the correlation
+between model quality and fit to data - which I should emphasise is very strong at high
+resolutions - has broken down essentially completely. In other words, a very poor-quality, physically
+impossible model can fit the data much better than a more realistic one. The picture is essentially the same when we
+look at cryo-EM models in the same resolution range, except that in this plot the bottom
+right-hand quadrant is where we want to be. A somewhat problematic situation. So - how can ISOLDE help to fix it? To answer that, I'll start by taking you through
+the essentials using my favourite toy model in the absence of a map, then show how it
+all can be applied in a real-world situation. Here we are in ChimeraX, the platform upon
+which ISOLDE is built, and I've opened up a model of insulin-like growth factor one. ISOLDE currently supports protein, DNA and
+RNA models. Metal ions and water molecules may be included
+but should be handled with care. All residues (including any water molecules)
+must be complete including hydrogens. Hydrogen atoms can be conveniently added using
+ChimeraX's built-in "AddH" command. To run ISOLDE you'll need a recent Linux machine
+with a GPU capable of OpenCL or CUDA processing with up-to-date drivers. Support for Mac and Windows environments is
+in development. To get it, within ChimeraX go to the Tools
+menu and then click "More Tools" to enter the ChimeraX Toolshed, and follow the links
+to download and automatically install ISOLDE. Once installed it will appear under Tools/General/ISOLDE. So let's fire it up. The interface loads as a floating window. If your computer has two screens I recommend
+putting it on the second, but here I'll dock it into the tool area on the right. For now we're working without any experimental
+map, so on the sim settings tab I'll switch over to Free Mode. This will trigger ISOLDE to do some preliminary
+analysis of the first loaded model to get it ready for simulation. Starting a simulation is as simple as selecting
+anything from a single atom to the entire model, and clicking "Go" - keeping in mind
+that for interactive performance the selection size should be kept reasonably small. Here I'll just go ahead and select the entire
+model. One of the big challenges of model building
+in general lies in the fact that even to the experienced eye it can be very difficult to
+tell a reasonable arrangement from a wrong one. This challenge is compounded when the atoms
+are actively moving, so a lot of my effort in designing ISOLDE has revolved around finding
+ways to make things more intelligible. A particular focus is on providing real-time
+visualisation of common geometric problems. The first of these is this traffic-light-style
+visualisation of the alpha carbon atoms, which continually updates to give the current status
+of each protein residue on the Ramachandran plot. Residues in favoured conformations are coloured
+green, while the remainder shade from yellow to dark pink as they become more unlikely. Unlikely sidechain conformations or rotamers,
+meanwhile, are annotated with this exclamation mark/spiral motif. These appear only for rotamers outside of
+favoured conformations, and change both size and colour according to severity. You may be wondering about that cyan atom
+in the middle there. That one has nothing to do with validation
+- it's highlighted because it's currently closest to the tip of my three-D haptic interface,
+which is represented by the little green cone here. Being able to interact with the model in true
+three dimensions like this certainly makes everything much easier, but it's just one
+of the options for model interaction in ISOLDE. Most of your day-to-day interaction with ISOLDE
+will be through the addition and removal of temporary restraints to guide the simulation
+into new conformations. Let's start with rotamer manipulations as
+an example. Selecting an atom in a protein residue enables
+the rotamer tools, allowing you to cycle through previews of a probability-ordered list of
+ideal rotamers. Once you've made a choice you *can* click
+"commit" to simply set the new coordinates, but in many cases I find it preferable to
+instead click "set target" to force the existing coordinates towards the new conformation. This approach has the substantial advantage
+of never introducing atomic clashes, allowing the surroundings to adapt naturally to the
+changes. The dihedral restraint mechanism used for
+this task is also used for restraining secondary structure and when flipping peptide bonds. It's of course important to always know where
+you're applying artificial restraints and how well satisfied they are, so to visualise
+dihedral restraints I've settled on this "ring and posts" motif, using both colour and geometry
+to show the level of satisfaction of each restraint. Peptide bond geometry controls are found just
+above the rotamer controls, and like those are only available when a single mobile protein
+residue is selected. These are implemented strictly as dihedral
+targets for the same reason as rotamers - that is, the avoidance of very high energy impossible
+conformations. In this case the applied restraints are temporary
+and will be released when the flipped conformation is reached or if it proves impossible to reach
+after a few dozen simulation steps. The cis peptide bond (where the hydrogen and
+oxygen are on the same side) is an exceedingly rare natural conformation in non-proline residues,
+and is flagged with this red filled-in plane visualisation. All peptide bonds in ISOLDE are restrained
+by default so that this type of flip cannot happen by accident. While individual atoms can be tugged directly
+using the keyboard and mouse, this can be difficult to do accurately due to the unavoidable
+fact that a mouse can only tug in the two dimensions perpendicular to the direction
+of view. For large rearrangements, therefore, it's
+often easier to make extensive use of temporary position restraints, which can be accessed
+at the bottom of the Rebuild tab. These are also useful in various other situations,
+for example for keeping sidechain atoms away from unfilled ligand density. If you're particularly eagle-eyed, you may
+have been wondering why this IGF-I model is missing its disulfide bonds. I've made it that way on purpose so I can
+show my two favourite tools - but before I do that, this would be a very good time to
+mention the checkpointing function. This allows you to save a snapshot of the
+current state of a running simulation including the coordinates and all current restraints,
+and return to it discarding all subsequent changes if you make a mistake. This can be particularly valuable when testing
+hypotheses about different possible conformations of a problematic region. Now, on to secondary structure restraints. These combine dihedral restraints with atom-to-atom
+distance restraints to force the peptide backbone towards defined conformations - parallel or
+anti-parallel beta strands or alpha helices. These are soft enough to still allow reasonable
+flexibility, but generally do a good job of attaining the desired conformation even when
+it's a very long way from the starting conformation - like, say, if I wanted to turn this entire
+IGF-I molecule into an alpha helix. Notice that the imposition of all these extra
+restraints doesn't impact on your ability to interact with the model - you can still
+pull it around with your mouse or haptic device as much as you like. ... and now you know what IGF-I looks like
+as an alpha helix. Just to really demonstrate this, I'm going
+to briefly turn ChimeraX's cartoon representation back on and re-calculate secondary structure
+using the dssp command. Once done playing, just click "return to checkpoint"
+and it's like it never happened. The next tool I'd like to show is the register
+shifter. While particularly fun to watch, it has a
+serious purpose - at the resolutions ISOLDE is designed for, errors in register - where
+stretches of peptide have been assigned one or more whole residues away from their true
+positions - are not at all uncommon. In ISOLDE any continuous stretch of peptide
+residues can be told to shift smoothly forward or backward along their length, making the
+task of recovering from such errors quite straightforward. Moving onto a real-world example, discussed
+in much more detail in my upcoming paper on ISOLDE. 3ja8 is a cryo-EM model, and the first published
+structure of the eukaryotic MCM-2 helicase. At around five and a half thousand unique
+residues and a resolution of three point eight Angstroms its a large and challenging beast,
+and at a first glance the PDB validation statistics look pretty good. OK, the high clashscore looks a little problematic,
+but nothing stands out as an obvious red flag. Before I get started, a few housekeeping details. To prepare the model for simulation I've used
+an external package to add in the many missing sidechains - remember, all residues must be
+complete for ISOLDE to work. I've also removed the ADP ligands, since these
+are not yet supported. I'll be using position restraints to keep
+the surrounding residues out of the ADP density, and add the ligands back in when passing the
+final model out to phenix real space refine. Since now we're working with a real experimental
+map, we'll be running in map-fitting mode. In this case we need a mtz file with at least
+one set of map structure factors. If as in this case you're working with a real-space
+map, you can easily convert it using phenix map to structure factors - or why not use
+phenix auto sharpen to improve the map interpretability at the same time? Pressing the Initialise button prepares your
+map or maps, and also triggers preparation of all dihedrals, rotamers etc. in the model. For a model this size that will take somewhere
+between 10 and 30 seconds. When done, the representation will change
+to a minimalist cartoon and a scrolling sphere of density which should be familiar to users
+of existing crystallographic visualisation and model-building software. In this mode, the mouse scroll wheel changes
+the map contour level, while dragging with the right mouse button zooms the display and
+dragging with the middle button pans. If you have multiple maps, you can choose
+which one responds to the scroll wheel by scrolling with the control key pressed. I strongly recommend switching your density
+map to a transparent surface representation as shown here. Note that particularly for cryo-EM maps, you'll
+need to adjust the coupling constant between map and simulation using the map settings
+dialogue. At present this is a somewhat ad-hoc affair,
+but a reasonable heuristic is that the coupling constant times the map one-sigma value (which
+you can get from the lower left of the ChimeraX window when adjusting contours) should be
+in the range 1 to 10. The first thing we need to do when working
+with a new model is to run a short simulation of the entire structure. This gives the molecular dynamics engine the
+chance to minimise out the worst of the high-energy features typically found in low-resolution
+models. It's particularly important to resolve any
+clashes, since these lead to exceedingly high energies - it's not at all uncommon for deposited
+models to have initial calculated energies in the tens of millions of kilojoules per
+mole! Starting the simulation triggers the map to
+be expanded and masked to cover the entire mobile selection. If you like you can adjust the masking radius
+in the map settings dialogue, but keep in mind that the mask will be update regularly
+during the simulation so the atoms are always in context even after large movements. I'm running this simulation with the Ramachandran
+plot visible, because this is the first indication that this model is a bit more problematic
+than it might first seem. What we see is an immediate explosion of Ramachandran
+outliers - this isn't a failing of ISOLDE, but a consequence of the fact that this largely
+hand-built model was refined with Ramachandran restraints. The problem with Ramachandran restraints in
+general is that they don't know where in the plot any given residue belongs, but will simply
+force it towards the nearest allowed region. What we see here is a consequence of the many
+clashes and unfavourable electrostatic interactions in the initial model pushing atoms away from
+each other. Sometimes a model has to get worse before
+it can get better. While we're looking at the Ramachandran plot,
+note that clicking on any point in the plot will take you straight to the corresponding
+residue in the main display. Clicking through a few of the newly introduced
+outliers we quickly come across a non-proline cis peptide bond, another red flag. Clicking the green "Keep changes" button stops
+the simulation and reverts to the standard scrolling display. The rotamer and cis peptide bond annotations
+from the simulation remain visible, and they certainly tell a story here. It turns out that this model has over a hundred
+spurious non-proline cis bonds, and the number of rotamer outliers has increased from that
+seemingly perfect initial zero point one percent to somewhere approaching ten percent of residues. Since cis peptide bonds are such rare and
+unusual features and can do strange things to the backbone conformation, checking and
+where necessary correcting these is a natural first step in the remodelling process. This can be done conveniently using the peptide
+bond validation tool, found underneath the Ramachandran plot on the Validate tab. Like with the Ramachandran plot, clicking
+on any entry in the list will take you to that residue and select it. In most cases simply clicking "Go" will give
+you a localised simulation big enough to deal with it, but it's always a good idea to look
+for signs of larger-scale problems and if necessary stop the simulation and restart
+with a bigger selection. While correcting these it may be worthwhile
+to fix any other obvious problems you see, but I wouldn't recommend spending too much
+time wrestling with individual residues at this stage. First, it's important to remember the golden
+rule: human eyes should see each and every residue in context at least once. In other words, we need to go through the
+model looking specifically for large-scale errors - there's no point spending all your
+time tinkering with the details if some large-scale change is going to wipe out all your hard
+work. Looking for large scale errors like register
+shifts requires a different style of visualisation. Rather than focusing on individual residues,
+we want to be looking at substantial stretches at a time, with just enough surrounding density
+to give them context without becoming overwhelming. Currently hiding away at the bottom of the
+sim settings tab is a tool for this purpose. Clicking "Step forward" will go to the first
+pair of defined secondary structure elements and isolate them along with their flanking
+unstructured connections. Each click will step forward in an overlapping
+sequence, allowing you to relatively quickly cast your eye over the whole structure. Remember, at this stage you're looking for
+signs of serious error - by all means, feel free to correct any obvious smaller-scale
+errors you find, but it's counterproductive to spend significant time on challenging spots
+until you're sure the surroundings are not going to change substantially. Here I've been doing just that after clearing
+away all the cis peptide bonds, and have come across this interesting problem. In the middle of chain 4 we hit a one-residue
+break in the chain, where the sequence jumps straight from lysine 467 to valine 469, with
+no room for the intervening lysine residue. I can only assume that this came about due
+to an error in sequence alignment when generating the initial homology model, but it has gone
+undetected and led to a register shift in the following stretch. But how far does this shift reach before the
+sequence pops back into register? The only way to find out is to carefully inspect
+the following residues for poor fit or unlikely contacts. Examples of what we're looking for here include
+over- or underfilled sidechain density, hydrophobic sidechains making close contact with charged
+ones, or poor backbone fit to the density, particularly where the backbone appears overly
+stretched or bunched up. This leucine residue seemingly attempting
+to make a salt bridge with an arginine sidechain is a particularly clear indication that this
+helix is out of register, and as we move up we can see that the fit to the following loop
+isn't all that great. So we can suspect with some confidence that
+the register shift extends at least to here. So let's start up a simulation covering this
+stretch and give it a try, keeping in mind that ISOLDE's checkpointing function ensures
+that we can play with different possibilities without fear of permanently damaging the model. You can make the necessary selection using
+ChimeraX's command-line selection syntax if you like, or you can take advantage of its
+handy selection promotion mechanism. If you select a single atom, then pressing
+the up arrow will expand the selection first to the whole residue, then to the whole secondary
+structure element or loop, and then to the whole chain. Selecting one atom from the helix and each
+of its flanking loops then pressing up twice will give you a simulation-ready selection. To induce the register shift, we start by
+selecting an atom from valine 469, then using the tools in the register shift dialog to
+expand the selection towards the C-terminus until it reaches our hypothesised end. Once you're satisfied with the selection,
+set the size of the shift to one - remember, a positive number indicates a shift towards
+the C-terminus, and click "make it so". I recommend leaving the shifting restraints
+in place until you've had a chance to look over the length of the shifted region, but
+when you're satisfied just click "Release". Of course, in most cases you're going to be
+left with a few bad rotamers etc. to clean up, but what you're looking for now is evidence
+that the new conformation both fits the density and makes physical sense. Remember, it's still not necessarily a good
+idea to attempt perfection at this stage, while there's still the possibility that there
+are other large errors in the surrounds. Once you're satisfied that the result is essentially
+correct - or at least, more correct than before, it's best to move on, then come back later
+for the finer-scaled cleanups. Jumping forward a bit, let's take a look at
+a few before-and-after stills of this region. Where valine 469 was previously we now have
+lysine 468, nicely filling the density and forming a neat double salt bridge with aspartic
+acid 431 and glutamic acid 497. Over on the helix we can see that the implausible
+contact with leucine 485 was pushing arginine 428 well out of density, but after the shift
+the arginine now comfortably continues the complex salt bridge with glu497 and continues
+it to glu484. There are various ways you can approach the
+remaining cleanups, but that's really a matter of personal preference and the available computational
+power. One, the approach I took in this case, is
+to use the Ramachandran plot, tackling one outlier at a time. This may seem like a daunting task - but keep
+in mind that in the act of solving one you'll often end up solving another half a dozen
+nearby, so it's not as big a job as it might seem. The other is to once again work through systematically
+end-to-end, this time focusing on all those details that you brushed past the first time. Since this all boils down to repeated application
+of the tools I've already demonstrated I won't bore you with it. Instead, let's jump forward to the results. On the top we have the PDB validation sliders
+for the original deposited model. On the bottom we have my result after about
+a week of work in ISOLDE combined with tightly restrained refinement in Phenix Real Space
+Refine. Obviously an improvement, but a simple glance
+at these might leave the naive viewer asking, why did it take a whole week to do that? After all, the changes in any one metric are
+only a few percent at most. Perhaps this will make things clearer. Here I've plotted the changes in the key peptide
+backbone dihedral angles phi, psi and omega, as well as the root-mean-square bulk movement
+for every residue in the model. Almost a fifth of all phi and psi dihedrals
+have changed by more than forty-five degrees, and almost eight percent of all residues have
+moved more than two point five Angstroms. All in all, just under a third of all residues
+in the model have had a substantial change in at least one of the listed criteria. To top things off, in keeping with my observation
+at the start that there is little to no correlation between fit to data and model quality at these
+low resolutions, we can see that despite these extensive changes the Fourier shell correlation
+curve between final model and map is essentially indistinguishable from the original. I've developed ISOLDE with the generous support
+of Professor Randy Read and the Wellcome Trust. ISOLDE is dependent upon Kevin Cowtan's Clipper
+libraries, the wonderful OpenMM molecular dynamics library from Stanford, and of course
+ChimeraX from UCSF. I would particularly like to acknowledge the
+extensive help I've received from Tom Goddard of the ChimeraX team.
+

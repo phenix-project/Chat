@@ -1,0 +1,57 @@
+How to run AlphaFold prediction in Phenix
+
+This tutorial describes how to run AlphaFold
+protein structure prediction through the Phenix GUI. Phenix now includes tools that integrate AlphaFold
+prediction into the structure determination workflows for both X-ray crystallography and
+Cryo-EM. In this video, we will do a short walkthrough
+of the structure prediction tool, which can be a very useful first step for any structural
+biology project. The innovation of AlphaFold, as well as other
+recent prediction tools, is to use machine learning tools to “learn” from the vast
+amount of information in the protein databank. These machine learning models find a way to
+accurately generate a protein model from a primary sequence, without an explicit understanding
+of the underlying physical processes. To run the structure prediction tool, select
+the “AlphaFold” top level category in the Phenix GUI. It is worth mentioning that there is a prominent
+“help” button, which will open the Phenix documentation in a web browser, which is another
+useful resource, then choose “AlphaFold model prediction”. This opens the input and settings dialog. We will first give the job a title. Next we have the option of uploading files,
+for example a fasta format sequence file. Alternatively, we could simply copy-and-paste
+the sequence into the “Sequence” input box. I will paste a sequence in to demonstrate. Next we will move to the second tab: “Prediction
+Settings”. In this tab we can customize options such
+as the number of predicted models, whether or not to use templates from the PDB, and
+whether or not to perform a multiple sequence alignment to use as input for the prediction. Generally each of these options will improve
+the accuracy of your prediction, so by default they are selected. Because of the computational demands of running
+alphafold, the actual computations will occur on a gpu machine maintained by the phenix
+developers. Your files will be uploaded, the data will
+be processed, and the results sent back to your machine. Keep in mind that this will require an active
+internet connection to access the remote computing resources. This checkbox allows using precalculated results. If the box is enabled, and your protein sequence
+has been used for a previous job with the same parameters, it will send that result
+to you without doing a new prediction. This mode gives you an answer quickly, but
+if you do want a unique AlphaFold run, you can disable this option. If the “allow precalculated MSA” checkbox
+is selected, then the Phenix Server will use a precalculated MSA if your sequence has been
+run before. Since the multiple sequence alignment is one
+of the more time consuming steps, this is a useful way to speed up the runtime. Because of the computational demands of running
+alphafold, the actual computations will occur on a GPU machine maintained by the Phenix
+developers. Your files will be uploaded, your data will
+be processed, and the result will be sent back to your machine. Each of these steps should happen automatically
+within the Phenix job. Keep in mind that this will require an active
+internet connection to access the remote computing resources. For this demonstration I will leave all the
+settings at default, and select “Run”. The job starts and some logging is visible. To view the number of other users on the server,
+the “Server” button at the top right will display a status window. If there are many active jobs, you may have
+to wait longer for your job to run. When the job completes, a summary window will
+display the resulting files. By scrolling down, some information about
+the pLDDT is presented, which is an assessment of AlphaFold’s confidence in the accuracy
+of the structure. The pLDDT value of 97.91 is very high, indicating
+that this structure has been predicted with very high confidence. Below that is the PAE plot, which stands for
+predicted aligned error. This gives you some insight into AlphaFold’s
+confidence of pairwise residue orientations. If your protein has multiple distinct domains
+this is often apparent by looking at the PAE plot. "This PAE plot does not show any domains,
+here is what a plot would look like with multiple domains. Note The bright green rectangles indicate
+that pairs of residues within each rectangle have accurate relationships and those between
+rectangles do not." FInally I will use the ChimeraX button to
+open ChimeraX to examine the predicted structure. We can see it looks like a well folded protein
+to the eye. If we then overlay the true structure obtained
+from experiment, we can see the ribbon representations align quite well.. By switching to an atom view, we can see that
+the prediction is still very similar to the experimental model, but not exactly. Some residues and some loops have visible
+differences. In general, AlphaFold predicted this chain
+quite accurately, and this predicted model would be very useful as an input to other
+Phenix tools such as molecular replacement or real space refinement with a cryo-EM map. 
+

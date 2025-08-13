@@ -1,0 +1,97 @@
+How to run MolProbity (web interface and Phenix GUI)
+
+This video tutorial goes step-by-step through
+how to use MolProbity or Phenix to obtain structure validation for your protein or RNA
+structures. First MolProbity. Use your favorite web browser to go to molprobity.biochem.duke.edu,
+as you can see in my search bar at the top. This takes you to a File Upload page, where
+you can either enter a PDB code here to fetch a PDB file directly from the PDB server, or
+you can select a PDB file to upload from your local computer here. To select a file, I will click on the Choose
+File button, which brings up a file chooser dialog. Here I have an example protein PDB file, which
+is the starting model from the phenix refinement ribonuclease Sa tutorial, so I can select
+it, and then click Open to set that file for upload. You will see the name of the file shows up
+here. Now I can hit the Upload button to upload
+that file to the server. You will see that MolProbity performs a number
+of checks on the file to ensure that it is a valid PDB format file. Assuming you have uploaded a valid file, MolProbity
+presents some basic statistics about the structure, such as the number of chains, residues, etc. Now I can hit the continue button to continue
+back to the main MolProbity page. Once you’ve uploaded a structure, the Main
+page presents all the analysis options recommended for that structure. The analysis options presented will automatically
+change based on what step in the analysis you are at. As discussed in our all-atom contacts tutorial
+video, the first step for analyzing a structure is addition of hydrogens. Note the warning box that tells you that if
+your structure already had hydrogens, to ensure that they are all of a consistent length,
+we remove them from your structure. If hydrogens were removed, there would be
+a drop-down menu so you could choose your file with its original hydrogens to analyze
+if desired. In general, we recommend trimming and re-adding
+hydrogens, so to add hydrogens to this example file, I click on the Add hydrogens option. This takes you to a setup page where you can
+decide whether or not to do the automated asn/gln/his flip corrections, and whether
+to use electron-cloud or nuclear bond lengths. In general, the default options selected for
+you should work fine, so here I click on the “Start adding H” button. This starts the process of adding hydrogens. For most structures this should only take
+a few seconds. If you selected the flip corrections, you
+will typically be presented with a screen that allows you to review the flips MolProbity
+recommends and allows you to select which ones to keep. For this tutorial, we will keep all the flips,
+and click on the Regenerate H button. This brings up a popup allowing you to download
+the new file with the Hydrogens and the flip corrections. I will click cancel, and then the continue
+button to go back to the main page. You will see now that the options have changed
+on the main page now that you have a PDB file with hydrogens. You will also see a drop down menu that allows
+selection of which file you wish to work on. Selecting a different file changes the analysis
+options, based on what’s in the file. You can also scroll down to the file upload
+section to upload other files to analyze. For now, we will make sure that the modelFH.pdb
+file is selected, and then choose the Analyze all-atom contacts and geometry option. This brings you to a page that lets you customize
+your analysis run. Options are presented for the 3D kinemage
+file generation and for the result charts. Like in other places in MolProbity, the default
+options are customized based on your structure. For example, since this structure has no RNA
+residues, the RNA options are turned off. I’m fine with the default options, so I
+will scroll down and click on the “Run programs” button to start the analysis. This takes you to a job status page which
+periodically updates itself and informs you about what step the analysis is on. This analysis generally takes anywhere from
+seconds to minutes to run, depending on the size of your structure. Once complete, this will take you to an output
+page, which presents the summary statistics for the options you selected. You can see that this tutorial model is poor
+quality, with almost all the validation options shown in red. For a high quality structure these indicators
+would be in green. Scrolling down, there is a multi-criterion
+3D kinemage file available to download to view in the KiNG software, which I will show
+separately later in this video, and there is a multi-criterion chart option also. Single-criterion output options are shown
+below the multi-criterion options. For example, you can see a PDF plot of the
+distribution of your residues on our six categories of Ramachandran plots. Going back to the summary page, clicking on
+the multi-criterion chart option opens a new tab containing a residue by residue listing
+of where the problem areas are in your structure. Note that the headers of this chart are sortable,
+so you can sort by a particular validation type to pinpoint the worst residues in your
+structure. For now, I will use the “close this window”
+button to close this tab and return to the summary page. Once you are done with this page, you can
+click on the Continue button to go back to the main page. Back at the main page, you will see in the
+“Recently generated results” section that the all-atom contacts output has been recorded,
+so you can easily get back to those results if needed. You can also go to the popular downloads section
+to download a variety of results files, including the html tables, PDF files, and kinemages. If you have any issues during your MolProbity
+run, we ask that you use the “Feedback & bugs” link on the left menu to send us an email. Finally, once you are done with MolProbity
+session, we kindly ask that you use the “Log out” link on the left menu to help us free
+up disk space on the MolProbity server. Once you click on the “Destroy” button
+all your files will be permanently deleted from our server. In order to obtain MolProbity validation in
+the Phenix GUI, go to the validation tab in the right panel. In this section, there is an option for Comprehensive
+validation by MolProbity. Clicking on this option brings up a dialog
+box. In the input field for the Input model, you
+can click on the Browse button to bring up a file browser dialog, which allows you to
+select a structure file to analyze. If all you want is the MolProbity structure
+validation, this is all you need to enter. Note that there is also a field for entering
+restraints if you have unusual ligands. Also, there is an option to add a reflection
+file, which enables model to data validation. If you scroll down, there is an option to
+Save a Kinemage file for KiNG to make the multi-criterion kinemage file with all of
+the validation markup. This tool automatically adds hydrogens without
+doing flip corrections, but there are options to specify whether to keep your original hydrogens
+or to use nuclear hydrogen positions. For this video, we will just run the job with
+only the PDB file. This will bring up a status box that warns
+you that you are only running model validation; we will hit yes to analyze just the structure. This brings up a tab showing the status of
+the calculations. Once the calculations are complete, a MolProbity
+tab shows up, containing subtabs with all the different results. The Summary tab shows the summary table of
+the overall scores for the whole structure. There is also a button to Open the structure
+in coot, if you have it installed, so you can see where errors are in the structure. The Basic geometry tab shows issues with the
+basic bond lengths and angles. The Protein tab shows the Ramachandran, sidechain
+rotamer, and c-beta deviation analysis results. The clashes tab shows the clashes from the
+all atom contact analysis. If your structure had RNA, there would be
+an RNA tab with the sugar pucker and RNA backbone conformer analysis results. Additionally, there is an Atomic properties
+tab, which shows a simple analysis of the occupancies and B-factors of the atoms in
+your structure. One particularly useful feature for finding
+problem areas is that in all of these results tabs, clicking on an entry in the list will
+take you that residue in coot. To view a file in KiNG, either open the standalone
+KiNG software, which is freely available for download from our kinemage.biochem.duke.edu
+website, or open the version of KiNG that is included with Phenix. Go to the file menu, then to the Open file
+option and select the kinemage file you downloaded from MolProbity or generated using Phenix,
+like I do here. This allows you to view your structure with
+all of the validation markup provided by MolProbity. This concludes our tutorial video. 
+

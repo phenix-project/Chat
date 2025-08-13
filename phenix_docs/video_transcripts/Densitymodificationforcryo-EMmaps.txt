@@ -1,0 +1,41 @@
+Density modification for cryo-EM maps
+
+Today we are going to learn about density
+modification of cryo-EM maps using ResolveCryoEM in the Phenix GUI. Density modification uses expectations about
+one part of a map to improve another part of the map. The original map on the left is implausible. It has a noisy solvent and its density profile
+is unlike that of typical protein because it contains noise. The density-modified map on the right is more
+plausible with flat solvent and density histograms similar those of typical proteins Let's density modify a cryo EM map now. We are going to use the 1.8 Angstrom map of
+human apoferritin from the Phenix density modification tutorial. In the main Phenix GUI, select "New Project"
+Then click on "Set up tutorial data" and select a dataset. Scroll down to the Cryo-EM section and select
+Human apoferritin density modification at 1.8 A.
+Then click OK There will now be a new apoferritin project
+with tutorial data in a new directory. We can click on it to select it. Let's run density modification now. Click on Cryo-EM to show the cryo-EM tools. Scroll down and hit the ResolveCryoEM button
+to load the cryo EM density modification tool. We are going to run starting with two half
+maps. These should be unmasked and as unprocessed
+as possible. Let's put in a title. Let's put in the two half maps. They are in the directory that was created
+when we set up the tutorial. The half maps are already cut out from the
+original maps and are called half_map_1 and 2 boxed dot ccp4. The resolution of our map is about 2 Angstroms. The best value of the resolution for density
+modification is usually a little smaller than the map resolution. We could leave it blank, but let's specify
+it as 1.8 Angstroms. Now let's add a sequence file. This tells ResolveCryoEM about the size of
+our molecule. Let's uncheck the "Box before analysis" box
+because our map is already boxed. Let's use all 4 of our processors And let's density modify unsharpened maps. This sometimes helps for high-resolution maps. The alternative is to use maps with half-map
+sharpening applied. We're ready to go. Hit *Run to start density modification. After about 15 minutes we get a new Results
+tab that shows us the resolution used in density modification, the starting resolution, the
+final resolution, and the estimated improvement. The next tab shows the Fourier shell correlation
+of the starting half-maps. Notice that the correlation is very high until
+the resolution gets *close to 1.9 Angstroms. The final tab shows the estimated map quality
+of original and density modified maps as a function of resolution. The light brown curve shows that the original
+map is about 50% correlated with the true (but unknown) map at a resolution of 1.9 Angstroms. The blue curve shows that the density modified
+map crosses that threshold at slightly finer resolution. Notice that the blue curve is higher than
+the brown one at all resolutions between 1.9 and 2.5 Angstroms. That means that the density modified map is
+better in this resolution range. Let's look at our original and density modified
+maps. In the files tab, select open in Coot. That opens our map. Let's load in a model from an x-ray structure
+refined against the original map. This model is supplied with the tutorial and
+is called apoferritin_chain_A_rsr.pdb. And let's load in that original map that comes
+with the tutorial. Here is the original map in yellow...and here
+is the density modified map in the same region. The model based on the x-ray structure has
+two conformations for the phenylalanine. There is just one in this cryo-EM structure
+and it is seen very clearly in the density-modified map. The density modified map is generally more
+clear than the original map, but the low-resolution aspects of the two maps are very similar because
+the original map already had very good low-resolution information. 
+

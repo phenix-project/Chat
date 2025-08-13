@@ -1,0 +1,109 @@
+Cryo-EM structure determination with AlphaFold using PredictAndBuild
+
+This tutorial will show you how to carry out
+CryoEM structure determination with AlphaFold models in Phenix using PredictAndBuild Here are the steps in solving a cryo-EM structure
+with PredictAndBuild First the structure of each chain in your
+molecule is predicted with AlphaFold Then low-confidence residues are removed and
+compact domains are identified with ProcessPredictedModel A density modified optimized map is obtained
+from your two half-maps with ResolveCryoEM. The domains are docked and rebuilt with DockAndRebuild. To try and get a more complete model, the
+full-length predicted chains are superposed and morphed to match the rebuilt model and
+are Refined. The model with the best map correlation is
+chosen. The entire procedure is then iterated using
+the best model from one cycle as a template in AlphaFold prediction in the next. If you want to run PredictAndBuild with Cryo-EM
+data, you will need: The sequences of all the unique chains in
+your molecule and how many of each are present. These can be supplied as a fasta file. And two half-maps or one full map. If you supply half maps map optimization by
+density modification will be carried out. Optionally you can also supply predicted models,
+for example if you have run AlphaFold or another prediction method yourself. If your structure contains DNA or RNA, you
+will need to supply models with approximately the right structure and exactly the right
+sequences, as AlphaFold does not predict nucleic acid structures. When PredictAndBuild is completed, it will
+provide: A rebuilt model based on AlphaFold predictions
+and your experimental data that represents your cryo-EM structure This is ready for further rebuilding and refinement PredictAndBuild will also provide a set of
+one or more full-length predicted models, superimposed on your rebuilt model These are useful as reference models for refinement
+because they often have very good geometry Finally PredictAndBuild will provide a density-modified
+map, suitable for model evaluation and improvement Let’s run PredictAndBuild on a part of a
+cryoEM structure showing an Fab domain of an antibody from PDB entry 7mjs, at a resolution
+of 3 A In the Phenix main GUI window, select “New
+Project”,Then select “Set up Tutorial Data”,
+and select the second tutorial, “Fab Heavy Chain” Hit “OK” and your new Fab heavy chain
+project, named AF_7mjs, for “AlphaFold with PDB entry 7mjs” will show up on the left
+side of your Phenix GUI If you don’t see it, click the “last modified”
+button to show recent projects Click on the “AlphaFold” button, and then
+on the PredictAndBuild CryoEM button to open a new PredictAndBuild window. Click “Add file” and a window showing
+a directory with the data available for the AF_7mjs tutorial will open Note that this directory contains a README
+file that describes this tutorial Select the two half-maps and the sequence
+file.fa, then Click “Open” . This will load the sequence and data into
+the PredictAndBuild window. Notice that a title has been automatically
+added. You can edit this if you like Scroll down a little and you will see that
+the resolution has been estimated from the two half-maps. You can set it yourself if you want. Also the one unique sequence has been copied
+from your sequence file and one copy of this sequence was found. You can edit this sequence or the number of
+copies if you need to. Back up at the top of the page, click on “Prediction
+and Building Settings” to show the most commonly-used parameters for this tool. In this tutorial we are going to leave all
+of the parameters just as they are. Let’s have a look at the other parameters
+on this page even though we are not going to change them The number of models is the number of separate
+predictions that AlphaFold will carry out. The one with the highest pLDDT value is kept. Normally 5 models is plenty; if a very high-confidence
+model is found, no more models will be created. Normally you will want to include templates
+from the PDB. Prediction on the first cycle will then be
+carried out with and without templates, and the highest-pLDDT model will be kept. Generally you will want to include multiple
+sequence alignments. These provide much of the information for
+prediction on the first cycle You can choose to skip multiple sequence alignments
+after the first cycle. This useful in cases where the multiple sequence
+alignment information dominates the prediction even when rebuilt models are being used as
+templates. You can choose how many iterations of prediction
+and model-building to carry out. This is usually set automatically based on
+your choice of rebuilding strategy. You will want to use at least 4 processors
+if you have them available; this will speed up rebuilding The Phenix AlphaFold server will save sequences
+used in prediction, the parameters for prediction, and the resulting model if you allow precalculated
+results. If you run again with the same sequence and
+parameters, the server will just supply the result from the previous run. PredictAndBuild saves intermediate results
+in a “CarryOn” directory. This allows restarting if something happens
+and the program stops. To continue a previous run, be sure the right
+CarryOn directory is specified and check Continue this previous run box. In this tutorial, the CarryOn directory is
+supplied with predicted models. If you check the Continue box in this tutorial
+then the run will be a normal run except that predicted models will be taken from the CarryOn
+directory instead of getting them from the server. For now we will leave this unchecked and use
+the server. You can find and set other parameters as well. We are all set…let’s hit Run and let this
+tutorial go ahead. After we hit ‘Run’ a new PredictAndBuildCryoEM
+tab appears The first thing PredictAndBuild does is run
+AlphaFold to predict the structure Two predictions are run here, one with just
+the multiple sequence alignment and one including templates from the PDB After the prediction is finished a Results
+tab appears It shows that the model was predicted with
+very high confidence (the pLDDT is about 91) 120 residues were predicted with confidence
+above 70 and 12 with confidence under 70. These 12 residues will be trimmed off before
+using the model. We will see later that the low-confidence
+residues are in a loop that is incorrect in the AlphaFold model and that needs to be rebuilt. Now PredictAndBuild is running cryo-EM density
+modification with ResolveCryoEM using your two half maps to produce an optimized map
+for docking and rebuilding. The trimmed predicted model is now docked
+into the optimized map to create a scaffold. Then the full-length predicted model is superimposed
+on the docked trimmed model with any necessary adjustments made by morphing the full-length
+predicted model. The morphed model is then rebuilt based on
+the optimized density map The first cycle is now complete. The map-model correlation for the morphed
+model was 0.56, a moderate value, while The correlation for the rebuilt model is much
+higher, 0.73. The RMS coordinate difference between the
+trimmed predicted model and the refined rebuilt model is just 0.6 A. Note that this does not
+include the 12 residues that were predicted with low confidence and removed. Now PredictAndBuild is carrying out a second
+cycle of prediction and rebuilding. The prediction is going to be done using the
+rebuilt model from the first cycle as a template The prediction is finished. It yielded a model with improved confidence. The pLDDT value is now 93. 131 residues have been predicted with confidence
+over 70, and only one with confidence under 70. The new predicted model has been superimposed
+on the model from the first cycle and is being rebuilt. The PredictAndBuild job has now finished and
+has produced several “overall best” files. The pdb file is your final model The map.ccp4 file is your density-modified
+map file. The superposed_predicted_untrimmed_cycle_1.pdb
+file and the corresponding file from cycle 2 contain your AlphaFold predictions from
+cycle 1 and cycle 2 superimposed on your final model. You can use these to see how the model was
+changed by using the experimental data. Let’s hit Open in ChimeraX and look at the
+predicted and rebuilt models Here is the final model, Overall_best.pdb,
+in tan and the superposed predicted model from the first cycle in pink. The models are similar in most places, but
+the loop at the upper right is rather different. This is the same loop that had low confidence
+in prediction and that was trimmed before rebuilding in the first cycle. Here is the predicted model on the second
+cycle in green. It looks a lot more like the final model,
+and this is because the rebuilt model from the first cycle was used as a template in
+prediction. This increased both the confidence and the
+accuracy of the prediction. Here are the final model in tan, the predicted
+model from the first cycle in pink, and the predicted model from the second cycle in green. And here is the final model shown with the
+density map. The map-model correlation is 0.74, a good
+value. When your job is done, a button for “Refine
+and validate” appears. If you hit this button a RealSpaceRefine window
+opens with all the necessary files already selected. This is just one of many things you can do
+next. Your Rebuilt and refined model, superimposed
+predicted models and map are ready for further refinement, rebuilding, and adding waters
+and ligands. 
+

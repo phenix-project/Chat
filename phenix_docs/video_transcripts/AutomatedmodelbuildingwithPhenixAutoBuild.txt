@@ -1,0 +1,59 @@
+Automated model building with Phenix AutoBuild
+
+Today we are going to carry out automated
+model-building using AutoBuild. Iterative model-building is a way to simultaneously
+improve the quality of your electron density map and to build a model. In a diffraction experiment, the phase information
+is lost. We need both intensities and phases to calculate
+a map. If we have a starting map and can build and
+refine a model based on it, we can improve the phases using our model in density modification. This improves the map even in places we didn't
+build a model. Here is how AutoBuild is going to build a
+model for us. We start with phase information from a model
+or experimental phases. AutoBuild will carry out cycles of density
+modification, model-building, and refinement to yield a new model and an improved map. If high-resolution data is available, the
+phase information will be extended to high resolution. If we start with experimental phase information,
+AutoBuild will carry out specialized density modification and model-building based on finding
+local patterns of density. This step is called "iterative building". Rebuilding starting with a model is called
+"iterative rebuilding" In case we are starting with a model, we have
+two main choices of how to use this model Standard rebuilding adds and deletes residues
+as necessary. Alternatively we can just move the residues
+in this model around. This is called "rebuild_in_place" because
+the model is rebuilt where it is, with no changes in connectivity. You can think of it as extensive refinement. Let's carry out automatic model-building starting
+from measured intensities and low- resolution experimental phases such as you might get
+from autosol, and a high-resolution data file for phase extension and refinement. Let's use demo data from the phenix tutorials. In the main Phenix GUI, click on "new project,"
+then "set up tutorial data" and choose the first tutorial under "model-building". Select a suitable location to put this folder
+and click ok. In the main Phenix GUI under the "model-building"
+tab select "AutoBuild". Let's put in a title
+Let's select some data. Click "Add file" to see the copied tutorial
+folder: seq.dat is our sequence file
+p9_data_and_phases.mtz contains low-resolution measured data and experimental phases,
+p9_hires.mtz has high-resolution data click open to load the files Now let's tell the GUI what these files contain. The GUI guessed the seq.dat is a sequence
+file Select the p9_data_and_phases.mtz data file. The GUI incorrectly guessed it is an initial
+map. Click on modify file data type to fix this. Turn on "experimental data" to indicate that
+experimental phases are present in this file turn off "initial map"
+Now the GUI knows that this file contains experimental phase information. Tell the GUI that p9_hires.mtz contains high
+resolution information. Click on the "Other options" tab. We are going to set a few parameters
+Make sure the space group and unit cell are what we expect. Set the number of processors Now, just to run quickly:
+Select "quick mode" Set the maximum iterative build and iterative
+rebuild steps to 1 Set build outside model to False. This turns off a step where density is removed
+wherever there is already model built. And set refine during building to False Let's leave place waters in refinement as
+True. These waters are both true waters and placeholders
+for "something is present here" that assist in refinement and model-building. We will also leave "rebuild-in-place" set
+to "Auto". If we had supplied a model then we could set
+rebuild-in-place to True if we wanted to keep the connectivity, or False if we wanted to
+rebuild it completely. We're ready to go. Click on "run" and then "run now" to start
+the run. Once you hit run a new AutoBuild_run tab appears,
+and additional sub-tabs will appear as the run proceeds. The summary tab shows the files produced and
+the overall statistics for the run. This model was built with 2.5-angstrom data. Notice the freeR value, the number of residues
+built, and the number of fragments making up the model. At this resolution a freeR in the 20's or
+low 30s and most of the model built in fragments that
+are about 50 residues or more in length is just
+fine. In the AutoBuild GUI, the models tab shows
+a summary of models built during the run. The structure status tab shows secondary structure
+in your model The summary tab has an "open in coot" button
+that will load the final model and map. This is a fine model and map for 3 Angstrom
+data. The next step after running AutoBuild is to
+run phenix refine and to use the Coot interface to phenix.refine to fix up problem areas in
+your model. Then you can carry out more cycles of
+AutoBuilding and manual improvement until you have a complete model. You might then run ligand fitting to place
+any ligands in your model, followed by final refinement. 
+

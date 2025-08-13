@@ -1,0 +1,67 @@
+How to use secondary structure restraints
+
+Hi everyone, this tutorial explains how to
+generate and apply secondary structure restraints. At resolutions lower than about 3A, refinement
+of coordinates may be unstable. In particular, secondary structure elements may be distorted.
+However, using specifically designed secondary structure restraints may help preserving their
+geometry and slightly distorted elements might be corrected. Note that this applies to refinement
+against X-ray or cryo-EM data. First, let's revise secondary structure:
+Secondary structure elements of proteins are helices and sheets. Helices can be sub-divided
+into 3_10, alpha and pi type, according to the hydrogen bond pattern. For example, the
+most common helix is the alpha helix, with hydrogen bonds between the peptide units of
+residue n and residue n+4. Sheets can be parallel or antiparallel, depending
+on the direction of the main chain. Secondary structure elements for nucleic acids
+are base-pairs and stacking pairs. Base-pairs have typically a somewhat planar configuration
+and stacking nucleotides are parallel to each other. If secondary structure restraints are enabled,
+interactions specific to these elements will be restrained during refinement.
+For example in helices, this will be the N...O bond lengths and the following angles:
+The N- O - C angle The CA - N - O angle
+The C - N - O angle Note that this is in addition to any other
+restraints applied, such as usual bond and angle restraints. To apply secondary structure restraints, it
+is necessary to supply an annotation, which tells the program which residues belong to
+a secondary structure element. Annotations can be supplied in several ways:
+- First, they can be stored as HELIX and SHEET records in the model file. The records can
+be obtained by using external programs. Also, they are typically present in files downloaded
+from the PDB. - Secondly, the phenix.refine and real_space_refine
+GUIs can perform the annotations. - Finally, the stand-alone command line tool
+phenix.secondary_structure_restraints can supply input files for phenix and it can also
+create HELIX and SHEET records. There is also an option to create a pymol script which allows
+visualization of bond and angle restraints to be applied, such as in this helix. The
+algorithm in the GUI and in this tool is the same. It should be noted that secondary structure
+annotation is based on the input model geometry, so a poor input model is likely to generate
+a sub-optimal annotation. If a higher resolution homologue model is available, consider using
+it for generating the annotations. Now, I will show how to obtain annotations
+in the phenix.refine GUI. I will show afterwards where to enable secondary
+structure restraints for phenix.real_space_refine. In the main Phenix window, click on "Refinement"
+and choose "phenix.refine". In the new window, click "Add file" to add
+your model and data files. Make sure that the space group, unit cell parameters and
+data labels are correct. Don't forget to add a title for the run.
+Then go to the tab "Refinement settings". In the "Targets and weighting" section, enable
+the "Use secondary structure restraints" checkbox. Then click on "Select atoms" in the "Strategy"
+field. A new window opens. The left-most tab is for
+secondary structure, which will not be present if the restraints checkbox was not activated. There are four sub-tabs, called "Helices",
+"Beta Sheets", "Base Pairs" and "Stacking Pairs". Click on the "Find Secondary Structure"
+button in any of the tabs. A new window opens, which gives options for secondary structure
+restraints. If the checkbox "Ignore annotation in file" is disabled, annotations provided
+in the input file will be used. If the box is enabled, the program will obtain annotations
+using the method specified in the "Search method" drop down menu. For this example, let's use default values.
+The program saves the annotation in an .eff file which can be used as reference or as
+input file for future refinements. The tabs contain now annotations for secondary
+structure elements. Click on the "model" button in the top of the selection editor window,
+which opens the model viewer. If you click on any structure element, it will be highlighted,
+such as this helix. You can also highlight entire sheets by selecting all lines at once. It is important to double check the secondary
+structure assignment, as it may happen that automatic procedures have some errors. For example, lets look at this helix, which
+is in chain A and runs from residue 296 to 315.
+This is how this helix looks like in isolation. There is a clear bend in the helix. When we
+draw the H bonds between peptide units, it can be clearly seen that the network is interrupted.
+The restraints algorithm has some safeguards to prevent that f.ex. this O atom and this
+N atom are considered bonded. However, it is preferable to supply the correct annotation.
+So please check your annotations manually in molecular viewer. If you have corrections, you can input them
+in to the selection editor. Let's say we only consider the fragment on the right as alpha
+helix. It runs from residue 302 to 315. In the editor, click on the helix and change
+the residue range accordingly. Once you think the annotation is correct,
+hit "save and close". If you don't have other options to change,
+you can start the refinement. To apply secondary structure restraints in
+phenix.real_space_refine, use the checkbox in the "Strategy" section and then proceed
+to the "select atoms" button.
+

@@ -1,0 +1,55 @@
+Fitting ligands into density with phenix.ligandfit
+
+Today we are going to learn about automated
+ligand fitting using ligandfit in the Phenix GUI. The inputs to Phenix ligandfit are a flexible
+ligand and a density map showing the ligand. The goal is to identify a conformation and
+orientation of the ligand that fits the map. Here is how ligand fitting works
+First the biggest region of high density in the map is chosen
+Then the ligand you supply is analyzed to identify rotatable bonds and rigid pieces
+a rigid part of the ligand is fit into density And the remainder of the ligand is traced. You can specify the ligand in any of several
+ways: a PDB or CIF file with the *ligand in it
+A SMILES string corresponding to the ligand Or a 3-letter code identifying the *ligand The quality of your ligand fitting will depend
+a lot on the map. At very high resolution you can see every
+atom. At low resolution the ligand is just placed
+into a blob of density. At moderately high resolution such as 2 angstroms
+you can see the conformation fairly clearly. We are going to use Phenix tutorial data on
+the nsf-d2 protein which we know has ATP bound. Here is the difference density map that shows
+the ATP. Here is the ATP molecule that we would like
+to fit into this density. Notice that it is not clear just how to change
+the conformation of the ATP and put it into the density. The advantage of ligandfit is that this can
+be done for you automatically. Let's go to the Phenix GUI and set up the
+ligand fitting tutorial data. Click on New project and then "set up tutorial
+data. Then select the ligand fitting tutorial
+under LIGANDS Choose a suitable destination and click OK
+to copy the tutorial data to your directory. Now there will be a new nsf-d2-ligand project
+ready to use. In the main Phenix GUI select *ligands and
+then ligandfit. This will open a new LigandFit window. Let's put in a title Now let's select our data. Click Add File and you will see the content
+of the tutorial directory. This
+nsf-d2.mtz contains measured data for this protein-ATP complex
+nsf-d2-noligand.pdb is just the protein atp.pdb is just the ligand, in an arbitrary
+configuration Select all three and click Open and the three
+files will be imported into the LigandFit GUI. The GUI has guessed the data type for each
+file. If you want to change it, select the file
+and "modify data type" and choose the appropriate data type. Notice the space group and unit cell and make
+sure that they are what you expect. Choose the ligand map type. Your choices are Fo-Fc, which is an Fobs minus
+Fcalc map phased with the model, Fobs, which is a Fobs map also phased with
+the model , n and pre-calculated, which will use map coefficients
+that you input. Set the number of processors to the number
+you have on your computer We entered our ATP ligand as a PDB file, but
+you could specify ATP as the ligand code and that would work as well. Now let's run by clicking Run and Run Now. Once the Gui runs a new Ligand_fit tab will
+appear The Status, tab shows the log file
+Parallel jobs tab shows the results for each try at fitting. Let's focus on the Summary tab which shows
+the files that are produced. Notice that one final solution is listed,
+with an overall CC or map correlation of 0.84, and 31 of 31 atoms in the ligand placed in
+the map. A good map correlation is 0.75 or higher. Below 0.5 is often suspect. If not all the atoms in your ligand are placed
+it means that there was no density for some parts of the ligand Let's select this solution and click Open
+in Coot We can center on the ligand with "go to atom",
+selecting the ligand_fit_1_1.pdb file, and "apply" Zooming in we see that the ligand is placed
+in the density very nicely. This is the kind of result you might expect
+to obtain with data that are about 2 Angstroms or so in resolution. As we saw in the introduction, at lower resolution
+the density is more like a blob and is difficult to interpret precisely, while at higher resolution
+even more detail than this is visible. Usually the next step after ligand fitting
+will be to run refinement with the entire molecule and ligand. You can just click on the "run phenix.refine"
+button and the refinement run will be set up for you. Keep in mind that it is important to visually
+inspect the final refined ligand and its fit to density. 
+

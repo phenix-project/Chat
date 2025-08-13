@@ -1,0 +1,56 @@
+Calculating polder maps
+
+Hi everybody, This tutorial is about running phenix.polder
+via the graphical user interface. A polder map is an OMIT map which excludes
+bulk solvent around the OMIT region. This way, weak densities may become visible,
+which can be otherwise obscured by bulk solvent. Only two input files are required: a model
+file and a reflection file. Furthermore, the atoms to be omitted have
+to be defined. Here is an example where polder maps can be
+useful: The electron density map in green shows an
+OMIT map of a MES molecule in structure 1ABA. The map is contoured at 3 sigma. At this level, only a few electron density
+peaks around the heavier atoms are visible and several carbon atoms do not have electron
+density. The Omit map seems therefore not very convincing
+for placing the MES molecule. However, the unclear density might be due
+to the bulk solvent mask, which is shown here as a violet mesh. In the OMIT map, the bulk solvent occupies
+the area of the MES molecule and can therefore obscure its density. Polder maps exclude the bulk solvent mask
+in the OMIT region and might help visualizing weak densities. In this tutorial, I will show how to calculate
+a polder OMIT map for the MES molecule. To do this, open the Phenix GUI. In the panel on the right hand side, choose
+Maps. Scroll down to the last option, which is 'Polder
+maps'. Click, and a new window opens. Here we choose the input parameters. For book-keeping, start with choosing a job
+title, such as 'phenix_tutorial'. To compute a polder map, we need two input
+files: a model file and a reflection file. Click on 'Browse', and choose your model file
+in the pop up window. Then do the same for the reflection file. If there are several data labels in the reflection
+file, it might be necessary to choose the appropriate ones. In this example, there is only one possible
+label for map calculations. An important input is the omit selection. This defines the region for which the polder
+map is calculated. The MES molecule, for which we want to calculate
+a polder map, is in chain A and has residue number 88. In the Phenix selection syntax, this corresponds
+to the following string, which needs to be typed in the box next to omit selection
+'chain A and resseq 88' (resseq stands for residue). The resolution limits can be changed in these
+boxes. By default, phenix.polder will use all available
+data from the reflection file. Below are some optional parameters, it is
+recommended to keep the default values. An exception is maybe the output prefix. It will add a string to the output filename,
+which is convenient for bookkeeping. Now we have all necessary input for running
+phenix polder. Click run to start the program. The calculation should be rather quick, for
+a small protein like in this example, it should take just a few seconds. Lets first have a look at the output log file
+by going to 'run status'. In the top part of the log file is a summary
+of the input parameters, followed by a summary of the omitted atoms. It is recommended to have a quick look at
+the summary to check if the selection is correct. Remember, we wanted to calculate a polder
+map for the MES molecule with residue number 88 in chain A. As you can see, the selection
+was done correctly. Below that is a list of crystallographic R
+factors - for the unmodified input model and data,
+- the polder map and - for the conventional omit map. The values should be fairly similar. Towards the end, there is a list of map correlation
+coefficients. These help to judge if the density in the
+polder omit map resembles to a modeled feature or to bulk solvent. I recommend looking at CC13 - that's this
+value here. It should be larger than CC12 and CC23. In our example it is 0.79 versus 0.59 and
+0.48, the density in the polder map therefore represents most likely the MES molecule. It is out of scope of this tutorial to explain
+how the correlation coefficients are calculated, but if you want to know more about them please
+read the paper about polder maps. If Coot is available on your system, the polder
+map can be opened from the Phenix gui by going to the results tab. Click on the mtz file and then click open
+in coot. Lets center on the MES molecule. By default, Coot will load two maps. The first is the polder map, the second is
+the conventional OMIT map. Here is the polder map, it shows electron
+density for almost every atom of the MES molecule. So it is very convincing that this molecule
+is present in the structure. Let's compare this to the conventional OMIT
+map which we saw in the beginning. Here we have only a few electron density peaks
+covering some atoms of the MES molecule. So this shows the usefulness of the polder
+map compared to the conventional OMIT map.
+

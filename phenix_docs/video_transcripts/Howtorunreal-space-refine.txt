@@ -1,0 +1,53 @@
+How to run real-space-refine
+
+Hi everyone, This tutorial explains how to run phenix.real_space.refine
+using the Phenix GUI. Real_space_refine is a tool to refine atomic
+models against maps, such as cryo-EM maps. The aim is to obtain a model that fits the
+map as well as possible while having a meaningful geometry. To run real_space_refine, the following inputs
+are required: a starting model and a map file. If the model contains novel ligands, restraint
+definitions need to be supplied as well. For the model, different formats are supported,
+such as PDB or mmCIF. The latter is especially useful for very large
+structures. For the map, it is possible to use either
+CCP4 type .map files (which are a three-dimensional grid of voxels with density values) or .mtz
+files (which contain Fourier coefficients). If map files are used, the resolution is also
+required. If mtz files are supplied, the resolution
+is detected automatically from the map coefficients. Note that the unit cell provided in the model
+file should match the box information of the map file or the crystal symmetry information
+in the .mtz file. The data for this tutorial are available from
+the example datasets which come with the Phenix installation. To set up the tutorial data, open the Phenix
+GUI and click on 'New Project'. Then, click on "Set up tutorial data". In the new window, click on the "Tutorial
+data" drop down menu. Go down to "Cryo-EM" and choose the second
+to last data set, called "MamK double helical filament". The README file gives some information about
+the tutorial. Choose a target directory and then click OK. To run phenix.real_space_refine, open the
+Phenix GUI. In the panel on the right hand side, choose
+"Refinement" and then click on "Real-space refinement", which opens a new window. Go first to the the "input/output" tab. For book-keeping, add a job title. Click "Add file" and select the file "model.pdb". Then add the map. As we use a map file, we have to input the
+resolution, which is 3.64 for this example data set. If the output model file should be written
+in mmCIF format, check the corresponding box. Then go to the "Refinement settings" tab,
+which contains most of the essential options for running real_space_refine. The following refinement strategies are enabled
+by default: - Global minimization
+- ADP's and
+- Local Rotamer fitting The following options are also activated:
+- Rotamer restraints - Ramachandran restraints
+and - C-beta deviations restraints
+Note that the latter cannot yet be de-activated in the GUI. Furthermore, the tool will automatically search
+for NCS, and if present, it will attempt to determine NCS groups and use them to define
+NCS constraints. The default number of refinement cycles is
+set to five, but it can be changed. Set it to 3 for this tutorial, to speed up
+the run time. Click the "Run" button on the toolbar to start
+the refinement. After starting the refinement job, the "Run
+status" tab shows the refinement log file which is updated while the task is running. When refinement is finished, two new tabs,
+called "Results" and "Validation" appear. The "results" tab contains the list of output
+files. Click the "open in coot" button to see the
+map and the final model. The tab "validation" shows validation results. It has several subtabs. The "summary" subtab gives a quick overview
+of data, model and model-vs-data quality. Red and yellow highlighted values indicate
+warnings and problems, so it recommended to have a closer look. Note that the table is responsive, f.ex. if
+you click on the table row corresponding to Rotamer outliers, the GUI will automatically
+go to the more detailed "rotamer" section of the Molprobity subtab. From here, you can center on particular outliers
+in Coot by simply clicking on the table rows in the Phenix GUI. The model to data fit is shown in the tab
+"Model vs. Data". It lists overall correlation coefficients
+and features a plot of the CC per residue. The "data" tab gives reports on the input
+data, such as Fourier shell correlation plots. It is important to go through all the criteria
+of the validation report and to address all problems. If the model was changed, another round of
+refinement is needed and this workflow is repeated until the best possible model is
+obtained.
+

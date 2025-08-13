@@ -1,0 +1,58 @@
+How to use multiple refinement strategies and apply them to selected parts of a model
+
+Hi everyone, this tutorial explains how to
+use multiple refinement strategies and apply them to selected parts of a model. Phenix has many refinement strategies, such
+as: - rigid body refinement
+- individual coordinates - individual isotropic or anisotropic B-factors
+- grouped B-factors - TLS refinement
+- occupancies and several more Most strategies can be combined with each
+other and applied to any selected part of the structure. Let's consider this protein, which is composed
+of 3 chains, colored in green, red and blue. Let's say we want to
+- apply rigid body refinement for chain B - refine anisotropic B-factors for chain C
+- refine occupancies for the ligand only - refine individual coordinates for chain
+A, with the exception of some C-terminal residues shown here in red. Please note that this is not a realistic choice
+of parameterization, but the example illustrates how to apply a variety of different strategies
+to selected parts of the model. The first thing to do is to obtain the expressions
+for these selections according to the Phenix atom selection syntax. Note that the syntax is explained in another
+video, so in this example, we will simply give the result: Let's start with the easy cases:
+To select chain B, the expression is "chain B". Note that the chain letter is case-sensitive. To select chain C, the expression is "chain
+C" The ligand, which is a carbohydrate, is in
+chain A and has residue numbers 301 and 302. The corresponding selection expression is
+"chain A and resseq 301:302" We only want to refine the coordinates of
+certain protein residues in chain A, so the expression is "chain A and resseq 24:220" If you are unsure about the selection expressions,
+test them as described in the selection syntax tutorial. Now let's apply these selections to phenix.refine. In the main Phenix GUI, click on "Refinement"
+in the right hand panel and choose phenix.refine. A new window opens, which has all controls
+for running a refinement job. Add your model and data files by clicking
+"Add file". Make sure that the space group, unit cell
+parameters and data labels are correct. Don't forget to add a title for the run. To choose the strategy, go to the tab "Refinement
+settings". In the strategy field, the following options
+are enabled by default. Coordinates in reciprocal space and in real
+space, individual B-factors and occupancies. Disable the "XYZ (real-space)" option as it
+is not part of our strategy. Then click on "Select atoms", and a new window
+appears. Go to the tab "Refinement strategy". The first tab on the left is for individual
+coordinates. Remember, we want to refine the coordinates
+for a specific residue range in chain A. Click "Add selection" and three dashes appear in
+the selection field. Click once on the dashes to highlight them
+and click a second time to modify the text. Type in "chain A and resseq 24:220". Then click on the occupancies tab. We want to refine the occupancies of the ligand
+only, so add a new selection and let's type the selection expression: "chain A and resseq
+301:302" To define the selection for B-factors, click
+on the individual ADP tab. In the input field for anisotropic atoms,
+type "chain C". Leave the input field for isotropic B-factors
+empty. This way, default behavior is enabled for
+B-factor refinement of atoms which are not in chain C.
+Finally, we want to define the selection for rigid body refinement. As you can see, there is no tab for this strategy
+in the selection window yet. So go back to the phenix.refine window and
+enable the "rigid body" option. The tab immediately appears in the selection
+window. Let's go there, add a new selection and type
+"chain B". Now we are done selecting, so click "Save
+and close". In the phenix.refine window, click "run",
+and then "run now" to start the refinement. Again, this toy example would not make much
+sense in the real world, f.ex. one would typically not apply rigid body and anisotropic B-factor
+refinement in one run. A more realistic case would be to choose different
+B-factor refinement strategies for different parts of a model. If the resolution of the diffraction data
+is sufficiently high, one could for example chose isotropic B-factors for water molecules
+and anisotropic B-factors for protein atoms. This is how to set this scenario up: Go to
+the "Individual ADP" tab of the Selection editor. You can either specify appropriate selections
+in the input fields, or you can go to the "Common configurations" drop down menu. Choose "All atoms except water anisotropic"
+and click "Apply" and the corresponding expressions appear in the input fields.
+

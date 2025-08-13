@@ -1,0 +1,58 @@
+Simulate a SAD experiment with phenix.plan_sad_experiment
+
+Today we are going to lean how to use plan-sad-experiment
+in the Phenix GUI to see if our SAD experiment is going to work. The purpose of Phenix plan sad experiment
+is to simulate a SAD experiment and to estimate the probability that you are going to be able
+to find the sites and solve your structure. Let's see how plan sad experiment works. There are two key steps in solving a structure
+by SAD phasing. These are finding the substructure of anomalously-scattering
+atoms, and calculating a map that can be interpreted. The anomalous signal is going to determine
+your chances of finding the substructure, and the anomalous correlation is going to
+determine the quality of your map. The anomalous signal is the peak height in
+an anomalous difference Fourier such as the yellow peaks in this picture. The anomalous signal is essentially the information
+per site in the anomalous differences. We will see that the substructure is likely
+to be found if the anomalous signal S is about 10 or greater. The anomalous correlation CCano is the correlation
+of your anomalous differences with ideal ones for your structure. It represents the accuracy of your anomalous
+data and it determines the accuracy of phasing and therefore the quality of the map that
+you can obtain. The anomalous signal is the key to finding
+the substructure. Here are the things that are going to determine
+your anomalous signal S. S is proportional to the anomalous correlation. It is proportional to the square root of the
+ratio of the number of reflections to the number of sites. It is reduced if the anomalous sub-structure
+is not well ordered. We can plan a SAD experiment by simulating
+the anomalous signal that we would expect to obtain. The anomalous signal is going to depend on
+the I over sigma of the data (the accuracy of the data). It will depend on the anomalous atom based
+on the wavelength and scattering factor for this atom. It will depend on the number of sites, and
+the resolution. It will depend indirectly on the sequence
+of your macromolecule, particularly at wavelengths longer than about 1.7 Angstroms, because oxygen
+and other atoms in your structure will contribute to the anomalous scattering in a way that
+amounts to noise. Putting all these together we can estimate
+the anomalous signal. Let's calculate the expected anomalous signal
+in a real dataset. In the main phenix GUI under "Experimental
+phasing" select "Plan SAD experiment". A new Plan Sad experiment window will open. Put in a job title to help you remember what
+you were testing with this run Enter the anomalously-scattering atom. Let's use Se for selenium and set the wavelength
+to the peak at 0.9792 A. Lets assume as a rather typical case that
+we have 12 sites, a high-resolution limit of 2 A, a solvent fraction of about 0.5, and
+500 residues. You could enter a sequence file if you wanted
+to instead of specifying the number of residues. Now a key parameters in plan_sad_experiment
+is the target anomalous signal. The GUI is going to try and achieve the target
+anomalous signal you specify by adjusting the I over sigma of the data to be collected. If you specify a high anomalous signal it
+will require more accurate data than a low one. We're ready to go. Hit Run and after a few moments you will get
+this Result panel. It summarizes the information you typed in,
+along with the characteristics of the anomalous scatterer, Se in this case. Notice the f double prime value of 3.84, which
+is quite high. The summary then lists, as a function of the
+high-resolution limit, the number of reflections, the I over sigma chosen by the GUI, the resulting
+half-dataset correlation and estimated anomalous correlation, the anomalous signal obtained,
+the probability that you will solve this structure with this data, and the expected figure of
+merit or quality of your SAD-phased map. In this case, a value of 20 for I over sigma
+is required to obtain a half-dataset correlation of 0.32 and the target anomalous signal of
+15. The probability of solving the structure with
+this data would be about 83% and the expected figure of merit would be 0.31. This is using all data to a resolution of
+3 A. Now let's see what would happen if everything
+were the same except we had only sulfur as the anomalous scatterer and we collected the
+data at a wavelength of 1.8 A. In this case the f double-prime is only 0.74,
+much less than the 3.84 we found for selenium. Now we find that it takes an I over sigma
+of 98 to get a half-dataset CC of 0.29 an an anomalous signal of 15. Compare this with a required I over sigma
+of just 20 for the selenium experiment. The probability of solving this structure
+with this data is still 83% and the expected figure of merit of phasing is 0.3. If you want to test out more possibilities,
+try changing the target anomalous signal and you can see what I over sigma would be required
+to get each value you choose. 
+

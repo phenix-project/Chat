@@ -1,0 +1,60 @@
+Structure determination with AlphaFold in Phenix
+
+Welcome to Structure determination with AlphaFold
+This tutorial will give an overview of cryo-EM and X-ray structure determination using AlphaFold
+models in Phenix. AlphaFold models are great hypotheses
+Often they are awesome However sometimes even high-confidence models
+can be wrong Or distorted …
+Here is a handy chart showing how accurate you can expect AlphaFold models to be
+Residues predicted with very high confidence (a plddt value over 90) have a median error
+of 0.6 Angstroms However even for such very high-confidence
+predictions, about 10% of residues will be over 2 Angstroms off
+For residues predicted with low confidence (plddt values under 70) the median prediction
+error will be much higher, about 3.5 Angstroms You can take advantage of AlphaFold models
+at every stage in structure determination Before you even start your experiment,
+Predict your structure as part of your planning Note which parts have lower confidence (green
+in this figure) Your AlphaFold prediction may give you clues
+about how your system works Or about what parts of your molecule to keep
+to obtain soluble expression When you have X-ray or cryo-EM data, you can
+use your AlphaFold models to jump start structure determination
+You’ll want to trim your predicted models to remove low-confidence parts
+You may want to split your models into domains as domain relationships may be uncertain
+Then you can use your predicted models as search models in molecular replacement if
+you have X-ray data Or you can dock your models into your cryo-EM
+maps For either cryo-EM or X-ray data, you can
+rebuild or refine your docked models based on your experimental data An exciting aspect of AlphaFold prediction
+is it can be improved by using accurate models as templates. Here is part of an AlphaFold model that
+Does not match an experimental density map
+A rebuilt and refined model is much better
+Using this refined model as a template in prediction
+yields an improved AlphaFold model
+The new prediction can be used in additional cycles to improve both the model and the map Phenix has tools to carry out all the steps
+in structure determination with AlphaFold using X-ray data or cryo-EM maps. Here are some of the main tools
+The Phenix server, which you can run from the Phenix GUI, uses AlphaFold to predict
+the structure of your protein This server is partly based on ColabFold and
+uses the mmSEQs2 server as well as AlphaFold The ProcessPredictedModel tool will convert
+the AlphaFold pLDDT values, which are saved in
+the B-value field of the model, into corresponding B-values. Then it will trim off low-confidence parts
+And separate the model into domains If you have X-ray data for your molecule,
+you can carry out Molecular replacement,
+With the the likelihood-based Phaser tool For density modification, you can use Resolve,
+another likelihood-based method For model rebuilding, you can use AutoBuild
+And for Refinement, you can use the likelihood-based phenix refine tool
+Finally, you can run a fully automated procedure, PredictAndBuild, which will combine all these
+steps with the Phenix AlphaFold server and ProcessPredictModel to predict the chains
+in your structure, trim them and find domains, run molecular replacement, optimize your map,
+rebuild and refine your model, and iterate to improve your model and map. If you have Cryo-EM data, you can carry out,
+Docking of single chains with the likelihood-based EMPlacement tool and multiple chains with
+the the correlation-based DockInMap tool For map improvement, you can use ResolveCryoEM
+for density modification or LocalAnisoSharpen for map sharpening
+For model rebuilding, you can use DockAndRebuild And for Refinement, you can use the real-space
+refine tool If you want an automated procedure, you can
+use PredictAndBuild, which will carry out all
+these steps to automatically interpret your cryo-EM map Now that you have an overall picture of how
+to take advantage of AlphaFold in Phenix, you are ready to learn some details. There are several tutorials that will help
+you with this One will tell you how to predict models with
+AlphaFold using the Phenix AlphaFold server Another will show you how to determine an
+X-ray structure with AlphaFold A third will show you how to interpret a cryo-EM
+map using AlphaFold
+using Phenix and AlphaFold! 
+

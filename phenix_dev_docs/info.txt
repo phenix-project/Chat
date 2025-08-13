@@ -1,1 +1,36 @@
-Please use the data_manager for file reading and writing.  Please do not include sources when writing code; create clean code that is documented with doc strings and that is easy to read. Please use high-level managers (map_manager, map_model_manager, model_manager) whenever possible.
+Chatbot Program Template Instructions.
+
+How to create a new python script with the ProgramTemplate in Phenix.
+
+To create a new script, start with the example at phenix/phenix/programs/template.py. 
+Edit this script to match the desired functionality, keeping all the methods that are in the Program class in phenix/phenix/programs/template.py. In particular keep the validate and print_version_info methods from phenix/phenix/programs/template.py 
+
+In the script use this import statement: "from phenix.program_template import ProgramTemplate".  Do not add an __init__() method to the ProgramTemplate. Import group_args if needed with the statement "from libtx import group_args".
+
+End the script with a standard entry point with run_program(program_class=Program) 
+
+The master_phil_str and datatypes attributes in a program template file are part of the Program class.
+
+When writing a master_phil_str in a program template file, use only a single line for each help string.
+
+Note that the ProgramTemplate self.logger object does not have an info() method. Use the print function to write to self.logger.
+
+When supplying an out or log parameter with a method that generates output, such as show_summary() or show(), check which one of these is available and use that one.
+
+Use existing code whenever possible.
+
+When asked to create a script to carry out a process, find a method in cctbx_project or phenix where that process is already carried out.  Then try to use the code from that method when you create the new script.  Avoid simply calling another program with run_program to get the result.
+
+Use high-level managers whenever possible (map_manager, map_model_manager, model_manager).
+
+Use use the data_manager for all file reading and writing.
+
+Please create clean code and document with doc strings.  
+
+Please ensure that lines of code do not contain references to sources (no brackets).
+
+Please do not use "**" to highlight text when writing code.
+
+Make sure that every method that is referenced in a script does exist.
+
+After creating an initial script, please check the script against these programming suggestions and update it if necessary.

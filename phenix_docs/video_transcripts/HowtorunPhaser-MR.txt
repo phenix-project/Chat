@@ -1,0 +1,61 @@
+How to run Phaser-MR
+
+This is a Phenix tutorial in solving a structure
+by molecular replacement with Phaser MR. In this example we have a crystal containing
+a complex of beta-lactamase, called beta for short throughout this tutorial, and a beta-lactamase
+inhibitor complex, called BLIP. The structures of beta and blip have already
+been solved separately, and we want to place them as two independent search models for
+molecular replacement. To run this Phaser MR, the following inputs
+are needed: the data, information about what is inside the asymmetric unit, and the search
+models. To set up the example data, open the Phenix
+GUI and click on New Project. In the new window, click on 'Set up tutorial
+data' and another window appears. Open the drop down menu next to 'Tutorial
+data'. Go down to 'molecular replacement' and choose
+the first dataset, called 'TEM-1 Beta-lactamase/beta-lactamase inhibitor complex'. Choose a directory where the data are to be
+saved. Then click OK to save the changes. In the panel on the right hand side, choose
+'Molecular Replacement' and then 'Phaser-MR (full-featured)'. First, for bookkeeping, give your job a title. I will use "Solve beta-blip complex with separate
+models". Ensure that the Phaser mode is 'Automated
+molecular replacement'. We now add the diffraction data file. Phenix automatically populates the Unit Cell
+and the space group fields from the mtz file, and you should ensure that the correct data
+columns are used. Here, we use the only set of data columns
+that are available - the Fobs and Sigma columns, though if intensities are available they are
+preferred. A high resolution limit can be stated for
+the job overall and the refinement, but it is best to let Phaser automatically decide
+upon this and for you to leave this field blank. Let's move to the Ensembles tab. The term "ensemble" is used because the model
+for a component can be an ensemble of alternative models, though we will only use one model
+for each component in this tutorial. We start by defining the beta-lactamase model. Give the first search model a name, here 'beta'. Click on 'Add file' to add the appropriate
+model. The estimated error, referred to as the 'Variance',
+now needs to be changed - usually you specify the % sequence identity, but you can also
+give the RMSD in Angstrom. Here we set the identity to 100% and click
+OK. A second search model is now added. Click the 'Add PDB ensemble' button, and then
+click on Ensemble 2. We name this one 'BLIP' and this time we add
+the blip.pdb. Again the sequence identity is 100%. The third configuration tab, "ASU contents",
+is where we tell Phaser what scattering matter to expect in the crystal. For each macromolecule in the cell, we first
+tell Phaser whether it is protein or nucleic acid, and how many copies of it there are. There are a number of different ways we can
+state what the macromolecule is - we can just provide its molecular weight, the number of
+residues or bases, the unformatted sequence string, or the easiest way is just to provide
+the sequence file. Giving the sequence file has the advantage
+that should we eventually launch AutoBuild from the Results tab then the sequence will
+be automatically added. Here we add beta.seq as one macromolecule,
+click on "Add macromolecule(s)" and then clicking on the second tab, where we can add blip.seq
+to define the other component. It's important to remember that Phaser needs
+to know the total content of the asymmetric unit in the crystal, not just what will be
+placed as models. The total content is used to figure out what
+fraction of the total scattering is explained by each model. The final configuration tab, "Search procedure",
+is where we tell Phaser how to use the ensembles we input. We click on the ellipsis and then "add ensemble",
+and add beta. We only wish to search for one copy of beta. In this tutorial we also want to search for
+a second component, which is the BLIP model. We click on Add search and add a component
+to search, and then clicking on the ellipsis we choose BLIP as the model to search with. Note if we just added BLIP to component 1
+rather than creating a separate component, this would tell Phaser the wrong thing. It would then search for beta and BLIP as
+alternative models for the same component, rather than searching for both of them.. Finally, the order of component 1 and 2 does
+not matter, as Phaser will decide which order is optimal. In this case, it will search for beta first
+as it is the significantly bigger protein. We now run the job, and it will update the
+run status and graph tabs. After about a minute, we see that Phaser has
+found 1 solution, and as it has a very high LLG well above 60, and a TFZ score above 8,
+we can be reasonably confident that Phaser has found the correct solution. We can then go on and either refine the model
+using phenix.refine, or rebuild it completely using AutoBuild. If Coot is installed on your system, we can
+view the model in Coot. If you want to follow the steps taken by Phaser
+in more detail, you can click on the "Graphs" tab to look at some plots, or click on the
+"Run status", which has a button to open a full log file. This would be a very good idea for a difficult
+case, if the LLG and TFZ scores tell you that the solution is ambiguous. 
+

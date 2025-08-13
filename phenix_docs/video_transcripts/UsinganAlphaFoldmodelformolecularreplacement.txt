@@ -1,0 +1,96 @@
+Using an AlphaFold model for molecular replacement
+
+Hi everyone,
+This tutorial shows how to use 
+an AlphaFold model for molecular replacement. In particular, it illustrates the case when a 
+model has been predicted without templates or   homologue structures.
+Our example uses data 
+from the protein POMGNT2. In February 2021,   when the first AlphaFold database was 
+trained on models in the PDB, no detectable   homologues of POMGNT2 were available, and the 
+structure was not yet published.
+Since then,   two groups determined the structure of POMGNT2. 
+We will use the diffraction data from one of these   structures for our tutorial.
+[If you are new to 
+using molecular replacement, it may be useful   to watch the MR video tutorial first.]
+To set up 
+the example data, open the Phenix GUI and click on   "New Project". In the new window, click on 'Set 
+up tutorial data' and another window appears.   Open the drop-down menu next to 'Tutorial data'. 
+Go down to 'Molecular replacement' and choose   POMGNT2. Indicate a directory where the data are 
+to be saved. Then click OK to save the changes. Predicted models often come with 
+residue-by-residue estimates of uncertainty. We   can use this information to remove low-confidence 
+residues and break the model into domains. Let's have a look at the 
+AlphaFold model of POMGNT2.   We can visually separate the structure 
+into three domains. The yellow colors in   the model tell us that the residues connecting 
+the domains have low confidence. The predicted   aligned error plot then can tell us how certain 
+the relative positions of the domains are. We see that there are three domains, represented 
+by the three dark green areas along the diagonal   in the plot. Each corresponds to a domain 
+that we visually identified in the structure,   and AlphaFold is confident about the distances 
+between all pairs of residues within each domain.   The small square in the upper left 
+corresponds to the long helix in the right,   the large square in the center of the plot 
+corresponds to the large domain in the middle,   and the square in the lower right represents 
+the smaller domain on the left. The light green   areas away from the diagonal in the plot suggest 
+that the relative orientations of the domains are   uncertain.
+So before doing MR, we will use the 
+process_predicted_model tool to break the model   into domains.
+Note that the model preparation step 
+should always be carried out, even if there are no   domains, because it's essential to translate 
+the confidence measure stored in the B-factor   field. The confidence measure (or pLDDT) 
+goes from 0 to 100 for bad to good, but if   it's interpreted as a B-factor it will give thew 
+strongest weight to the worst parts of the model.   The process_predicted_model task translates 
+the pLDDT into a B-factor that appropriately   downweights the worst parts of the model.
+Go to 
+the Phenix GUI. In the panel on the right-hand   side, choose 'AlphaFold' and then 'Process 
+predicted model'. For book-keeping, put a   job title. To enter the predicted model, click 
+'browse' and choose 'AF-Q8NAT1-F1-model_v1.pdb'.   Then click on 'optional input files' and click 
+'browse' next to the PAE file input field. Choose   the .json file in the tutorial directory, which 
+contains the predicted aligned error matrix.   Click 'OK' to close the window. We leave all other 
+parameters at their defaults, then click 'Run'   to start the program.
+Once finished, the program 
+has separated the AlphaFold model into 3 chains:   A1, A2 and A3. We will ignore chain A1, the 
+long helical domain, as it corresponds to a   membrane anchor helix that was left out of the 
+soluble construct made for crystallization.   Note that the program also purged some 
+low confidence residues from the model.   It also indicates the number of residues in each 
+domain.
+We will now use the program 'PDB Tools' to   create two separate model files, one for chain A2 
+and one for chain A3. In the main Phenix window,   go to 'Models: modification, minimization and 
+dynamics'. Then choose 'PDB tools'. Enter a   job title. Click 'add file' and choose the output 
+file from the 'process predicted model' program.   Choose an output filename, such as domain2. 
+Go to the 'options' tab and put 'chain A2'   into the 'Keep only atom selection' field. Click 
+'run'. When it is finished, run the program again,   this time with the selection 'chain A3'; and don't 
+forget to change the output file name to domain3.   The output files will be in separate subfolders in 
+your tutorial directory.
+Now we are ready to run   MR! In the main Phenix window, choose 'Molecular 
+Replacement' and then 'Phaser-MR (full-featured)'.   For bookkeeping, give your job a title. Ensure 
+that the Phaser mode is 'Automated molecular   replacement'. Then we add the file with the 
+diffraction data. Phenix automatically populates   the unit cell and the space group fields from the 
+file; quickly check to ensure that the correct   information is used.
+Then go to the Ensembles 
+tab. In this run, we will only use one model   for each component, but you can use an ensemble of 
+alternative models when you run MR on your data. We start by defining the first domain. Give the 
+first search model a name, here 'domain2'.   Click on 'Add file' to add the model file. Let's 
+change the estimated error or 'Variance', we will   specify it with an RMSD of one Angstrom. Then 
+click OK.
+Now let's add the second search model.   Click the 'Add PDB ensemble' button, and then 
+click on Ensemble 2. We name this one 'domain3'   and this time we add the file domain3.pdb. Again, 
+the RMSD is 1 Angstrom.
+Go to the "ASU contents"   tab. For each molecule in the asymmetric unit, we 
+tell Phaser whether it is protein or nucleic acid,   and how many copies exist. The size of each 
+component can be specified in a number of ways,   but it is usually most convenient to use the 
+sequence of the protein you crystallized. Make sure the 'Chain type' is set to 'protein'. 
+Change the number of copies to 2, specify the ASU   contents as 'Sequence file' and select the 
+file with the sequence of the construct.  In the "Search procedure" tab, we tell Phaser 
+how to use the ensembles. Next to 'Component 1',   click on the ellipsis. Choose "add ensemble", and 
+add domain2. We search for two copies of domain2.   To search also for the other 
+domain, click on 'Add search'   and add a component. Clicking on the ellipsis, 
+we choose domain3 as second component. Search   for two copies.
+Click 'Run' to start the job. The 
+GUI will update the run status and graph tabs.  After about 10 minutes, Phaser has found 1 
+solution with a very high LLG and TFZ. We   can be reasonably confident that this solution is 
+correct. 
+If we don't break the model into domains   and use instead the AlphaFold model "as is", then 
+Phaser can still find a solution in this case.   However, the small domain is not well placed, as 
+can be seen in this screenshot. The residues do   not fit the density; when we overlay the deposited 
+model from the PDB, we see that the orientation   of the small domain is different. To fix this, 
+significant manual work or re-building is needed.   In contrast, when we search for two domains, 
+the residues fit the density very well. 
+

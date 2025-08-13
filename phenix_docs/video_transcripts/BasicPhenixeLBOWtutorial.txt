@@ -1,0 +1,37 @@
+Basic Phenix eLBOW tutorial
+
+eLBOW is a tool for generating chemical restraints. It is a flexible and powerful tool that has
+many features. Its main purpose is to generate restraints
+for ligands and other non-standard chemical entities in a macromolecular model. The Phenix GUI has two eLBOW GUIs, both in
+the ligands button of the main program menu. One is for the advanced user but this tutorial
+is going to introduce the simplified wizard eLBOW GUI. Upon choosing the simple eLBOW GUI, the first
+panel displays some choices for the molecular input of the ligand. Some are preferred because these formats generally
+provide unambiguous descriptions of the molecule topology. They include SMILES, Mol3D or SDF and the
+data from the Chemical Components library available from the PDB and distributed with
+Phenix. This is a database of CIF files that contains
+the chemical information of ALL the chemical entities in the Protein Data Bank. The formats at the bottom are not recommended
+because heuristics need to applied to determine the molecular topology and there is room for
+error. It is always better to know enough about your
+ligand to use one of the preferred input rather than using a PDB input without CONECT records
+or hydrogens. Let's choose the Chemical Components input
+for this introduction. The next screen displays the options regarding
+the Cartesian geometry of the molecule. The simple option uses bond lengths calculated
+using quantum chemistry for ideal distances. The second option is a built-in RM1/AM1 semi-empirical
+QM method that is appropriate for most drug-like molecules. The next method uses a feature in eLBOW that
+can use 3rd party QM packages such as GAMESS to generate higher-level QM geometries. This requires additional setup. The final radio button option is to provide
+a Cartesian geometry from another file such as a PDB file. This last option at the bottom is related
+to the atom names. This allows a molecule to have the atom names
+from another molecule of similar topology. This is helpful when working on a series of
+similar molecules. Let's choice the AM1 option and OK. The final configuration screen has only those
+fields and buttons needed as well as a few minor configuration options that are always
+shown. This button allows for searching of the chemical
+components library. Searching for water shows the water molecule
+as well as other water containing entities. We only need to enter a residue code to generate
+restraints so let's enter our toy example, HOH, which is the most common code for water. Clicking on run will run eLBOW which is very
+quick for water. The log file is displayed in this field and
+the output files in the results tab. A successful job will result in a PDB file
+and a restraints file in CIF format. Either file can be useful in fitting the ligand
+in a model. Choosing the restraints file and then the
+REEL button will allow you to validate and edit the restraints but that is for another
+tutorial. Thank you for listening.
+

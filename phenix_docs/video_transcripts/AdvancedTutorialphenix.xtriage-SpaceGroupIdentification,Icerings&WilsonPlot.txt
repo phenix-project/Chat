@@ -1,0 +1,70 @@
+Advanced Tutorial phenix.xtriage - Space Group Identification, Ice rings & Wilson Plot
+
+xfToday we are going to learn about Wilson
+plots, ice rings and space group determination using Xtriage. In these Xriage tutorials we are thinking
+of solving a challenging structure as a treasure hunt. The treasures are the problems. Once you've found them all and fixed them
+or accounted for them, you get to solve your structure. In a the first two Advanced Xtriage tutorials
+we covered Translational NCS and Twinning. Today's treasures are going to be: Ice rings and the Wrong space group We will illustrate each situation with an
+Xtriage analysis of datasets from the Phenix tutorial called "Advanced Xtriage" We are going to use plots of intensity versus
+resolution to tell us whether the diffraction from our crystal looks like the diffraction
+from a macromolecule and whether there are any indications of data collection problems,
+such as ice rings interfering with measurements of diffraction spots or anisotropy in the
+diffraction pattern indicating more disorder in the crystal in some directions. This is a plot of intensity versus resolution
+for an ideal crystal with randomly-placed atoms that vary an rms of about 0.5 Angstrom
+from one unit cell to another. The intensities of diffraction spots for this
+crystal are high at low resolution, near the center of this diffraction pattern, and weaker
+at higher resolution, further from the center in the diffraction pattern. This fall-off is described by a B-factor or
+atomic displacement parameter (ADP)which is 18 angstroms squared in this case. If the variation from unit cell to unit cell
+is larger, the B-factor is larger and the fall-off is faster. If you plot the log of the mean intensity
+versus you get a straight line. These are Wilson plots and the slopes are
+proportional to the B-factor. Let's look at the Xtriage analysis of mean
+intensity versus resolution. Xtriage shows a plot that is similar to a
+Wilson plot. It displays mean intensity versus resolution,
+after applying some resolution-dependent scale factors. This is a pretty ordinary plot of mean intensity
+versus resolution for a real high-resolution dataset called P9 that diffracts to better
+than 1.7 angstroms. Focus on the orange "via binning" curve. Notice that the intensities generally decrease
+with resolution, but there is a huge peak at about 4-5 angstroms. This peak is present because the locations
+of atoms in this crystal are not random at all. The peak at 4-5 angstroms corresponds to the
+typical non-bonded atom-atom distance. Note that the orange curve matches the expected
+curve in green rather closely. Xtriage analyzes our data to identify the
+effective B-factor describing how much weaker the data are at higher resolution. Here is the Xtriage analysis of this same
+P9 dataset. The estimated Wilson B-factor is 18 angstroms
+squared. This corresponds to a mean square variation
+in atomic positions from unit cell to unit cell of about 0.5 Angstroms, which is rather
+low. As we saw, this crystal diffracted to high
+resolution. The Xtriage output also analyzes the fall-off
+with resolution along the principal directions of the diffraction pattern. In this case along a-star and b-star the effective
+B-value is 16 angstroms-squared, while along c-star it is 26 angstroms-squared. If the crystal were highly anisotropic these
+numbers might differ by as much as a hundred angstroms-squared or more. Now we are going to look at a dataset from
+a crystal at lower resolution. As there is no high-resolution data, the shape
+of the curve looks like just part of the curve for the P9 dataset we saw before. Notice that in this sec17 dataset from the
+Advanced Xtriage tutorial, the intensity versus resolution plot has a big bump at about 3.6
+A that does not match the expected plot. Reflections in this resolution range can sometimes
+be much too strong because they accidentally include diffraction from ice that was on your
+crystal. In a case like this you will want to reprocess
+your data, excluding diffraction spots that overlap with ice rings. Now let's have a look at your space group. Often you will not know the true space group
+of your crystal until you have solved the structure. During data processing, you used the crystal
+lattice, the symmetry of the diffraction pattern, and systematic absences to choose a possible
+space group and index your data. If you merge your data with a particular crystal
+symmetry, then you force the data to have that symmetry. It is best to supply Xtriage with unmerged
+data. Xtriage will not detect symmetry that is too
+high. If you find that your crystal may be twinned,
+you should re-run Xtriage with unmerged data and specifying the lowest symmetry space group
+where you have nearly complete data. Xtriage can tell you whether the symmetry
+you chose is too low. It can also tell you if there are systematic
+absences in the data that you supply. Here is the twinned porin data we saw in the
+twinning tutorial, analyzed for space group symmetry specifying the correct space group
+of R3. The minimum R unused is the R-value for comparing
+reflections related by a symmetry element that is not used in this space group. Xtriage says that for space group R3 the minimum
+R-unused is 0.195. This is pretty low. It says there is symmetry present that is
+not part of R3, but not perfect symmetry (which would have an R nearer to zero). If we examine the data indexed in space group
+R32, with an extra 2-fold axis, the minimum R unused is now 0.41, so there is no longer
+extra symmetry. Now the minimum R used, the R for symmetry
+elements included in the space group, is 0.195. This is a bit high. For typical data, a symmetry R value should
+be closer to 10% or less. Xtriage automatically tries to assign the
+space group using the Bayesian Information criterion which balances the number of symmetry
+elements with how well the data merges in that space group. A low BIC value is good, and Xtriage says
+that R3 with a BIC of 1.1 times ten to the fifth is more likely than R32, with a BIC
+of 2.8 times ten to the fifth. If you are not positive about the space group,
+you will want to try various possibilities as you try to solve your structure. 
+
